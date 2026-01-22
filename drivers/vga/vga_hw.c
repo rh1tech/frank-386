@@ -100,12 +100,13 @@ static uint8_t txt_palette[16];
 // Fast text palette for 2-bit pixel pairs
 static uint16_t txt_palette_fast[256 * 4];
 
-// Graphics palette (256 entries) - 8-bit VGA format with sync bits
+// Graphics palette (256 entries) - 16-bit dithered format
+// Each entry: low byte = c_hi (conv0), high byte = c_lo (conv1)
 // Double buffered to avoid race conditions with ISR
-static uint8_t palette_a[256];
-static uint8_t palette_b[256];
-static uint8_t * volatile active_palette = palette_a; // Used by ISR
-static uint8_t *pending_palette = palette_b;          // Used by update function
+static uint16_t palette_a[256];
+static uint16_t palette_b[256];
+static uint16_t * volatile active_palette = palette_a; // Used by ISR
+static uint16_t *pending_palette = palette_b;          // Used by update function
 static volatile bool palette_dirty = false;
 
 // 16-color EGA palette (for 16-color modes) - 8-bit VGA format with sync bits
@@ -154,7 +155,15 @@ static volatile uint32_t gfx_fallback_count = 0;
 // Color Conversion
 // ============================================================================
 
+// Dithering lookup tables from quakegeneric
+// These map 3-bit values (0-7) to 2-bit values with different rounding
+// conv0 rounds down more, conv1 rounds up more
+// Alternating between them spatially creates perceived intermediate colors
+static const uint8_t conv0[] = { 0b00, 0b00, 0b01, 0b10, 0b10, 0b10, 0b11, 0b11 };
+static const uint8_t conv1[] = { 0b00, 0b01, 0b01, 0b01, 0b10, 0b11, 0b11, 0b11 };
+
 // Convert 6-bit VGA DAC values (0-63) to 8-bit output with sync bits
+// Used for EGA/CGA palettes (no dithering)
 static uint8_t vga_color_to_output(uint8_t r6, uint8_t g6, uint8_t b6) {
     // Map 6-bit VGA colors to 2-bit per channel (RRGGBB in bits 0-5)
     // Bits 6-7 are sync: 0xC0 = no sync pulses during active video
@@ -162,6 +171,25 @@ static uint8_t vga_color_to_output(uint8_t r6, uint8_t g6, uint8_t b6) {
     uint8_t g2 = g6 >> 4;
     uint8_t b2 = b6 >> 4;
     return TMPL_LINE | (r2 << 4) | (g2 << 2) | b2;
+}
+
+// Convert 6-bit VGA DAC values to 16-bit dithered output
+// Returns: low byte = c_hi (conv0), high byte = c_lo (conv1)
+// When output as 16-bit, adjacent pixels get different colors for spatial dithering
+static uint16_t vga_color_to_dithered(uint8_t r6, uint8_t g6, uint8_t b6) {
+    // Convert 6-bit (0-63) to 3-bit (0-7) for dither table lookup
+    // 63/7 ≈ 9, so divide by 9
+    uint8_t r = r6 / 9;
+    uint8_t g = g6 / 9;
+    uint8_t b = b6 / 9;
+    if (r > 7) r = 7;
+    if (g > 7) g = 7;
+    if (b > 7) b = 7;
+
+    uint8_t c_hi = TMPL_LINE | (conv0[r] << 4) | (conv0[g] << 2) | conv0[b];
+    uint8_t c_lo = TMPL_LINE | (conv1[r] << 4) | (conv1[g] << 2) | conv1[b];
+
+    return (uint16_t)c_hi | ((uint16_t)c_lo << 8);
 }
 
 static void init_palettes(void) {
@@ -208,10 +236,11 @@ static void init_palettes(void) {
         txt_palette_fast[i * 4 + 3] = fg | (fg << 8);  // 11: left=fg, right=fg
     }
     
-    // Initialize 256-color palette with VGA default (will be overwritten by emulator)
+    // Initialize 256-color dithered palette with black (will be overwritten by emulator)
+    uint16_t black_dithered = vga_color_to_dithered(0, 0, 0);
     for (int i = 0; i < 256; i++) {
-        palette_a[i] = TMPL_LINE;  // Black with sync bits
-        palette_b[i] = TMPL_LINE;
+        palette_a[i] = black_dithered;
+        palette_b[i] = black_dithered;
     }
     
     // Initialize CGA 4-color palette (palette 1 high intensity: black, cyan, magenta, white)
@@ -228,35 +257,37 @@ static void init_palettes(void) {
 
 // Pre-render a graphics line from PSRAM to SRAM buffer
 // Called from vga_hw_update() on Core 1 main loop, NOT from IRQ
+// Uses dithered 16-bit palette for ~2197 perceived colors
 static void prerender_gfx_line(uint32_t line) {
     if (!vga_ram_psram || line >= N_LINES_VISIBLE) return;
-    
+
     uint32_t buf_idx = line % GFX_LINE_BUFFER_COUNT;
-    
+
     // Mode 13h is 320x200, we double to 640x400
     uint32_t src_line = line / 2;
     if (src_line >= 200) {
         memset(gfx_line_buffer[buf_idx] + SHIFT_PICTURE, TMPL_LINE, 640);
     } else {
-        // Read from PSRAM and apply palette - write 32-bit at a time
+        // Read from PSRAM and apply dithered palette - write 32-bit at a time
         uint32_t *src32 = (uint32_t *)(vga_ram_psram + (src_line * 320));
         uint32_t *out32 = (uint32_t *)(gfx_line_buffer[buf_idx] + SHIFT_PICTURE);
-        
+
+        // Each pixel outputs 16 bits (2 bytes) of dithered color
         for (int i = 0; i < 80; i++) {
             uint32_t pixels = src32[i];
-            uint8_t p0 = active_palette[pixels & 0xFF];
-            uint8_t p1 = active_palette[(pixels >> 8) & 0xFF];
-            uint8_t p2 = active_palette[(pixels >> 16) & 0xFF];
-            uint8_t p3 = active_palette[pixels >> 24];
-            // Each pixel doubled: p0 p0 p1 p1 p2 p2 p3 p3 (8 bytes = 2 x uint32_t)
-            *out32++ = (p0) | (p0 << 8) | (p1 << 16) | (p1 << 24);
-            *out32++ = (p2) | (p2 << 8) | (p3 << 16) | (p3 << 24);
+            uint16_t p0 = active_palette[pixels & 0xFF];
+            uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
+            uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
+            uint16_t p3 = active_palette[pixels >> 24];
+            // Each pixel outputs 16 bits (dithered pair): 4 pixels = 8 bytes = 2 x uint32_t
+            *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
+            *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
         }
     }
-    
+
     // Copy sync portion from template
     memcpy(gfx_line_buffer[buf_idx], lines_pattern[0], SHIFT_PICTURE);
-    
+
     gfx_buffer_line[buf_idx] = line;
     gfx_prerender_count++;
 }
@@ -275,9 +306,10 @@ static void __time_critical_func(copy_gfx_line)(uint32_t line, uint32_t *output_
 }
 
 // Render graphics line directly from SRAM framebuffer (for IRQ use)
+// Uses dithered 16-bit palette for ~2197 perceived colors
 static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint32_t *output_buffer) {
     uint32_t *out32 = output_buffer + SHIFT_PICTURE / 4;
-    
+
     // Determine source line based on graphics height
     // If height > 200 (e.g. 400 in Mode X), map 1:1
     // If height <= 200 (e.g. 320x200), double lines
@@ -302,15 +334,19 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
         // Read from display buffer (stable during active video)
         // 320 pixels = 320 bytes. Stride is 320.
         const uint32_t *src32 = (const uint32_t *)(gfx_display_buffer + (src_line * 320));
+
+        // Each pixel outputs 16 bits (2 bytes) of dithered color
+        // Low byte = c_hi (conv0), high byte = c_lo (conv1)
+        // This creates spatial dithering for ~2197 perceived colors
         for (int i = 0; i < 80; i++) {
             uint32_t pixels = src32[i];
-            uint8_t p0 = active_palette[pixels & 0xFF];
-            uint8_t p1 = active_palette[(pixels >> 8) & 0xFF];
-            uint8_t p2 = active_palette[(pixels >> 16) & 0xFF];
-            uint8_t p3 = active_palette[pixels >> 24];
-            // Each pixel doubled: p0 p0 p1 p1 p2 p2 p3 p3 (8 bytes = 2 x uint32_t)
-            *out32++ = (p0) | (p0 << 8) | (p1 << 16) | (p1 << 24);
-            *out32++ = (p2) | (p2 << 8) | (p3 << 16) | (p3 << 24);
+            uint16_t p0 = active_palette[pixels & 0xFF];
+            uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
+            uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
+            uint16_t p3 = active_palette[pixels >> 24];
+            // Each pixel outputs 16 bits (dithered pair): 4 pixels = 8 bytes = 2 x uint32_t
+            *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
+            *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
         }
     }
 }
@@ -580,7 +616,7 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
         
         // Swap palette if dirty
         if (palette_dirty) {
-            uint8_t *tmp = active_palette;
+            uint16_t *tmp = active_palette;
             active_palette = pending_palette;
             pending_palette = tmp;
             palette_dirty = false;
@@ -808,12 +844,13 @@ void vga_hw_submit_frame(uint16_t start_addr, uint8_t panning, int line_compare)
 
 // Update palette from emulator's 6-bit VGA DAC values
 // palette_data is 768 bytes (256 entries × 3 bytes RGB, each 0-63)
+// Uses dithering for ~2197 perceived colors from 64 actual colors
 void vga_hw_set_palette(const uint8_t *palette_data) {
     for (int i = 0; i < 256; i++) {
         uint8_t r6 = palette_data[i * 3 + 0];
         uint8_t g6 = palette_data[i * 3 + 1];
         uint8_t b6 = palette_data[i * 3 + 2];
-        pending_palette[i] = vga_color_to_output(r6, g6, b6);
+        pending_palette[i] = vga_color_to_dithered(r6, g6, b6);
     }
     palette_dirty = true;
 }
