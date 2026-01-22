@@ -102,6 +102,19 @@ target_compile_definitions(video_driver PRIVATE
 target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
 
 #=============================================================================
+# I2S Audio Driver
+#=============================================================================
+add_library(audio_driver
+    drivers/audio/audio.c
+)
+target_include_directories(audio_driver PUBLIC drivers/audio src)
+target_compile_definitions(audio_driver PRIVATE
+    BOARD_${BOARD_VARIANT}
+)
+target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq)
+pico_generate_pio_header(audio_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/audio/audio_i2s.pio)
+
+#=============================================================================
 # Core 386 Emulator Sources
 #=============================================================================
 set(EMU_CORE_SOURCES
@@ -121,11 +134,14 @@ set(EMU_CORE_SOURCES
     pci.c        # PCI bus
     misc.c       # Serial, RTC, CMOS
 
+    # Sound devices
+    adlib.c      # Adlib/OPL2
+    sb16.c       # Sound Blaster 16
+    pcspk.c      # PC Speaker
+    fmopl.c      # FM OPL synthesis engine
+
     # Optional devices (can be disabled for size)
     # fpu.c      # FPU emulation - disabled for initial port
-    # adlib.c    # Adlib/OPL2 - disabled for initial port
-    # sb16.c     # Sound Blaster - disabled for initial port
-    # pcspk.c    # PC Speaker - disabled for initial port
     # ne2000.c   # Network - disabled for initial port
 
     # Configuration
@@ -150,6 +166,7 @@ target_include_directories(murm386 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd
     ${CMAKE_CURRENT_LIST_DIR}/drivers/psram
     ${CMAKE_CURRENT_LIST_DIR}/drivers/vga
+    ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
 )
 
 target_compile_definitions(murm386 PRIVATE
@@ -170,7 +187,7 @@ target_compile_definitions(murm386 PRIVATE
 
     # Disable features for initial port
     NO_FPU=1
-    NO_SOUND=1
+    # NO_SOUND=1  # Sound enabled with I2S output
     NO_NETWORK=1
 
     # Performance optimizations
@@ -197,11 +214,13 @@ target_link_libraries(murm386
     hardware_clocks
     hardware_vreg
     hardware_flash
+    hardware_irq
     fatfs
     sdcard
     ps2kbd
     psram
     video_driver
+    audio_driver
 )
 
 # USB Serial console (enabled)

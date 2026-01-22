@@ -259,6 +259,20 @@ int32_t platform_get_temperature(void) {
 }
 
 //=============================================================================
+// Small PSRAM Allocation (for sound system)
+//=============================================================================
+
+/**
+ * Allocate small memory block from PSRAM.
+ * Used by fmopl.c for OPL chip state and lookup tables.
+ * Similar to bigmalloc but for smaller allocations.
+ */
+void *psmalloc(long size) {
+    extern void *bigmalloc(size_t size);
+    return bigmalloc((size_t)size);
+}
+
+//=============================================================================
 // Initialization
 //=============================================================================
 

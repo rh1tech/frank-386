@@ -782,8 +782,8 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 }
 
 #if defined(BUILD_ESP32) || defined(RP2350_BUILD)
-// Smaller buffer for embedded platforms
-#define MIXER_BUF_LEN 128
+// Buffer for embedded platforms - needs to hold at least 735 samples * 2 bytes
+#define MIXER_BUF_LEN 1536
 #else
 #define MIXER_BUF_LEN 2048
 #endif
@@ -793,9 +793,19 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 	PC *pc = opaque;
 	assert(free / 2 <= MIXER_BUF_LEN);
 	memset(tmpbuf, 0, MIXER_BUF_LEN);
-	adlib_callback(pc->adlib, tmpbuf, free / 2); // s16, mono
-	sb16_audio_callback(pc->sb16, stream, free); // s16, stereo
+	memset(stream, 0, free);  // Clear output buffer first
 
+	// Adlib/OPL2 - mono s16
+	if (pc->adlib) {
+		adlib_callback(pc->adlib, tmpbuf, free / 2);
+	}
+
+	// Sound Blaster 16 - stereo s16
+	if (pc->sb16) {
+		sb16_audio_callback(pc->sb16, stream, free);
+	}
+
+	// Mix Adlib into output
 	int16_t *d2 = (int16_t *) stream;
 	int16_t *d1 = (int16_t *) tmpbuf;
 	for (int i = 0; i < free / 2; i++) {
@@ -805,9 +815,10 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 		d2[i] = res;
 	}
 
-	if (pcspk_get_active_out(pc->pcspk)) {
+	// PC Speaker - mono u8
+	if (pc->pcspk && pcspk_get_active_out(pc->pcspk)) {
 		memset(tmpbuf, 0x80, MIXER_BUF_LEN / 2);
-		pcspk_callback(pc->pcspk, tmpbuf, free / 4); // u8, mono
+		pcspk_callback(pc->pcspk, tmpbuf, free / 4);
 		for (int i = 0; i < free / 2; i++) {
 			int res = d2[i];
 			res += ((int) tmpbuf[i / 2] - 0x80) << 5;

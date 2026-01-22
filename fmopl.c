@@ -48,8 +48,8 @@
 #if defined(BUILD_ESP32) || defined(RP2350_BUILD)
 void *pcmalloc(long size);
 void *psmalloc(long size);
-// Use pre-computed static tables for performance
-#define FMOPL_USE_STATIC_TABLE
+// Use dynamic tables allocated from PSRAM (no fmopl.inc needed)
+// #define FMOPL_USE_STATIC_TABLE
 #else
 #define pcmalloc malloc
 #define psmalloc malloc

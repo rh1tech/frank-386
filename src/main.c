@@ -25,6 +25,7 @@
 #include "ps2kbd_wrapper.h"
 #include "sdcard.h"
 #include "ff.h"
+#include "audio.h"
 
 #include "pc.h"
 #include "ini.h"
@@ -382,6 +383,14 @@ static bool init_hardware(void) {
     printf("  Base pin: GPIO%d\n", VGA_BASE_PIN);
     vga_hw_init();
 
+    // Initialize I2S Audio
+    printf("Initializing I2S Audio...\n");
+    printf("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
+           I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
+    if (!audio_init()) {
+        printf("WARNING: Audio initialization failed\n");
+    }
+
     return true;
 }
 
@@ -584,10 +593,13 @@ int main(void) {
             poll_keyboard();
         }
 
-        // Update heavy VGA state periodically (cursor, mode, palette)
+        // Update heavy VGA state and audio periodically (~60Hz)
         uint64_t now = time_us_64();
         if (now - last_vga_update >= vga_interval_us) {
             last_vga_update = now;
+
+            // Process audio frame - mix SB16, Adlib, PC Speaker and output to I2S
+            audio_process_frame(pc);
 
             // Update cursor
             int cx, cy, cs, ce, cv;
