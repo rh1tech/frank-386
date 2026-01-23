@@ -32,7 +32,7 @@ void *pcmalloc(long size);
 #define pcmalloc malloc
 #endif
 
-#define PCSPK_BUF_LEN 1792
+#define PCSPK_BUF_LEN 4096
 //#define PCSPK_SAMPLE_RATE 32000
 #define PCSPK_SAMPLE_RATE 44100
 #define PCSPK_MAX_FREQ (PCSPK_SAMPLE_RATE >> 1)
@@ -60,7 +60,8 @@ static inline void generate_samples(PCSpkState *s)
         const uint32_t n = ((uint64_t)PIT_FREQ << 32) / m;
 
         /* multiple of wavelength for gapless looping */
-        s->samples = (PCSPK_BUF_LEN * PIT_FREQ / m * m / (PIT_FREQ >> 1) + 1) >> 1;
+        s->samples = ((uint64_t)PCSPK_BUF_LEN * PIT_FREQ / m * m / (PIT_FREQ >> 1) + 1) >> 1;
+        if (s->samples == 0) s->samples = 1;
         for (i = 0; i < s->samples; ++i)
             s->sample_buf[i] = (64 & (n * i >> 25)) - 32;
     } else {

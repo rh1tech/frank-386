@@ -86,4 +86,7 @@ bool audio_is_enabled(void);
 // Get the I2S config for direct access
 i2s_config_t* audio_get_i2s_config(void);
 
+// Check if audio system needs more samples (buffer free)
+bool audio_needs_samples(void);
+
 #endif // AUDIO_H

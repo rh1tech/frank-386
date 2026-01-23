@@ -77,9 +77,9 @@ static int opl_dbg_maxchip,opl_dbg_chip;
 #define TL_BITS    (FREQ_BITS+2)
 
 /* final output shift , limit minimum and maximum */
-#define OPL_OUTSB   (TL_BITS+3-16)		/* OPL output final shift 16bit */
-#define OPL_MAXOUT (0x7fff<<OPL_OUTSB)
-#define OPL_MINOUT (-(0x8000<<OPL_OUTSB))
+#define OPL_OUTSB   (TL_BITS+3-16 + 2)		/* OPL output final shift 16bit (lowered vol) */
+#define OPL_MAXOUT (0x4000<<OPL_OUTSB)
+#define OPL_MINOUT (-(0x4000<<OPL_OUTSB))
 
 /* -------------------- quality selection --------------------- */
 
@@ -235,14 +235,14 @@ static OPL_CH *S_CH;
 static OPL_CH *E_CH;
 static OPL_SLOT *SLOT7_1, *SLOT7_2, *SLOT8_1, *SLOT8_2;
 
-static int32_t outd[1];
+static int64_t outd[1];
 static int32_t ams;
 static int32_t vib;
 const static int32_t *ams_table;
 const static int32_t *vib_table;
 static int32_t amsIncr;
 static int32_t vibIncr;
-static int32_t feedback2;		/* connect for SLOT 2 */
+static int64_t feedback2;		/* connect for SLOT 2 */
 
 /* log output level */
 #define LOG_ERR  3      /* ERROR       */
@@ -257,13 +257,13 @@ static int32_t feedback2;		/* connect for SLOT 2 */
 
 /* --------------------- subroutines  --------------------- */
 
-static inline int Limit( int val, int max, int min ) {
+static inline int Limit( int64_t val, int max, int min ) {
 	if ( val > max )
 		val = max;
 	else if ( val < min )
 		val = min;
 
-	return val;
+	return (int)val;
 }
 
 /* status set and IRQ handling */
@@ -371,7 +371,7 @@ static inline uint32_t OPL_CALC_SLOT( OPL_SLOT *SLOT )
 /* set algorithm connection */
 static void set_algorithm( OPL_CH *CH)
 {
-	int32_t *carrier = &outd[0];
+	int64_t *carrier = &outd[0];
 	CH->connect1 = CH->CON ? carrier : &feedback2;
 	CH->connect2 = carrier;
 }

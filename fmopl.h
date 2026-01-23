@@ -47,8 +47,8 @@ typedef struct fm_opl_channel {
 	OPL_SLOT SLOT[2];
 	uint8_t CON;			/* connection type                     */
 	uint8_t FB;			/* feed back       :(shift down bit)   */
-	int32_t *connect1;	/* slot1 output pointer                */
-	int32_t *connect2;	/* slot2 output pointer                */
+	int64_t *connect1;	/* slot1 output pointer                */
+	int64_t *connect2;	/* slot2 output pointer                */
 	int32_t op1_out[2];	/* slot1 output for selfeedback        */
 	/* phase generator state */
 	uint32_t  block_fnum;	/* block+fnum      :                   */

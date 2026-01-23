@@ -278,6 +278,12 @@ void i2s_dma_write_count(i2s_config_t *config, const int16_t *samples, uint32_t 
             dma_channel_start(dma_channel_a);
             audio_running = true;
         }
+    } else {
+        // Safety check: if underrun stopped the DMA chain, restart it
+        if (!dma_channel_is_busy(dma_channel_a) && !dma_channel_is_busy(dma_channel_b)) {
+             if (buf_index == 0) dma_channel_start(dma_channel_a);
+             else dma_channel_start(dma_channel_b);
+        }
     }
 }
 
@@ -483,4 +489,10 @@ bool audio_is_enabled(void) {
 
 i2s_config_t* audio_get_i2s_config(void) {
     return &i2s_config;
+}
+
+bool audio_needs_samples(void) {
+    if (!audio_initialized || !audio_enabled) return false;
+    // Check if any buffer is free in the mask
+    return (dma_buffers_free_mask != 0);
 }

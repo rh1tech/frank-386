@@ -454,20 +454,16 @@ static bool init_emulator(void) {
 static void core1_entry(void) {
     printf("[Core 1] VGA rendering + Audio started\n");
 
-    // Audio timing - run at ~60Hz (every ~16666us)
-    uint64_t last_audio_time = 0;
-    const uint64_t audio_interval_us = 16666;
-
     while (true) {
         // VGA driver handles rendering in DMA IRQ
         // Core 1 can do VGA updates from PSRAM
         if (initialized && pc) {
             vga_hw_update();
 
-            // Process audio at ~60Hz
-            uint64_t now = time_us_64();
-            if (now - last_audio_time >= audio_interval_us) {
-                last_audio_time = now;
+            // Process audio whenever the driver needs samples (DMA buffer free)
+            // This decouples audio generation from CPU time and locks it to
+            // the actual playback rate (preventing underruns/clicks).
+            if (audio_needs_samples()) {
                 // Mix SB16, Adlib, PC Speaker and output to I2S
                 audio_process_frame(pc);
             }
