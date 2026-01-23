@@ -248,6 +248,7 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
     else {
         int tmp = (256 - s->time_const);
         s->freq = (1000000 + (tmp / 2)) / tmp;
+        s->freq >>= s->fmt_stereo;
     }
 
     if (dma_len != -1) {
@@ -264,7 +265,6 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
         s->block_size &= ~s->fmt_stereo;
     }
 
-    s->freq >>= s->fmt_stereo;
     s->left_till_irq = s->block_size;
     s->bytes_per_second = (s->freq << s->fmt_stereo);
     /* s->highspeed = (mask & DMA8_HIGH) != 0; */
@@ -897,6 +897,7 @@ static void reset (SB16State *s)
     s->highspeed = 0;
     s->v2x6 = 0;
     s->cmd = -1;
+    s->time_const = -1;
 
     s->e2_valadd = 0xaa;
     s->e2_valxor = 0x96;
