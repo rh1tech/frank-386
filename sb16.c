@@ -249,6 +249,7 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
         int tmp = (256 - s->time_const);
         s->freq = (1000000 + (tmp / 2)) / tmp;
         s->freq >>= s->fmt_stereo;
+        s->time_const = -1;
     }
 
     if (dma_len != -1) {
@@ -1305,168 +1306,152 @@ static int gcd(int a, int b)
     return a;
 }
 
+// Optimized Resamplers using fixed-point stepping (eliminates large loops for dirty frequencies)
+
 static int resample_s16m(int16_t *out, int olen, int os,
                          int16_t *in, int ip, int ilen, int itlen, int is)
 {
-    int g = gcd(os, is);
-    os = os / g;
-    is = is / g;
-    int uc = os;
-    int dc = is;
-    int i = 0;
+    // Mono Input -> Stereo Output
+    // olen: output buffer size in int16_t (pairs)
+    // ilen: input buffer size in int16_t (samples)
+    
+    // Safety check: avoid divide by zero
+    if (os <= 0) return 0;
+    
+    uint64_t step = ((uint64_t)is << 32) / os;
+    uint64_t pos = 0;
     int j = 0;
-    while (i < ilen && j + 1 < olen) {
-        dc--;
-        if (dc == 0) {
-            dc = is;
-            out[j + 1] = out[j] = in[(ip + i) % itlen];
-            j += 2;
-        }
-        uc--;
-        if (uc == 0) {
-            uc = os;
-            i++;
-        }
+    
+    while (j + 1 < olen) {
+        int input_idx = pos >> 32;
+        if (input_idx >= ilen) break;
+        
+        int16_t val = in[(ip + input_idx) % itlen];
+        out[j++] = val;
+        out[j++] = val;
+        
+        pos += step;
     }
-    return i;
+    return pos >> 32;
 }
 
 static int resample_s16s(int16_t *out, int olen, int os,
                          int16_t *in, int ip, int ilen, int itlen, int is)
 {
-    int g = gcd(os, is);
-    os = os / g;
-    is = is / g;
-    int uc = os;
-    int dc = is;
-    int i = 0;
+    // Stereo Input -> Stereo Output
+    // ilen: input buffer size in int16_t (samples, L+R interleave)
+    // itlen: total buffer size in int16_t
+
+    if (os <= 0) return 0;
+    
+    uint64_t step = ((uint64_t)is << 32) / os;
+    uint64_t pos = 0;
     int j = 0;
-    while (i + 1 < ilen && j + 1 < olen) {
-        dc--;
-        if (dc == 0) {
-            dc = is;
-            out[j] = in[(ip + i) % itlen];
-            out[j + 1] = in[(ip + i + 1) % itlen];
-            j += 2;
-        }
-        uc--;
-        if (uc == 0) {
-            uc = os;
-            i += 2;
-        }
+    
+    while (j + 1 < olen) {
+        int input_idx = (pos >> 32) * 2; // Pairs
+        if (input_idx + 1 >= ilen) break;
+        
+        out[j++] = in[(ip + input_idx) % itlen];
+        out[j++] = in[(ip + input_idx + 1) % itlen];
+        
+        pos += step;
     }
-    return i;
+    return (pos >> 32) * 2;
 }
 
 static int resample_u16m(int16_t *out, int olen, int os,
                          int16_t *in, int ip, int ilen, int itlen, int is)
 {
-    int g = gcd(os, is);
-    os = os / g;
-    is = is / g;
-    int uc = os;
-    int dc = is;
-    int i = 0;
+    // U16 Mono -> Stereo
+    if (os <= 0) return 0;
+    
+    uint64_t step = ((uint64_t)is << 32) / os;
+    uint64_t pos = 0;
     int j = 0;
-    while (i < ilen && j + 1 < olen) {
-        dc--;
-        if (dc == 0) {
-            dc = is;
-            out[j + 1] = out[j] = in[(ip + i) % itlen] - 32768;
-            j += 2;
-        }
-        uc--;
-        if (uc == 0) {
-            uc = os;
-            i++;
-        }
+    
+    while (j + 1 < olen) {
+        int input_idx = pos >> 32;
+        if (input_idx >= ilen) break;
+        
+        int16_t val = in[(ip + input_idx) % itlen] - 32768;
+        out[j++] = val;
+        out[j++] = val;
+        
+        pos += step;
     }
-    return i;
+    return pos >> 32;
 }
 
 static int resample_u16s(int16_t *out, int olen, int os,
                          int16_t *in, int ip, int ilen, int itlen, int is)
 {
-    int g = gcd(os, is);
-    os = os / g;
-    is = is / g;
-    int uc = os;
-    int dc = is;
-    int i = 0;
+    // U16 Stereo -> Stereo
+    if (os <= 0) return 0;
+    
+    uint64_t step = ((uint64_t)is << 32) / os;
+    uint64_t pos = 0;
     int j = 0;
-    while (i + 1 < ilen && j + 1 < olen) {
-        dc--;
-        if (dc == 0) {
-            dc = is;
-            out[j] = in[(ip + i) % itlen] - 32768;
-            out[j + 1] = in[(ip + i + 1) % itlen] - 32768;
-            j += 2;
-        }
-        uc--;
-        if (uc == 0) {
-            uc = os;
-            i += 2;
-        }
+    
+    while (j + 1 < olen) {
+        int input_idx = (pos >> 32) * 2;
+        if (input_idx + 1 >= ilen) break;
+        
+        out[j++] = in[(ip + input_idx) % itlen] - 32768;
+        out[j++] = in[(ip + input_idx + 1) % itlen] - 32768;
+        
+        pos += step;
     }
-    return i;
+    return (pos >> 32) * 2;
 }
 
 static int resample_u8m(int16_t *out, int olen, int os,
                         uint8_t *in, int ip, int ilen, int itlen, int is)
 {
-    int g = gcd(os, is);
-    os = os / g;
-    is = is / g;
-    int uc = os;
-    int dc = is;
-    int i = 0;
+    // U8 Mono -> Stereo
+    if (os <= 0) return 0;
+
+    uint64_t step = ((uint64_t)is << 32) / os;
+    uint64_t pos = 0;
     int j = 0;
-    while (i < ilen && j + 1 < olen) {
-        dc--;
-        if (dc == 0) {
-            dc = is;
-            int8_t d = in[(ip + i) % itlen] - 128;
-            out[j] = d << 8;
-            out[j + 1] = out[j];
-            j += 2;
-        }
-        uc--;
-        if (uc == 0) {
-            uc = os;
-            i++;
-        }
+
+    while (j + 1 < olen) {
+        int input_idx = pos >> 32;
+        if (input_idx >= ilen) break;
+
+        uint8_t d = in[(ip + input_idx) % itlen];
+        int16_t sample = (int16_t)(d - 128) << 8;
+        out[j++] = sample;
+        out[j++] = sample;
+
+        pos += step;
     }
-    return i;
+    return pos >> 32;
 }
 
 static int resample_u8s(int16_t *out, int olen, int os,
                         uint8_t *in, int ip, int ilen, int itlen, int is)
 {
-    int g = gcd(os, is);
-    os = os / g;
-    is = is / g;
-    int uc = os;
-    int dc = is;
-    int i = 0;
+    // U8 Stereo -> Stereo
+    if (os <= 0) return 0;
+
+    uint64_t step = ((uint64_t)is << 32) / os;
+    uint64_t pos = 0;
     int j = 0;
-    while (i + 1 < ilen && j + 1 < olen) {
-        dc--;
-        if (dc == 0) {
-            dc = is;
-            int8_t d;
-            d = in[(ip + i) % itlen] - 128;
-            out[j] = d << 8;
-            d = in[(ip + i + 1) % itlen] - 128;
-            out[j + 1] = d << 8;
-            j += 2;
-        }
-        uc--;
-        if (uc == 0) {
-            uc = os;
-            i += 2;
-        }
+
+    while (j + 1 < olen) {
+        int input_idx = (pos >> 32) * 2;
+        if (input_idx + 1 >= ilen) break;
+
+        uint8_t d1 = in[(ip + input_idx) % itlen];
+        uint8_t d2 = in[(ip + input_idx + 1) % itlen];
+        
+        out[j++] = (int16_t)(d1 - 128) << 8;
+        out[j++] = (int16_t)(d2 - 128) << 8;
+
+        pos += step;
     }
-    return i;
+    return (pos >> 32) * 2;
 }
 
 void sb16_audio_callback (void *opaque, uint8_t *stream, int free)
@@ -1474,7 +1459,8 @@ void sb16_audio_callback (void *opaque, uint8_t *stream, int free)
     SB16State *s = opaque;
     s->audio_free = free;
 
-    if (!s->active_out)
+    // Continue playing if buffer has data, even if DMA (active_out) has stopped
+    if (!s->active_out && s->audio_q == s->audio_p)
         return;
 
     unsigned int len = s->audio_q - s->audio_p;
