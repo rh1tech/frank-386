@@ -1257,9 +1257,7 @@ static int SB_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
 #endif
 
     if (till <= copy) {
-        if (s->dma_auto == 0) {
-            copy = till;
-        }
+        copy = till;
     }
 
     written = write_audio (s, nchan, dma_pos, dma_len, copy);
