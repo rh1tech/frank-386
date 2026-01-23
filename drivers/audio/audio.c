@@ -301,7 +301,7 @@ void i2s_dma_write(i2s_config_t *config, const int16_t *samples) {
 }
 
 void i2s_volume(i2s_config_t *config, int8_t volume) {
-    if (volume < -4) volume = -4; // Limit max gain to +24dB (<< 4)
+    if (volume < -8) volume = -8; // Limit max gain to +48dB (<< 8)
     if (volume > 16) volume = 16; // Limit min gain to -96dB (>> 16)
     config->volume = volume;
 }
@@ -312,7 +312,7 @@ void i2s_volume(i2s_config_t *config, int8_t volume) {
 
 static bool audio_initialized = false;
 static bool audio_enabled = true;
-static int master_volume = 160;  // Default to mild amplification (x2)
+static int master_volume = 160;  // Default to moderate amplification (x8)
 static i2s_config_t i2s_config;
 
 // Startup mute: output silence for first N frames to let hardware settle
@@ -349,6 +349,9 @@ bool audio_init(void) {
     i2s_config.dma_trans_count = TARGET_SAMPLES_PER_FRAME;
 
     i2s_init(&i2s_config);
+
+    // Apply default master volume options
+    audio_set_volume(master_volume);
 
     audio_initialized = true;
 
@@ -486,9 +489,13 @@ void audio_set_volume(int volume) {
     if (volume <= 128) {
         shift = (128 - volume) >> 3; // 0->16, 128->0
     } else {
-        // 129-> -1, 160-> -2, 192-> -3, 255-> -4
-        shift = -((volume - 128) >> 5) - 1;
-        if (shift < -4) shift = -4;
+        // 129..255 -> Amplification (shift -1..-8)
+        // (val - 128) -> 1..127.
+        // >> 4 -> 0..7
+        // +1 -> 1..8
+        // Negate -> -1..-8
+        shift = -((volume - 128) >> 4) - 1;
+        if (shift < -8) shift = -8;
     }
     i2s_volume(&i2s_config, shift);
 }
