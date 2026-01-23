@@ -35,7 +35,7 @@ typedef struct {
     uint8_t  dma_channel;
     uint16_t dma_trans_count;
     uint16_t *dma_buf;
-    uint8_t  volume;  // 0 = max volume, higher = quieter (shift amount)
+    int8_t   volume;  // >0 = attenuation (right shift), <0 = amplification (left shift)
 } i2s_config_t;
 
 // Get default I2S configuration
@@ -48,11 +48,11 @@ void i2s_init(i2s_config_t *config);
 // samples: pointer to stereo samples (interleaved L/R as 32-bit words)
 void i2s_dma_write(i2s_config_t *config, const int16_t *samples);
 
-// Write specific number of samples to I2S via DMA
+// write specific number of samples to I2S via DMA
 void i2s_dma_write_count(i2s_config_t *config, const int16_t *samples, uint32_t sample_count);
 
-// Adjust volume (0 = loudest, 16 = quietest)
-void i2s_volume(i2s_config_t *config, uint8_t volume);
+// Adjust volume (0 = loudest if attenuation only, or specific shifts)
+void i2s_volume(i2s_config_t *config, int8_t volume);
 
 //=============================================================================
 // High-level audio API for murm386

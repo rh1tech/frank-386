@@ -251,10 +251,19 @@ void i2s_dma_write_count(i2s_config_t *config, const int16_t *samples, uint32_t 
 
     if (config->volume == 0) {
         memcpy(write_ptr, samples, sample_count * sizeof(uint32_t));
-    } else {
-        // Volume adjustment
+    } else if (config->volume > 0) {
+        // Attenuation (Right shift)
         for (uint32_t i = 0; i < sample_count * 2; i++) {
             write_ptr16[i] = samples[i] >> config->volume;
+        }
+    } else {
+        // Amplification (Left shift) - with saturation
+        int shift = -config->volume;
+        for (uint32_t i = 0; i < sample_count * 2; i++) {
+            int32_t val = (int32_t)samples[i] << shift;
+            if (val > 32767) val = 32767;
+            if (val < -32768) val = -32768;
+            write_ptr16[i] = (int16_t)val;
         }
     }
 
@@ -291,8 +300,9 @@ void i2s_dma_write(i2s_config_t *config, const int16_t *samples) {
     i2s_dma_write_count(config, samples, dma_transfer_count);
 }
 
-void i2s_volume(i2s_config_t *config, uint8_t volume) {
-    if (volume > 16) volume = 16;
+void i2s_volume(i2s_config_t *config, int8_t volume) {
+    if (volume < -4) volume = -4; // Limit max gain to +24dB (<< 4)
+    if (volume > 16) volume = 16; // Limit min gain to -96dB (>> 16)
     config->volume = volume;
 }
 
@@ -302,7 +312,7 @@ void i2s_volume(i2s_config_t *config, uint8_t volume) {
 
 static bool audio_initialized = false;
 static bool audio_enabled = true;
-static int master_volume = 100;  // 0-128
+static int master_volume = 160;  // Default to mild amplification (x2)
 static i2s_config_t i2s_config;
 
 // Startup mute: output silence for first N frames to let hardware settle
@@ -466,12 +476,20 @@ void audio_process_frame(void *pc) {
 
 void audio_set_volume(int volume) {
     if (volume < 0) volume = 0;
-    if (volume > 128) volume = 128;
+    if (volume > 255) volume = 255;
     master_volume = volume;
 
-    // Convert 0-128 to shift amount (0 = max, 16 = min)
-    // volume 128 = shift 0, volume 0 = shift 16
-    uint8_t shift = (128 - volume) >> 3;
+    // Map 0-255 volume to shift:
+    // 0..128 -> Attenuation (shift 16..0)
+    // 129..255 -> Amplification (shift -1..-4)
+    int8_t shift;
+    if (volume <= 128) {
+        shift = (128 - volume) >> 3; // 0->16, 128->0
+    } else {
+        // 129-> -1, 160-> -2, 192-> -3, 255-> -4
+        shift = -((volume - 128) >> 5) - 1;
+        if (shift < -4) shift = -4;
+    }
     i2s_volume(&i2s_config, shift);
 }
 
