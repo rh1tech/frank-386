@@ -154,7 +154,7 @@ AdlibState *adlib_new()
     AdlibState *s = malloc(sizeof(AdlibState));
     memset(s, 0, sizeof(AdlibState));
     s->freq = 44100;
-    s->opl = OPLCreate (3579545, s->freq);
+    s->opl = OPLCreate (3600000, s->freq);
     if (!s->opl) {
         return NULL;
     }
