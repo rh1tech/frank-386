@@ -557,6 +557,9 @@ static bool init_emulator(void) {
         return false;
     }
 
+    // Ensure emulator starts unpaused
+    pc->paused = 0;
+
     // Set VGA VRAM pointer (VGA memory is allocated by pc_new)
     vga_hw_set_vram((uint8_t *)pc->vga_mem);
     DBG_PRINT("  VGA VRAM set to 0x%08lx\n", (unsigned long)pc->vga_mem);
