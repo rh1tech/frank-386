@@ -469,6 +469,43 @@ static void configure_clocks(void) {
     DBG_PRINT("System clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
 
+/**
+ * Reconfigure clocks at runtime based on loaded configuration.
+ * Called after INI file is parsed if frequencies differ from compile-time defaults.
+ * This function MUST run from RAM (not flash) as it reconfigures timing.
+ */
+static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int psram_mhz) {
+    DBG_PRINT("Reconfiguring clocks: CPU=%d MHz, PSRAM=%d MHz\n", cpu_mhz, psram_mhz);
+
+    // Set voltage based on target CPU frequency
+    if (cpu_mhz >= 504) {
+        vreg_disable_voltage_limit();
+        vreg_set_voltage(VREG_VOLTAGE_1_65);
+        DBG_PRINT("  Voltage: 1.65V\n");
+    } else if (cpu_mhz >= 378) {
+        vreg_disable_voltage_limit();
+        vreg_set_voltage(VREG_VOLTAGE_1_60);
+        DBG_PRINT("  Voltage: 1.60V\n");
+    } else if (cpu_mhz > 252) {
+        vreg_disable_voltage_limit();
+        vreg_set_voltage(VREG_VOLTAGE_1_50);
+        DBG_PRINT("  Voltage: 1.50V\n");
+    }
+    sleep_ms(50);  // Stabilization delay
+
+    // Configure flash timing BEFORE changing clock
+    set_flash_timings(cpu_mhz);
+
+    // Set system clock
+    set_sys_clock_khz(cpu_mhz * 1000, false);
+    DBG_PRINT("  System clock now: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
+
+    // Re-initialize PSRAM with new frequency
+    uint psram_pin = get_psram_pin();
+    psram_init_with_freq(psram_pin, psram_mhz);
+    DBG_PRINT("  PSRAM re-initialized at %d MHz\n", psram_mhz);
+}
+
 //=============================================================================
 // Hardware Initialization
 //=============================================================================
@@ -538,6 +575,16 @@ static bool init_emulator(void) {
         DBG_PRINT("Using default configuration\n");
     }
 
+    // Check if we need to reconfigure clocks based on loaded settings
+    int cfg_cpu_freq = config_get_cpu_freq();
+    int cfg_psram_freq = config_get_psram_freq();
+    if (cfg_cpu_freq != CPU_CLOCK_MHZ || cfg_psram_freq != PSRAM_MAX_FREQ_MHZ) {
+        DBG_PRINT("Config frequencies differ from compile-time defaults\n");
+        DBG_PRINT("  Compile: CPU=%d MHz, PSRAM=%d MHz\n", CPU_CLOCK_MHZ, PSRAM_MAX_FREQ_MHZ);
+        DBG_PRINT("  Config:  CPU=%d MHz, PSRAM=%d MHz\n", cfg_cpu_freq, cfg_psram_freq);
+        reconfigure_clocks(cfg_cpu_freq, cfg_psram_freq);
+    }
+
     DBG_PRINT("\nEmulator configuration:\n");
     DBG_PRINT("  Memory: %ld MB\n", config.mem_size / (1024 * 1024));
     DBG_PRINT("  VGA Memory: %ld KB\n", config.vga_mem_size / 1024);
@@ -590,6 +637,9 @@ static bool init_emulator(void) {
     config_set_fill_cmos(config.fill_cmos);
     // Hardware settings are loaded from [murm386] section via parse_murm386_ini
     config_clear_changes();
+
+    // Apply VGA horizontal shift from config
+    vga_hw_set_hshift(config_get_vga_hshift());
 
     // Load BIOS and reset
     DBG_PRINT("Loading BIOS...\n");

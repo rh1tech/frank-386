@@ -47,7 +47,10 @@ static const struct pio_program pio_vga_program = {
 #define LINE_VS_END         414
 
 #define HS_SIZE             96
-#define SHIFT_PICTURE       138  // Where active video starts (tuned for monitor centering)
+#define SHIFT_PICTURE_DEFAULT 138  // Default horizontal shift (where active video starts)
+
+// Horizontal shift (configurable for monitor centering)
+static int shift_picture = SHIFT_PICTURE_DEFAULT;
 
 // Sync encoding in bits 6-7
 #define TMPL_LINE           0xC0
@@ -269,11 +272,11 @@ static void prerender_gfx_line(uint32_t line) {
     // Mode 13h is 320x200, we double to 640x400
     uint32_t src_line = line / 2;
     if (src_line >= 200) {
-        memset(gfx_line_buffer[buf_idx] + SHIFT_PICTURE, TMPL_LINE, 640);
+        memset(gfx_line_buffer[buf_idx] + shift_picture, TMPL_LINE, 640);
     } else {
         // Read from PSRAM and apply dithered palette - write 32-bit at a time
         uint32_t *src32 = (uint32_t *)(vga_ram_psram + (src_line * 320));
-        uint32_t *out32 = (uint32_t *)(gfx_line_buffer[buf_idx] + SHIFT_PICTURE);
+        uint32_t *out32 = (uint32_t *)(gfx_line_buffer[buf_idx] + shift_picture);
 
         // Each pixel outputs 16 bits (2 bytes) of dithered color
         for (int i = 0; i < 80; i++) {
@@ -289,7 +292,7 @@ static void prerender_gfx_line(uint32_t line) {
     }
 
     // Copy sync portion from template
-    memcpy(gfx_line_buffer[buf_idx], lines_pattern[0], SHIFT_PICTURE);
+    memcpy(gfx_line_buffer[buf_idx], lines_pattern[0], shift_picture);
 
     gfx_buffer_line[buf_idx] = line;
     gfx_prerender_count++;
@@ -311,7 +314,7 @@ static void __time_critical_func(copy_gfx_line)(uint32_t line, uint32_t *output_
 // Render graphics line directly from SRAM framebuffer (for IRQ use)
 // Uses dithered 16-bit palette for ~2197 perceived colors
 static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint32_t *output_buffer) {
-    uint32_t *out32 = output_buffer + SHIFT_PICTURE / 4;
+    uint32_t *out32 = output_buffer + shift_picture / 4;
 
     // Determine source line based on graphics height
     // If height > 200 (e.g. 400 in Mode X), map 1:1
@@ -357,7 +360,7 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
 // Render CGA 4-color graphics line (320x200, 2 bits per pixel, interleaved)
 // VGA stores CGA data in odd/even mode with interleaved planes
 static void __time_critical_func(render_gfx_line_cga)(uint32_t line, uint32_t *output_buffer) {
-    uint32_t *out32 = output_buffer + SHIFT_PICTURE / 4;
+    uint32_t *out32 = output_buffer + shift_picture / 4;
 
     // CGA 320x200 mode (doubled to 640x400)
     uint32_t src_line = line / 2;
@@ -405,7 +408,7 @@ static void __time_critical_func(render_gfx_line_cga)(uint32_t line, uint32_t *o
 // Memory layout: planar (4 bytes per screen byte), plane 0 only contains data
 // Row interleaving: even rows at bank 0, odd rows at bank 1 (0x2000 offset)
 static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *output_buffer) {
-    uint32_t *out32 = output_buffer + SHIFT_PICTURE / 4;
+    uint32_t *out32 = output_buffer + shift_picture / 4;
 
     // CGA 640x200 mode (doubled to 640x400)
     uint32_t src_line = line / 2;
@@ -477,7 +480,7 @@ static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
 // Supports both 320x200 (doubled) and 640x350 (native) modes
 // Reads from SRAM buffer (copied from PSRAM during main loop)
 static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *output_buffer) {
-    uint32_t *out32 = output_buffer + SHIFT_PICTURE / 4;
+    uint32_t *out32 = output_buffer + shift_picture / 4;
 
     // Determine if we need pixel doubling (for 320-wide modes)
     int double_pixels = (gfx_width <= 320);
@@ -590,7 +593,7 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
 
 // Helper function to render a single text line
 static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *output_buffer) {
-    uint16_t *out16 = (uint16_t *)output_buffer + SHIFT_PICTURE / 2;
+    uint16_t *out16 = (uint16_t *)output_buffer + shift_picture / 2;
     
     uint32_t char_row = line / 16;
     uint32_t glyph_line = line & 15;
@@ -900,6 +903,10 @@ void vga_hw_set_vram_offset(uint16_t offset) {
 
 void vga_hw_set_panning(uint8_t panning) {
     pixel_panning = panning & 7;
+}
+
+void vga_hw_set_hshift(int pixels) {
+    shift_picture = pixels;
 }
 
 void vga_hw_set_line_compare(int line) {

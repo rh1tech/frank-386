@@ -19,10 +19,10 @@
 #endif
 
 /**
- * Initialize PSRAM hardware.
+ * Initialize PSRAM hardware with specified frequency.
  * This function MUST run from RAM, not flash, as it reconfigures the XIP controller.
  */
-void __no_inline_not_in_flash_func(psram_init)(uint cs_pin) {
+void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_mhz) {
     const int clock_hz = clock_get_hz(clk_sys);
 
     // Configure GPIO for XIP CS1 function
@@ -40,7 +40,7 @@ void __no_inline_not_in_flash_func(psram_init)(uint cs_pin) {
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS);
 
     // Calculate optimal clock divisor for target PSRAM frequency
-    const int max_psram_freq = PSRAM_MAX_FREQ_MHZ * 1000000;
+    const int max_psram_freq = freq_mhz * 1000000;
 
     int divisor = (clock_hz + max_psram_freq - 1) / max_psram_freq;
     if (divisor == 1 && clock_hz > 100000000) {
@@ -95,6 +95,14 @@ void __no_inline_not_in_flash_func(psram_init)(uint cs_pin) {
 
     // Enable writes to M1 (PSRAM) region
     hw_set_bits(&xip_ctrl_hw->ctrl, XIP_CTRL_WRITABLE_M1_BITS);
+}
+
+/**
+ * Initialize PSRAM hardware with default frequency.
+ * This function MUST run from RAM, not flash, as it reconfigures the XIP controller.
+ */
+void __no_inline_not_in_flash_func(psram_init)(uint cs_pin) {
+    psram_init_with_freq(cs_pin, PSRAM_MAX_FREQ_MHZ);
 }
 
 /**

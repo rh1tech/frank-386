@@ -28,6 +28,15 @@
 void psram_init(uint cs_pin);
 
 /**
+ * Initialize PSRAM with a specific frequency.
+ * This function must be called from RAM (not flash) as it reconfigures XIP.
+ *
+ * @param cs_pin GPIO pin connected to PSRAM CS
+ * @param freq_mhz Target PSRAM frequency in MHz (e.g., 133, 166)
+ */
+void psram_init_with_freq(uint cs_pin, int freq_mhz);
+
+/**
  * Test PSRAM functionality.
  * Performs a simple read/write test.
  *
