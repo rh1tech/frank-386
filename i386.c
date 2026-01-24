@@ -7,6 +7,7 @@
 #ifdef RP2350_BUILD
 #include "pico/stdlib.h"
 #include "platform_rp2350.h"
+#include "i386_arm.h"  /* ARM assembly optimizations */
 #else
 #include <unistd.h>
 #endif
@@ -206,6 +207,18 @@ void cpu_abort(CPUI386 *cpu, int code)
 	abort();
 }
 
+/* Sign extension functions - ARM has native SXTB/SXTH instructions */
+#if defined(RP2350_BUILD) && defined(__arm__)
+static inline uword sext8(u8 a)
+{
+	return SEXT8_INLINE(a);
+}
+
+static inline uword sext16(u16 a)
+{
+	return SEXT16_INLINE(a);
+}
+#else
 static uword sext8(u8 a)
 {
 	return (sword) (s8) a;
@@ -215,6 +228,7 @@ static uword sext16(u16 a)
 {
 	return (sword) (s16) a;
 }
+#endif
 
 static uword sext32(u32 a)
 {
@@ -223,6 +237,39 @@ static uword sext32(u32 a)
 
 #ifdef I386_OPT1
 /* only works on hosts that are little-endian and support unaligned access */
+#if defined(RP2350_BUILD) && defined(__arm__)
+/* ARM Cortex-M33 optimized versions using inline assembly macros */
+static inline u8 pload8(CPUI386 *cpu, uword addr)
+{
+	return PLOAD8_INLINE(cpu->phys_mem, addr);
+}
+
+static inline u16 pload16(CPUI386 *cpu, uword addr)
+{
+	return PLOAD16_INLINE(cpu->phys_mem, addr);
+}
+
+static inline u32 pload32(CPUI386 *cpu, uword addr)
+{
+	return PLOAD32_INLINE(cpu->phys_mem, addr);
+}
+
+static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
+{
+	PSTORE8_INLINE(cpu->phys_mem, addr, val);
+}
+
+static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
+{
+	PSTORE16_INLINE(cpu->phys_mem, addr, val);
+}
+
+static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
+{
+	PSTORE32_INLINE(cpu->phys_mem, addr, val);
+}
+#else
+/* Standard C implementation for non-ARM builds */
 static inline u8 pload8(CPUI386 *cpu, uword addr)
 {
 	return cpu->phys_mem[addr];
@@ -252,6 +299,7 @@ static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
 {
 	*(u32 *)&(cpu->phys_mem[addr]) = val;
 }
+#endif
 #else
 static inline u8 pload8(CPUI386 *cpu, uword addr)
 {
@@ -2038,6 +2086,36 @@ static inline void clear_segs(CPUI386 *cpu)
 #define BTCw(...) BTX_helper(16, ^, __VA_ARGS__)
 #define BTCd(...) BTX_helper(32, ^, __VA_ARGS__)
 
+/*
+ * BSF/BSR - Bit Scan Forward/Reverse
+ * On ARM, we use CLZ (Count Leading Zeros) for efficient implementation.
+ * BSF(x) finds lowest set bit: use RBIT+CLZ or isolate lowest bit with x & -x
+ * BSR(x) finds highest set bit: use 31 - CLZ(x)
+ */
+#if defined(RP2350_BUILD) && defined(__arm__)
+/* ARM optimized BSF using RBIT + CLZ */
+#define BSF_helper(BIT, a, b, la, sa, lb, sb) \
+	u ## BIT src = lb(b); \
+	cpu->cc.mask = 0; \
+	if (src == 0) { \
+		cpu->flags |= ZF; \
+	} else { \
+		cpu->flags &= ~ZF; \
+		sa(a, BSF32_INLINE(src)); \
+	}
+
+/* ARM optimized BSR using CLZ */
+#define BSR_helper(BIT, a, b, la, sa, lb, sb) \
+	u ## BIT src = lb(b); \
+	cpu->cc.mask = 0; \
+	if (src == 0) { \
+		cpu->flags |= ZF; \
+	} else { \
+		cpu->flags &= ~ZF; \
+		sa(a, BSR32_INLINE(src)); \
+	}
+#else
+/* Fallback loop-based implementation */
 #define BSF_helper(BIT, a, b, la, sa, lb, sb) \
 	u ## BIT src = lb(b); \
 	u ## BIT temp = 0; \
@@ -2053,9 +2131,6 @@ static inline void clear_segs(CPUI386 *cpu)
 		sa(a, temp); \
 	}
 
-#define BSFw(...) BSF_helper(16, __VA_ARGS__)
-#define BSFd(...) BSF_helper(32, __VA_ARGS__)
-
 #define BSR_helper(BIT, a, b, la, sa, lb, sb) \
 	s ## BIT src = lb(b); \
 	u ## BIT temp = BIT - 1; \
@@ -2070,7 +2145,10 @@ static inline void clear_segs(CPUI386 *cpu)
 		} \
 		sa(a, temp); \
 	}
+#endif
 
+#define BSFw(...) BSF_helper(16, __VA_ARGS__)
+#define BSFd(...) BSF_helper(32, __VA_ARGS__)
 #define BSRw(...) BSR_helper(16, __VA_ARGS__)
 #define BSRd(...) BSR_helper(32, __VA_ARGS__)
 

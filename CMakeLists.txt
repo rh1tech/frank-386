@@ -120,6 +120,7 @@ pico_generate_pio_header(audio_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/audio/au
 set(EMU_CORE_SOURCES
     # CPU and core
     i386.c
+    i386_arm.S   # ARM assembly optimizations for hot paths
     pc.c
 
     # Peripheral chips
@@ -199,6 +200,11 @@ target_compile_options(murm386 PRIVATE
     -O3
     -ffunction-sections
     -fdata-sections
+)
+
+# ARM assembly flags for Cortex-M33
+set_source_files_properties(i386_arm.S PROPERTIES
+    COMPILE_FLAGS "-mcpu=cortex-m33 -mthumb"
 )
 
 target_link_options(murm386 PRIVATE
