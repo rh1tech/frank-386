@@ -1278,6 +1278,14 @@ uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
 {
     int val, index;
 
+    /* Always handle status registers 0x3BA and 0x3DA regardless of color mode.
+     * Some games (like Goblins) poll 0x3BA for vertical retrace even in color mode. */
+    if (addr == 0x3ba || addr == 0x3da) {
+        val = s->st01;
+        s->ar_flip_flop = 0;
+        goto done;
+    }
+
     /* check port range access depending on color/monochrome mode */
     if ((addr >= 0x3b0 && addr <= 0x3bf && (s->msr & MSR_COLOR_EMULATION)) ||
         (addr >= 0x3d0 && addr <= 0x3df && !(s->msr & MSR_COLOR_EMULATION))) {
@@ -1349,18 +1357,14 @@ uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
             printf("vga: read CR%x = 0x%02x\n", s->cr_index, val);
 #endif
             break;
-        case 0x3ba:
-        case 0x3da:
-            /* just toggle to fool polling */
-//            s->st01 ^= ST01_V_RETRACE | ST01_DISP_ENABLE;
-            val = s->st01;
-            s->ar_flip_flop = 0;
-            break;
+        /* Note: 0x3ba and 0x3da are handled before the switch statement
+         * to ensure they work regardless of color/monochrome mode */
         default:
             val = 0x00;
             break;
         }
     }
+done:
 #if defined(DEBUG_VGA)
     printf("VGA: read addr=0x%04x data=0x%02x\n", addr, val);
 #endif
