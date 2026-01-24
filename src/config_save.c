@@ -106,14 +106,7 @@ bool config_save_all(void) {
     snprintf(line, sizeof(line), "fill_cmos=%d\n", cfg_fill_cmos);
     write_line(&fp, line);
 
-    // FPU
-    write_line(&fp, "\n[cpu]\n");
-    snprintf(line, sizeof(line), "gen=%d\n", cfg_cpu_gen);
-    write_line(&fp, line);
-    snprintf(line, sizeof(line), "fpu=%d\n", cfg_fpu);
-    write_line(&fp, line);
-
-    // Disks
+    // Disks (must be in [pc] section)
     write_line(&fp, "\n; Disk images\n");
     for (int i = 0; i < 2; i++) {
         const char *fname = disk_get_filename(i);
@@ -133,6 +126,13 @@ bool config_save_all(void) {
             write_line(&fp, line);
         }
     }
+
+    // FPU (separate section)
+    write_line(&fp, "\n[cpu]\n");
+    snprintf(line, sizeof(line), "gen=%d\n", cfg_cpu_gen);
+    write_line(&fp, line);
+    snprintf(line, sizeof(line), "fpu=%d\n", cfg_fpu);
+    write_line(&fp, line);
 
     f_close(&fp);
     cfg_changed = false;
