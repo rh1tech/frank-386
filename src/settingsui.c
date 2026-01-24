@@ -41,11 +41,11 @@ static const int mem_option_count = 3;
 static const int cpu_options[] = { 3, 4, 5 };
 static const int cpu_option_count = 3;
 
-static const int cpu_freq_options[] = { 504, 378 };
-static const int cpu_freq_option_count = 2;
+static const int cpu_freq_options[] = { 504, 378, 252 };
+static const int cpu_freq_option_count = 3;
 
-static const int psram_freq_options[] = { 166, 133 };
-static const int psram_freq_option_count = 2;
+static const int psram_freq_options[] = { 166, 133, 100 };
+static const int psram_freq_option_count = 3;
 
 // VGA H-Shift: 138 to 300 in steps of 6
 #define VGA_HSHIFT_MIN   138
