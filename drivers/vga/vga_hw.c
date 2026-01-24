@@ -748,6 +748,8 @@ void vga_hw_init(void) {
     float sys_clk = (float)clock_get_hz(clk_sys);
     float clk_div = sys_clk / 25175000.0f;
 
+    // Always print clock info (critical for debugging)
+    printf("  VGA: sys_clk=%.1f MHz, div=%.2f\n", sys_clk / 1e6, clk_div);
     DBG_PRINT("  System clock: %.1f MHz\n", sys_clk / 1e6);
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
     
