@@ -11,6 +11,7 @@
 #include "debug.h"
 #include <stdio.h>
 #include <string.h>
+#include "pico/stdlib.h"  // for time_us_32()
 
 // Only compile if USB Host is enabled
 #if CFG_TUH_ENABLED
@@ -32,6 +33,18 @@ static hid_keyboard_report_t prev_kbd_report = { 0, 0, {0} };
 
 // Device connection state
 static volatile int keyboard_connected = 0;
+static volatile int mouse_connected = 0;
+
+// Mouse state
+typedef struct {
+    int16_t dx;
+    int16_t dy;
+    int8_t dz;       // Scroll wheel
+    uint8_t buttons; // Button state (bit 0=left, 1=right, 2=middle)
+    bool has_event;
+} mouse_state_t;
+
+static mouse_state_t mouse_state = {0};
 
 // Key action queue (for detecting press/release)
 #define KEY_ACTION_QUEUE_SIZE 32
@@ -43,6 +56,17 @@ typedef struct {
 static key_action_t key_action_queue[KEY_ACTION_QUEUE_SIZE];
 static volatile int key_action_head = 0;
 static volatile int key_action_tail = 0;
+
+// Key repeat (typematic) support
+// USB keyboards don't send repeat events - host must generate them
+#define TYPEMATIC_DELAY_MS     500   // Initial delay before repeat starts
+#define TYPEMATIC_RATE_MS      33    // ~30 chars/sec repeat rate
+
+static uint8_t held_keys[6] = {0};       // Currently held keys (from last report)
+static uint8_t held_modifiers = 0;       // Currently held modifiers
+static uint8_t repeat_key = 0;           // Key currently being repeated (0 = none)
+static uint32_t repeat_next_time = 0;    // Time for next repeat event
+static bool repeat_initial = true;       // true = waiting for initial delay
 
 //--------------------------------------------------------------------
 // Internal functions
@@ -137,11 +161,18 @@ static void process_kbd_report(hid_keyboard_report_t const *report, hid_keyboard
         queue_key_action(0xE7, 1);
     }
 
+    // Track the last newly pressed key for repeat
+    uint8_t new_repeat_key = 0;
+
     // Check for released keys
     for (int i = 0; i < 6; i++) {
         uint8_t keycode = prev_report->keycode[i];
         if (keycode && !find_keycode_in_report(report, keycode)) {
             queue_key_action(keycode, 0); // Key released
+            // If the released key was being repeated, stop repeat
+            if (keycode == repeat_key) {
+                repeat_key = 0;
+            }
         }
     }
 
@@ -150,12 +181,54 @@ static void process_kbd_report(hid_keyboard_report_t const *report, hid_keyboard
         uint8_t keycode = report->keycode[i];
         if (keycode && !find_keycode_in_report(prev_report, keycode)) {
             queue_key_action(keycode, 1); // Key pressed
+            new_repeat_key = keycode;     // This becomes the new repeat candidate
         }
+    }
+
+    // Update held keys state
+    memcpy(held_keys, report->keycode, 6);
+    held_modifiers = report->modifier;
+
+    // Start repeat for the newly pressed key (if any)
+    if (new_repeat_key) {
+        repeat_key = new_repeat_key;
+        repeat_next_time = time_us_32() + (TYPEMATIC_DELAY_MS * 1000);
+        repeat_initial = true;
+    }
+}
+
+// Process key repeat - call this from usbhid_task()
+static void process_key_repeat(void) {
+    if (repeat_key == 0) return;  // No key to repeat
+
+    uint32_t now = time_us_32();
+
+    // Check if repeat time has elapsed (handle wraparound)
+    if ((int32_t)(now - repeat_next_time) >= 0) {
+        // Queue a repeat key press event
+        queue_key_action(repeat_key, 1);
+
+        // Set next repeat time
+        repeat_next_time = now + (TYPEMATIC_RATE_MS * 1000);
+        repeat_initial = false;
     }
 }
 
 //--------------------------------------------------------------------
-// Process generic HID report (for non-boot protocol keyboards)
+// Process mouse report
+//--------------------------------------------------------------------
+
+static void process_mouse_report(hid_mouse_report_t const *report) {
+    // Accumulate mouse movement (will be consumed by usbhid_get_mouse_event)
+    mouse_state.dx += report->x;
+    mouse_state.dy += report->y;
+    mouse_state.dz += report->wheel;
+    mouse_state.buttons = report->buttons;
+    mouse_state.has_event = true;
+}
+
+//--------------------------------------------------------------------
+// Process generic HID report (for non-boot protocol keyboards/mice)
 //--------------------------------------------------------------------
 
 static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t const *report, uint16_t len) {
@@ -189,6 +262,8 @@ static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t c
         if (rpt_info->usage == HID_USAGE_DESKTOP_KEYBOARD) {
             process_kbd_report((hid_keyboard_report_t const *)report, &prev_kbd_report);
             prev_kbd_report = *(hid_keyboard_report_t const *)report;
+        } else if (rpt_info->usage == HID_USAGE_DESKTOP_MOUSE) {
+            process_mouse_report((hid_mouse_report_t const *)report);
         }
     }
 }
@@ -206,6 +281,9 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
         keyboard_connected = 1;
         DBG_PRINT("  USB Keyboard connected!\n");
+    } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+        mouse_connected = 1;
+        DBG_PRINT("  USB Mouse connected!\n");
     }
 
     // Parse generic report descriptor for non-boot protocol devices
@@ -229,6 +307,9 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
     if (itf_protocol == HID_ITF_PROTOCOL_KEYBOARD) {
         keyboard_connected = 0;
         DBG_PRINT("  USB Keyboard disconnected\n");
+    } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
+        mouse_connected = 0;
+        DBG_PRINT("  USB Mouse disconnected\n");
     }
 }
 
@@ -240,6 +321,10 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
         case HID_ITF_PROTOCOL_KEYBOARD:
             process_kbd_report((hid_keyboard_report_t const *)report, &prev_kbd_report);
             prev_kbd_report = *(hid_keyboard_report_t const *)report;
+            break;
+
+        case HID_ITF_PROTOCOL_MOUSE:
+            process_mouse_report((hid_mouse_report_t const *)report);
             break;
 
         default:
@@ -261,11 +346,22 @@ void usbhid_init(void) {
     // Initialize TinyUSB Host
     tuh_init(BOARD_TUH_RHPORT);
 
-    // Clear state
+    // Clear keyboard state
     memset(&prev_kbd_report, 0, sizeof(prev_kbd_report));
     key_action_head = 0;
     key_action_tail = 0;
     keyboard_connected = 0;
+
+    // Clear key repeat state
+    memset(held_keys, 0, sizeof(held_keys));
+    held_modifiers = 0;
+    repeat_key = 0;
+    repeat_next_time = 0;
+    repeat_initial = true;
+
+    // Clear mouse state
+    memset(&mouse_state, 0, sizeof(mouse_state));
+    mouse_connected = 0;
 
     DBG_PRINT("USB HID Host initialized\n");
 }
@@ -273,6 +369,9 @@ void usbhid_init(void) {
 void usbhid_task(void) {
     // Process USB events
     tuh_task();
+
+    // Process key repeat (typematic)
+    process_key_repeat();
 }
 
 int usbhid_keyboard_connected(void) {
@@ -287,6 +386,29 @@ int usbhid_get_key_action(uint8_t *keycode, int *down) {
     *keycode = key_action_queue[key_action_tail].keycode;
     *down = key_action_queue[key_action_tail].down;
     key_action_tail = (key_action_tail + 1) % KEY_ACTION_QUEUE_SIZE;
+    return 1;
+}
+
+int usbhid_mouse_connected(void) {
+    return mouse_connected;
+}
+
+int usbhid_get_mouse_event(int16_t *dx, int16_t *dy, int8_t *dz, uint8_t *buttons) {
+    if (!mouse_state.has_event) {
+        return 0;
+    }
+
+    *dx = mouse_state.dx;
+    *dy = mouse_state.dy;
+    *dz = mouse_state.dz;
+    *buttons = mouse_state.buttons;
+
+    // Clear accumulated state
+    mouse_state.dx = 0;
+    mouse_state.dy = 0;
+    mouse_state.dz = 0;
+    mouse_state.has_event = false;
+
     return 1;
 }
 

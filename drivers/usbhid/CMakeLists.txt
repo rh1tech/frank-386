@@ -14,6 +14,7 @@ if(USB_HID_ENABLED)
     target_sources(usbhid INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/hid_app.c
         ${CMAKE_CURRENT_LIST_DIR}/usbkbd_wrapper.c
+        ${CMAKE_CURRENT_LIST_DIR}/usbmouse_wrapper.c
     )
 
     # Include directory for headers and tusb_config.h

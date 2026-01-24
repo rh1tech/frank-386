@@ -25,6 +25,7 @@
 #include "ps2kbd_wrapper.h"
 #ifdef USB_HID_ENABLED
 #include "usbkbd_wrapper.h"
+#include "usbmouse_wrapper.h"
 #endif
 #include "sdcard.h"
 #include "ff.h"
@@ -190,6 +191,16 @@ static void poll_keyboard(void) {
     while (usbkbd_get_key(&is_down, &keycode)) {
         if (pc && pc->kbd) {
             ps2_put_keycode(pc->kbd, is_down, keycode);
+        }
+    }
+
+    // Poll USB mouse
+    int16_t dx, dy;
+    int8_t dz;
+    uint8_t buttons;
+    if (usbmouse_get_event(&dx, &dy, &dz, &buttons)) {
+        if (pc && pc->mouse) {
+            ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
         }
     }
 #endif
@@ -667,6 +678,7 @@ int main(void) {
             // Update VGA mode
             int vga_mode = vga_get_mode(pc->vga);
             if (vga_mode != last_vga_mode) {
+                printf("[VGA_HW] Mode change: %d -> %d\n", last_vga_mode, vga_mode);
                 vga_hw_set_mode(vga_mode);
                 last_vga_mode = vga_mode;
             }
@@ -678,6 +690,12 @@ int main(void) {
                 int gfx_w, gfx_h;
                 int gfx_submode = vga_get_graphics_mode(pc->vga, &gfx_w, &gfx_h);
                 int line_offset = vga_get_line_offset(pc->vga);
+                static int last_submode = -1;
+                if (gfx_submode != last_submode) {
+                    printf("[VGA_HW] Graphics submode=%d %dx%d offset=%d\n",
+                           gfx_submode, gfx_w, gfx_h, line_offset);
+                    last_submode = gfx_submode;
+                }
                 vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
 
                 // For EGA mode, also update the 16-color palette

@@ -44,6 +44,22 @@ int usbhid_keyboard_connected(void);
  */
 int usbhid_get_key_action(uint8_t *keycode, int *down);
 
+/**
+ * Check if a USB mouse is connected
+ * @return Non-zero if mouse connected
+ */
+int usbhid_mouse_connected(void);
+
+/**
+ * Get accumulated mouse event
+ * @param dx X movement delta (accumulated since last call)
+ * @param dy Y movement delta (accumulated since last call)
+ * @param dz Scroll wheel delta
+ * @param buttons Button state (bit 0=left, bit 1=right, bit 2=middle)
+ * @return Non-zero if event available, 0 if no mouse activity
+ */
+int usbhid_get_mouse_event(int16_t *dx, int16_t *dy, int8_t *dz, uint8_t *buttons);
+
 #ifdef __cplusplus
 }
 #endif
