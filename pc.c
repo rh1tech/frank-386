@@ -126,6 +126,12 @@ static u8 pc_io_read(void *o, int addr)
 	case 0x226: case 0x22a: case 0x22c: case 0x22d: case 0x22e: case 0x22f:
 		val = sb16_dsp_read(pc->sb16, addr);
 		return val;
+	case 0x201:
+		/* Gameport / Joystick - return "no joystick" state
+		 * Bits 7-4: buttons (1 = not pressed)
+		 * Bits 3-0: axes timeout (0 = timed out, no joystick)
+		 * Return 0xF0 to indicate axes have timed out (no joystick present) */
+		return 0xf0;
 	default:
 		//fprintf(stderr, "in 0x%x <= 0x%x\n", addr, 0xff);
 		return 0xff;
