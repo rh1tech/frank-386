@@ -2595,7 +2595,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	while (cx) { \
 		TRY(translate ## BIT(cpu, &memld, 2, SEG_ES, lreg ## ABIT(7))); \
 		if (memld.addr1 % (BIT / 8)) { \
-			/* slow path */ \
+			/* slow path for unaligned */ \
 			while (lreg ## ABIT(1)) { \
 				stdi(BIT, ABIT) \
 				sreg ## ABIT(1, lreg ## ABIT(1) - 1); \
@@ -2608,6 +2608,16 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		else countd = 1 + (memld.addr1 & 4095) / (BIT / 8); \
 		if (countd < count) \
 			count = countd; \
+		/* Fast path for STOSB: use memset when in main memory */ \
+		if (BIT == 8 && likely(dir > 0 && !in_iomem(memld.addr1) && \
+		    memld.addr1 + count <= cpu->phys_mem_size)) { \
+			memset(cpu->phys_mem + memld.addr1, (u8)ax, count); \
+			sreg ## ABIT(7, lreg ## ABIT(7) + count); \
+			sreg ## ABIT(1, cx - count); \
+			cx = lreg ## ABIT(1); \
+			continue; \
+		} \
+		/* Fallback: element-by-element store */ \
 		for (uword i = 0; i <= count - 1; i++) { \
 			saddr ## BIT(&memld, ax); \
 			memld.addr1 += dir; \
@@ -2697,7 +2707,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		TRY(translate ## BIT(cpu, &memls, 1, curr_seg, lreg ## ABIT(6))); \
 		TRY(translate ## BIT(cpu, &memld, 2, SEG_ES, lreg ## ABIT(7))); \
 		if (memls.addr1 % (BIT / 8) || memld.addr1 % (BIT / 8)) { \
-			/* slow path */ \
+			/* slow path for unaligned */ \
 			while (lreg ## ABIT(1)) { \
 				ldsistdi(BIT, ABIT) \
 				sreg ## ABIT(1, lreg ## ABIT(1) - 1); \
@@ -2717,6 +2727,20 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			count = counts; \
 		if (countd < count) \
 			count = countd; \
+		/* Fast path: both in main memory, forward direction, use memcpy */ \
+		if (likely(dir > 0 && !in_iomem(memls.addr1) && !in_iomem(memld.addr1) && \
+		    memls.addr1 + count * (BIT / 8) <= cpu->phys_mem_size && \
+		    memld.addr1 + count * (BIT / 8) <= cpu->phys_mem_size)) { \
+			memcpy(cpu->phys_mem + memld.addr1, \
+			       cpu->phys_mem + memls.addr1, \
+			       count * (BIT / 8)); \
+			sreg ## ABIT(6, lreg ## ABIT(6) + count * (BIT / 8)); \
+			sreg ## ABIT(7, lreg ## ABIT(7) + count * (BIT / 8)); \
+			sreg ## ABIT(1, cx - count); \
+			cx = lreg ## ABIT(1); \
+			continue; \
+		} \
+		/* I/O memory write path */ \
 		if (cpu->cb.iomem_write_string && in_iomem(memld.addr1) && \
 		    dir > 0  && in_iomem(memld.addr1 + count - 1) && \
 		    (memls.addr1 | 4095) < cpu->phys_mem_size && \
@@ -2731,6 +2755,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 				continue; \
 			} \
 		} \
+		/* Fallback: element-by-element copy */ \
 		for (uword i = 0; i <= count - 1; i++) { \
 			store ## BIT(cpu, &memld, load ## BIT(cpu, &memls)); \
 			memld.addr1 += dir; \

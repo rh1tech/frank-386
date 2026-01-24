@@ -458,7 +458,7 @@ void pc_step(PC *pc)
 #if defined(BUILD_ESP32)
 	cpui386_step(pc->cpu, 512);  // ESP32: limited by memory bandwidth
 #elif defined(RP2350_BUILD)
-	cpui386_step(pc->cpu, 2048);  // RP2350: balance between responsiveness and throughput
+	cpui386_step(pc->cpu, 4096);  // RP2350: increased for better benchmark throughput
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif
