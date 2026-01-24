@@ -100,6 +100,7 @@ target_link_libraries(psram pico_stdlib hardware_clocks)
 #=============================================================================
 add_library(video_driver
     drivers/vga/vga_hw.c
+    drivers/vga/vga_osd.c
 )
 target_include_directories(video_driver PUBLIC drivers/vga src)
 target_compile_definitions(video_driver PRIVATE
@@ -167,6 +168,7 @@ add_executable(murm386
     src/main.c
     src/platform_rp2350.c
     src/stubs_rp2350.c
+    src/diskui.c
     ${EMU_CORE_SOURCES}
 )
 

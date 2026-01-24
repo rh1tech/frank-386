@@ -34,6 +34,8 @@
 #include "pc.h"
 #include "ini.h"
 #include "debug.h"
+#include "diskui.h"
+#include "vga_osd.h"
 
 //=============================================================================
 // Version Information
@@ -173,14 +175,62 @@ static void vga_redraw(void *opaque, int x, int y, int w, int h) {
 // Keyboard Polling
 //=============================================================================
 
+// Track modifier key state for Win+F12 hotkey
+static bool win_key_pressed = false;
+
+// Process a single keycode, handling disk UI hotkey
+// Returns true if key should be passed to emulator, false if consumed
+static bool process_keycode(int is_down, int keycode) {
+    // Track Win key state
+    if (keycode == KEY_LEFTMETA) {
+        win_key_pressed = is_down;
+    }
+
+    // Check for Win+F12 hotkey to toggle disk UI
+    if (is_down && keycode == KEY_F12 && win_key_pressed) {
+        if (!diskui_is_open()) {
+            // Open disk UI and pause emulation
+            diskui_open();
+            if (pc) {
+                pc->paused = 1;
+                audio_set_enabled(false);
+            }
+        } else {
+            // Close disk UI and resume emulation
+            diskui_close();
+            if (pc) {
+                pc->paused = 0;
+                audio_set_enabled(true);
+            }
+        }
+        return false;  // Don't pass to emulator
+    }
+
+    // When disk UI is open, route all keys to it
+    if (diskui_is_open()) {
+        diskui_handle_key(keycode, is_down);
+
+        // Check if disk UI was closed by Escape
+        if (!diskui_is_open() && pc && pc->paused) {
+            pc->paused = 0;
+            audio_set_enabled(true);
+        }
+        return false;  // Don't pass to emulator
+    }
+
+    return true;  // Pass to emulator
+}
+
 static void poll_keyboard(void) {
     // Poll PS/2 keyboard
     ps2kbd_tick();
 
     int is_down, keycode;
     while (ps2kbd_get_key(&is_down, &keycode)) {
-        if (pc && pc->kbd) {
-            ps2_put_keycode(pc->kbd, is_down, keycode);
+        if (process_keycode(is_down, keycode)) {
+            if (pc && pc->kbd) {
+                ps2_put_keycode(pc->kbd, is_down, keycode);
+            }
         }
     }
 
@@ -189,18 +239,22 @@ static void poll_keyboard(void) {
     usbkbd_tick();
 
     while (usbkbd_get_key(&is_down, &keycode)) {
-        if (pc && pc->kbd) {
-            ps2_put_keycode(pc->kbd, is_down, keycode);
+        if (process_keycode(is_down, keycode)) {
+            if (pc && pc->kbd) {
+                ps2_put_keycode(pc->kbd, is_down, keycode);
+            }
         }
     }
 
-    // Poll USB mouse
-    int16_t dx, dy;
-    int8_t dz;
-    uint8_t buttons;
-    if (usbmouse_get_event(&dx, &dy, &dz, &buttons)) {
-        if (pc && pc->mouse) {
-            ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
+    // Poll USB mouse (only if not paused)
+    if (!pc || !pc->paused) {
+        int16_t dx, dy;
+        int8_t dz;
+        uint8_t buttons;
+        if (usbmouse_get_event(&dx, &dy, &dz, &buttons)) {
+            if (pc && pc->mouse) {
+                ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
+            }
         }
     }
 #endif
@@ -473,6 +527,10 @@ static bool init_emulator(void) {
     vga_hw_set_vram((uint8_t *)pc->vga_mem);
     DBG_PRINT("  VGA VRAM set to 0x%08lx\n", (unsigned long)pc->vga_mem);
 
+    // Initialize disk UI
+    DBG_PRINT("Initializing Disk UI...\n");
+    diskui_init();
+
     // Load BIOS and reset
     DBG_PRINT("Loading BIOS...\n");
     load_bios_and_reset(pc);
@@ -600,6 +658,14 @@ int main(void) {
 
     // Main emulation loop (Core 0)
     while (true) {
+        // Skip CPU execution when paused (disk UI active)
+        if (pc->paused) {
+            // Still poll keyboard to handle disk UI input
+            poll_keyboard();
+            sleep_ms(16);  // ~60Hz polling rate
+            continue;
+        }
+
         // Run CPU steps - batch multiple steps for efficiency
         for (int i = 0; i < 10; i++) {
             pc_step(pc);

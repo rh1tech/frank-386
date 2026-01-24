@@ -7,6 +7,7 @@
 #pragma GCC optimize("Ofast")
 
 #include "vga_hw.h"
+#include "vga_osd.h"
 #include "font8x16.h"
 #include "debug.h"
 
@@ -80,8 +81,8 @@ static volatile uint32_t current_line = 0;
 // Pointer to tiny386's VGA RAM in PSRAM (set via vga_hw_set_vram)
 static uint8_t *vga_ram_psram = NULL;
 
-// Text buffer in SRAM 
-static uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4)));
+// Text buffer in SRAM (non-static to allow OSD reuse when paused)
+uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4)));
 static volatile int update_requested = 0;  // Set by update call
 static volatile int in_vblank = 0;         // Set by IRQ during vblank
 
@@ -621,6 +622,13 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
 
 // Dispatch to appropriate renderer based on current mode
 static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_buffer) {
+    // If OSD is visible, it takes over the display completely
+    // (it reuses text_buffer_sram so we can't render normal text)
+    if (osd_is_visible()) {
+        osd_render_line(line, output_buffer);
+        return;
+    }
+
     if (current_mode == 2) {
         // Graphics mode - choose renderer based on submode
         if (gfx_submode == 1) {
@@ -948,6 +956,9 @@ void vga_hw_set_gfx_mode(int submode, int width, int height, int line_offset) {
 // For graphics mode: pre-renders scanlines ahead of the beam
 void vga_hw_update(void) {
     if (!vga_ram_psram) return;
+
+    // Don't update text buffer when OSD is visible (it reuses the same buffer)
+    if (osd_is_visible()) return;
 
     if (current_mode == 1) {
         // Text mode: only copy text buffer once per frame during vblank

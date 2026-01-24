@@ -22,7 +22,8 @@ struct struct_drive {
     uint16_t heads;
     uint8_t inserted;
     uint8_t readonly;
-} disk[4];
+    uint8_t iscdrom;  // CD-ROM flag for drive E:
+} disk[5];  // 0-1: floppy, 2-3: HDD, 4: CD-ROM
 
 static int led_state = 0;
 static CPUI386 *disk_cpu = NULL;
@@ -33,11 +34,16 @@ void disk_set_cpu(CPUI386 *cpu) {
     disk_mem = cpu_get_phys_mem(cpu);
 }
 
+// Forward declaration for filename tracking
+void disk_set_filename(uint8_t drivenum, const char *filename);
+
 static inline void ejectdisk(uint8_t drivenum) {
     if (drivenum & 0x80) drivenum -= 126;
 
     if (disk[drivenum].inserted) {
+        f_close(&disk[drivenum].diskfile);
         disk[drivenum].inserted = 0;
+        disk_set_filename(drivenum, NULL);
         if (drivenum >= 2)
             hdcount--;
         else
@@ -106,6 +112,9 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     } else {
         fdcount++;
     }
+
+    // Track filename for disk UI
+    disk_set_filename(drivenum, pathname);
 
     return 1;
 }
@@ -282,7 +291,7 @@ static void writedisk(uint8_t drivenum,
 
 
 void diskhandler(CPUI386 *cpu) {
-    static uint8_t lastdiskah[4] = { 0 }, lastdiskcf[4] = { 0 };
+    static uint8_t lastdiskah[5] = { 0 }, lastdiskcf[5] = { 0 };
 
     disk_cpu = cpu;
     disk_mem = cpu_get_phys_mem(cpu);
@@ -375,4 +384,58 @@ void diskhandler(CPUI386 *cpu) {
     if (cpu_get_dl(cpu) & 0x80) {
         disk_mem[0x474] = cpu_get_ah(cpu);
     }
+}
+
+//=============================================================================
+// Public API for Disk UI
+//=============================================================================
+
+// Eject disk from specified drive (0-4)
+void disk_eject(uint8_t drivenum) {
+    if (drivenum > 4) return;
+    ejectdisk(drivenum);
+}
+
+// Insert disk image into specified drive (0-4)
+// Returns 1 on success, 0 on failure
+uint8_t disk_insert(uint8_t drivenum, const char *pathname) {
+    if (drivenum > 4) return 0;
+    return insertdisk(drivenum, pathname);
+}
+
+// Check if disk is inserted in specified drive
+uint8_t disk_is_inserted(uint8_t drivenum) {
+    if (drivenum > 4) return 0;
+    return disk[drivenum].inserted;
+}
+
+// Get filename of inserted disk (returns empty string if none)
+// Note: FatFS doesn't store filename in FIL, so we need separate tracking
+static char disk_filenames[5][64] = {0};
+
+void disk_set_filename(uint8_t drivenum, const char *filename) {
+    if (drivenum > 4) return;
+    if (filename) {
+        strncpy(disk_filenames[drivenum], filename, 63);
+        disk_filenames[drivenum][63] = 0;
+    } else {
+        disk_filenames[drivenum][0] = 0;
+    }
+}
+
+const char* disk_get_filename(uint8_t drivenum) {
+    if (drivenum > 4) return "";
+    return disk_filenames[drivenum];
+}
+
+// Set CD-ROM flag for a drive
+void disk_set_cdrom(uint8_t drivenum, uint8_t iscdrom) {
+    if (drivenum > 4) return;
+    disk[drivenum].iscdrom = iscdrom;
+}
+
+// Check if drive is CD-ROM
+uint8_t disk_is_cdrom(uint8_t drivenum) {
+    if (drivenum > 4) return 0;
+    return disk[drivenum].iscdrom;
 }

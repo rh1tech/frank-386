@@ -69,6 +69,7 @@ typedef struct {
 	u8 port92;
 	int shutdown_state;
 	int reset_request;
+	int paused;  // Emulation paused (e.g., for disk UI)
 
 	const char *linuxstart;
 	const char *kernel;
