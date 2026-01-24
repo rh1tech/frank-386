@@ -270,6 +270,7 @@ void i8254_update_irq(PITState *pit)
 	uint32_t uticks = get_uticks();
 	PITChannelState *s = pit->channels;
 	uint32_t d = ((uint64_t) (uticks - s->count_load_time)) * PIT_FREQ / 1000000;
+
 	switch(s->mode) {
 	case 2:
 	case 3:

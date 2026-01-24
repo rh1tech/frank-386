@@ -14,44 +14,10 @@
 #define cpu_get_cycle cpui386_get_cycle
 #endif
 
-/* Debug: I/O port access tracing to identify polling loops
- * Set IO_TRACE_ENABLED to 1 to enable, 0 to disable */
-#define IO_TRACE_ENABLED 1
-
-#if IO_TRACE_ENABLED
-static uint32_t io_read_count = 0;
-static int io_last_port = -1;
-static uint32_t io_last_port_count = 0;
-#define IO_TRACE_INTERVAL 500000  /* Print every N reads */
-
-static void io_trace_read(int addr) {
-	io_read_count++;
-	if (addr == io_last_port) {
-		io_last_port_count++;
-	} else {
-		io_last_port = addr;
-		io_last_port_count = 1;
-	}
-	/* Print if same port polled many times or at interval */
-	if (io_last_port_count == 10000) {
-		printf("[IO_TRACE] Port 0x%03x polled 10000 times - possible hang\n", addr);
-	}
-	if ((io_read_count % IO_TRACE_INTERVAL) == 0) {
-		printf("[IO_TRACE] %u reads, last port=0x%03x (count=%u)\n",
-		       io_read_count, io_last_port, io_last_port_count);
-	}
-}
-#define IO_TRACE_READ(addr) io_trace_read(addr)
-#else
-#define IO_TRACE_READ(addr)
-#endif
-
 static u8 pc_io_read(void *o, int addr)
 {
 	PC *pc = o;
 	u8 val;
-
-	IO_TRACE_READ(addr);
 
 	switch(addr) {
 	case 0x20: case 0x21: case 0xa0: case 0xa1:
@@ -442,8 +408,6 @@ void pc_vga_step(void *o)
 	}
 }
 
-static int pc_step_debug = 0;  // Disabled for performance
-
 void pc_step(PC *pc)
 {
 #ifndef USEKVM
@@ -452,25 +416,14 @@ void pc_step(PC *pc)
 		load_bios_and_reset(pc);
 	}
 #endif
-#if !defined(BUILD_ESP32) && !defined(RP2350_BUILD)
 	int refresh = vga_step(pc->vga);
-#else
-	int refresh = vga_step(pc->vga);
-#endif
-	if (pc_step_debug) printf("pc_step: vga_step done, refresh=%d\n", refresh);
 	i8254_update_irq(pc->pit);
-	if (pc_step_debug) printf("pc_step: pit done\n");
 	cmos_update_irq(pc->cmos);
-	if (pc_step_debug) printf("pc_step: cmos done\n");
 	if (pc->enable_serial)
 		u8250_update(pc->serial);
-	if (pc_step_debug) printf("pc_step: serial done\n");
 	kbd_step(pc->i8042);
-	if (pc_step_debug) printf("pc_step: kbd done\n");
-	/* NE2000 networking removed */
 	i8257_dma_run(pc->isa_dma);
 	i8257_dma_run(pc->isa_hdma);
-	if (pc_step_debug) printf("pc_step: dma done\n");
 #if !defined(BUILD_ESP32) && !defined(RP2350_BUILD)
 	pc->poll(pc->redraw_data);
 	if (refresh) {
@@ -480,30 +433,25 @@ void pc_step(PC *pc)
 			pc->full_update = 0;
 	}
 #else
-	// RP2350/ESP32: call poll and vga_refresh
 	if (pc->poll) pc->poll(pc->redraw_data);
-	if (pc_step_debug) printf("pc_step: poll done\n");
 	if (refresh && pc->redraw) {
 		vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
 			    pc->full_update != 0);
 		if (pc->full_update == 2)
 			pc->full_update = 0;
 	}
-	if (pc_step_debug) printf("pc_step: vga_refresh done\n");
 #endif
-	if (pc_step_debug) printf("pc_step: calling cpu_step\n");
 #ifdef USEKVM
 	cpukvm_step(pc->cpu, 4096);
 #else
 #if defined(BUILD_ESP32)
-	cpui386_step(pc->cpu, 512);  // ESP32: limited by memory bandwidth
+	cpui386_step(pc->cpu, 512);
 #elif defined(RP2350_BUILD)
-	cpui386_step(pc->cpu, 2048);  // RP2350: balance between responsiveness and throughput
+	cpui386_step(pc->cpu, 2048);
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif
 #endif
-	if (pc_step_debug) { printf("pc_step: cpu done\n"); pc_step_debug--; }
 }
 
 static void raise_irq(void *o, PicState2 *s)

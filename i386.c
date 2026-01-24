@@ -2249,7 +2249,6 @@ static inline void clear_segs(CPUI386 *cpu)
 static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define INT(i, li, _) \
-	/*dolog("int %02x %08x %04x:%08x\n", li(i), REGi[0], SEGi(SEG_CS), cpu->ip);*/ \
 	if ((cpu->flags & VM)) { \
 		if(get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
 	} \
@@ -2858,7 +2857,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if (rep == 0) { \
 		if (adsz16) { indxstdi(BIT, 16) } else { indxstdi(BIT, 32) } \
 	} else { \
-		if (rep != 1) THROW0(EX_UD); \
+		/* Accept both REP (F3) and REPNE (F2) prefixes - REPNE is treated as REP for INS */ \
 		if (adsz16) { INS_helper2(BIT, 16) } else { INS_helper2(BIT, 32) } \
 	}
 
@@ -2922,7 +2921,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if (rep == 0) { \
 		if (adsz16) { ldsioutdx(BIT, 16) } else { ldsioutdx(BIT, 32) } \
 	} else { \
-		if (rep != 1) THROW0(EX_UD); \
+		/* Accept both REP (F3) and REPNE (F2) prefixes - REPNE is treated as REP for OUTS */ \
 		if (adsz16) { \
 			OUTS_helper2(BIT, 16) \
 		} else { \
@@ -5061,6 +5060,7 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 		cpu->intr = false;
 		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
+
 		cpu->ip = cpu->next_ip;
 		TRY1(call_isr(cpu, no, false, 1));
 	}

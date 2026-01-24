@@ -1167,7 +1167,10 @@ static void simplefb_clear(FBDevice *fb_dev,
     memset(fb_dev->fb_data, 0, fb_dev->width * fb_dev->height * (BPP / 8));
 }
 
-int vga_step(VGAState *s)
+/* Update VGA retrace status based on timing.
+ * This must be called frequently to ensure games polling 0x3DA see the
+ * retrace bits toggle. Called from both vga_step() and vga_ioport_read(). */
+static int vga_update_retrace(VGAState *s)
 {
     uint32_t now = get_uticks();
     int ret = 0;
@@ -1193,6 +1196,11 @@ int vga_step(VGAState *s)
         }
     }
     return ret;
+}
+
+int vga_step(VGAState *s)
+{
+    return vga_update_retrace(s);
 }
 
 void vga_refresh(VGAState *s,
@@ -1279,8 +1287,10 @@ uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
     int val, index;
 
     /* Always handle status registers 0x3BA and 0x3DA regardless of color mode.
-     * Some games (like Goblins) poll 0x3BA for vertical retrace even in color mode. */
+     * Some games (like Goblins) poll 0x3BA for vertical retrace even in color mode.
+     * Update retrace status on each read so tight polling loops see changes. */
     if (addr == 0x3ba || addr == 0x3da) {
+        vga_update_retrace(s);
         val = s->st01;
         s->ar_flip_flop = 0;
         goto done;
@@ -2514,6 +2524,12 @@ int vga_get_graphics_mode(VGAState *s, int *width, int *height)
     if (shift_control != 1) {
         int multi_scan = (((s->cr[0x09] & 0x1f) + 1) << double_scan);
         h = (h + multi_scan - 1) / multi_scan;
+    }
+
+    // For VGA 256-color mode (shift_control == 2), the CRTC width is doubled
+    // because the pixel clock is halved. Divide by 2 to get actual resolution.
+    if (shift_control == 2) {
+        w = w / 2;
     }
 
     if (width) *width = w;
