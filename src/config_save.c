@@ -5,18 +5,29 @@
  */
 
 #include "config_save.h"
+#include "board_config.h"
 #include "disk.h"
 #include "ff.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Current configuration values (minimal storage)
-static int cfg_mem_mb = 7;
+static int cfg_mem_mb = 4;
 static int cfg_vga_kb = 128;
 static int cfg_cpu_gen = 4;
 static int cfg_fpu = 0;
 static int cfg_fill_cmos = 1;
 static bool cfg_changed = false;
+
+// Hardware settings (use build-time defaults)
+static int cfg_pcspeaker = 1;
+static int cfg_adlib = 1;
+static int cfg_soundblaster = 1;
+static int cfg_mouse = 1;
+static int cfg_cpu_freq = CPU_CLOCK_MHZ;
+static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
+static bool cfg_hw_changed = false;
 
 // INI file path
 #define CONFIG_PATH "386/config.ini"
@@ -66,8 +77,60 @@ void config_set_fill_cmos(int enabled) {
     }
 }
 
+// Hardware settings
+int config_get_pcspeaker(void) { return cfg_pcspeaker; }
+void config_set_pcspeaker(int enabled) {
+    if (cfg_pcspeaker != enabled) {
+        cfg_pcspeaker = enabled;
+        cfg_changed = true;
+    }
+}
+
+int config_get_adlib(void) { return cfg_adlib; }
+void config_set_adlib(int enabled) {
+    if (cfg_adlib != enabled) {
+        cfg_adlib = enabled;
+        cfg_changed = true;
+    }
+}
+
+int config_get_soundblaster(void) { return cfg_soundblaster; }
+void config_set_soundblaster(int enabled) {
+    if (cfg_soundblaster != enabled) {
+        cfg_soundblaster = enabled;
+        cfg_changed = true;
+    }
+}
+
+int config_get_mouse(void) { return cfg_mouse; }
+void config_set_mouse(int enabled) {
+    if (cfg_mouse != enabled) {
+        cfg_mouse = enabled;
+        cfg_changed = true;
+    }
+}
+
+int config_get_cpu_freq(void) { return cfg_cpu_freq; }
+void config_set_cpu_freq(int mhz) {
+    if (cfg_cpu_freq != mhz) {
+        cfg_cpu_freq = mhz;
+        cfg_changed = true;
+        cfg_hw_changed = true;
+    }
+}
+
+int config_get_psram_freq(void) { return cfg_psram_freq; }
+void config_set_psram_freq(int mhz) {
+    if (cfg_psram_freq != mhz) {
+        cfg_psram_freq = mhz;
+        cfg_changed = true;
+        cfg_hw_changed = true;
+    }
+}
+
+bool config_hw_changed(void) { return cfg_hw_changed; }
 bool config_has_changes(void) { return cfg_changed; }
-void config_clear_changes(void) { cfg_changed = false; }
+void config_clear_changes(void) { cfg_changed = false; cfg_hw_changed = false; }
 
 // Write a line to file
 static bool write_line(FIL *fp, const char *line) {
@@ -134,12 +197,52 @@ bool config_save_all(void) {
     snprintf(line, sizeof(line), "fpu=%d\n", cfg_fpu);
     write_line(&fp, line);
 
+    // Hardware settings (murm386-specific)
+    write_line(&fp, "\n[murm386]\n");
+    snprintf(line, sizeof(line), "pcspeaker=%d\n", cfg_pcspeaker);
+    write_line(&fp, line);
+    snprintf(line, sizeof(line), "adlib=%d\n", cfg_adlib);
+    write_line(&fp, line);
+    snprintf(line, sizeof(line), "soundblaster=%d\n", cfg_soundblaster);
+    write_line(&fp, line);
+    snprintf(line, sizeof(line), "mouse=%d\n", cfg_mouse);
+    write_line(&fp, line);
+    snprintf(line, sizeof(line), "cpu_freq=%d\n", cfg_cpu_freq);
+    write_line(&fp, line);
+    snprintf(line, sizeof(line), "psram_freq=%d\n", cfg_psram_freq);
+    write_line(&fp, line);
+
     f_close(&fp);
     cfg_changed = false;
+    cfg_hw_changed = false;
     return true;
 }
 
 bool config_save_disks(void) {
     // For now, save everything (simpler implementation)
     return config_save_all();
+}
+
+// INI parser callback for [murm386] section
+int parse_murm386_ini(void* user, const char* section,
+                      const char* name, const char* value) {
+    (void)user;
+
+    if (strcmp(section, "murm386") != 0) return 1;  // Not our section
+
+    if (strcmp(name, "pcspeaker") == 0) {
+        cfg_pcspeaker = atoi(value);
+    } else if (strcmp(name, "adlib") == 0) {
+        cfg_adlib = atoi(value);
+    } else if (strcmp(name, "soundblaster") == 0) {
+        cfg_soundblaster = atoi(value);
+    } else if (strcmp(name, "mouse") == 0) {
+        cfg_mouse = atoi(value);
+    } else if (strcmp(name, "cpu_freq") == 0) {
+        cfg_cpu_freq = atoi(value);
+    } else if (strcmp(name, "psram_freq") == 0) {
+        cfg_psram_freq = atoi(value);
+    }
+
+    return 1;  // Success
 }

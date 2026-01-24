@@ -24,6 +24,12 @@ typedef enum {
     SETTING_CPU,
     SETTING_FPU,
     SETTING_FILL_CMOS,
+    SETTING_PCSPEAKER,
+    SETTING_ADLIB,
+    SETTING_SOUNDBLASTER,
+    SETTING_MOUSE,
+    SETTING_CPU_FREQ,
+    SETTING_PSRAM_FREQ,
     SETTING_COUNT
 } SettingItem;
 
@@ -34,19 +40,29 @@ static const int mem_option_count = 3;
 static const int cpu_options[] = { 3, 4, 5 };
 static const int cpu_option_count = 3;
 
+static const int cpu_freq_options[] = { 504, 378 };
+static const int cpu_freq_option_count = 2;
+
+static const int psram_freq_options[] = { 166, 133, 100 };
+static const int psram_freq_option_count = 3;
+
 // State
 static SettingsState settings_state = SETTINGS_CLOSED;
 static int selected_item = 0;
+static int scroll_offset = 0;
 static bool restart_requested = false;
 
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_fill_cmos;
+static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_mouse;
+static int orig_cpu_freq, orig_psram_freq;
 
 // UI dimensions
-#define MENU_X      15
-#define MENU_Y      6
-#define MENU_W      50
-#define MENU_H      13
+#define MENU_X      10
+#define MENU_Y      4
+#define MENU_W      60
+#define MENU_H      17
+#define VISIBLE_ITEMS 10
 
 // Forward declarations
 static void draw_settings_menu(void);
@@ -67,9 +83,16 @@ void settingsui_open(void) {
     orig_cpu = config_get_cpu_gen();
     orig_fpu = config_get_fpu();
     orig_fill_cmos = config_get_fill_cmos();
+    orig_pcspeaker = config_get_pcspeaker();
+    orig_adlib = config_get_adlib();
+    orig_soundblaster = config_get_soundblaster();
+    orig_mouse = config_get_mouse();
+    orig_cpu_freq = config_get_cpu_freq();
+    orig_psram_freq = config_get_psram_freq();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
+    scroll_offset = 0;
     osd_clear();
     osd_show();
     draw_settings_menu();
@@ -82,6 +105,12 @@ void settingsui_close(void) {
         config_set_cpu_gen(orig_cpu);
         config_set_fpu(orig_fpu);
         config_set_fill_cmos(orig_fill_cmos);
+        config_set_pcspeaker(orig_pcspeaker);
+        config_set_adlib(orig_adlib);
+        config_set_soundblaster(orig_soundblaster);
+        config_set_mouse(orig_mouse);
+        config_set_cpu_freq(orig_cpu_freq);
+        config_set_psram_freq(orig_psram_freq);
         config_clear_changes();
     }
     settings_state = SETTINGS_CLOSED;
@@ -135,6 +164,38 @@ static void cycle_option(int direction) {
         case SETTING_FILL_CMOS:
             config_set_fill_cmos(config_get_fill_cmos() ? 0 : 1);
             break;
+
+        case SETTING_PCSPEAKER:
+            config_set_pcspeaker(config_get_pcspeaker() ? 0 : 1);
+            break;
+
+        case SETTING_ADLIB:
+            config_set_adlib(config_get_adlib() ? 0 : 1);
+            break;
+
+        case SETTING_SOUNDBLASTER:
+            config_set_soundblaster(config_get_soundblaster() ? 0 : 1);
+            break;
+
+        case SETTING_MOUSE:
+            config_set_mouse(config_get_mouse() ? 0 : 1);
+            break;
+
+        case SETTING_CPU_FREQ:
+            options = cpu_freq_options;
+            count = cpu_freq_option_count;
+            idx = find_option_index(options, count, config_get_cpu_freq());
+            idx = (idx + direction + count) % count;
+            config_set_cpu_freq(options[idx]);
+            break;
+
+        case SETTING_PSRAM_FREQ:
+            options = psram_freq_options;
+            count = psram_freq_option_count;
+            idx = find_option_index(options, count, config_get_psram_freq());
+            idx = (idx + direction + count) % count;
+            config_set_psram_freq(options[idx]);
+            break;
     }
 }
 
@@ -146,18 +207,32 @@ static void draw_settings_menu(void) {
     osd_fill(MENU_X + 1, MENU_Y + 1, MENU_W - 2, MENU_H - 2, ' ', OSD_ATTR_NORMAL);
 
     // Settings items
-    const char *labels[] = { "RAM Size:", "CPU Type:", "FPU (387):", "Fill CMOS:" };
-    char value[20];
+    const char *labels[] = {
+        "RAM Size:",
+        "CPU Type:",
+        "FPU (387):",
+        "Fill CMOS:",
+        "PC Speaker:",
+        "AdLib:",
+        "SoundBlaster:",
+        "Mouse:",
+        "RP2350 Freq:",
+        "PSRAM Freq:"
+    };
+    char value[24];
 
-    for (int i = 0; i < SETTING_COUNT; i++) {
+    for (int i = 0; i < SETTING_COUNT && i < VISIBLE_ITEMS; i++) {
+        int setting_idx = i + scroll_offset;
+        if (setting_idx >= SETTING_COUNT) break;
+
         int y = MENU_Y + 2 + i;
-        uint8_t attr = (i == selected_item) ? OSD_ATTR_SELECTED : OSD_ATTR_NORMAL;
+        uint8_t attr = (setting_idx == selected_item) ? OSD_ATTR_SELECTED : OSD_ATTR_NORMAL;
 
         osd_fill(MENU_X + 2, y, MENU_W - 4, 1, ' ', attr);
-        osd_print(MENU_X + 3, y, labels[i], attr);
+        osd_print(MENU_X + 3, y, labels[setting_idx], attr);
 
         // Format value
-        switch (i) {
+        switch (setting_idx) {
             case SETTING_MEM:
                 snprintf(value, sizeof(value), "< %d MB >", config_get_mem_size_mb());
                 break;
@@ -170,8 +245,26 @@ static void draw_settings_menu(void) {
             case SETTING_FILL_CMOS:
                 snprintf(value, sizeof(value), "< %s >", config_get_fill_cmos() ? "Enabled" : "Disabled");
                 break;
+            case SETTING_PCSPEAKER:
+                snprintf(value, sizeof(value), "< %s >", config_get_pcspeaker() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_ADLIB:
+                snprintf(value, sizeof(value), "< %s >", config_get_adlib() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_SOUNDBLASTER:
+                snprintf(value, sizeof(value), "< %s >", config_get_soundblaster() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_MOUSE:
+                snprintf(value, sizeof(value), "< %s >", config_get_mouse() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_CPU_FREQ:
+                snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
+                break;
+            case SETTING_PSRAM_FREQ:
+                snprintf(value, sizeof(value), "< %d MHz >", config_get_psram_freq());
+                break;
         }
-        osd_print(MENU_X + 20, y, value, attr);
+        osd_print(MENU_X + 25, y, value, attr);
     }
 
     // Show if changes pending
@@ -212,6 +305,10 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                 case KEY_UP:
                     if (selected_item > 0) {
                         selected_item--;
+                        // Adjust scroll if needed
+                        if (selected_item < scroll_offset) {
+                            scroll_offset = selected_item;
+                        }
                         draw_settings_menu();
                     }
                     break;
@@ -219,6 +316,10 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                 case KEY_DOWN:
                     if (selected_item < SETTING_COUNT - 1) {
                         selected_item++;
+                        // Adjust scroll if needed
+                        if (selected_item >= scroll_offset + VISIBLE_ITEMS) {
+                            scroll_offset = selected_item - VISIBLE_ITEMS + 1;
+                        }
                         draw_settings_menu();
                     }
                     break;

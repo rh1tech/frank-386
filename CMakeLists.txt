@@ -36,6 +36,14 @@ project(murm386 C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
+# Read version from version.txt (format: "MAJOR MINOR" e.g. "1 00" = v1.00)
+file(READ "${CMAKE_CURRENT_LIST_DIR}/version.txt" VERSION_CONTENT)
+string(STRIP "${VERSION_CONTENT}" VERSION_CONTENT)
+string(REPLACE " " ";" VERSION_LIST "${VERSION_CONTENT}")
+list(GET VERSION_LIST 0 MURM386_VERSION_MAJOR)
+list(GET VERSION_LIST 1 MURM386_VERSION_MINOR)
+message(STATUS "murm386 version: ${MURM386_VERSION_MAJOR}.${MURM386_VERSION_MINOR}")
+
 pico_sdk_init()
 
 #=============================================================================
@@ -192,8 +200,13 @@ if(USB_HID_ENABLED)
 endif()
 
 target_compile_definitions(murm386 PRIVATE
+    # Version information
+    MURM386_VERSION_MAJOR=${MURM386_VERSION_MAJOR}
+    MURM386_VERSION_MINOR=${MURM386_VERSION_MINOR}
+
     # Board configuration
     BOARD_${BOARD_VARIANT}
+    BOARD_VARIANT_STR="${BOARD_VARIANT}"
     CPU_CLOCK_MHZ=${CPU_SPEED}
     CPU_VOLTAGE=${CPU_VOLTAGE}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}

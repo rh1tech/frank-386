@@ -43,7 +43,13 @@
 // Version Information
 //=============================================================================
 
-#define MURM386_VERSION "1.0.0"
+// Version is defined in CMakeLists.txt from version.txt
+#ifndef MURM386_VERSION_MAJOR
+#define MURM386_VERSION_MAJOR 1
+#endif
+#ifndef MURM386_VERSION_MINOR
+#define MURM386_VERSION_MINOR 0
+#endif
 
 //=============================================================================
 // Global State
@@ -408,6 +414,9 @@ static int load_config_from_sd(const char *filename) {
         return -1;
     }
 
+    // Also parse murm386-specific settings
+    ini_parse_string(content, parse_murm386_ini, NULL);
+
     free(content);
     return 0;
 }
@@ -572,11 +581,13 @@ static bool init_emulator(void) {
     DBG_PRINT("Initializing Settings UI...\n");
     settingsui_init();
 
-    // Initialize config save module with current values
+    // Initialize config save module with current values from PCConfig
+    // (these override INI values if not present in [murm386] section)
     config_set_mem_size_mb(config.mem_size / (1024 * 1024));
     config_set_cpu_gen(config.cpu_gen);
     config_set_fpu(config.fpu);
     config_set_fill_cmos(config.fill_cmos);
+    // Hardware settings are loaded from [murm386] section via parse_murm386_ini
     config_clear_changes();
 
     // Load BIOS and reset
@@ -612,6 +623,63 @@ static void core1_entry(void) {
 }
 
 //=============================================================================
+// Welcome Screen
+//=============================================================================
+
+static void show_welcome_screen(void) {
+    // Welcome screen dimensions
+    int wx = 15, wy = 7, ww = 50, wh = 11;
+
+    osd_clear();
+
+    // Draw shadow
+    uint8_t shadow_attr = OSD_ATTR(OSD_DARKGRAY, OSD_BLACK);
+    osd_fill(wx + 2, wy + wh, ww, 1, '\xDB', shadow_attr);
+    for (int i = 1; i < wh + 1; i++) {
+        osd_putchar(wx + ww, wy + i, '\xDB', shadow_attr);
+        osd_putchar(wx + ww + 1, wy + i, '\xDB', shadow_attr);
+    }
+
+    // Draw box with cyan border
+    osd_draw_box_titled(wx, wy, ww, wh, " Welcome ", OSD_ATTR_BORDER);
+    osd_fill(wx + 1, wy + 1, ww - 2, wh - 2, ' ', OSD_ATTR_NORMAL);
+
+    // Title
+    osd_print_center(wy + 2, "Murm386", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+
+    // Version
+    char version_str[32];
+    snprintf(version_str, sizeof(version_str), "Version %d.%02d",
+             MURM386_VERSION_MAJOR, MURM386_VERSION_MINOR);
+    osd_print_center(wy + 4, version_str, OSD_ATTR_NORMAL);
+
+    // Author
+    osd_print_center(wy + 5, "Mikhail Matveev, rh1.tech", OSD_ATTR_NORMAL);
+
+    // Hardware info
+    char hw_str[48];
+    snprintf(hw_str, sizeof(hw_str), "RP2350 @ %d MHz / PSRAM @ %d MHz",
+             config_get_cpu_freq(), config_get_psram_freq());
+    osd_print_center(wy + 7, hw_str, OSD_ATTR(OSD_LIGHTCYAN, OSD_BLUE));
+
+    // Platform
+#ifdef BOARD_M1
+    osd_print_center(wy + 8, "Platform: M1", OSD_ATTR_DISABLED);
+#elif defined(BOARD_M2)
+    osd_print_center(wy + 8, "Platform: M2", OSD_ATTR_DISABLED);
+#else
+    osd_print_center(wy + 8, "Platform: Unknown", OSD_ATTR_DISABLED);
+#endif
+
+    osd_show();
+
+    // Display for 5 seconds
+    sleep_ms(5000);
+
+    osd_hide();
+}
+
+//=============================================================================
 // Main Entry Point
 //=============================================================================
 
@@ -622,7 +690,7 @@ int main(void) {
     DBG_PRINT("\n\n");
     DBG_PRINT("============================================\n");
     DBG_PRINT("  murm386 - 386 Emulator for RP2350\n");
-    DBG_PRINT("  Version %s\n", MURM386_VERSION);
+    DBG_PRINT("  Version %d.%02d\n", MURM386_VERSION_MAJOR, MURM386_VERSION_MINOR);
     DBG_PRINT("============================================\n\n");
 
 #ifndef USB_HID_ENABLED
@@ -680,6 +748,10 @@ int main(void) {
     multicore_launch_core1(core1_entry);
 
     initialized = true;
+
+    // Show welcome screen
+    show_welcome_screen();
+
     DBG_PRINT("\nStarting emulation...\n");
 
     // VGA update timing
