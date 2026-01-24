@@ -857,12 +857,13 @@ int main(void) {
             // Update cursor
             int cx, cy, cs, ce, cv;
             vga_get_cursor_info(pc->vga, &cx, &cy, &cs, &ce, &cv);
+            int char_height = vga_get_char_height(pc->vga);
             if (cv) {
-                vga_hw_set_cursor(cx, cy, cs, ce);
+                vga_hw_set_cursor(cx, cy, cs, ce, char_height);
                 // Sync cursor blink phase with emulator
                 vga_hw_set_cursor_blink(vga_get_cursor_blink_phase(pc->vga));
             } else {
-                vga_hw_set_cursor(-1, -1, 0, 0);  // Hide cursor
+                vga_hw_set_cursor(-1, -1, 0, 0, 16);  // Hide cursor
             }
 
             // Update VGA mode

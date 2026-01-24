@@ -2642,3 +2642,13 @@ int vga_get_cursor_blink_phase(VGAState *s)
     }
     return s->cursor_visible_phase;
 }
+
+/* Get character cell height (from CRT register 0x09 max scan line + 1)
+ * Typically 8 for CGA-style modes or 16 for VGA text mode */
+int vga_get_char_height(VGAState *s)
+{
+    if (!s) return 16;
+    int cheight = (s->cr[0x09] & 0x1f) + 1;
+    if (cheight <= 0) cheight = 16;
+    return cheight;
+}

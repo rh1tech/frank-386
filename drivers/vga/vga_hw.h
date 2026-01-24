@@ -61,7 +61,8 @@ void vga_hw_set_vram(uint8_t *vram);
 void vga_hw_set_mode(int mode);
 
 // Set cursor position and size for text mode
-void vga_hw_set_cursor(int x, int y, int start, int end);
+// char_height is the emulated character cell height (for scaling cursor to 16-line font)
+void vga_hw_set_cursor(int x, int y, int start, int end, int char_height);
 
 // Set cursor blink state (1 = visible, 0 = hidden during blink cycle)
 void vga_hw_set_cursor_blink(int blink_phase);

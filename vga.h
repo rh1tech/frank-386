@@ -48,6 +48,7 @@ int vga_get_line_offset(VGAState *s);    // Line offset in words
 int vga_get_line_compare(VGAState *s);   // Scanline where address resets to 0
 bool vga_in_retrace(VGAState *s);        // Check if in vertical retrace
 int vga_get_cursor_blink_phase(VGAState *s);  // Cursor blink phase (1=visible, 0=hidden)
+int vga_get_char_height(VGAState *s);         // Character cell height (typically 8 or 16)
 
 #ifndef BPP
 #define BPP 32

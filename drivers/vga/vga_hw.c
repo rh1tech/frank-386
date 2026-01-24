@@ -873,11 +873,21 @@ void vga_hw_set_mode(int mode) {
     }
 }
 
-void vga_hw_set_cursor(int x, int y, int start, int end) {
+void vga_hw_set_cursor(int x, int y, int start, int end, int char_height) {
     cursor_x = x;
     cursor_y = y;
-    cursor_start = start;
-    cursor_end = end;
+    // Scale cursor scanlines from emulated char_height to our 16-line font
+    // For example: if char_height=8 and cursor is at scanlines 6-7,
+    // we scale to 12-15 for a 16-line font (preserving bottom position)
+    if (char_height > 0 && char_height != 16) {
+        cursor_start = start * 16 / char_height;
+        cursor_end = (end + 1) * 16 / char_height - 1;
+        if (cursor_end < cursor_start) cursor_end = cursor_start;
+        if (cursor_end > 15) cursor_end = 15;
+    } else {
+        cursor_start = start;
+        cursor_end = end;
+    }
 }
 
 void vga_hw_set_cursor_blink(int blink_phase) {
