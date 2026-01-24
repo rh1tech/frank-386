@@ -13,6 +13,9 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 252, 378, 504")
 # PSRAM speed configuration (84, 100, 133, 166 MHz target)
 set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 84, 100, 133, 166")
 
+# USB HID keyboard support (disabled by default to keep USB CDC for debug)
+option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" OFF)
+
 # CPU voltage selection based on speed
 if(CPU_SPEED GREATER_EQUAL 504)
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_65")
@@ -115,6 +118,11 @@ target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardwar
 pico_generate_pio_header(audio_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/audio/audio_i2s.pio)
 
 #=============================================================================
+# USB HID Keyboard Driver (optional)
+#=============================================================================
+add_subdirectory(drivers/usbhid)
+
+#=============================================================================
 # Core 386 Emulator Sources
 #=============================================================================
 set(EMU_CORE_SOURCES
@@ -169,6 +177,12 @@ target_include_directories(murm386 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/vga
     ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
 )
+# Only include usbhid directory when USB HID is enabled (to avoid tusb_config.h conflicts)
+if(USB_HID_ENABLED)
+    target_include_directories(murm386 PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}/drivers/usbhid
+    )
+endif()
 
 target_compile_definitions(murm386 PRIVATE
     # Board configuration
@@ -227,11 +241,19 @@ target_link_libraries(murm386
     psram
     video_driver
     audio_driver
+    usbhid
 )
 
-# USB Serial console (enabled)
-pico_enable_stdio_usb(murm386 1)
-pico_enable_stdio_uart(murm386 0)
+# USB configuration: USB HID uses Host mode which disables CDC
+if(USB_HID_ENABLED)
+    message(STATUS "USB HID enabled: Using UART for stdio (USB is Host mode for keyboard)")
+    pico_enable_stdio_usb(murm386 0)
+    pico_enable_stdio_uart(murm386 1)
+else()
+    # USB Serial console (when USB HID is disabled)
+    pico_enable_stdio_usb(murm386 1)
+    pico_enable_stdio_uart(murm386 0)
+endif()
 
 # Generate UF2 and other output formats
 pico_add_extra_outputs(murm386)
@@ -245,4 +267,5 @@ message(STATUS "  Board Variant:  ${BOARD_VARIANT}")
 message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
+message(STATUS "  USB HID:        ${USB_HID_ENABLED}")
 message(STATUS "")

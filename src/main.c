@@ -23,6 +23,9 @@
 #include "vga_hw.h"
 #include "vga.h"
 #include "ps2kbd_wrapper.h"
+#ifdef USB_HID_ENABLED
+#include "usbkbd_wrapper.h"
+#endif
 #include "sdcard.h"
 #include "ff.h"
 #include "audio.h"
@@ -169,6 +172,7 @@ static void vga_redraw(void *opaque, int x, int y, int w, int h) {
 //=============================================================================
 
 static void poll_keyboard(void) {
+    // Poll PS/2 keyboard
     ps2kbd_tick();
 
     int is_down, keycode;
@@ -177,6 +181,17 @@ static void poll_keyboard(void) {
             ps2_put_keycode(pc->kbd, is_down, keycode);
         }
     }
+
+#ifdef USB_HID_ENABLED
+    // Poll USB keyboard
+    usbkbd_tick();
+
+    while (usbkbd_get_key(&is_down, &keycode)) {
+        if (pc && pc->kbd) {
+            ps2_put_keycode(pc->kbd, is_down, keycode);
+        }
+    }
+#endif
 }
 
 //=============================================================================
@@ -378,6 +393,14 @@ static bool init_hardware(void) {
     printf("  CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
     ps2kbd_init(PS2_PIN_CLK);
 
+    // Initialize USB HID keyboard (if enabled)
+#ifdef USB_HID_ENABLED
+    printf("Initializing USB HID keyboard...\n");
+    usbkbd_init();
+#else
+    printf("USB HID keyboard: disabled (use -DUSB_HID_ENABLED=1 to enable)\n");
+#endif
+
     // Initialize VGA
     printf("Initializing VGA...\n");
     printf("  Base pin: GPIO%d\n", VGA_BASE_PIN);
@@ -477,20 +500,21 @@ static void core1_entry(void) {
 //=============================================================================
 
 int main(void) {
-    // Initialize stdio (USB Serial)
+    // Initialize stdio (USB Serial or UART depending on USB HID mode)
     stdio_init_all();
 
-    // Wait for USB Serial connection (with timeout)
     printf("\n\n");
     printf("============================================\n");
     printf("  murm386 - 386 Emulator for RP2350\n");
     printf("  Version %s\n", MURM386_VERSION);
     printf("============================================\n\n");
 
+#ifndef USB_HID_ENABLED
+    // Wait for USB Serial connection (with timeout)
+    // Only when USB CDC is enabled (USB HID disabled)
     printf("Waiting for USB Serial connection...\n");
     printf("(Press any key or wait %d seconds)\n\n", USB_CONSOLE_DELAY_MS / 1000);
 
-    // 5 second delay for USB Serial connection
     absolute_time_t deadline = make_timeout_time_ms(USB_CONSOLE_DELAY_MS);
     while (!stdio_usb_connected() && !time_reached(deadline)) {
         sleep_ms(100);
@@ -501,6 +525,11 @@ int main(void) {
     } else {
         printf("Timeout - continuing without USB Serial\n\n");
     }
+#else
+    // USB HID mode: using UART for debug output
+    printf("USB HID mode: USB port used for keyboard input\n");
+    printf("Debug output via UART\n\n");
+#endif
 
     // Print board configuration
     printf("Board Configuration:\n");
