@@ -469,80 +469,6 @@ static void configure_clocks(void) {
     DBG_PRINT("System clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
 
-/**
- * Reconfigure clocks at runtime based on loaded configuration.
- * Called after INI file is parsed if frequencies differ from compile-time defaults.
- * This function MUST run from RAM (not flash) as it reconfigures timing.
- *
- * IMPORTANT: When lowering frequency, we must lower clock BEFORE voltage.
- * When raising frequency, we must raise voltage BEFORE clock.
- */
-static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int psram_mhz) {
-    DBG_PRINT("Reconfiguring clocks: CPU=%d MHz, PSRAM=%d MHz\n", cpu_mhz, psram_mhz);
-
-    int current_mhz = clock_get_hz(clk_sys) / 1000000;
-    bool lowering = (cpu_mhz < current_mhz);
-
-    if (lowering) {
-        // LOWERING frequency: change clock first, then voltage
-        DBG_PRINT("  Lowering from %d MHz to %d MHz\n", current_mhz, cpu_mhz);
-
-        // Configure flash timing for new (lower) frequency
-        set_flash_timings(cpu_mhz);
-
-        // Lower the clock first (safe at current voltage)
-        set_sys_clock_khz(cpu_mhz * 1000, false);
-        DBG_PRINT("  System clock now: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
-
-        // Now safe to lower voltage
-        if (cpu_mhz >= 504) {
-            vreg_disable_voltage_limit();
-            vreg_set_voltage(VREG_VOLTAGE_1_65);
-            DBG_PRINT("  Voltage: 1.65V\n");
-        } else if (cpu_mhz >= 378) {
-            vreg_disable_voltage_limit();
-            vreg_set_voltage(VREG_VOLTAGE_1_60);
-            DBG_PRINT("  Voltage: 1.60V\n");
-        } else if (cpu_mhz > 252) {
-            vreg_disable_voltage_limit();
-            vreg_set_voltage(VREG_VOLTAGE_1_50);
-            DBG_PRINT("  Voltage: 1.50V\n");
-        }
-        // No need to wait after lowering voltage
-    } else {
-        // RAISING frequency: raise voltage first, then clock
-        DBG_PRINT("  Raising from %d MHz to %d MHz\n", current_mhz, cpu_mhz);
-
-        // Raise voltage first (safe at current clock)
-        if (cpu_mhz >= 504) {
-            vreg_disable_voltage_limit();
-            vreg_set_voltage(VREG_VOLTAGE_1_65);
-            DBG_PRINT("  Voltage: 1.65V\n");
-        } else if (cpu_mhz >= 378) {
-            vreg_disable_voltage_limit();
-            vreg_set_voltage(VREG_VOLTAGE_1_60);
-            DBG_PRINT("  Voltage: 1.60V\n");
-        } else if (cpu_mhz > 252) {
-            vreg_disable_voltage_limit();
-            vreg_set_voltage(VREG_VOLTAGE_1_50);
-            DBG_PRINT("  Voltage: 1.50V\n");
-        }
-        sleep_ms(50);  // Wait for voltage to stabilize
-
-        // Configure flash timing for new (higher) frequency
-        set_flash_timings(cpu_mhz);
-
-        // Now safe to raise clock
-        set_sys_clock_khz(cpu_mhz * 1000, false);
-        DBG_PRINT("  System clock now: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
-    }
-
-    // Re-initialize PSRAM with new frequency
-    uint psram_pin = get_psram_pin();
-    psram_init_with_freq(psram_pin, psram_mhz);
-    DBG_PRINT("  PSRAM re-initialized at %d MHz\n", psram_mhz);
-}
-
 //=============================================================================
 // Hardware Initialization
 //=============================================================================
@@ -572,24 +498,6 @@ static bool init_hardware(void) {
     }
     DBG_PRINT("  SD card mounted\n");
 
-    // Load config early to get clock settings before VGA init
-    // (VGA PIO timing depends on system clock frequency)
-    load_default_config();
-    if (load_config_from_sd("config.ini") != 0) {
-        DBG_PRINT("Using default configuration\n");
-    }
-
-    // Reconfigure clocks if config differs from compile-time defaults
-    // MUST happen before VGA init so PIO timing is correct
-    int cfg_cpu_freq = config_get_cpu_freq();
-    int cfg_psram_freq = config_get_psram_freq();
-    if (cfg_cpu_freq != CPU_CLOCK_MHZ || cfg_psram_freq != PSRAM_MAX_FREQ_MHZ) {
-        DBG_PRINT("Config frequencies differ from compile-time defaults\n");
-        DBG_PRINT("  Compile: CPU=%d MHz, PSRAM=%d MHz\n", CPU_CLOCK_MHZ, PSRAM_MAX_FREQ_MHZ);
-        DBG_PRINT("  Config:  CPU=%d MHz, PSRAM=%d MHz\n", cfg_cpu_freq, cfg_psram_freq);
-        reconfigure_clocks(cfg_cpu_freq, cfg_psram_freq);
-    }
-
     // Initialize PS/2 keyboard
     DBG_PRINT("Initializing PS/2 keyboard...\n");
     DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
@@ -601,7 +509,7 @@ static bool init_hardware(void) {
     usbkbd_init();
 #endif
 
-    // Initialize VGA (after clock reconfiguration so PIO timing is correct)
+    // Initialize VGA
     DBG_PRINT("Initializing VGA...\n");
     DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
     vga_hw_init();
@@ -622,7 +530,13 @@ static bool init_hardware(void) {
 //=============================================================================
 
 static bool init_emulator(void) {
-    // Config was already loaded in init_hardware (before VGA init for clock timing)
+    // Load configuration
+    load_default_config();
+
+    // Try to load config from SD card
+    if (load_config_from_sd("config.ini") != 0) {
+        DBG_PRINT("Using default configuration\n");
+    }
 
     DBG_PRINT("\nEmulator configuration:\n");
     DBG_PRINT("  Memory: %ld MB\n", config.mem_size / (1024 * 1024));
@@ -676,9 +590,6 @@ static bool init_emulator(void) {
     config_set_fill_cmos(config.fill_cmos);
     // Hardware settings are loaded from [murm386] section via parse_murm386_ini
     config_clear_changes();
-
-    // Apply VGA horizontal shift from config
-    vga_hw_set_hshift(config_get_vga_hshift());
 
     // Load BIOS and reset
     DBG_PRINT("Loading BIOS...\n");

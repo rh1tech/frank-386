@@ -73,9 +73,6 @@ void vga_hw_set_vram_offset(uint16_t offset);
 // Set horizontal pixel panning (0-7)
 void vga_hw_set_panning(uint8_t panning);
 
-// Set horizontal shift (for monitor centering adjustment)
-void vga_hw_set_hshift(int pixels);
-
 // Set Line Compare (scanline where address resets to 0)
 void vga_hw_set_line_compare(int line);
 
