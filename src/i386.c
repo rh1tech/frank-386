@@ -3887,8 +3887,8 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 /* 0x58 */	&&f0x58_fast, &&f0x59_fast, &&f0x5a_fast, &&f0x5b_fast, &&f0x5c_fast, &&f0x5d_fast, &&f0x5e_fast, &&f0x5f_fast,
 /* 0x60 */	&&f0x60, &&f0x61, &&f0x62, &&f0x63, &&pfx64, &&pfx65, &&pfx66, &&pfx67,
 /* 0x68 */	&&f0x68, &&f0x69, &&f0x6a, &&f0x6b, &&f0x6c, &&f0x6d, &&f0x6e, &&f0x6f,
-/* 0x70 */	&&f0x70, &&f0x71, &&f0x72, &&f0x73, &&f0x74_fast, &&f0x75_fast, &&f0x76, &&f0x77,
-/* 0x78 */	&&f0x78, &&f0x79, &&f0x7a, &&f0x7b, &&f0x7c, &&f0x7d, &&f0x7e, &&f0x7f,
+/* 0x70 */	&&f0x70, &&f0x71, &&f0x72_fast, &&f0x73_fast, &&f0x74_fast, &&f0x75_fast, &&f0x76_fast, &&f0x77_fast,
+/* 0x78 */	&&f0x78, &&f0x79, &&f0x7a, &&f0x7b, &&f0x7c_fast, &&f0x7d_fast, &&f0x7e_fast, &&f0x7f_fast,
 /* 0x80 */	&&f0x80, &&f0x81, &&f0x82, &&f0x83, &&f0x84, &&f0x85_fast, &&f0x86, &&f0x87,
 /* 0x88 */	&&f0x88, &&f0x89_fast, &&f0x8a, &&f0x8b_fast, &&f0x8c, &&f0x8d_fast, &&f0x8e, &&f0x8f,
 /* 0x90 */	&&f0x90, &&f0x91, &&f0x92, &&f0x93, &&f0x94, &&f0x95, &&f0x96, &&f0x97,
@@ -4021,6 +4021,94 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 			zf = (cpu->cc.dst == 0);
 		}
 		if (!zf) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x72_fast: { // JB/JC/JNAE - jump if CF=1
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		if (get_CF(cpu)) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x73_fast: { // JNB/JNC/JAE - jump if CF=0
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		if (!get_CF(cpu)) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x76_fast: { // JBE/JNA - jump if CF=1 or ZF=1
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		int zf;
+		if (likely(!(cpu->cc.mask & ZF))) {
+			zf = !!(cpu->flags & ZF);
+		} else {
+			zf = (cpu->cc.dst == 0);
+		}
+		if (get_CF(cpu) || zf) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x77_fast: { // JA/JNBE - jump if CF=0 and ZF=0
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		int zf;
+		if (likely(!(cpu->cc.mask & ZF))) {
+			zf = !!(cpu->flags & ZF);
+		} else {
+			zf = (cpu->cc.dst == 0);
+		}
+		if (!get_CF(cpu) && !zf) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x7c_fast: { // JL/JNGE - jump if SF != OF
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		if (get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x7d_fast: { // JGE/JNL - jump if SF = OF
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		if (get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x7e_fast: { // JLE/JNG - jump if ZF=1 or SF != OF
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		int zf;
+		if (likely(!(cpu->cc.mask & ZF))) {
+			zf = !!(cpu->flags & ZF);
+		} else {
+			zf = (cpu->cc.dst == 0);
+		}
+		if (zf || get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
+		ebreak;
+	}
+
+	f0x7f_fast: { // JG/JNLE - jump if ZF=0 and SF = OF
+		PROF_TOTAL();
+		u8 disp8;
+		TRY(fetch8(cpu, &disp8));
+		int zf;
+		if (likely(!(cpu->cc.mask & ZF))) {
+			zf = !!(cpu->flags & ZF);
+		} else {
+			zf = (cpu->cc.dst == 0);
+		}
+		if (!zf && get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
 		ebreak;
 	}
 
