@@ -27,7 +27,6 @@ static int cfg_soundblaster = 1;
 static int cfg_mouse = 1;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
-static int cfg_vga_hshift = 138;  // Default VGA horizontal shift
 static bool cfg_hw_changed = false;
 
 // INI file path
@@ -129,14 +128,6 @@ void config_set_psram_freq(int mhz) {
     }
 }
 
-int config_get_vga_hshift(void) { return cfg_vga_hshift; }
-void config_set_vga_hshift(int pixels) {
-    if (cfg_vga_hshift != pixels) {
-        cfg_vga_hshift = pixels;
-        cfg_changed = true;
-    }
-}
-
 bool config_hw_changed(void) { return cfg_hw_changed; }
 bool config_has_changes(void) { return cfg_changed; }
 void config_clear_changes(void) { cfg_changed = false; cfg_hw_changed = false; }
@@ -220,8 +211,6 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "psram_freq=%d\n", cfg_psram_freq);
     write_line(&fp, line);
-    snprintf(line, sizeof(line), "vga_hshift=%d\n", cfg_vga_hshift);
-    write_line(&fp, line);
 
     f_close(&fp);
     cfg_changed = false;
@@ -253,8 +242,6 @@ int parse_murm386_ini(void* user, const char* section,
         cfg_cpu_freq = atoi(value);
     } else if (strcmp(name, "psram_freq") == 0) {
         cfg_psram_freq = atoi(value);
-    } else if (strcmp(name, "vga_hshift") == 0) {
-        cfg_vga_hshift = atoi(value);
     }
 
     return 1;  // Success

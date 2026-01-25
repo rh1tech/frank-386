@@ -30,7 +30,6 @@ typedef enum {
     SETTING_MOUSE,
     SETTING_CPU_FREQ,
     SETTING_PSRAM_FREQ,
-    SETTING_VGA_HSHIFT,
     SETTING_COUNT
 } SettingItem;
 
@@ -41,17 +40,11 @@ static const int mem_option_count = 3;
 static const int cpu_options[] = { 3, 4, 5 };
 static const int cpu_option_count = 3;
 
-static const int cpu_freq_options[] = { 504, 378, 252 };
-static const int cpu_freq_option_count = 3;
+static const int cpu_freq_options[] = { 504, 378 };
+static const int cpu_freq_option_count = 2;
 
-static const int psram_freq_options[] = { 166, 133, 100 };
-static const int psram_freq_option_count = 3;
-
-// VGA H-Shift: 138 to 300 in steps of 6
-#define VGA_HSHIFT_MIN   138
-#define VGA_HSHIFT_MAX   300
-#define VGA_HSHIFT_STEP  6
-#define VGA_HSHIFT_COUNT (((VGA_HSHIFT_MAX - VGA_HSHIFT_MIN) / VGA_HSHIFT_STEP) + 1)
+static const int psram_freq_options[] = { 166, 133 };
+static const int psram_freq_option_count = 2;
 
 // State
 static SettingsState settings_state = SETTINGS_CLOSED;
@@ -62,7 +55,7 @@ static bool restart_requested = false;
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_fill_cmos;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_mouse;
-static int orig_cpu_freq, orig_psram_freq, orig_vga_hshift;
+static int orig_cpu_freq, orig_psram_freq;
 
 // UI dimensions
 #define MENU_X      10
@@ -96,7 +89,6 @@ void settingsui_open(void) {
     orig_mouse = config_get_mouse();
     orig_cpu_freq = config_get_cpu_freq();
     orig_psram_freq = config_get_psram_freq();
-    orig_vga_hshift = config_get_vga_hshift();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
@@ -119,7 +111,6 @@ void settingsui_close(void) {
         config_set_mouse(orig_mouse);
         config_set_cpu_freq(orig_cpu_freq);
         config_set_psram_freq(orig_psram_freq);
-        config_set_vga_hshift(orig_vga_hshift);
         config_clear_changes();
     }
     settings_state = SETTINGS_CLOSED;
@@ -205,15 +196,6 @@ static void cycle_option(int direction) {
             idx = (idx + direction + count) % count;
             config_set_psram_freq(options[idx]);
             break;
-
-        case SETTING_VGA_HSHIFT: {
-            int val = config_get_vga_hshift();
-            val += direction * VGA_HSHIFT_STEP;
-            if (val < VGA_HSHIFT_MIN) val = VGA_HSHIFT_MAX;
-            if (val > VGA_HSHIFT_MAX) val = VGA_HSHIFT_MIN;
-            config_set_vga_hshift(val);
-            break;
-        }
     }
 }
 
@@ -235,8 +217,7 @@ static void draw_settings_menu(void) {
         "SoundBlaster:",
         "Mouse:",
         "RP2350 Freq:",
-        "PSRAM Freq:",
-        "VGA H-Shift:"
+        "PSRAM Freq:"
     };
     char value[24];
 
@@ -281,9 +262,6 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_PSRAM_FREQ:
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_psram_freq());
-                break;
-            case SETTING_VGA_HSHIFT:
-                snprintf(value, sizeof(value), "< %d >", config_get_vga_hshift());
                 break;
         }
         osd_print(MENU_X + 25, y, value, attr);

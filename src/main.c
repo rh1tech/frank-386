@@ -469,6 +469,49 @@ static void configure_clocks(void) {
     DBG_PRINT("System clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
 
+/**
+ * Get voltage for CPU frequency
+ */
+static enum vreg_voltage get_voltage_for_freq(int mhz) {
+    if (mhz >= 504) return VREG_VOLTAGE_1_65;
+    if (mhz >= 378) return VREG_VOLTAGE_1_60;
+    return VREG_VOLTAGE_1_50;
+}
+
+/**
+ * Reconfigure clocks at runtime based on INI settings.
+ * This function MUST run from RAM, not flash.
+ */
+static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int psram_mhz, uint psram_pin) {
+    int current_mhz = clock_get_hz(clk_sys) / 1000000;
+    bool lowering = (cpu_mhz < current_mhz);
+
+    DBG_PRINT("Reconfiguring clocks: %d MHz -> %d MHz, PSRAM: %d MHz\n",
+              current_mhz, cpu_mhz, psram_mhz);
+
+    enum vreg_voltage new_voltage = get_voltage_for_freq(cpu_mhz);
+
+    if (lowering) {
+        // LOWERING: clock first, then voltage (safe order)
+        set_flash_timings(cpu_mhz);
+        set_sys_clock_khz(cpu_mhz * 1000, false);
+        sleep_ms(10);
+        vreg_set_voltage(new_voltage);
+    } else {
+        // RAISING: voltage first, then clock (safe order)
+        vreg_disable_voltage_limit();
+        vreg_set_voltage(new_voltage);
+        sleep_ms(50);  // Stabilization delay
+        set_flash_timings(cpu_mhz);
+        set_sys_clock_khz(cpu_mhz * 1000, false);
+    }
+
+    // Re-initialize PSRAM with the new frequency
+    psram_init_with_freq(psram_pin, psram_mhz);
+
+    DBG_PRINT("Clock reconfiguration complete: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
+}
+
 //=============================================================================
 // Hardware Initialization
 //=============================================================================
@@ -497,6 +540,35 @@ static bool init_hardware(void) {
         return false;
     }
     DBG_PRINT("  SD card mounted\n");
+
+    // Load murm386-specific hardware settings from INI before VGA init
+    // This allows cpu_freq and psram_freq to be configured
+    {
+        FIL fp;
+        char *content = NULL;
+
+        if (f_open(&fp, "386/config.ini", FA_READ) == FR_OK) {
+            FSIZE_t size = f_size(&fp);
+            content = malloc(size + 1);
+            if (content) {
+                UINT bytes_read;
+                if (f_read(&fp, content, size, &bytes_read) == FR_OK) {
+                    content[bytes_read] = '\0';
+                    // Parse just the [murm386] section
+                    ini_parse_string(content, parse_murm386_ini, NULL);
+                }
+                free(content);
+            }
+            f_close(&fp);
+        }
+
+        // Check if clock reconfiguration is needed
+        int cfg_cpu = config_get_cpu_freq();
+        int cfg_psram = config_get_psram_freq();
+        if (cfg_cpu != CPU_CLOCK_MHZ || cfg_psram != PSRAM_MAX_FREQ_MHZ) {
+            reconfigure_clocks(cfg_cpu, cfg_psram, psram_pin);
+        }
+    }
 
     // Initialize PS/2 keyboard
     DBG_PRINT("Initializing PS/2 keyboard...\n");

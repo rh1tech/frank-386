@@ -217,6 +217,17 @@ static inline uint get_psram_pin(void) {
 #define beginHDMI_PIN_data  (HDMI_BASE_PIN + 2)
 
 //=============================================================================
+// VGA Display Configuration
+//=============================================================================
+
+// VGA horizontal shift (where active video starts)
+// Adjust this value to center the display on your monitor
+// Default: 138 (tuned for typical monitor centering)
+#ifndef VGA_SHIFT_PICTURE
+#define VGA_SHIFT_PICTURE 138
+#endif
+
+//=============================================================================
 // Emulator Memory Configuration
 //=============================================================================
 

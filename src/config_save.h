@@ -52,9 +52,6 @@ void config_set_cpu_freq(int mhz);
 int config_get_psram_freq(void);
 void config_set_psram_freq(int mhz);
 
-int config_get_vga_hshift(void);
-void config_set_vga_hshift(int pixels);
-
 // Check if hardware settings changed (requires reboot)
 bool config_hw_changed(void);
 

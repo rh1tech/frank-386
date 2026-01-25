@@ -10,6 +10,7 @@
 #include "vga_osd.h"
 #include "font8x16.h"
 #include "debug.h"
+#include "board_config.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,7 +48,7 @@ static const struct pio_program pio_vga_program = {
 #define LINE_VS_END         414
 
 #define HS_SIZE             96
-#define SHIFT_PICTURE       138  // Where active video starts (tuned for monitor centering)
+#define SHIFT_PICTURE       VGA_SHIFT_PICTURE  // Where active video starts (from board_config.h)
 
 // Sync encoding in bits 6-7
 #define TMPL_LINE           0xC0
