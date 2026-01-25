@@ -3889,7 +3889,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 /* 0x68 */	&&f0x68, &&f0x69, &&f0x6a, &&f0x6b, &&f0x6c, &&f0x6d, &&f0x6e, &&f0x6f,
 /* 0x70 */	&&f0x70, &&f0x71, &&f0x72, &&f0x73, &&f0x74_fast, &&f0x75_fast, &&f0x76, &&f0x77,
 /* 0x78 */	&&f0x78, &&f0x79, &&f0x7a, &&f0x7b, &&f0x7c, &&f0x7d, &&f0x7e, &&f0x7f,
-/* 0x80 */	&&f0x80, &&f0x81, &&f0x82, &&f0x83_fast, &&f0x84, &&f0x85_fast, &&f0x86, &&f0x87,
+/* 0x80 */	&&f0x80, &&f0x81, &&f0x82, &&f0x83, &&f0x84, &&f0x85_fast, &&f0x86, &&f0x87,
 /* 0x88 */	&&f0x88, &&f0x89_fast, &&f0x8a, &&f0x8b_fast, &&f0x8c, &&f0x8d_fast, &&f0x8e, &&f0x8f,
 /* 0x90 */	&&f0x90, &&f0x91, &&f0x92, &&f0x93, &&f0x94, &&f0x95, &&f0x96, &&f0x97,
 /* 0x98 */	&&f0x98, &&f0x99, &&f0x9a, &&f0x9b, &&f0x9c, &&f0x9d, &&f0x9e, &&f0x9f,
@@ -4499,116 +4499,6 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 			else cpu->gprx[reg].r32 = addr;
 		}
 		ebreak;
-	}
-
-	f0x83_fast: { // Group 1 Ev, Ib - very common (add/sub/cmp with imm8)
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		int group = (modrm >> 3) & 7;
-		int mod = modrm >> 6;
-		int rm = modrm & 7;
-
-		if (likely(mod == 3)) {
-			// Register operand - most common case
-			u8 imm8;
-			TRY(fetch8(cpu, &imm8));
-			sword imm = (sword)(s8)imm8;  // Sign extend
-
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = imm;
-				switch (group) {
-				case 0: // ADD
-					cpu->cc.dst = sext16(cpu->cc.src1 + cpu->cc.src2);
-					cpu->gprx[rm].r16 = cpu->cc.dst;
-					cpu->cc.op = CC_ADD;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					break;
-				case 5: // SUB
-					cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-					cpu->gprx[rm].r16 = cpu->cc.dst;
-					cpu->cc.op = CC_SUB;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					break;
-				case 7: // CMP
-					cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-					cpu->cc.op = CC_SUB;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					break;
-				case 1: // OR
-					cpu->cc.dst = sext16(cpu->gprx[rm].r16 | imm);
-					cpu->gprx[rm].r16 = cpu->cc.dst;
-					cpu->cc.op = CC_OR;
-					cpu->cc.mask = CF | PF | ZF | SF | OF;
-					break;
-				case 4: // AND
-					cpu->cc.dst = sext16(cpu->gprx[rm].r16 & imm);
-					cpu->gprx[rm].r16 = cpu->cc.dst;
-					cpu->cc.op = CC_AND;
-					cpu->cc.mask = CF | PF | ZF | SF | OF;
-					break;
-				case 6: // XOR
-					cpu->cc.dst = sext16(cpu->gprx[rm].r16 ^ imm);
-					cpu->gprx[rm].r16 = cpu->cc.dst;
-					cpu->cc.op = CC_XOR;
-					cpu->cc.mask = CF | PF | ZF | SF | OF;
-					break;
-				case 2: // ADC
-				case 3: // SBB
-				default:
-					goto f0x83_slow;
-				}
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = imm;
-				switch (group) {
-				case 0: // ADD
-					cpu->cc.dst = sext32(cpu->cc.src1 + cpu->cc.src2);
-					cpu->gprx[rm].r32 = cpu->cc.dst;
-					cpu->cc.op = CC_ADD;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					break;
-				case 5: // SUB
-					cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-					cpu->gprx[rm].r32 = cpu->cc.dst;
-					cpu->cc.op = CC_SUB;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					break;
-				case 7: // CMP
-					cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-					cpu->cc.op = CC_SUB;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					break;
-				case 1: // OR
-					cpu->cc.dst = sext32(cpu->gprx[rm].r32 | imm);
-					cpu->gprx[rm].r32 = cpu->cc.dst;
-					cpu->cc.op = CC_OR;
-					cpu->cc.mask = CF | PF | ZF | SF | OF;
-					break;
-				case 4: // AND
-					cpu->cc.dst = sext32(cpu->gprx[rm].r32 & imm);
-					cpu->gprx[rm].r32 = cpu->cc.dst;
-					cpu->cc.op = CC_AND;
-					cpu->cc.mask = CF | PF | ZF | SF | OF;
-					break;
-				case 6: // XOR
-					cpu->cc.dst = sext32(cpu->gprx[rm].r32 ^ imm);
-					cpu->gprx[rm].r32 = cpu->cc.dst;
-					cpu->cc.op = CC_XOR;
-					cpu->cc.mask = CF | PF | ZF | SF | OF;
-					break;
-				case 2: // ADC
-				case 3: // SBB
-				default:
-					goto f0x83_slow;
-				}
-			}
-			ebreak;
-		}
-		f0x83_slow:
-		// Fall through to standard handler for memory ops and ADC/SBB
-		cpu->next_ip = cpu->ip + 1;  // Rewind to re-fetch modrm
-		goto f0x83;
 	}
 
 #endif
