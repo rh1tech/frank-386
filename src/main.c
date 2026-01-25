@@ -730,7 +730,7 @@ static void show_welcome_screen(void) {
     osd_print_center(wy + 4, version_str, OSD_ATTR_NORMAL);
 
     // Author
-    osd_print_center(wy + 5, "Mikhail Matveev, rh1.tech", OSD_ATTR_NORMAL);
+    osd_print_center(wy + 5, "Port by Mikhail Matveev, rh1.tech", OSD_ATTR_NORMAL);
 
     // Hardware info
     char hw_str[48];

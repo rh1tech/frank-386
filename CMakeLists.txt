@@ -4,14 +4,21 @@ cmake_minimum_required(VERSION 3.13)
 set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 
 # Board configuration variant (M1, M2)
-set(BOARD_VARIANT "M1" CACHE STRING "Board variant: M1 or M2")
+set(BOARD "M1" CACHE STRING "Board variant: M1 or M2")
+# Alias for backwards compatibility
+if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
+    set(BOARD ${BOARD_VARIANT})
+endif()
 
-# CPU overclock configuration (252, 378, 504 MHz)
-# 252 = no overclock, 378 = medium, 504 = high (default)
-set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 252, 378, 504")
+# CPU overclock configuration (378, 504 MHz)
+# 378 = stable overclock (default), 504 = high overclock
+set(CPU_SPEED "378" CACHE STRING "CPU clock in MHz: 378, 504")
 
-# PSRAM speed configuration (84, 100, 133, 166 MHz target)
-set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 84, 100, 133, 166")
+# PSRAM speed configuration (133, 166 MHz target)
+set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
+
+# MOS2 (Murmulator OS 2) build - generates .m1p2/.m2p2 instead of .uf2
+option(MOS2 "Build for Murmulator OS 2 (m1p2/m2p2 format)" OFF)
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" OFF)
@@ -28,7 +35,7 @@ else()
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_50")
 endif()
 
-message(STATUS "murm386: Board=${BOARD_VARIANT}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE}")
+message(STATUS "murm386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE}, MOS2=${MOS2}")
 
 include(pico_sdk_import.cmake)
 
@@ -67,7 +74,7 @@ add_library(sdcard
 )
 target_include_directories(sdcard PUBLIC drivers/sdcard drivers/fatfs src)
 target_compile_definitions(sdcard PRIVATE
-    BOARD_${BOARD_VARIANT}
+    BOARD_${BOARD}
     RP2350_BUILD=1
     # SDCARD_PIO=1  # Disabled - use hardware SPI instead
 )
@@ -83,7 +90,7 @@ add_library(ps2kbd
 )
 target_include_directories(ps2kbd PUBLIC drivers/ps2kbd src)
 target_compile_definitions(ps2kbd PRIVATE
-    BOARD_${BOARD_VARIANT}
+    BOARD_${BOARD}
 )
 target_link_libraries(ps2kbd pico_stdlib hardware_pio)
 # Generate PIO headers for both M1 and M2 board variants
@@ -98,7 +105,7 @@ add_library(psram
 )
 target_include_directories(psram PUBLIC drivers/psram src)
 target_compile_definitions(psram PRIVATE
-    BOARD_${BOARD_VARIANT}
+    BOARD_${BOARD}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
 )
 target_link_libraries(psram pico_stdlib hardware_clocks)
@@ -112,7 +119,7 @@ add_library(video_driver
 )
 target_include_directories(video_driver PUBLIC drivers/vga src)
 target_compile_definitions(video_driver PRIVATE
-    BOARD_${BOARD_VARIANT}
+    BOARD_${BOARD}
 )
 target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
 
@@ -124,7 +131,7 @@ add_library(audio_driver
 )
 target_include_directories(audio_driver PUBLIC drivers/audio src)
 target_compile_definitions(audio_driver PRIVATE
-    BOARD_${BOARD_VARIANT}
+    BOARD_${BOARD}
 )
 target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq)
 pico_generate_pio_header(audio_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/audio/audio_i2s.pio)
@@ -205,8 +212,8 @@ target_compile_definitions(murm386 PRIVATE
     MURM386_VERSION_MINOR=${MURM386_VERSION_MINOR}
 
     # Board configuration
-    BOARD_${BOARD_VARIANT}
-    BOARD_VARIANT_STR="${BOARD_VARIANT}"
+    BOARD_${BOARD}
+    BOARD_VARIANT_STR="${BOARD}"
     CPU_CLOCK_MHZ=${CPU_SPEED}
     CPU_VOLTAGE=${CPU_VOLTAGE}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
@@ -285,14 +292,40 @@ endif()
 pico_add_extra_outputs(murm386)
 
 #=============================================================================
+# MOS2 Linker Script and Output Format
+#=============================================================================
+if(MOS2)
+    # Use MOS2 linker script (reserves first 128KB for bootloader)
+    pico_set_linker_script(murm386 "${CMAKE_SOURCE_DIR}/memmap.mos2.ld")
+
+    # Determine output extension based on board
+    if(BOARD STREQUAL "M2")
+        set(MOS2_EXT "m2p2")
+    else()
+        set(MOS2_EXT "m1p2")
+    endif()
+
+    # Rename .uf2 to .m1p2/.m2p2 after build
+    add_custom_command(TARGET murm386 POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E rename
+            "${CMAKE_CURRENT_BINARY_DIR}/murm386.uf2"
+            "${CMAKE_CURRENT_BINARY_DIR}/murm386.${MOS2_EXT}"
+        COMMENT "Renaming to MOS2 format: murm386.${MOS2_EXT}"
+    )
+
+    message(STATUS "MOS2 build: Output will be murm386.${MOS2_EXT}")
+endif()
+
+#=============================================================================
 # Print configuration summary
 #=============================================================================
 message(STATUS "")
 message(STATUS "murm386 Build Configuration:")
-message(STATUS "  Board Variant:  ${BOARD_VARIANT}")
+message(STATUS "  Board Variant:  ${BOARD}")
 message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
 message(STATUS "  USB HID:        ${USB_HID_ENABLED}")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
+message(STATUS "  MOS2 Build:     ${MOS2}")
 message(STATUS "")

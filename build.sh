@@ -1,48 +1,121 @@
 #!/bin/bash
-# Build murm386 for RP2350
+# Build murm386 - 386 Emulator for RP2350
 #
-# Usage: ./build.sh [options]
-#   -M1, -M2           Board variant (default: M1)
-#   -252, -378, -504   CPU speed in MHz (default: 504)
-#   -clean             Clean build directory first
+# Usage: ./build.sh [OPTIONS]
+#   -b, --board      Board variant: M1 or M2 (default: M2)
+#   -p, --psram      PSRAM speed in MHz (default: 133)
+#   -c, --cpu        CPU speed in MHz: 378 (default), 504
+#   --mos2           Build for Murmulator OS (m1p2/m2p2 format)
+#   --usb-hid        Enable USB HID keyboard (disables USB CDC)
+#   --debug          Enable debug output
+#   -clean           Clean build directory first
+#   -h, --help       Show this help
 #
-# Examples:
-#   ./build.sh                  # Build M1 at 504MHz
-#   ./build.sh -M2 -378         # Build M2 at 378MHz
-#   ./build.sh -clean -M1 -504  # Clean build M1 at 504MHz
+# Short options:
+#   -M1, -M2         Board variant
+#   -378, -504       CPU speed in MHz
 
-BOARD_VARIANT="M1"
-CPU_SPEED="504"
-PSRAM_SPEED="166"
+# Defaults (378/133 for stable overclocked operation)
+BOARD="M2"
+PSRAM="133"
+CPU="378"
+MOS2="OFF"
+USB_HID="OFF"
+DEBUG="OFF"
 CLEAN=0
 
 # Parse arguments
-for arg in "$@"; do
-    case $arg in
-        -M1) BOARD_VARIANT="M1" ;;
-        -M2) BOARD_VARIANT="M2" ;;
-        -252) CPU_SPEED="252"; PSRAM_SPEED="133" ;;
-        -378) CPU_SPEED="378"; PSRAM_SPEED="133" ;;
-        -504) CPU_SPEED="504"; PSRAM_SPEED="166" ;;
-        -clean) CLEAN=1 ;;
-        *) echo "Unknown option: $arg"; exit 1 ;;
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -b|--board)
+            BOARD="$2"
+            shift 2
+            ;;
+        -M1)
+            BOARD="M1"
+            shift
+            ;;
+        -M2)
+            BOARD="M2"
+            shift
+            ;;
+        -p|--psram)
+            PSRAM="$2"
+            shift 2
+            ;;
+        -c|--cpu)
+            CPU="$2"
+            shift 2
+            ;;
+        -378)
+            CPU="378"
+            PSRAM="133"
+            shift
+            ;;
+        -504)
+            CPU="504"
+            PSRAM="166"
+            shift
+            ;;
+        --mos2)
+            MOS2="ON"
+            shift
+            ;;
+        --usb-hid)
+            USB_HID="ON"
+            shift
+            ;;
+        --debug)
+            DEBUG="ON"
+            shift
+            ;;
+        -clean)
+            CLEAN=1
+            shift
+            ;;
+        -h|--help)
+            head -16 "$0" | tail -14
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
     esac
 done
 
-echo "Building murm386 for RP2350"
-echo "  Board: $BOARD_VARIANT"
-echo "  CPU:   $CPU_SPEED MHz"
-echo "  PSRAM: $PSRAM_SPEED MHz"
+# Build cmake arguments
+CMAKE_ARGS="-DPICO_BOARD=pico2"
+CMAKE_ARGS="$CMAKE_ARGS -DBOARD=${BOARD}"
+CMAKE_ARGS="$CMAKE_ARGS -DCPU_SPEED=$CPU"
+CMAKE_ARGS="$CMAKE_ARGS -DPSRAM_SPEED=$PSRAM"
 
-if [ $CLEAN -eq 1 ] || [ ! -d ./build ]; then
+if [[ "$USB_HID" == "ON" ]]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DUSB_HID_ENABLED=ON"
+fi
+
+if [[ "$DEBUG" == "ON" ]]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DDEBUG_ENABLED=ON"
+fi
+
+if [[ "$MOS2" == "ON" ]]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DMOS2=ON"
+fi
+
+echo "Building murm386:"
+echo "  Board: $BOARD"
+echo "  CPU: $CPU MHz"
+echo "  PSRAM: $PSRAM MHz"
+echo "  MOS2: $MOS2"
+echo "  USB HID: $USB_HID"
+echo "  Debug: $DEBUG"
+echo ""
+
+if [[ $CLEAN -eq 1 ]] || [[ ! -d ./build ]]; then
     rm -rf ./build
     mkdir build
 fi
 
 cd build
-cmake -DPICO_PLATFORM=rp2350 \
-      -DBOARD_VARIANT=$BOARD_VARIANT \
-      -DCPU_SPEED=$CPU_SPEED \
-      -DPSRAM_SPEED=$PSRAM_SPEED \
-      ..
-make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+cmake $CMAKE_ARGS ..
+make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
