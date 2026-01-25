@@ -3891,7 +3891,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 /* 0x78 */	&&f0x78, &&f0x79, &&f0x7a, &&f0x7b, &&f0x7c_fast, &&f0x7d_fast, &&f0x7e_fast, &&f0x7f_fast,
 /* 0x80 */	&&f0x80, &&f0x81, &&f0x82, &&f0x83, &&f0x84, &&f0x85_fast, &&f0x86, &&f0x87,
 /* 0x88 */	&&f0x88, &&f0x89_fast, &&f0x8a, &&f0x8b_fast, &&f0x8c, &&f0x8d_fast, &&f0x8e, &&f0x8f,
-/* 0x90 */	&&f0x90, &&f0x91, &&f0x92, &&f0x93, &&f0x94, &&f0x95, &&f0x96, &&f0x97,
+/* 0x90 */	&&f0x90_fast, &&f0x91, &&f0x92, &&f0x93, &&f0x94, &&f0x95, &&f0x96, &&f0x97,
 /* 0x98 */	&&f0x98, &&f0x99, &&f0x9a, &&f0x9b, &&f0x9c, &&f0x9d, &&f0x9e, &&f0x9f,
 /* 0xa0 */	&&f0xa0, &&f0xa1, &&f0xa2, &&f0xa3, &&f0xa4, &&f0xa5, &&f0xa6, &&f0xa7,
 /* 0xa8 */	&&f0xa8, &&f0xa9, &&f0xaa, &&f0xab, &&f0xac, &&f0xad, &&f0xae, &&f0xaf,
@@ -3899,7 +3899,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 /* 0xb8 */	&&f0xb8, &&f0xb9, &&f0xba, &&f0xbb, &&f0xbc, &&f0xbd, &&f0xbe, &&f0xbf,
 /* 0xc0 */	&&f0xc0, &&f0xc1, &&f0xc2, &&f0xc3_fast, &&f0xc4, &&f0xc5, &&f0xc6, &&f0xc7,
 /* 0xc8 */	&&f0xc8, &&f0xc9, &&f0xca, &&f0xcb, &&f0xcc, &&f0xcd, &&f0xce, &&f0xcf,
-/* 0xd0 */	&&f0xd0, &&f0xd1, &&f0xd2, &&f0xd3, &&f0xd4, &&f0xd5, &&f0xd6, &&f0xd7,
+/* 0xd0 */	&&f0xd0, &&f0xd1_fast, &&f0xd2, &&f0xd3, &&f0xd4, &&f0xd5, &&f0xd6, &&f0xd7,
 /* 0xd8 */	&&f0xd8, &&f0xd9, &&f0xda, &&f0xdb, &&f0xdc, &&f0xdd, &&f0xde, &&f0xdf,
 /* 0xe0 */	&&f0xe0, &&f0xe1, &&f0xe2, &&f0xe3, &&f0xe4, &&f0xe5, &&f0xe6, &&f0xe7,
 /* 0xe8 */	&&f0xe8_fast, &&f0xe9, &&f0xea, &&f0xeb_fast, &&f0xec, &&f0xed, &&f0xee, &&f0xef,
@@ -4831,6 +4831,64 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 			cpu->next_ip += disp;
 		}
 		ebreak;
+	}
+
+	f0x90_fast: { // NOP
+		PROF_TOTAL();
+		ebreak;
+	}
+
+	f0xd1_fast: { // Group 2 Ev,1 - shift/rotate by 1 (SHL/SHR/SAR register only)
+		PROF_TOTAL();
+		u8 peek_modrm;
+		TRY(peek8(cpu, &peek_modrm));
+		int group = (peek_modrm >> 3) & 7;
+		int mod = peek_modrm >> 6;
+
+		// Only fast-path register SHL/SHR/SAR
+		if (likely(mod == 3 && (group == 4 || group == 5 || group == 7))) {
+			cpu->next_ip++; // consume modrm
+			int rm = peek_modrm & 7;
+			if (opsz16) {
+				u16 val = cpu->gprx[rm].r16;
+				if (group == 4) { // SHL
+					cpu->cc.dst = sext16(val << 1);
+					cpu->cc.dst2 = (val >> 15) & 1;
+					cpu->cc.op = CC_SHL;
+				} else if (group == 5) { // SHR
+					cpu->cc.dst = sext16(val >> 1);
+					cpu->cc.dst2 = val & 1;
+					cpu->cc.op = CC_SHR;
+					cpu->cc.src1 = sext16(val);
+				} else { // SAR
+					cpu->cc.dst = sext16((s16)val >> 1);
+					cpu->cc.dst2 = val & 1;
+					cpu->cc.op = CC_SAR;
+				}
+				cpu->gprx[rm].r16 = cpu->cc.dst;
+			} else {
+				u32 val = cpu->gprx[rm].r32;
+				if (group == 4) { // SHL
+					cpu->cc.dst = sext32(val << 1);
+					cpu->cc.dst2 = (val >> 31) & 1;
+					cpu->cc.op = CC_SHL;
+				} else if (group == 5) { // SHR
+					cpu->cc.dst = sext32(val >> 1);
+					cpu->cc.dst2 = val & 1;
+					cpu->cc.op = CC_SHR;
+					cpu->cc.src1 = sext32(val);
+				} else { // SAR
+					cpu->cc.dst = sext32((s32)val >> 1);
+					cpu->cc.dst2 = val & 1;
+					cpu->cc.op = CC_SAR;
+				}
+				cpu->gprx[rm].r32 = cpu->cc.dst;
+			}
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+			ebreak;
+		}
+		// For ROL/ROR/RCL/RCR and memory ops, use original handler
+		goto f0xd1;
 	}
 
 #endif
