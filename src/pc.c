@@ -598,6 +598,9 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->cpu = cpui386_new(conf->cpu_gen, mem, conf->mem_size, &cb);
 	if (conf->fpu)
 		cpui386_enable_fpu(pc->cpu);
+#ifdef JIT_ENABLED
+	cpui386_enable_jit(pc->cpu);
+#endif
 #endif
 	pc->bios = conf->bios;
 	pc->vga_bios = conf->vga_bios;

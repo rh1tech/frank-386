@@ -8,6 +8,7 @@
 #   --mos2           Build for Murmulator OS (m1p2/m2p2 format)
 #   --usb-hid        Enable USB HID keyboard (disables USB CDC)
 #   --debug          Enable debug output
+#   --jit            Enable JIT compiler (experimental)
 #   -clean           Clean build directory first
 #   -h, --help       Show this help
 #
@@ -22,6 +23,7 @@ CPU="378"
 MOS2="OFF"
 USB_HID="OFF"
 DEBUG="ON"
+JIT="OFF"
 CLEAN=0
 
 # Parse arguments
@@ -69,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             DEBUG="ON"
             shift
             ;;
+        --jit)
+            JIT="ON"
+            shift
+            ;;
         -clean)
             CLEAN=1
             shift
@@ -102,6 +108,10 @@ if [[ "$MOS2" == "ON" ]]; then
     CMAKE_ARGS="$CMAKE_ARGS -DMOS2=ON"
 fi
 
+if [[ "$JIT" == "ON" ]]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DJIT_ENABLED=ON"
+fi
+
 echo "Building murm386:"
 echo "  Board: $BOARD"
 echo "  CPU: $CPU MHz"
@@ -109,6 +119,7 @@ echo "  PSRAM: $PSRAM MHz"
 echo "  MOS2: $MOS2"
 echo "  USB HID: $USB_HID"
 echo "  Debug: $DEBUG"
+echo "  JIT: $JIT"
 echo ""
 
 if [[ $CLEAN -eq 1 ]] || [[ ! -d ./build ]]; then

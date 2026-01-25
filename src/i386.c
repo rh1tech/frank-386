@@ -40,6 +40,10 @@
 #define fpu_exec2(...) false
 #endif
 
+#ifdef JIT_ENABLED
+#include "jit/jit.h"
+#endif
+
 /* Note: CPUI386 struct is now defined in i386.h for JIT access */
 
 #define dolog(...) fprintf(stderr, __VA_ARGS__)
@@ -5151,6 +5155,10 @@ CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 
 	cpu->fpu = NULL;
 
+#ifdef JIT_ENABLED
+	cpu->jit = NULL;  /* JIT initialized separately via cpui386_enable_jit() */
+#endif
+
 	cpui386_reset(cpu);
 
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
@@ -5165,8 +5173,20 @@ void cpui386_enable_fpu(CPUI386 *cpu)
 		cpu->fpu = fpu_new();
 }
 
+#ifdef JIT_ENABLED
+void cpui386_enable_jit(CPUI386 *cpu)
+{
+	if (!cpu->jit)
+		cpu->jit = jit_init(cpu);
+}
+#endif
+
 void cpui386_delete(CPUI386 *cpu)
 {
+#ifdef JIT_ENABLED
+	if (cpu->jit)
+		jit_destroy(cpu->jit);
+#endif
 	if (cpu->fpu)
 		fpu_delete(cpu->fpu);
 	free(cpu);
