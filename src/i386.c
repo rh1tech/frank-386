@@ -3874,17 +3874,17 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 #else
 	static const DRAM_ATTR void *pfxlabel[] = {
 /* 0x00 */	&&f0x00, &&f0x01_fast, &&f0x02, &&f0x03_fast, &&f0x04, &&f0x05, &&f0x06, &&f0x07,
-/* 0x08 */	&&f0x08, &&f0x09, &&f0x0a, &&f0x0b, &&f0x0c, &&f0x0d, &&f0x0e, &&f0x0f,
+/* 0x08 */	&&f0x08, &&f0x09_fast, &&f0x0a, &&f0x0b_fast, &&f0x0c, &&f0x0d, &&f0x0e, &&f0x0f,
 /* 0x10 */	&&f0x10, &&f0x11, &&f0x12, &&f0x13, &&f0x14, &&f0x15, &&f0x16, &&f0x17,
 /* 0x18 */	&&f0x18, &&f0x19, &&f0x1a, &&f0x1b, &&f0x1c, &&f0x1d, &&f0x1e, &&f0x1f,
-/* 0x20 */	&&f0x20, &&f0x21, &&f0x22, &&f0x23, &&f0x24, &&f0x25, &&pfx26, &&f0x27,
+/* 0x20 */	&&f0x20, &&f0x21_fast, &&f0x22, &&f0x23_fast, &&f0x24, &&f0x25, &&pfx26, &&f0x27,
 /* 0x28 */	&&f0x28, &&f0x29_fast, &&f0x2a, &&f0x2b_fast, &&f0x2c, &&f0x2d, &&pfx2e, &&f0x2f,
 /* 0x30 */	&&f0x30, &&f0x31_fast, &&f0x32, &&f0x33_fast, &&f0x34, &&f0x35, &&pfx36, &&f0x37,
 /* 0x38 */	&&f0x38, &&f0x39_fast, &&f0x3a, &&f0x3b_fast, &&f0x3c, &&f0x3d, &&pfx3e, &&f0x3f,
 /* 0x40 */	&&f0x40_fast, &&f0x41_fast, &&f0x42_fast, &&f0x43_fast, &&f0x44_fast, &&f0x45_fast, &&f0x46_fast, &&f0x47_fast,
 /* 0x48 */	&&f0x48_fast, &&f0x49_fast, &&f0x4a_fast, &&f0x4b_fast, &&f0x4c_fast, &&f0x4d_fast, &&f0x4e_fast, &&f0x4f_fast,
-/* 0x50 */	&&f0x50, &&f0x51, &&f0x52, &&f0x53, &&f0x54, &&f0x55, &&f0x56, &&f0x57,
-/* 0x58 */	&&f0x58, &&f0x59, &&f0x5a, &&f0x5b, &&f0x5c, &&f0x5d, &&f0x5e, &&f0x5f,
+/* 0x50 */	&&f0x50_fast, &&f0x51_fast, &&f0x52_fast, &&f0x53_fast, &&f0x54_fast, &&f0x55_fast, &&f0x56_fast, &&f0x57_fast,
+/* 0x58 */	&&f0x58_fast, &&f0x59_fast, &&f0x5a_fast, &&f0x5b_fast, &&f0x5c_fast, &&f0x5d_fast, &&f0x5e_fast, &&f0x5f_fast,
 /* 0x60 */	&&f0x60, &&f0x61, &&f0x62, &&f0x63, &&pfx64, &&pfx65, &&pfx66, &&pfx67,
 /* 0x68 */	&&f0x68, &&f0x69, &&f0x6a, &&f0x6b, &&f0x6c, &&f0x6d, &&f0x6e, &&f0x6f,
 /* 0x70 */	&&f0x70, &&f0x71, &&f0x72, &&f0x73, &&f0x74_fast, &&f0x75_fast, &&f0x76, &&f0x77,
@@ -4500,6 +4500,212 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 		}
 		ebreak;
 	}
+
+	f0x09_fast: { // OR r/m, r
+		PROF_TOTAL();
+		TRY(fetch8(cpu, &modrm));
+		if (likely((modrm & 0xC0) == 0xC0)) {
+			int reg = (modrm >> 3) & 7;
+			int rm = modrm & 7;
+			if (opsz16) {
+				cpu->cc.dst = sext16(cpu->gprx[rm].r16 | cpu->gprx[reg].r16);
+				cpu->gprx[rm].r16 = cpu->cc.dst;
+			} else {
+				cpu->cc.dst = sext32(cpu->gprx[rm].r32 | cpu->gprx[reg].r32);
+				cpu->gprx[rm].r32 = cpu->cc.dst;
+			}
+			cpu->cc.op = CC_OR;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+			ebreak;
+		}
+		// Memory path
+		{
+			int reg = (modrm >> 3) & 7;
+			int mod = modrm >> 6;
+			int rm = modrm & 7;
+			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
+			if (opsz16) {
+				TRY(translate16(cpu, &meml, 3, curr_seg, addr));
+				cpu->cc.dst = sext16(laddr16(&meml) | cpu->gprx[reg].r16);
+				saddr16(&meml, cpu->cc.dst);
+			} else {
+				TRY(translate32(cpu, &meml, 3, curr_seg, addr));
+				cpu->cc.dst = sext32(laddr32(&meml) | cpu->gprx[reg].r32);
+				saddr32(&meml, cpu->cc.dst);
+			}
+			cpu->cc.op = CC_OR;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+		}
+		ebreak;
+	}
+
+	f0x0b_fast: { // OR r, r/m
+		PROF_TOTAL();
+		TRY(fetch8(cpu, &modrm));
+		if (likely((modrm & 0xC0) == 0xC0)) {
+			int reg = (modrm >> 3) & 7;
+			int rm = modrm & 7;
+			if (opsz16) {
+				cpu->cc.dst = sext16(cpu->gprx[reg].r16 | cpu->gprx[rm].r16);
+				cpu->gprx[reg].r16 = cpu->cc.dst;
+			} else {
+				cpu->cc.dst = sext32(cpu->gprx[reg].r32 | cpu->gprx[rm].r32);
+				cpu->gprx[reg].r32 = cpu->cc.dst;
+			}
+			cpu->cc.op = CC_OR;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+			ebreak;
+		}
+		// Memory path
+		{
+			int reg = (modrm >> 3) & 7;
+			int mod = modrm >> 6;
+			int rm = modrm & 7;
+			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
+			if (opsz16) {
+				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
+				cpu->cc.dst = sext16(cpu->gprx[reg].r16 | laddr16(&meml));
+				cpu->gprx[reg].r16 = cpu->cc.dst;
+			} else {
+				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
+				cpu->cc.dst = sext32(cpu->gprx[reg].r32 | laddr32(&meml));
+				cpu->gprx[reg].r32 = cpu->cc.dst;
+			}
+			cpu->cc.op = CC_OR;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+		}
+		ebreak;
+	}
+
+	f0x21_fast: { // AND r/m, r
+		PROF_TOTAL();
+		TRY(fetch8(cpu, &modrm));
+		if (likely((modrm & 0xC0) == 0xC0)) {
+			int reg = (modrm >> 3) & 7;
+			int rm = modrm & 7;
+			if (opsz16) {
+				cpu->cc.dst = sext16(cpu->gprx[rm].r16 & cpu->gprx[reg].r16);
+				cpu->gprx[rm].r16 = cpu->cc.dst;
+			} else {
+				cpu->cc.dst = sext32(cpu->gprx[rm].r32 & cpu->gprx[reg].r32);
+				cpu->gprx[rm].r32 = cpu->cc.dst;
+			}
+			cpu->cc.op = CC_AND;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+			ebreak;
+		}
+		// Memory path
+		{
+			int reg = (modrm >> 3) & 7;
+			int mod = modrm >> 6;
+			int rm = modrm & 7;
+			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
+			if (opsz16) {
+				TRY(translate16(cpu, &meml, 3, curr_seg, addr));
+				cpu->cc.dst = sext16(laddr16(&meml) & cpu->gprx[reg].r16);
+				saddr16(&meml, cpu->cc.dst);
+			} else {
+				TRY(translate32(cpu, &meml, 3, curr_seg, addr));
+				cpu->cc.dst = sext32(laddr32(&meml) & cpu->gprx[reg].r32);
+				saddr32(&meml, cpu->cc.dst);
+			}
+			cpu->cc.op = CC_AND;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+		}
+		ebreak;
+	}
+
+	f0x23_fast: { // AND r, r/m
+		PROF_TOTAL();
+		TRY(fetch8(cpu, &modrm));
+		if (likely((modrm & 0xC0) == 0xC0)) {
+			int reg = (modrm >> 3) & 7;
+			int rm = modrm & 7;
+			if (opsz16) {
+				cpu->cc.dst = sext16(cpu->gprx[reg].r16 & cpu->gprx[rm].r16);
+				cpu->gprx[reg].r16 = cpu->cc.dst;
+			} else {
+				cpu->cc.dst = sext32(cpu->gprx[reg].r32 & cpu->gprx[rm].r32);
+				cpu->gprx[reg].r32 = cpu->cc.dst;
+			}
+			cpu->cc.op = CC_AND;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+			ebreak;
+		}
+		// Memory path
+		{
+			int reg = (modrm >> 3) & 7;
+			int mod = modrm >> 6;
+			int rm = modrm & 7;
+			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
+			if (opsz16) {
+				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
+				cpu->cc.dst = sext16(cpu->gprx[reg].r16 & laddr16(&meml));
+				cpu->gprx[reg].r16 = cpu->cc.dst;
+			} else {
+				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
+				cpu->cc.dst = sext32(cpu->gprx[reg].r32 & laddr32(&meml));
+				cpu->gprx[reg].r32 = cpu->cc.dst;
+			}
+			cpu->cc.op = CC_AND;
+			cpu->cc.mask = CF | PF | ZF | SF | OF;
+		}
+		ebreak;
+	}
+
+	// PUSH reg fast paths
+#define DO_PUSH_FAST(reg_idx) \
+	{ \
+		PROF_TOTAL(); \
+		OptAddr meml1; \
+		uword sp = cpu->gprx[4].r32; \
+		if (opsz16) { \
+			TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask)); \
+			set_sp(sp - 2, sp_mask); \
+			saddr16(&meml1, cpu->gprx[reg_idx].r16); \
+		} else { \
+			TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask)); \
+			set_sp(sp - 4, sp_mask); \
+			saddr32(&meml1, cpu->gprx[reg_idx].r32); \
+		} \
+		ebreak; \
+	}
+	f0x50_fast: DO_PUSH_FAST(0)  // PUSH EAX
+	f0x51_fast: DO_PUSH_FAST(1)  // PUSH ECX
+	f0x52_fast: DO_PUSH_FAST(2)  // PUSH EDX
+	f0x53_fast: DO_PUSH_FAST(3)  // PUSH EBX
+	f0x54_fast: DO_PUSH_FAST(4)  // PUSH ESP
+	f0x55_fast: DO_PUSH_FAST(5)  // PUSH EBP
+	f0x56_fast: DO_PUSH_FAST(6)  // PUSH ESI
+	f0x57_fast: DO_PUSH_FAST(7)  // PUSH EDI
+#undef DO_PUSH_FAST
+
+	// POP reg fast paths
+#define DO_POP_FAST(reg_idx) \
+	{ \
+		PROF_TOTAL(); \
+		OptAddr meml1; \
+		uword sp = cpu->gprx[4].r32; \
+		if (opsz16) { \
+			TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
+			cpu->gprx[reg_idx].r16 = laddr16(&meml1); \
+			set_sp(sp + 2, sp_mask); \
+		} else { \
+			TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
+			cpu->gprx[reg_idx].r32 = laddr32(&meml1); \
+			set_sp(sp + 4, sp_mask); \
+		} \
+		ebreak; \
+	}
+	f0x58_fast: DO_POP_FAST(0)  // POP EAX
+	f0x59_fast: DO_POP_FAST(1)  // POP ECX
+	f0x5a_fast: DO_POP_FAST(2)  // POP EDX
+	f0x5b_fast: DO_POP_FAST(3)  // POP EBX
+	f0x5c_fast: DO_POP_FAST(4)  // POP ESP
+	f0x5d_fast: DO_POP_FAST(5)  // POP EBP
+	f0x5e_fast: DO_POP_FAST(6)  // POP ESI
+	f0x5f_fast: DO_POP_FAST(7)  // POP EDI
+#undef DO_POP_FAST
 
 #endif
 	eswitch(b1) {
