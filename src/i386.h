@@ -15,8 +15,15 @@ typedef int8_t s8;
 typedef u32 uword;
 typedef s32 sword;
 
-typedef struct CPUI386 CPUI386;
+/* Enable optimized register layout (union-based) */
+#ifndef I386_OPT1
+#define I386_OPT1
+#endif
 
+/* Forward declaration for FPU */
+typedef struct FPU FPU;
+
+/* CPU callback structure - must be defined before CPUI386 */
 typedef struct {
 	void *pic;
 	int (*pic_read_irq)(void *);
@@ -40,6 +47,96 @@ typedef struct {
 	void (*iomem_write32)(void *, uword, u32);
 	bool (*iomem_write_string)(void *, uword, uint8_t *, int);
 } CPU_CB;
+
+/* TLB entry structure */
+struct tlb_entry {
+	uword lpgno;
+	uword xaddr;
+	int (*pte_lookup)[2];
+	u8 *ppte;
+};
+
+/*
+ * CPUI386 structure - main CPU state
+ * Defined here so JIT compiler can access fields directly
+ */
+struct CPUI386 {
+#ifdef I386_OPT1
+	union {
+		u32 r32;
+		u16 r16;
+		u8 r8[2];
+	} gprx[8];
+#else
+	uword gpr[8];
+#endif
+	uword ip, next_ip;
+	uword flags;
+	uword flags_mask;
+	int cpl;
+	bool code16;
+	uword sp_mask;
+	bool halt;
+
+	FPU *fpu;
+
+	struct {
+		uword sel;
+		uword base;
+		uword limit;
+		uword flags;
+	} seg[8];
+
+	struct {
+		uword base;
+		uword limit;
+	} idt, gdt;
+
+	uword cr0, cr2, cr3;
+
+	uword dr[8];
+
+	struct {
+		unsigned long laddr;
+		uword xaddr;
+	} ifetch;
+
+	struct {
+		int op;
+		uword dst;
+		uword dst2;
+		uword src1;
+		uword src2;
+		uword mask;
+	} cc;
+
+	struct {
+		int size;
+		struct tlb_entry *tab;
+	} tlb;
+
+	u8 *phys_mem;
+	long phys_mem_size;
+
+	long cycle;
+
+	int excno;
+	uword excerr;
+
+	bool intr;
+	CPU_CB cb;
+
+	int gen;
+	struct {
+		uword cs, eip, esp;
+	} sysenter;
+
+	/* INT 13h disk handler hook */
+	void (*int13_handler)(struct CPUI386 *cpu, void *opaque);
+	void *int13_opaque;
+};
+
+typedef struct CPUI386 CPUI386;
 
 CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb);
 void cpui386_delete(CPUI386 *cpu);

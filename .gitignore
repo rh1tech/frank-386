@@ -2,7 +2,6 @@
 *.o
 *.a
 *.elf
-*.bin
 *.hex
 *.uf2
 *.dis
@@ -17,3 +16,4 @@ tiny386_nosdl
 tiny386_kvm
 wifikbd
 initnet
+release

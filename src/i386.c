@@ -38,89 +38,9 @@
 #define fpu_new(...) NULL
 #define fpu_exec1(...) false
 #define fpu_exec2(...) false
-typedef void FPU;
 #endif
 
-struct CPUI386 {
-#ifdef I386_OPT1
-	union {
-		u32 r32;
-		u16 r16;
-		u8 r8[2];
-	} gprx[8];
-#else
-	uword gpr[8];
-#endif
-	uword ip, next_ip;
-	uword flags;
-	uword flags_mask;
-	int cpl;
-	bool code16;
-	uword sp_mask;
-	bool halt;
-
-	FPU *fpu;
-
-	struct {
-		uword sel;
-		uword base;
-		uword limit;
-		uword flags;
-	} seg[8];
-
-	struct {
-		uword base;
-		uword limit;
-	} idt, gdt;
-
-	uword cr0, cr2, cr3;
-
-	uword dr[8];
-
-	struct {
-		unsigned long laddr;
-		uword xaddr;
-	} ifetch;
-
-	struct {
-		int op;
-		uword dst;
-		uword dst2;
-		uword src1;
-		uword src2;
-		uword mask;
-	} cc;
-
-	struct {
-		int size;
-		struct tlb_entry {
-			uword lpgno;
-			uword xaddr;
-			int (*pte_lookup)[2];
-			u8 *ppte;
-		} *tab;
-	} tlb;
-
-	u8 *phys_mem;
-	long phys_mem_size;
-
-	long cycle;
-
-	int excno;
-	uword excerr;
-
-	bool intr;
-	CPU_CB cb;
-
-	int gen;
-	struct {
-		uword cs, eip, esp;
-	} sysenter;
-
-	/* INT 13h disk handler hook */
-	void (*int13_handler)(struct CPUI386 *cpu, void *opaque);
-	void *int13_opaque;
-};
+/* Note: CPUI386 struct is now defined in i386.h for JIT access */
 
 #define dolog(...) fprintf(stderr, __VA_ARGS__)
 #define likely(x) __builtin_expect(!!(x), 1)

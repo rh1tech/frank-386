@@ -26,6 +26,9 @@ option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" OFF)
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
 
+# JIT compiler (experimental - i386 to ARM Thumb-2 dynamic recompilation)
+option(JIT_ENABLED "Enable JIT compiler (experimental)" OFF)
+
 # CPU voltage selection based on speed
 if(CPU_SPEED GREATER_EQUAL 504)
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_65")
@@ -192,6 +195,7 @@ add_executable(murm386
 target_include_directories(murm386 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/src
+    ${CMAKE_CURRENT_LIST_DIR}/src/jit
     ${CMAKE_CURRENT_LIST_DIR}/drivers/fatfs
     ${CMAKE_CURRENT_LIST_DIR}/drivers/sdcard
     ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd
@@ -239,6 +243,16 @@ target_compile_definitions(murm386 PRIVATE
 # Add DEBUG_ENABLED if enabled
 if(DEBUG_ENABLED)
     target_compile_definitions(murm386 PRIVATE DEBUG_ENABLED=1)
+endif()
+
+# Add JIT_ENABLED if enabled (experimental)
+if(JIT_ENABLED)
+    target_compile_definitions(murm386 PRIVATE JIT_ENABLED=1)
+    target_sources(murm386 PRIVATE
+        src/jit/jit_cache.c
+        src/jit/jit_emit.c
+        src/jit/jit_translate.c
+    )
 endif()
 
 # Compiler optimizations for performance
@@ -327,5 +341,6 @@ message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
 message(STATUS "  USB HID:        ${USB_HID_ENABLED}")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
+message(STATUS "  JIT Compiler:   ${JIT_ENABLED}")
 message(STATUS "  MOS2 Build:     ${MOS2}")
 message(STATUS "")
