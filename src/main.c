@@ -27,6 +27,7 @@
 #include "vga_hw.h"
 #include "vga.h"
 #include "ps2kbd_wrapper.h"
+#include "ps2mouse.h"
 #ifdef USB_HID_ENABLED
 #include "usbkbd_wrapper.h"
 #include "usbmouse_wrapper.h"
@@ -383,6 +384,18 @@ static void poll_keyboard(void) {
         }
     }
 
+    // Poll PS/2 mouse (only if enabled and not paused)
+    if (pc && pc->mouse_enabled && !pc->paused) {
+        int16_t dx, dy;
+        int8_t dz;
+        uint8_t buttons;
+        if (ps2mouse_get_state(&dx, &dy, &dz, &buttons)) {
+            if (pc->mouse) {
+                ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
+            }
+        }
+    }
+
 #ifdef USB_HID_ENABLED
     // Poll USB keyboard
     usbkbd_tick();
@@ -704,6 +717,11 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing PS/2 keyboard...\n");
     DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
     ps2kbd_init(PS2_PIN_CLK);
+
+    // Initialize PS/2 mouse
+    DBG_PRINT("Initializing PS/2 mouse...\n");
+    DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
+    ps2mouse_init();
 
     // Initialize USB HID keyboard (if enabled)
 #ifdef USB_HID_ENABLED

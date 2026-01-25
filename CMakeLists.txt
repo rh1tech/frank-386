@@ -101,6 +101,18 @@ pico_generate_pio_header(ps2kbd ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd/ps2kbd_
 pico_generate_pio_header(ps2kbd ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd/ps2kbd_mrmltr2.pio)
 
 #=============================================================================
+# PS/2 Mouse Driver
+#=============================================================================
+add_library(ps2mouse
+    drivers/ps2mouse/ps2mouse.c
+)
+target_include_directories(ps2mouse PUBLIC drivers/ps2mouse src)
+target_compile_definitions(ps2mouse PRIVATE
+    BOARD_${BOARD}
+)
+target_link_libraries(ps2mouse pico_stdlib hardware_gpio)
+
+#=============================================================================
 # PSRAM Driver
 #=============================================================================
 add_library(psram
@@ -198,6 +210,7 @@ target_include_directories(murm386 PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/fatfs
     ${CMAKE_CURRENT_LIST_DIR}/drivers/sdcard
     ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd
+    ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2mouse
     ${CMAKE_CURRENT_LIST_DIR}/drivers/psram
     ${CMAKE_CURRENT_LIST_DIR}/drivers/vga
     ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
@@ -279,6 +292,7 @@ target_link_libraries(murm386
     fatfs
     sdcard
     ps2kbd
+    ps2mouse
     psram
     video_driver
     audio_driver
