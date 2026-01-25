@@ -44,6 +44,7 @@ static int file_scroll_offset = 0;
 #define MAX_FILENAME_LEN 32
 static char file_list[MAX_FILES][MAX_FILENAME_LEN];
 static int file_count = 0;
+static int plasma_frame = 0;  // Animation frame counter
 
 // UI dimensions
 #define MENU_X      10
@@ -97,13 +98,13 @@ const DriveInfo* diskui_get_drive_info(DiskUIDrive drive) {
 }
 
 static void draw_main_menu(void) {
-    osd_clear();
+    // Draw plasma background (animated) - covers everything outside window
+    osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
 
-    // Draw main box
-    osd_draw_box_titled(MENU_X, MENU_Y, MENU_W, MENU_H, " Disk Manager ", OSD_ATTR_BORDER);
-
-    // Fill interior
+    // Draw main box with title on border
+    osd_draw_box(MENU_X, MENU_Y, MENU_W, MENU_H, OSD_ATTR_BORDER);
     osd_fill(MENU_X + 1, MENU_Y + 1, MENU_W - 2, MENU_H - 2, ' ', OSD_ATTR_NORMAL);
+    osd_print_center(MENU_Y, " Disk Manager ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
     // Draw drive list
     for (int i = 0; i < DRIVE_COUNT; i++) {
@@ -144,17 +145,17 @@ static void draw_main_menu(void) {
 }
 
 static void draw_file_browser(void) {
-    osd_clear();
+    // Draw plasma background (animated) - covers everything outside window
+    osd_draw_plasma_background(plasma_frame * 3, FILE_X, FILE_Y, FILE_W, FILE_H);
 
-    // Title with drive letter
-    char title[32];
-    snprintf(title, sizeof(title), " Select Image for %s ", drive_info[selected_drive].label);
-
-    // Draw box
-    osd_draw_box_titled(FILE_X, FILE_Y, FILE_W, FILE_H, title, OSD_ATTR_BORDER);
-
-    // Fill interior
+    // Draw box with title on border
+    osd_draw_box(FILE_X, FILE_Y, FILE_W, FILE_H, OSD_ATTR_BORDER);
     osd_fill(FILE_X + 1, FILE_Y + 1, FILE_W - 2, FILE_H - 2, ' ', OSD_ATTR_NORMAL);
+
+    // Title on border
+    char title[48];
+    snprintf(title, sizeof(title), " Select Image for %s ", drive_info[selected_drive].label);
+    osd_print_center(FILE_Y, title, OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
     // Draw file list
     int visible_files = FILE_VISIBLE;
@@ -286,15 +287,21 @@ bool diskui_handle_key(int keycode, bool is_down) {
                 case KEY_UP:
                     if (selected_drive > 0) {
                         selected_drive--;
-                        draw_main_menu();
+                    } else {
+                        // Wrap to last drive
+                        selected_drive = DRIVE_COUNT - 1;
                     }
+                    draw_main_menu();
                     break;
 
                 case KEY_DOWN:
                     if (selected_drive < DRIVE_COUNT - 1) {
                         selected_drive++;
-                        draw_main_menu();
+                    } else {
+                        // Wrap to first drive
+                        selected_drive = 0;
                     }
+                    draw_main_menu();
                     break;
 
                 case KEY_ENTER:
@@ -339,25 +346,36 @@ bool diskui_handle_key(int keycode, bool is_down) {
         case MENU_FILE_BROWSER:
             switch (keycode) {
                 case KEY_UP:
+                    if (file_count == 0) break;  // No files to navigate
                     if (selected_file > 0) {
                         selected_file--;
-                        // Scroll up if needed
-                        if (selected_file < file_scroll_offset) {
-                            file_scroll_offset = selected_file;
-                        }
-                        draw_file_browser();
+                    } else {
+                        // Wrap to last file
+                        selected_file = file_count - 1;
+                        file_scroll_offset = file_count - FILE_VISIBLE;
+                        if (file_scroll_offset < 0) file_scroll_offset = 0;
                     }
+                    // Scroll up if needed
+                    if (selected_file < file_scroll_offset) {
+                        file_scroll_offset = selected_file;
+                    }
+                    draw_file_browser();
                     break;
 
                 case KEY_DOWN:
+                    if (file_count == 0) break;  // No files to navigate
                     if (selected_file < file_count - 1) {
                         selected_file++;
-                        // Scroll down if needed
-                        if (selected_file >= file_scroll_offset + FILE_VISIBLE) {
-                            file_scroll_offset = selected_file - FILE_VISIBLE + 1;
-                        }
-                        draw_file_browser();
+                    } else {
+                        // Wrap to first file
+                        selected_file = 0;
+                        file_scroll_offset = 0;
                     }
+                    // Scroll down if needed
+                    if (selected_file >= file_scroll_offset + FILE_VISIBLE) {
+                        file_scroll_offset = selected_file - FILE_VISIBLE + 1;
+                    }
+                    draw_file_browser();
                     break;
 
                 case KEY_ENTER:
@@ -377,4 +395,17 @@ bool diskui_handle_key(int keycode, bool is_down) {
     }
 
     return true;
+}
+
+void diskui_animate(void) {
+    if (menu_state == MENU_CLOSED) return;
+
+    plasma_frame++;
+
+    // Update plasma background based on current menu state
+    if (menu_state == MENU_MAIN) {
+        osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
+    } else if (menu_state == MENU_FILE_BROWSER) {
+        osd_draw_plasma_background(plasma_frame * 3, FILE_X, FILE_Y, FILE_W, FILE_H);
+    }
 }

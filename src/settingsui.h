@@ -36,6 +36,9 @@ bool settingsui_restart_requested(void);
 // Clear restart request flag
 void settingsui_clear_restart(void);
 
+// Animate plasma background (call from main loop when menu is open)
+void settingsui_animate(void);
+
 // Linux keycodes
 #define KEY_F11     87
 

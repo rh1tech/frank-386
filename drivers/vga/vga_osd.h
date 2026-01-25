@@ -80,6 +80,11 @@ void osd_fill(int x, int y, int w, int h, char ch, uint8_t attr);
 // Buffer is OSD_COLS * OSD_ROWS * 2 bytes (char + attr pairs)
 uint8_t *osd_get_buffer(void);
 
+// Draw greyscale plasma background effect
+// Skips the specified window area (wx, wy, ww, wh)
+// seed: varies the plasma pattern (use 0 for static, or frame number for animation)
+void osd_draw_plasma_background(int seed, int wx, int wy, int ww, int wh);
+
 // Render OSD overlay to VGA output
 // Called from VGA driver during scanline rendering
 void osd_render_line(uint32_t line, uint32_t *output_buffer);

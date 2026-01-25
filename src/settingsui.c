@@ -55,6 +55,7 @@ static SettingsState settings_state = SETTINGS_CLOSED;
 static int selected_item = 0;
 static int scroll_offset = 0;
 static bool restart_requested = false;
+static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_fill_cmos;
@@ -204,11 +205,13 @@ static void cycle_option(int direction) {
 }
 
 static void draw_settings_menu(void) {
-    osd_clear();
+    // Draw plasma background (animated) - covers everything outside window
+    osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
 
-    // Draw box
-    osd_draw_box_titled(MENU_X, MENU_Y, MENU_W, MENU_H, " Settings ", OSD_ATTR_BORDER);
+    // Draw box with title on border
+    osd_draw_box(MENU_X, MENU_Y, MENU_W, MENU_H, OSD_ATTR_BORDER);
     osd_fill(MENU_X + 1, MENU_Y + 1, MENU_W - 2, MENU_H - 2, ' ', OSD_ATTR_NORMAL);
+    osd_print_center(MENU_Y, " Settings ", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
     // Settings items
     const char *labels[] = {
@@ -283,19 +286,9 @@ static void draw_settings_menu(void) {
 static void draw_confirm_dialog(void) {
     int dx = 20, dy = 10, dw = 40, dh = 5;
 
-    // Draw shadow (dark gray on black)
-    uint8_t shadow_attr = OSD_ATTR(OSD_DARKGRAY, OSD_BLACK);
-    osd_fill(dx + 2, dy + dh, dw, 1, '\xDB', shadow_attr);  // Bottom shadow
-    for (int i = 1; i < dh + 1; i++) {
-        osd_putchar(dx + dw, dy + i, '\xDB', shadow_attr);     // Right shadow
-        osd_putchar(dx + dw + 1, dy + i, '\xDB', shadow_attr); // Right shadow 2nd col
-    }
-
-    // Draw dialog box with full red background
+    // Draw dialog box with red background (no shadow)
     uint8_t dialog_attr = OSD_ATTR(OSD_WHITE, OSD_RED);
-    uint8_t title_attr = OSD_ATTR(OSD_YELLOW, OSD_RED);
-    osd_fill(dx, dy, dw, dh, ' ', dialog_attr);
-    osd_draw_box_titled(dx, dy, dw, dh, " Confirm ", title_attr);
+    osd_draw_box(dx, dy, dw, dh, dialog_attr);
     osd_fill(dx + 1, dy + 1, dw - 2, dh - 2, ' ', dialog_attr);
     osd_print(dx + 3, dy + 2, "Save settings and restart? (Y/N)", dialog_attr);
 }
@@ -309,23 +302,32 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                 case KEY_UP:
                     if (selected_item > 0) {
                         selected_item--;
-                        // Adjust scroll if needed
-                        if (selected_item < scroll_offset) {
-                            scroll_offset = selected_item;
-                        }
-                        draw_settings_menu();
+                    } else {
+                        // Wrap to last item
+                        selected_item = SETTING_COUNT - 1;
+                        scroll_offset = SETTING_COUNT - VISIBLE_ITEMS;
+                        if (scroll_offset < 0) scroll_offset = 0;
                     }
+                    // Adjust scroll if needed
+                    if (selected_item < scroll_offset) {
+                        scroll_offset = selected_item;
+                    }
+                    draw_settings_menu();
                     break;
 
                 case KEY_DOWN:
                     if (selected_item < SETTING_COUNT - 1) {
                         selected_item++;
-                        // Adjust scroll if needed
-                        if (selected_item >= scroll_offset + VISIBLE_ITEMS) {
-                            scroll_offset = selected_item - VISIBLE_ITEMS + 1;
-                        }
-                        draw_settings_menu();
+                    } else {
+                        // Wrap to first item
+                        selected_item = 0;
+                        scroll_offset = 0;
                     }
+                    // Adjust scroll if needed
+                    if (selected_item >= scroll_offset + VISIBLE_ITEMS) {
+                        scroll_offset = selected_item - VISIBLE_ITEMS + 1;
+                    }
+                    draw_settings_menu();
                     break;
 
                 case KEY_LEFT:
@@ -371,4 +373,13 @@ bool settingsui_handle_key(int keycode, bool is_down) {
     }
 
     return true;
+}
+
+void settingsui_animate(void) {
+    if (settings_state == SETTINGS_CLOSED) return;
+
+    plasma_frame++;
+
+    // Only update plasma background, not the window content
+    osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
 }

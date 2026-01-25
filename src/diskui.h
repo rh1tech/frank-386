@@ -53,6 +53,9 @@ bool diskui_handle_key(int keycode, bool is_down);
 // Get info about a drive
 const DriveInfo* diskui_get_drive_info(DiskUIDrive drive);
 
+// Animate plasma background (call from main loop when menu is open)
+void diskui_animate(void);
+
 // Linux keycodes used by disk UI
 #define KEY_UP      103
 #define KEY_DOWN    108
