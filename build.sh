@@ -21,7 +21,7 @@ PSRAM="133"
 CPU="378"
 MOS2="OFF"
 USB_HID="OFF"
-DEBUG="OFF"
+DEBUG="ON"
 CLEAN=0
 
 # Parse arguments
