@@ -3897,12 +3897,12 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 /* 0xa8 */	&&f0xa8, &&f0xa9, &&f0xaa, &&f0xab, &&f0xac, &&f0xad, &&f0xae, &&f0xaf,
 /* 0xb0 */	&&f0xb0, &&f0xb1, &&f0xb2, &&f0xb3, &&f0xb4, &&f0xb5, &&f0xb6, &&f0xb7,
 /* 0xb8 */	&&f0xb8, &&f0xb9, &&f0xba, &&f0xbb, &&f0xbc, &&f0xbd, &&f0xbe, &&f0xbf,
-/* 0xc0 */	&&f0xc0, &&f0xc1, &&f0xc2, &&f0xc3, &&f0xc4, &&f0xc5, &&f0xc6, &&f0xc7,
+/* 0xc0 */	&&f0xc0, &&f0xc1, &&f0xc2, &&f0xc3_fast, &&f0xc4, &&f0xc5, &&f0xc6, &&f0xc7,
 /* 0xc8 */	&&f0xc8, &&f0xc9, &&f0xca, &&f0xcb, &&f0xcc, &&f0xcd, &&f0xce, &&f0xcf,
 /* 0xd0 */	&&f0xd0, &&f0xd1, &&f0xd2, &&f0xd3, &&f0xd4, &&f0xd5, &&f0xd6, &&f0xd7,
 /* 0xd8 */	&&f0xd8, &&f0xd9, &&f0xda, &&f0xdb, &&f0xdc, &&f0xdd, &&f0xde, &&f0xdf,
 /* 0xe0 */	&&f0xe0, &&f0xe1, &&f0xe2, &&f0xe3, &&f0xe4, &&f0xe5, &&f0xe6, &&f0xe7,
-/* 0xe8 */	&&f0xe8, &&f0xe9, &&f0xea, &&f0xeb_fast, &&f0xec, &&f0xed, &&f0xee, &&f0xef,
+/* 0xe8 */	&&f0xe8_fast, &&f0xe9, &&f0xea, &&f0xeb_fast, &&f0xec, &&f0xed, &&f0xee, &&f0xef,
 /* 0xf0 */	&&pfxf0, &&f0xf1, &&pfxf2, &&pfxf3, &&f0xf4, &&f0xf5, &&f0xf6, &&f0xf7,
 /* 0xf8 */	&&f0xf8, &&f0xf9, &&f0xfa, &&f0xfb, &&f0xfc, &&f0xfd, &&f0xfe, &&f0xff,
 	};
@@ -4706,6 +4706,44 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 	f0x5e_fast: DO_POP_FAST(6)  // POP ESI
 	f0x5f_fast: DO_POP_FAST(7)  // POP EDI
 #undef DO_POP_FAST
+
+	f0xc3_fast: { // RET near
+		PROF_TOTAL();
+		OptAddr meml1;
+		uword sp = cpu->gprx[4].r32;
+		if (opsz16) {
+			TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
+			set_sp(sp + 2, sp_mask);
+			cpu->next_ip = laddr16(&meml1);
+		} else {
+			TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
+			set_sp(sp + 4, sp_mask);
+			cpu->next_ip = laddr32(&meml1);
+		}
+		ebreak;
+	}
+
+	f0xe8_fast: { // CALL near relative
+		PROF_TOTAL();
+		OptAddr meml1;
+		uword sp = cpu->gprx[4].r32;
+		if (opsz16) {
+			s16 disp;
+			TRY(fetch16(cpu, (u16*)&disp));
+			TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask));
+			set_sp(sp - 2, sp_mask);
+			saddr16(&meml1, cpu->next_ip);
+			cpu->next_ip += disp;
+		} else {
+			s32 disp;
+			TRY(fetch32(cpu, (u32*)&disp));
+			TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask));
+			set_sp(sp - 4, sp_mask);
+			saddr32(&meml1, cpu->next_ip);
+			cpu->next_ip += disp;
+		}
+		ebreak;
+	}
 
 #endif
 	eswitch(b1) {
