@@ -16,7 +16,7 @@
 #   -378, -504       CPU speed in MHz
 
 # Defaults (378/133 for stable overclocked operation)
-BOARD="M2"
+BOARD="M1"
 PSRAM="133"
 CPU="378"
 MOS2="OFF"
