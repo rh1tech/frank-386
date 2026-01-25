@@ -58,6 +58,12 @@ typedef struct {
 	SB16State *sb16;
 	PCSpkState *pcspk;
 
+	// Runtime enable flags for audio devices (checked in mixer_callback)
+	int adlib_enabled;
+	int sb16_enabled;
+	int pcspk_enabled;
+	int mouse_enabled;
+
 	I440FXState *i440fx;
 	PCIBus *pcibus;
 	PCIDevice *pci_vga;

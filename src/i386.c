@@ -5066,7 +5066,9 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 	}
 
 	if (cpu->halt) {
+#if !defined(RP2350_BUILD) && !defined(BUILD_ESP32)
 		usleep(1);
+#endif
 		return;
 	}
 

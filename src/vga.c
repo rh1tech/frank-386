@@ -131,6 +131,7 @@ struct VGAState {
     uint8_t dac_8bit;
     uint8_t dac_cache[3]; /* used when writing */
     uint8_t palette[768];
+    int palette_dirty;    /* set when palette is modified */
     int32_t bank_offset;
 
     uint32_t latch;
@@ -1432,9 +1433,11 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
             switch(index) {
             case 0x00 ... 0x0f:
                 s->ar[index] = val & 0x3f;
+                s->palette_dirty = 1;  // Palette index mapping changed
                 break;
             case 0x10:
                 s->ar[index] = val & ~0x10;
+                s->palette_dirty = 1;  // Affects palette selection
                 break;
             case 0x11:
                 s->ar[index] = val;
@@ -1447,6 +1450,7 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
                 break;
             case 0x14:
                 s->ar[index] = val & ~0xf0;
+                s->palette_dirty = 1;  // Affects palette color select
                 break;
             default:
                 break;
@@ -1480,6 +1484,7 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
         s->dac_cache[s->dac_sub_index] = val;
         if (++s->dac_sub_index == 3) {
             memcpy(&s->palette[s->dac_write_index * 3], s->dac_cache, 3);
+            s->palette_dirty = 1;
             s->dac_sub_index = 0;
             s->dac_write_index++;
         }
@@ -2400,6 +2405,7 @@ static void vga_initmode(VGAState *s)
 {
     for (int i = 0; i < 64*3; i++)
         s->palette[i] = pal_ega[i];
+    s->palette_dirty = 1;
 
     for (int i = 0; i <= 0x13; i++)
         s->ar[i] = actl[i];
@@ -2501,6 +2507,14 @@ void vga_get_cursor(VGAState *s, int *x, int *y, int *start, int *end)
 const uint8_t *vga_get_palette(VGAState *s)
 {
     return s->palette;
+}
+
+/* Check if palette was modified since last call (clears the flag) */
+int vga_is_palette_dirty(VGAState *s)
+{
+    int dirty = s->palette_dirty;
+    s->palette_dirty = 0;
+    return dirty;
 }
 
 /* Get EGA 16-color palette (applies AC palette register indirection)

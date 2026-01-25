@@ -395,13 +395,13 @@ static void poll_keyboard(void) {
         }
     }
 
-    // Poll USB mouse (only if not paused)
-    if (!pc || !pc->paused) {
+    // Poll USB mouse (only if enabled and not paused)
+    if (pc && pc->mouse_enabled && !pc->paused) {
         int16_t dx, dy;
         int8_t dz;
         uint8_t buttons;
         if (usbmouse_get_event(&dx, &dy, &dz, &buttons)) {
-            if (pc && pc->mouse) {
+            if (pc->mouse) {
                 ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
             }
         }
@@ -788,6 +788,15 @@ static bool init_emulator(void) {
     // Hardware settings are loaded from [murm386] section via parse_murm386_ini
     config_clear_changes();
 
+    // Apply audio/mouse enable settings from config to PC instance
+    // This allows disabling devices for performance improvement
+    pc->pcspk_enabled = config_get_pcspeaker();
+    pc->adlib_enabled = config_get_adlib();
+    pc->sb16_enabled = config_get_soundblaster();
+    pc->mouse_enabled = config_get_mouse();
+    DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, Mouse=%d\n",
+              pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mouse_enabled);
+
     // Check if BIOS file exists before loading
     DBG_PRINT("Loading BIOS...\n");
     if (config.bios && config.bios[0]) {
@@ -1055,9 +1064,10 @@ int main(void) {
             was_in_retrace = in_retrace;
         }
 
-        // Poll keyboard periodically
+        // Poll keyboard less frequently (every 20 iterations ~5ms)
+        // Keyboard events are buffered, so missing a few cycles is fine
         static int poll_counter = 0;
-        if (++poll_counter >= 10) {
+        if (++poll_counter >= 20) {
             poll_counter = 0;
             poll_keyboard();
         }
@@ -1090,7 +1100,10 @@ int main(void) {
 
             // Update palette and graphics submode for graphics modes
             if (vga_mode == 2) {
-                vga_hw_set_palette(vga_get_palette(pc->vga));
+                // Only update palette when it actually changed
+                if (vga_is_palette_dirty(pc->vga)) {
+                    vga_hw_set_palette(vga_get_palette(pc->vga));
+                }
 
                 int gfx_w, gfx_h;
                 int gfx_submode = vga_get_graphics_mode(pc->vga, &gfx_w, &gfx_h);

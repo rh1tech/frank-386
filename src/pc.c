@@ -447,7 +447,7 @@ void pc_step(PC *pc)
 #if defined(BUILD_ESP32)
 	cpui386_step(pc->cpu, 512);
 #elif defined(RP2350_BUILD)
-	cpui386_step(pc->cpu, 2048);
+	cpui386_step(pc->cpu, 4096);
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif
@@ -698,6 +698,14 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
 	pc->pcspk = pcspk_init(pc->pit);
+
+	// Audio/mouse enable flags default to enabled
+	// These can be disabled via config_set_* functions at runtime
+	pc->adlib_enabled = 1;
+	pc->sb16_enabled = 1;
+	pc->pcspk_enabled = 1;
+	pc->mouse_enabled = 1;
+
 	pc->port92 = 0x2;
 	pc->shutdown_state = 0;
 	pc->reset_request = 0;
@@ -715,16 +723,23 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 	uint8_t tmpbuf[MIXER_BUF_LEN];
 	PC *pc = opaque;
 	assert(free / 2 <= MIXER_BUF_LEN);
+
+	// Early exit if all audio disabled - major performance optimization
+	if (!pc->adlib_enabled && !pc->sb16_enabled && !pc->pcspk_enabled) {
+		memset(stream, 0, free);
+		return;
+	}
+
 	memset(tmpbuf, 0, MIXER_BUF_LEN);
 	memset(stream, 0, free);  // Clear output buffer first
 
-	// Adlib/OPL2 - mono s16
-	if (pc->adlib) {
+	// Adlib/OPL2 - mono s16 (only if enabled)
+	if (pc->adlib && pc->adlib_enabled) {
 		adlib_callback(pc->adlib, tmpbuf, free / 2);
 	}
 
-	// Sound Blaster 16 - stereo s16
-	if (pc->sb16) {
+	// Sound Blaster 16 - stereo s16 (only if enabled)
+	if (pc->sb16 && pc->sb16_enabled) {
 		sb16_audio_callback(pc->sb16, stream, free);
 	}
 
@@ -740,8 +755,8 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 		d2[i] = res;
 	}
 
-	// PC Speaker - mono u8 (attenuate: shift 4 instead of 5)
-	if (pc->pcspk && pcspk_get_active_out(pc->pcspk)) {
+	// PC Speaker - mono u8 (only if enabled and active)
+	if (pc->pcspk && pc->pcspk_enabled && pcspk_get_active_out(pc->pcspk)) {
 		memset(tmpbuf, 0x80, MIXER_BUF_LEN / 2);
 		pcspk_callback(pc->pcspk, tmpbuf, free / 4);
 		for (int i = 0; i < free / 2; i++) {
