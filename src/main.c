@@ -548,7 +548,7 @@ static int load_config_from_sd(const char *filename) {
 //=============================================================================
 
 // Flash timing configuration for overclocking
-#define FLASH_MAX_FREQ_MHZ 88
+#define FLASH_MAX_FREQ_MHZ 66
 
 static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz) {
     const int clock_hz = cpu_mhz * 1000000;

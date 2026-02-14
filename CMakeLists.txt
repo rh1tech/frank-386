@@ -1,10 +1,24 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0-a4)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
 # Set board to Pico 2 (RP2350)
 set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 
 # Board configuration variant (M1, M2)
-set(BOARD "M1" CACHE STRING "Board variant: M1 or M2")
+set(BOARD "M2" CACHE STRING "Board variant: M1 or M2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -21,7 +35,7 @@ set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
 option(MOS2 "Build for Murmulator OS 2 (m1p2/m2p2 format)" OFF)
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
-option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" OFF)
+option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
 
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
