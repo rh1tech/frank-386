@@ -42,7 +42,8 @@
 
 /* Note: CPUI386 struct is defined in i386.h */
 
-#define dolog(...) fprintf(stderr, __VA_ARGS__)
+//#define dolog(...) fprintf(stderr, __VA_ARGS__)
+#define dolog(...)
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
 
@@ -367,7 +368,7 @@ static int get_CF(CPUI386 *cpu)
 	return 0;
 }
 
-const static u8 parity_tab[256] = {
+const static u8 parity_tab[256] __not_in_flash("parity_tab") = {
   1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1,
   0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
   0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0,
@@ -3872,7 +3873,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 		break;
 	}
 #else
-	static const DRAM_ATTR void *pfxlabel[] = {
+	static const void *pfxlabel[] __not_in_flash("pfxlabel") = {
 /* 0x00 */	&&f0x00_fast, &&f0x01_fast, &&f0x02_fast, &&f0x03_fast, &&f0x04_fast, &&f0x05_fast, &&f0x06, &&f0x07,
 /* 0x08 */	&&f0x08_fast, &&f0x09_fast, &&f0x0a_fast, &&f0x0b_fast, &&f0x0c_fast, &&f0x0d_fast, &&f0x0e, &&f0x0f,
 /* 0x10 */	&&f0x10, &&f0x11, &&f0x12, &&f0x13, &&f0x14, &&f0x15, &&f0x16, &&f0x17,
@@ -6275,7 +6276,7 @@ GRPEND
 #ifdef I386_OPT2
 		// Computed goto dispatch for 0x0f two-byte opcodes
 		// Note: MMX opcodes (0x60-0x7f, 0xd1-0xdf, 0xe1-0xef, 0xf1-0xfe) included when I386_ENABLE_MMX
-		static const DRAM_ATTR void *pfxlabel_0f[] = {
+		static const void *pfxlabel_0f[] __not_in_flash("pfxlabel_0f") = {
 /* 0x00 */	&&f0f_0x00, &&f0f_0x01, &&f0f_0x02, &&f0f_0x03, &&f0f_ud, &&f0f_ud, &&f0f_0x06, &&f0f_ud,
 /* 0x08 */	&&f0f_ud, &&f0f_0x09, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
 /* 0x10 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,

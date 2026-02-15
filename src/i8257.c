@@ -41,11 +41,12 @@
 
 /* #define DEBUG_DMA */
 
-#define dolog(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #ifdef DEBUG_DMA
+#define dolog(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #define linfo(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #define ldebug(...) fprintf (stderr, "dma: " __VA_ARGS__)
 #else
+#define dolog(...)
 #define linfo(...)
 #define ldebug(...)
 #endif

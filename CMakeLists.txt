@@ -29,7 +29,7 @@ endif()
 set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
-set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
+set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
 
 # MOS2 (Murmulator OS 2) build - generates .m1p2/.m2p2 instead of .uf2
 option(MOS2 "Build for Murmulator OS 2 (m1p2/m2p2 format)" OFF)

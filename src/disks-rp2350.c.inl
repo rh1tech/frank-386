@@ -55,6 +55,7 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     FIL file;
 
     if (drivenum & 0x80) drivenum -= 126;  // Normalize hard drive numbers
+    if (drivenum > 4) return false;
 
     // Build full path (files are in 386/ directory)
     char path[256];
