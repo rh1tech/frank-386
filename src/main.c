@@ -191,7 +191,7 @@ uint32_t get_uticks(void) {
  */
 void *pcmalloc(long size) {
     // For small allocations, use regular malloc
-    if (size < 4096) {
+    if (size <= 2 * 4096) {
         return malloc(size);
     }
     // For large allocations, use PSRAM

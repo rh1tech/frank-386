@@ -18,7 +18,7 @@ cmake_minimum_required(VERSION 3.13)
 set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 
 # Board configuration variant (M1, M2)
-set(BOARD "M1" CACHE STRING "Board variant: M1 or M2")
+set(BOARD "M2" CACHE STRING "Board variant: M1 or M2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -26,7 +26,7 @@ endif()
 
 # CPU overclock configuration (378, 504 MHz)
 # 378 = stable overclock (default), 504 = high overclock
-set(CPU_SPEED "400" CACHE STRING "CPU clock in MHz: 378, 504")
+set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
 set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
@@ -366,3 +366,5 @@ message(STATUS "  USB HID:        ${USB_HID_ENABLED}")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
 message(STATUS "  MOS2 Build:     ${MOS2}")
 message(STATUS "")
+
+target_link_options(murm386 PRIVATE -Xlinker --print-memory-usage --data-sections)
