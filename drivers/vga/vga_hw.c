@@ -45,11 +45,24 @@ static const struct pio_program pio_vga_program = {
 // VGA Timing (640x400 @ 70Hz - standard VGA text mode timing)
 // ============================================================================
 
+#define VGA_CLK 25175000.0f
+
+
 #define LINE_SIZE           800
+/*
 #define N_LINES_TOTAL       449
 #define N_LINES_VISIBLE     400
 #define LINE_VS_BEGIN       412
 #define LINE_VS_END         414
+*/
+
+#define N_LINES_TOTAL   525
+#define N_LINES_VISIBLE 400
+//#define LINE_VS_BEGIN   490
+//#define LINE_VS_END     492
+
+#define LINE_VS_BEGIN   452
+#define LINE_VS_END     454
 
 #define HS_SIZE             96
 #define SHIFT_PICTURE       VGA_SHIFT_PICTURE  // Where active video starts (from board_config.h)
@@ -684,11 +697,11 @@ void vga_hw_init(void) {
 
     init_palettes();
 
-    // Calculate clock divider for 25.175 MHz pixel clock
+    // Calculate clock divider
     float sys_clk = (float)clock_get_hz(clk_sys);
-    float clk_div = sys_clk / 25175000.0f;
+    float clk_div = sys_clk / VGA_CLK;
 
-    DBG_PRINT("  System clock: %.1f MHz\n", sys_clk / 1e6);
+    DBG_PRINT("  System clock: %.1f MHz\n", sys_clk / 1e6f);
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
     
     // Allocate line pattern buffers (6 buffers: 2 sync + 4 active)

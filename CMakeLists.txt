@@ -18,7 +18,7 @@ cmake_minimum_required(VERSION 3.13)
 set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 
 # Board configuration variant (M1, M2)
-set(BOARD "M2" CACHE STRING "Board variant: M1 or M2")
+set(BOARD "M1" CACHE STRING "Board variant: M1 or M2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -26,7 +26,7 @@ endif()
 
 # CPU overclock configuration (378, 504 MHz)
 # 378 = stable overclock (default), 504 = high overclock
-set(CPU_SPEED "378" CACHE STRING "CPU clock in MHz: 378, 504")
+set(CPU_SPEED "400" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
 set(PSRAM_SPEED "133" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
@@ -149,6 +149,7 @@ add_library(video_driver
 target_include_directories(video_driver PUBLIC drivers/vga src)
 target_compile_definitions(video_driver PRIVATE
     BOARD_${BOARD}
+    RP2350_BUILD=1
 )
 target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
 
