@@ -562,41 +562,56 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     }
 }
 
+static volatile int text_cols = 80;
+// Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
+// For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
+static volatile int text_stride_cells = 80;
+
+void vga_hw_set_text_cols(int cols) {
+    if (cols == 40 || cols == 80) text_cols = cols;
+}
+
+void vga_hw_set_text_stride(int stride_cells) {
+    if (stride_cells > 0 && stride_cells <= 256)
+        text_stride_cells = stride_cells;
+}
+
 // Helper function to render a single text line
 static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *output_buffer) {
     uint16_t *out16 = (uint16_t *)output_buffer + SHIFT_PICTURE / 2;
-    
+
     uint32_t char_row = line / 16;
     uint32_t glyph_line = line & 15;
-    
+
+    int cols = text_cols;
+    int double_h = (cols == 40);
+
     if (char_row < 25) {
-        // tiny386 text VRAM layout (as used in the old working path):
-        // each cell is a 32-bit word, and (char,attr) is stored in LOW 16 bits:
-        // low8  = char
-        // high8 = attr
-        // gfx_buffer currently contains VRAM starting at address 0, so apply vram_offset here.
-        const uint32_t *text_row = (const uint32_t *)(gfx_buffer + ((uint32_t)vram_offset << 2))
-                                 + (char_row * 80);
-        for (int col = 0; col < 80; col++) {
-            uint32_t val = text_row[col];
-            uint16_t cell = (uint16_t)val;          // LOW16 = packed (ch + (attr<<8))
+        // Use snapped start address for the frame (prevents mid-frame tearing).
+        const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
+        const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
+
+        for (int col = 0; col < cols; col++) {
+            uint16_t cell = text_row[col];
             uint8_t ch   = (uint8_t)(cell & 0xFF);
             uint8_t attr = (uint8_t)(cell >> 8);
             uint8_t glyph = font_8x16[ch * 16 + glyph_line];
             uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
-            
-            // Handle cursor
-            if (cursor_blink_state && col == cursor_x && 
+
+            if (cursor_blink_state && col == cursor_x &&
                 char_row == (uint32_t)cursor_y &&
-                glyph_line >= (uint32_t)cursor_start && 
+                glyph_line >= (uint32_t)cursor_start &&
                 glyph_line <= (uint32_t)cursor_end) {
                 glyph = 0xFF;
             }
-            
-            *out16++ = pal[glyph & 3];
-            *out16++ = pal[(glyph >> 2) & 3];
-            *out16++ = pal[(glyph >> 4) & 3];
-            *out16++ = pal[(glyph >> 6) & 3];
+
+            // 8px glyph -> 4x uint16 (каждый uint16 = 2 пикселя)
+            uint16_t v;
+
+            v = pal[glyph & 3];           *out16++ = v; if (double_h) *out16++ = v;
+            v = pal[(glyph >> 2) & 3];    *out16++ = v; if (double_h) *out16++ = v;
+            v = pal[(glyph >> 4) & 3];    *out16++ = v; if (double_h) *out16++ = v;
+            v = pal[(glyph >> 6) & 3];    *out16++ = v; if (double_h) *out16++ = v;
         }
     }
 }

@@ -2443,6 +2443,16 @@ static void vga_initmode(VGAState *s)
 // Accessor functions for hardware VGA driver integration
 //=============================================================================
 
+// Visible columns are derived from CRTC Horizontal Display End (index 0x01).
+// In text modes this is 39 (40 cols) or 79 (80 cols).
+int vga_get_text_cols(VGAState *s) {
+    if (!s) return 80;
+    int cols = (int)s->cr[0x01] + 1;
+    if (cols == 40 || cols == 80) return cols;
+    // Fallback: clamp to sane values
+    return (cols < 60) ? 40 : 80;
+}
+
 /* Get current VGA mode: 0=blank, 1=text, 2=graphics */
 int vga_get_mode(VGAState *s)
 {

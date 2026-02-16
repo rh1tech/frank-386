@@ -1042,6 +1042,15 @@ int main(void) {
                 uint8_t panning = vga_get_panning(pc->vga);
                 int line_compare = vga_get_line_compare(pc->vga);
 
+                // Text geometry:
+                // - visible cols from CRTC 0x01 (40/80)
+                // - stride in cells from CRTC 0x13 (offset) * 2
+                int cols = vga_get_text_cols(pc->vga);
+                vga_hw_set_text_cols(cols);
+                int cr13 = vga_get_line_offset(pc->vga);   // CRTC offset register
+                int stride_cells = cr13 * 2;
+                vga_hw_set_text_stride(stride_cells);
+
                 // Glitch Filter logic - avoid mid-update artifacts during smooth scrolling
                 bool is_glitch = false;
                 if (start_addr == latched_start_addr + 1 && panning >= latched_panning) is_glitch = true;

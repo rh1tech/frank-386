@@ -39,6 +39,7 @@ PCIDevice *vga_pci_init(VGAState *s, PCIBus *bus,
 int vga_get_mode(VGAState *s);           // 0=blank, 1=text, 2=graphics
 uint16_t vga_get_start_addr(VGAState *s); // Start address in VGA memory
 uint8_t vga_get_panning(VGAState *s);    // Horizontal pixel panning (0-7)
+int vga_get_text_cols(VGAState *s);      // Visible text columns (40/80)
 void vga_get_cursor(VGAState *s, int *x, int *y, int *start, int *end);
 void vga_get_cursor_info(VGAState *s, int *x, int *y, int *start, int *end, int *visible);
 const uint8_t *vga_get_palette(VGAState *s);  // 768-byte RGB palette (256 x 3)
@@ -50,6 +51,9 @@ int vga_get_line_compare(VGAState *s);   // Scanline where address resets to 0
 bool vga_in_retrace(VGAState *s);        // Check if in vertical retrace
 int vga_get_cursor_blink_phase(VGAState *s);  // Cursor blink phase (1=visible, 0=hidden)
 int vga_get_char_height(VGAState *s);         // Character cell height (typically 8 or 16)
+
+void vga_hw_set_text_cols(int cols);
+void vga_hw_set_text_stride(int stride_cells);
 
 #ifndef BPP
 #define BPP 32
