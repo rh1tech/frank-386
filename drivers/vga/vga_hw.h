@@ -49,9 +49,6 @@
 // Initialize VGA hardware subsystem
 void vga_hw_init(void);
 
-// Set pointer to emulator's VRAM (tiny386's vga_mem)
-void vga_hw_set_vram(uint8_t *vram);
-
 // Set video mode (3 = 80x25 text, 0x13 = 320x200x256, etc.)
 void vga_hw_set_mode(int mode);
 
@@ -93,9 +90,6 @@ void vga_hw_update(void);
 
 // Get current frame count
 uint32_t vga_hw_get_frame_count(void);
-
-// Debug: get graphics pre-render stats (resets counters)
-void vga_hw_get_gfx_stats(uint32_t *prerender, uint32_t *fallback);
 
 // Legacy API (compatibility stubs)
 uint8_t *vga_hw_get_framebuffer(void);

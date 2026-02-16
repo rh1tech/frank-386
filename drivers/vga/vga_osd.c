@@ -12,8 +12,8 @@
 #include "board_config.h"
 #include <string.h>
 #include <stdio.h>
-
-#include "pico/stdlib.h"  // For __time_critical_func
+#include <pico.h>
+#include <pico/stdlib.h>  // For __time_critical_func
 
 // OSD reuses the VGA text buffer (emulation is paused when OSD is visible)
 // This is defined in vga_hw.c - we access it via extern
@@ -72,7 +72,7 @@ void osd_hide(void) {
     osd_visible = false;
 }
 
-bool osd_is_visible(void) {
+bool __time_critical_func(osd_is_visible)(void) {
     return osd_visible;
 }
 

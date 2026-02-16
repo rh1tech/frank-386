@@ -5,6 +5,8 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <hardware/watchdog.h>
+
 
 #ifdef USEKVM
 #define cpu_raise_irq cpukvm_raise_irq
@@ -413,7 +415,8 @@ void pc_step(PC *pc)
 #ifndef USEKVM
 	if (pc->reset_request) {
 		pc->reset_request = 0;
-		load_bios_and_reset(pc);
+		watchdog_reboot(0, 0, 0);
+		/// load_bios_and_reset(pc);
 	}
 #endif
 	int refresh = vga_step(pc->vga);
@@ -590,6 +593,9 @@ static void pc_reset_request(void *p)
 	pc->reset_request = 1;
 }
 
+extern uint8_t gfx_buffer[256ul << 10];
+
+
 PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
@@ -666,7 +672,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->boot_start_time = 0;
 
 	pc->vga_mem_size = conf->vga_mem_size;
-	pc->vga_mem = bigmalloc(pc->vga_mem_size);
+	pc->vga_mem = gfx_buffer; // TODO: if more than 256k?
 	memset(pc->vga_mem, 0, pc->vga_mem_size);
 	pc->vga = vga_init(pc->vga_mem, pc->vga_mem_size,
 			   fb, conf->width, conf->height);

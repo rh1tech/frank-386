@@ -96,18 +96,13 @@ static spin_lock_t *vga_state_lock = NULL;
 static volatile uint32_t frame_count = 0;
 static volatile uint32_t current_line = 0;
 
-// Pointer to tiny386's VGA RAM in PSRAM (set via vga_hw_set_vram)
-static uint8_t *vga_ram_psram = NULL;
-
 // Text buffer in SRAM (non-static to allow OSD reuse when paused)
 uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4)));
 static volatile int update_requested = 0;  // Set by update call
 static volatile int in_vblank = 0;         // Set by IRQ during vblank
 
-// 112KB supports up to 640x350 EGA (81 words * 350 lines * 4 = 113KB)
-// TODO: Mode X (320x400) not supported - would need 128KB
-#define GFX_BUFFER_SIZE (112 * 1024)
-static uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
+#define GFX_BUFFER_SIZE (256 * 1024)
+uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
 static volatile int gfx_write_done = 0;  // Set when write buffer has new frame
 static volatile int gfx_copy_allowed = 0;  // Set during vblank to allow copy
 
@@ -155,7 +150,6 @@ static int line_compare = -1;           // Line Compare register (-1 = disabled/
 static int frame_line_compare = -1;     // Snapshotted at start of frame
 
 // Debug counters
-static volatile uint32_t gfx_prerender_count = 0;
 static volatile uint32_t gfx_fallback_count = 0;
 
 // ============================================================================
@@ -289,7 +283,17 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
     } else {
         // Read from display buffer (stable during active video)
         // 320 pixels = 320 bytes. Stride is 320.
-        const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (src_line * 320));
+        uint32_t stride = 80; // 320px / 4 pixels per word
+        uint32_t offset;
+        if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+            offset = (src_line - frame_line_compare) * stride;
+        } else {
+            offset = frame_vram_offset + src_line * stride;
+        }
+
+        offset &= 0xFFFF;
+
+        const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset * 4));
 
         // Each pixel outputs 16 bits (2 bytes) of dithered color
         // Low byte = c_hi (conv0), high byte = c_lo (conv1)
@@ -326,7 +330,13 @@ static void __time_critical_func(render_gfx_line_cga)(uint32_t line, uint32_t *o
         // Odd lines (1,3,5,...) at offset 0x2000
         uint32_t cga_bank = (src_line & 1) ? 0x2000 : 0x0000;
         uint32_t cga_row = src_line >> 1;  // Which row within bank (0-99)
-        uint32_t cga_line_offset = cga_bank + cga_row * 80;
+        uint32_t cga_line_offset;
+        if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+            cga_line_offset = cga_bank + (src_line - frame_line_compare) * 80;
+        } else {
+            cga_line_offset = frame_vram_offset + cga_bank + cga_row * 80;
+        }
+        cga_line_offset &= 0xFFFF;
 
         const uint8_t *src = gfx_buffer;
 
@@ -377,8 +387,14 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *
         uint32_t row_in_bank = src_line >> 1;  // Which row within bank (0-99)
         // Base address for this scanline (in bytes): bank + row * 80 bytes/row
         // In planar layout: multiply by 4 to get actual byte offset
-        uint32_t base_addr = (bank_offset + row_in_bank * 80) * 4;
-
+        uint32_t offset;
+        if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+            offset = bank_offset + (src_line - frame_line_compare) * 80;
+        } else {
+            offset = frame_vram_offset + bank_offset + row_in_bank * 80;
+        }
+        offset &= 0xFFFF;
+        uint32_t base_addr = offset * 4;
         const uint8_t *src = gfx_buffer;
 
         // CGA 2-color palette: 0 = black, 1 = white (or foreground color)
@@ -470,14 +486,18 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
         }
         return;
     }
+    uint32_t stride = gfx_line_offset > 0 ? (gfx_line_offset * 2) : (gfx_width / 8);
 
-    // Snapshot display buffer pointer
-    const uint8_t *disp_buf = gfx_buffer;
+    uint32_t offset;
+    if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+        offset = (src_line - frame_line_compare) * stride;
+    } else {
+        offset = frame_vram_offset + src_line * stride;
+    }
 
-    // Read from display buffer (stable during active video)
-    // Use calculated stride
-    const uint32_t *src32 = (const uint32_t *)disp_buf + (src_line * gfx_sram_stride);
+    offset &= 0xFFFF;
 
+    const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset * 4));
     int panning = frame_pixel_panning;
     int shift = panning * 4;
 
@@ -550,11 +570,18 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
     uint32_t glyph_line = line & 15;
     
     if (char_row < 25) {
-        uint8_t *text_row = text_buffer_sram + char_row * 160;
-        
+        // tiny386 text VRAM layout (as used in the old working path):
+        // each cell is a 32-bit word, and (char,attr) is stored in LOW 16 bits:
+        // low8  = char
+        // high8 = attr
+        // gfx_buffer currently contains VRAM starting at address 0, so apply vram_offset here.
+        const uint32_t *text_row = (const uint32_t *)(gfx_buffer + ((uint32_t)vram_offset << 2))
+                                 + (char_row * 80);
         for (int col = 0; col < 80; col++) {
-            uint8_t ch = text_row[col * 2];
-            uint8_t attr = text_row[col * 2 + 1];
+            uint32_t val = text_row[col];
+            uint16_t cell = (uint16_t)val;          // LOW16 = packed (ch + (attr<<8))
+            uint8_t ch   = (uint8_t)(cell & 0xFF);
+            uint8_t attr = (uint8_t)(cell >> 8);
             uint8_t glyph = font_8x16[ch * 16 + glyph_line];
             uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
             
@@ -582,7 +609,11 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
         osd_render_line(line, output_buffer);
         return;
     }
-
+    if (current_mode == 1) {
+        // Text mode now rendered from linear framebuffer
+        render_text_line(line, output_buffer);
+        return;
+    }
     if (current_mode == 2) {
         // Graphics mode - choose renderer based on submode
         if (gfx_submode == 1) {
@@ -598,9 +629,6 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
             // VGA 256-color (mode 13h) - default
             render_gfx_line_from_sram(line, output_buffer);
         }
-    } else {
-        // Text mode
-        render_text_line(line, output_buffer);
     }
 }
 
@@ -621,6 +649,9 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
     
     // At start of vblank (end of active video), swap buffers if write is done
     if (current_line == N_LINES_VISIBLE) {
+        frame_vram_offset = vram_offset;
+        frame_line_compare = line_compare;
+        frame_pixel_panning = pixel_panning;        
         // Apply pending mode change during vblank (safe time to switch)
         if (pending_mode >= 0) {
             current_mode = pending_mode;
@@ -788,10 +819,6 @@ void vga_hw_init(void) {
     DBG_PRINT("  VGA started (640x400 text mode, IRQ priority=0x00)!\n");
 }
 
-void vga_hw_set_vram(uint8_t *vram) {
-    vga_ram_psram = vram;
-}
-
 void vga_hw_set_mode(int mode) {
     if (mode != current_mode) {
         // Defer mode change to vblank to prevent signal glitches
@@ -890,188 +917,12 @@ void vga_hw_set_gfx_mode(int submode, int width, int height, int line_offset) {
 // For text mode: copies text buffer during vblank
 // For graphics mode: pre-renders scanlines ahead of the beam
 void vga_hw_update(void) {
-    if (!vga_ram_psram) return;
-
     // Don't update text buffer when OSD is visible (it reuses the same buffer)
     if (osd_is_visible()) return;
-
-    if (current_mode == 1) {
-        // Text mode: only copy text buffer once per frame during vblank
-        static uint32_t last_text_frame = 0;
-        uint32_t cur_frame = frame_count;
-        if (cur_frame == last_text_frame) return;  // Already updated this frame
-
-        // Wait for vblank with timeout
-        if (!in_vblank) return;  // Not in vblank yet, try again later
-
-        last_text_frame = cur_frame;
-
-        // In tiny386 VGA, text mode uses odd/even plane interleaving
-        uint8_t *src = vga_ram_psram + (vram_offset * 4);
-        uint32_t *src32 = (uint32_t *)src;
-        uint16_t *dst16 = (uint16_t *)text_buffer_sram;
-
-        for (int i = 0; i < 80 * 25; i++) {
-            uint32_t val = src32[i];
-            dst16[i] = (uint16_t)(val & 0xFFFF);
-        }
-
-    } else if (current_mode == 2) {
-        // Graphics mode: copy visible portion from PSRAM to SRAM
-        // Only copy when a new frame has been submitted by the emulator
-        
-        bool should_update = false;
-        if (vga_state_lock) {
-            uint32_t flags = spin_lock_blocking(vga_state_lock);
-            if (new_frame_pending && !in_vblank) {
-                // Apply pending registers atomically
-                vram_offset = pending_start_addr;
-                pixel_panning = pending_panning & 7;
-                line_compare = pending_line_compare;
-                new_frame_pending = false; // Frame processed
-                should_update = true;
-            }
-            spin_unlock(vga_state_lock, flags);
-        } else {
-            if (new_frame_pending && !in_vblank) {
-                vram_offset = pending_start_addr;
-                pixel_panning = pending_panning & 7;
-                line_compare = pending_line_compare;
-                new_frame_pending = false;
-                should_update = true;
-            }
-        }
-
-        if (should_update) {
-            
-            // Use snapshotted offset for entire copy
-            uint16_t copy_offset = vram_offset;
-            int split_line = line_compare;
-            
-            const uint32_t *src = (const uint32_t *)vga_ram_psram;
-            uint32_t *dst = (uint32_t *)gfx_buffer;
-            
-            if (gfx_submode == 1 || gfx_submode == 4) {
-                // CGA 4-color or 2-color: copy 32KB (same memory layout)
-                memcpy(dst, src, GFX_BUFFER_SIZE);
-                gfx_prerender_count += 200;
-            } else if (gfx_submode == 2) {
-                // EGA planar: copy only visible lines (compact, no stride gap)
-                // 320x200: 40 words/line * 200 lines = 8000 words = 32KB
-                int display_words = gfx_width / 8;  // 40 for 320px, 80 for 640px
-                int sram_stride = gfx_sram_stride;
-                int stride = gfx_line_offset > 0 ? (gfx_line_offset * 2) : display_words; // stride in words
-                int height = gfx_height > 0 ? gfx_height : 200;
-                
-                // Cap height to fit in buffer
-                int max_height = GFX_BUFFER_SIZE / (sram_stride * 4);
-                if (height > max_height) height = max_height;
-                
-                // Copy visible lines compactly to SRAM buffer
-                // Handle Line Compare (Split Screen)
-                // If y >= split_line, address resets to 0
-                
-                // Pre-calculate source pointers
-                const uint32_t *ega_src_scrolled = src + copy_offset;
-                const uint32_t *ega_src_fixed = src; // Address 0
-                
-                for (int y = 0; y < height; y++) {
-                    const uint32_t *line_src;
-                    
-                    // Check for split screen
-                    // Note: split_line is 0-based scanline. If split_line=0, all lines are fixed?
-                    // Usually split_line is > 0. If y >= split_line, use fixed address.
-                    // BUT, the fixed address starts at 0 relative to the split point?
-                    // No, VGA hardware resets address counter to 0 when line counter == Line Compare.
-                    // So the line AT split_line is drawn from address 0.
-                    // The line AT split_line+1 is drawn from address 0 + stride.
-                    
-                    if (split_line >= 0 && y >= split_line) {
-                        // Fixed area (usually bottom status bar)
-                        // Address starts at 0 for the first line of the split area
-                        int split_y = y - split_line;
-                        line_src = ega_src_fixed + split_y * stride;
-                    } else {
-                        // Scrolled area (usually top)
-                        line_src = ega_src_scrolled + y * stride;
-                    }
-                    
-                    // Wrap address to 64KB words (256KB bytes) to prevent reading garbage
-                    // We can't easily wrap the pointer, but we can wrap the offset if we calculated it manually.
-                    // Let's re-calculate with wrapping.
-                    
-                    uint32_t offset;
-                    if (split_line >= 0 && y >= split_line) {
-                        offset = (y - split_line) * stride;
-                    } else {
-                        offset = copy_offset + y * stride;
-                    }
-                    offset &= 0xFFFF; // Wrap at 64KB words
-                    
-                    // Handle VRAM wrap-around for the copy itself
-                    // If offset + sram_stride > 0x10000, we need to split the copy
-                    if (offset + sram_stride > 0x10000) {
-                        uint32_t first_part = 0x10000 - offset;
-                        uint32_t second_part = sram_stride - first_part;
-                        
-                        memcpy(dst + y * sram_stride, src + offset, first_part * 4);
-                        memcpy(dst + y * sram_stride + first_part, src, second_part * 4);
-                    } else {
-                        memcpy(dst + y * sram_stride, src + offset, sram_stride * 4);
-                    }
-                }
-                gfx_prerender_count += 200;
-            } else {
-                // VGA 256-color (mode 13h / Mode X)
-                // 320x200: 80 words/line * 200 lines = 16000 words = 64KB
-                
-                int stride = 80; // 320 pixels / 4 pixels per word
-                int height = gfx_height > 0 ? gfx_height : 200;
-                
-                // Cap height
-                int max_height = GFX_BUFFER_SIZE / (stride * 4);
-                if (height > max_height) height = max_height;
-                
-                for (int y = 0; y < height; y++) {
-                    uint32_t offset;
-                    
-                    // Handle Split Screen
-                    if (split_line >= 0 && y >= split_line) {
-                        offset = (y - split_line) * stride;
-                    } else {
-                        offset = copy_offset + y * stride;
-                    }
-                    offset &= 0xFFFF; // Wrap at 64KB words (256KB bytes)
-                    
-                    // Handle VRAM wrap-around
-                    if (offset + stride > 0x10000) {
-                        uint32_t first_part = 0x10000 - offset;
-                        uint32_t second_part = stride - first_part;
-                        
-                        memcpy(dst + y * stride, src + offset, first_part * 4);
-                        memcpy(dst + y * stride + first_part, src, second_part * 4);
-                    } else {
-                        memcpy(dst + y * stride, src + offset, stride * 4);
-                    }
-                }
-                gfx_prerender_count += 200;
-            }
-            
-            gfx_write_done = 1;  // Signal buffer swap at next vblank
-        }
-    }
 }
 
 uint32_t vga_hw_get_frame_count(void) {
     return frame_count;
-}
-
-// Debug: get graphics pre-render stats
-void vga_hw_get_gfx_stats(uint32_t *prerender, uint32_t *fallback) {
-    *prerender = gfx_prerender_count;
-    *fallback = gfx_fallback_count;
-    gfx_prerender_count = 0;
-    gfx_fallback_count = 0;
 }
 
 // Legacy API for compatibility
