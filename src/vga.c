@@ -1201,7 +1201,7 @@ static void simplefb_clear(FBDevice *fb_dev,
 /* Update VGA retrace status based on timing.
  * This must be called frequently to ensure games polling 0x3DA see the
  * retrace bits toggle. Called from both vga_step() and vga_ioport_read(). */
-static int vga_update_retrace(VGAState *s)
+static int __not_in_flash_func(vga_update_retrace)(VGAState *s)
 {
     uint32_t now = get_uticks();
     int ret = 0;
@@ -1229,12 +1229,12 @@ static int vga_update_retrace(VGAState *s)
     return ret;
 }
 
-int vga_step(VGAState *s)
+int __not_in_flash_func(vga_step)(VGAState *s)
 {
     return vga_update_retrace(s);
 }
 
-void vga_refresh(VGAState *s,
+void __not_in_flash_func(vga_refresh)(VGAState *s,
                  SimpleFBDrawFunc *redraw_func, void *opaque, int full_update)
 {
     FBDevice *fb_dev = s->fb_dev;
@@ -2658,7 +2658,7 @@ int vga_get_line_compare(VGAState *s)
 }
 
 /* Check if VGA is in Vertical Retrace */
-bool vga_in_retrace(VGAState *s)
+bool __not_in_flash_func(vga_in_retrace)(VGAState *s)
 {
     return (s->st01 & ST01_V_RETRACE) != 0;
 }

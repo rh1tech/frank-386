@@ -325,7 +325,7 @@ void i8257_dma_release_DREQ(IsaDma *obj, int nchan)
     i8257_dma_run(d);
 }
 
-static void i8257_channel_run(I8257State *d, int ichan)
+static void __not_in_flash_func(i8257_channel_run)(I8257State *d, int ichan)
 {
     int ncont = d->dshift;
     int n;
@@ -354,7 +354,7 @@ static void i8257_channel_run(I8257State *d, int ichan)
     }
 }
 
-void IRAM_ATTR i8257_dma_run(void *opaque)
+void __not_in_flash_func(i8257_dma_run)(void *opaque)
 {
     I8257State *d = opaque;
     int ichan;

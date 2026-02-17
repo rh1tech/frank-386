@@ -7688,7 +7688,7 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 	return true;
 }
 
-void cpui386_step(CPUI386 *cpu, int stepcount)
+void __not_in_flash_func(cpui386_step)(CPUI386 *cpu, int stepcount)
 {
 	if ((cpu->flags & IF) && cpu->intr) {
 		cpu->intr = false;

@@ -68,10 +68,6 @@ void vga_hw_set_panning(uint8_t panning);
 // Set Line Compare (scanline where address resets to 0)
 void vga_hw_set_line_compare(int line);
 
-// Submit a new frame state (registers) to be rendered
-// This signals Core 1 to copy VRAM and apply these registers at the next opportunity
-void vga_hw_submit_frame(uint16_t start_addr, uint8_t panning, int line_compare);
-
 // Update 256-color palette from emulator's VGA DAC
 // palette_data is 768 bytes (256 entries × 3 bytes RGB, each 0-63)
 void vga_hw_set_palette(const uint8_t *palette_data);
@@ -98,8 +94,7 @@ void vga_hw_clear(uint8_t color);
 // Set a single pixel (legacy, no-op)
 void vga_hw_set_pixel(int x, int y, uint8_t color);
 
-void vga_hw_set_text_cols(int cols);
-void vga_hw_set_text_stride(int stride_cells);
-
 // True during vertical blank
 bool vga_hw_in_vblank(void);
+
+void vga_hw_submit_text_geom(int cols, int stride_cells);

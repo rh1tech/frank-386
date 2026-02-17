@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include "i8254.h"
+#include <pico.h>
 //#define DEBUG_PIT
 
 #define RW_STATE_LSB 1
@@ -265,7 +266,7 @@ static void pit_reset(void *opaque)
 	}
 }
 
-void i8254_update_irq(PITState *pit)
+void __not_in_flash_func(i8254_update_irq)(PITState *pit)
 {
 	uint32_t uticks = get_uticks();
 	PITChannelState *s = pit->channels;

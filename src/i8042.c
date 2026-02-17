@@ -27,6 +27,7 @@
 #include <string.h>
 #include <inttypes.h>
 #include <assert.h>
+#include <pico.h>
 
 uint32_t get_uticks();
 static int after_eq(uint32_t a, uint32_t b)
@@ -551,7 +552,7 @@ void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode)
 }
 
 /* to be called in main loop */
-void kbd_step(void *opaque)
+void __not_in_flash_func(kbd_step)(void *opaque)
 {
     KBDState *s = opaque;
     PS2KbdState *kbd = s->kbd;

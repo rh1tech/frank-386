@@ -326,7 +326,7 @@ static void cmos_update_timer(CMOS *s)
 	}
 }
 
-void cmos_update_irq(CMOS *s)
+void __not_in_flash_func(cmos_update_irq)(CMOS *s)
 {
 	uint32_t d;
 	if (s->data[RTC_REG_B] & REG_B_PIE) {

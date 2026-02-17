@@ -182,7 +182,7 @@ static void show_warning_screen(const char *title, const char *message, int dela
 /**
  * Get microsecond timestamp.
  */
-uint32_t get_uticks(void) {
+uint32_t __not_in_flash_func(get_uticks)(void) {
     return time_us_32();
 }
 
@@ -984,7 +984,8 @@ int main(void) {
     initialized = true;
 
     // Show welcome screen
-    show_welcome_screen();
+    if(*(uint32_t*)(0x20000000 + (512ul << 10) - 32) != 0x1927fa52) // magic to fast reboot
+        show_welcome_screen();
 
     DBG_PRINT("\nStarting emulation...\n");
 
@@ -1005,10 +1006,6 @@ int main(void) {
     static uint8_t latched_panning = 0;
     static int latched_line_compare = -1;
     static int last_vga_mode = -1;
-
-    // Frame skipping - skip every other frame for better performance
-    int frame_skip_counter = 0;
-    const int frame_skip_pattern = 2; // Render 1 frame, skip 1 (30fps display)
 
     // Main emulation loop (Core 0)
     while (true) {
@@ -1031,62 +1028,22 @@ int main(void) {
         // Run CPU steps - batch multiple steps for efficiency
         for (int i = 0; i < 10; i++) {
             pc_step(pc);
-
-            // Check retrace and submit frame (fast path)
-            // We must check this frequently to catch the VBLANK edge
-            bool in_retrace = vga_in_retrace(pc->vga);
-
-            // Latch values at the END of retrace (falling edge of VBLANK)
-            if (was_in_retrace && !in_retrace) {
-                uint16_t start_addr = vga_get_start_addr(pc->vga);
-                uint8_t panning = vga_get_panning(pc->vga);
-                int line_compare = vga_get_line_compare(pc->vga);
-
-                // Text geometry:
-                // - visible cols from CRTC 0x01 (40/80)
-                // - stride in cells from CRTC 0x13 (offset) * 2
-                int cols = vga_get_text_cols(pc->vga);
-                vga_hw_set_text_cols(cols);
-                int cr13 = vga_get_line_offset(pc->vga);   // CRTC offset register
-                int stride_cells = cr13 * 2;
-                vga_hw_set_text_stride(stride_cells);
-
-                // Glitch Filter logic - avoid mid-update artifacts during smooth scrolling
-                bool is_glitch = false;
-                if (start_addr == latched_start_addr + 1 && panning >= latched_panning) is_glitch = true;
-                else if (start_addr == latched_start_addr - 1 && panning <= latched_panning) is_glitch = true;
-                else if (latched_panning >= 6 && panning <= 1 && start_addr == latched_start_addr) is_glitch = true;
-                else if (latched_panning <= 1 && panning >= 6 && start_addr == latched_start_addr) is_glitch = true;
-
-                // Persistence check: If a glitch persists for more than 2 frames, assume it's real
-                static int glitch_counter = 0;
-                if (is_glitch) {
-                    glitch_counter++;
-                    if (glitch_counter > 2) {
-                        is_glitch = false;
-                        glitch_counter = 0;
-                    }
-                } else {
-                    glitch_counter = 0;
-                }
-
-                if (!is_glitch) {
-                    latched_start_addr = start_addr;
-                    latched_panning = panning;
-                    latched_line_compare = line_compare;
-
-                    // Frame skipping: only submit frame if not skipped
-                    frame_skip_counter++;
-                    if (frame_skip_counter < frame_skip_pattern) {
-                        vga_hw_submit_frame(latched_start_addr, latched_panning, latched_line_compare);
-                    } else {
-                        frame_skip_counter = 0; // Reset counter, skip this frame
-                    }
-                }
-            }
-
-            was_in_retrace = in_retrace;
         }
+// TODO: avoid it there (use vsync)
+        // Check retrace and submit frame (fast path)
+        // We must check this frequently to catch the VBLANK edge
+        bool in_retrace = vga_in_retrace(pc->vga);
+        // Latch values at the END of retrace (falling edge of VBLANK)
+        if (was_in_retrace && !in_retrace) {
+            // Text geometry:
+            // - visible cols from CRTC 0x01 (40/80)
+            // - stride in cells from CRTC 0x13 (offset) * 2
+            int cols = vga_get_text_cols(pc->vga);
+            int cr13 = vga_get_line_offset(pc->vga);   // CRTC offset register
+            int stride_cells = cr13 * 2;
+            vga_hw_submit_text_geom(cols, stride_cells);
+        }
+        was_in_retrace = in_retrace;
 
         // Poll keyboard less frequently (every 20 iterations ~5ms)
         // Keyboard events are buffered, so missing a few cycles is fine

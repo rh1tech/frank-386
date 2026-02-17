@@ -410,11 +410,12 @@ void pc_vga_step(void *o)
 	}
 }
 
-void pc_step(PC *pc)
+void __not_in_flash_func(pc_step)(PC *pc)
 {
 #ifndef USEKVM
 	if (pc->reset_request) {
 		pc->reset_request = 0;
+		*(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
 		watchdog_reboot(0, 0, 0);
 		/// load_bios_and_reset(pc);
 	}

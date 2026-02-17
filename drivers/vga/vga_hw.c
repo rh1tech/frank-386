@@ -89,9 +89,6 @@ static int dma_ctrl_chan = -1;
 // PIO state
 static uint vga_sm = 0;
 
-// Spin lock for frame state synchronization
-static spin_lock_t *vga_state_lock = NULL;
-
 // Frame counter
 static volatile uint32_t frame_count = 0;
 static volatile uint32_t current_line = 0;
@@ -620,13 +617,18 @@ static volatile int text_cols = 80;
 // For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
 static volatile int text_stride_cells = 80;
 
-void vga_hw_set_text_cols(int cols) {
-    if (cols == 40 || cols == 80) text_cols = cols;
-}
+static volatile int pending_text_cols = 80;
+static volatile int pending_text_stride = 80;
+static volatile int text_geom_pending = 0;
 
-void vga_hw_set_text_stride(int stride_cells) {
-    if (stride_cells > 0 && stride_cells <= 256)
-        text_stride_cells = stride_cells;
+void vga_hw_submit_text_geom(int cols, int stride_cells) {
+    if (cols != 40 && cols != 80)
+        return;
+    if (stride_cells <= 0 || stride_cells > 256)
+        return;
+    pending_text_cols = cols;
+    pending_text_stride = stride_cells;
+    text_geom_pending = 1;
 }
 
 // 80 cols: one uint16 = 2 pixels (left in low byte, right in high byte)
@@ -745,6 +747,12 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
         frame_vram_offset = vram_offset;
         frame_line_compare = line_compare;
         frame_pixel_panning = pixel_panning;        
+
+        if (text_geom_pending) {
+            text_cols = pending_text_cols;
+            text_stride_cells = pending_text_stride;
+            text_geom_pending = 0;
+        }
         // Apply pending mode change during vblank (safe time to switch)
         if (pending_mode >= 0) {
             current_mode = pending_mode;
@@ -833,10 +841,6 @@ void vga_hw_init(void) {
     // Initialize PIO
     uint offset = pio_add_program(VGA_PIO, &pio_vga_program);
     vga_sm = pio_claim_unused_sm(VGA_PIO, true);
-    
-    // Initialize spin lock for frame state synchronization
-    int lock_num = spin_lock_claim_unused(true);
-    vga_state_lock = spin_lock_init(lock_num);
     
     // Configure GPIO pins
     for (int i = 0; i < 8; i++) {
@@ -950,28 +954,6 @@ void vga_hw_set_panning(uint8_t panning) {
 
 void vga_hw_set_line_compare(int line) {
     line_compare = line;
-}
-
-// Pending frame state (submitted by Core 0)
-static volatile bool new_frame_pending = false;
-static volatile uint16_t pending_start_addr = 0;
-static volatile uint8_t pending_panning = 0;
-static volatile int pending_line_compare = -1;
-
-void vga_hw_submit_frame(uint16_t start_addr, uint8_t panning, int line_compare) {
-    if (vga_state_lock) {
-        uint32_t flags = spin_lock_blocking(vga_state_lock);
-        pending_start_addr = start_addr;
-        pending_panning = panning;
-        pending_line_compare = line_compare;
-        new_frame_pending = true;
-        spin_unlock(vga_state_lock, flags);
-    } else {
-        pending_start_addr = start_addr;
-        pending_panning = panning;
-        pending_line_compare = line_compare;
-        new_frame_pending = true;
-    }
 }
 
 // Update palette from emulator's 6-bit VGA DAC values
