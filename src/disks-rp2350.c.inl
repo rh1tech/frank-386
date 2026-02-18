@@ -17,6 +17,7 @@ static uint8_t sectorbuffer[512];
 struct struct_drive {
     FIL diskfile;
     size_t filesize;
+    size_t data_offset;   // 0 for raw, 0 for fixed VHD (footer at end only)
     uint16_t cyls;
     uint16_t sects;
     uint16_t heads;
@@ -28,6 +29,20 @@ struct struct_drive {
 static int led_state = 0;
 static CPUI386 *disk_cpu = NULL;
 static uint8_t *disk_mem = NULL;
+
+// Detect fixed VHD (footer at end)
+static int detect_vhd(FIL *file, size_t size) {
+    if (size < 512) return 0;
+    UINT br;
+    f_lseek(file, size - 512);
+    if (FR_OK != f_read(file, sectorbuffer, 512, &br) || br != 512)
+        return 0;
+    // Footer starts with "conectix"
+    if (memcmp(sectorbuffer, "conectix", 8) == 0) {
+        return 1;
+    }
+    return 0;
+}
 
 void disk_set_cpu(CPUI386 *cpu) {
     disk_cpu = cpu;
@@ -55,7 +70,7 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     FIL file;
 
     if (drivenum & 0x80) drivenum -= 126;  // Normalize hard drive numbers
-    if (drivenum > 4) return false;
+    if (drivenum > 5) return false;
 
     // Build full path (files are in 386/ directory)
     char path[256];
@@ -67,8 +82,16 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
 
     size_t size = f_size(&file);
 
+    int is_vhd = detect_vhd(&file, size);
+    size_t usable_size = size;
+
+    if (is_vhd) {
+        // Fixed VHD: subtract 512-byte footer
+        usable_size -= 512;
+    }
+
     // Validate size constraints
-    if (size < 360 * 1024 || size > 0x1f782000UL || (size & 511)) {
+    if (usable_size < 360 * 1024 || usable_size > 0x1f782000UL || (usable_size & 511)) {
         f_close(&file);
         return 0;
     }
@@ -79,7 +102,7 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     if (drivenum >= 2) {  // Hard disk
         sects = 63;
         heads = 16;
-        cyls = size / (sects * heads * 512);
+        cyls = usable_size / (sects * heads * 512);
     } else {  // Floppy disk
         cyls = 80;
         sects = 18;
@@ -100,7 +123,8 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     ejectdisk(drivenum);
 
     disk[drivenum].diskfile = file;
-    disk[drivenum].filesize = size;
+    disk[drivenum].filesize = usable_size;
+    disk[drivenum].data_offset = 0;   // fixed VHD has no header, only footer
     disk[drivenum].inserted = 1;
     disk[drivenum].readonly = 0;
     disk[drivenum].cyls = cyls;
@@ -122,7 +146,7 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
 
 // Call this ONLY if all parameters are valid! There is no check here!
 static inline size_t chs2ofs(int drivenum, int cyl, int head, int sect) {
-    return (
+    return disk[drivenum].data_offset + (
                    ((size_t)cyl * (size_t)disk[drivenum].heads + (size_t)head) * (size_t)disk[drivenum].sects + (size_t) sect - 1
            ) * 512UL;
 }

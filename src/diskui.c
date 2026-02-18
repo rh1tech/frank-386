@@ -223,6 +223,7 @@ static void scan_disk_images(void) {
         bool valid = false;
         if (strcasecmp(ext, ".img") == 0) valid = true;
         else if (strcasecmp(ext, ".ima") == 0) valid = true;
+        else if (strcasecmp(ext, ".vhd") == 0) valid = true;
         else if (strcasecmp(ext, ".bin") == 0) valid = true;
         else if (strcasecmp(ext, ".iso") == 0) valid = true;
 
