@@ -205,11 +205,13 @@ static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int coun
 	return 0;
 }
 
+#if EMULATE_LTEMS
 uint8_t ems_pages[4] = {0};
 
 inline static void out_ems(const uint16_t port, const uint8_t data) {
     ems_pages[port & 3] = data;
 }
+#endif
 
 static void pc_io_write(void *o, int addr, u8 val)
 {
@@ -225,9 +227,11 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x3fc: case 0x3fd: case 0x3fe: case 0x3ff:
 		u8250_reg_write(pc->serial, addr - 0x3f8, val);
 		return;
+#if EMULATE_LTEMS
     case 0x260: case 0x261: case 0x262: case 0x263:
 		out_ems(addr, val);
         return;
+#endif
 	case 0x2f8: case 0x2f9: case 0x2fa: case 0x2fb:
 	case 0x2fc: case 0x2fd: case 0x2fe: case 0x2ff:
 	case 0x2e8: case 0x2e9: case 0x2ea: case 0x2eb:
