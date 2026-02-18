@@ -282,15 +282,18 @@ static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, u
     base &= 0xFFFF;
 
     // base is in dwords; gfx_buffer is bytes, so byte offset = base * 4
-    // DEBUG: show raw pixel byte values as native colors (bypass palette)
-    {
-        const uint8_t *src8 = (const uint8_t *)(gfx_buffer + base * 4);
-        uint8_t *out8 = (uint8_t *)out32;
-        for (int i = 0; i < 320; i++) {
-            uint8_t col = TMPL_LINE | (src8[i] >> 2);
-            out8[i*2]   = col;
-            out8[i*2+1] = col;
-        }
+    const uint32_t *src32 = (const uint32_t *)(gfx_buffer + base * 4);
+    // Select dither phase per scanline
+    uint16_t *active_palette = (src_line & 1) ? palette_a : palette_b;
+    // 320 pixels -> 80 dwords -> 160 output dwords (640px doubled)
+    for (int i = 0; i < 80; i++) {
+        uint32_t pixels = src32[i];
+        uint16_t p0 = active_palette[pixels & 0xFF];
+        uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
+        uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
+        uint16_t p3 = active_palette[(pixels >> 24) & 0xFF];
+        *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
+        *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
     }
 }
 
@@ -335,20 +338,17 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
 
         // offset is in dwords; gfx_buffer is bytes, so byte offset = offset * 4
         const uint32_t *src32 = (const uint32_t *)(gfx_buffer + offset * 4);
-
-        // DEBUG: show raw pixel byte values as native colors (bypass palette)
-        // This tells us exactly what Wolf3D wrote to VRAM.
-        // Native color format: TMPL_LINE | R2G2B2 (6 bits)
-        // We map pixel_byte directly: top 6 bits -> color, ignoring palette
-        uint8_t *out8 = (uint8_t *)out32;
-        const uint8_t *src8 = (const uint8_t *)src32;
-        for (int i = 0; i < 320; i++) {
-            uint8_t px = src8[i];
-            // Map 8-bit index to 6-bit color: use top 6 bits with sync
-            uint8_t col = TMPL_LINE | (px >> 2);
-            // Double each pixel horizontally (320 -> 640)
-            out8[i*2]   = col;
-            out8[i*2+1] = col;
+        // Select dither phase per scanline
+        uint16_t *active_palette = (src_line & 1) ? palette_a : palette_b;
+        // 320 pixels -> 80 dwords
+        for (int i = 0; i < 80; i++) {
+            uint32_t pixels = src32[i];
+            uint16_t p0 = active_palette[pixels & 0xFF];
+            uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
+            uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
+            uint16_t p3 = active_palette[(pixels >> 24) & 0xFF];
+            *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
+            *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
         }
     }
 }
