@@ -18,6 +18,7 @@
 #include "pcspk.h"
 #include "pci.h"
 #include "ini.h"
+#include "sn76489.h"
 
 /// Platform HAL
 uint32_t get_uticks();
@@ -57,11 +58,13 @@ typedef struct {
 	I8257State *isa_dma, *isa_hdma;
 	SB16State *sb16;
 	PCSpkState *pcspk;
+	SN76489State *sn76489;
 
 	// Runtime enable flags for audio devices (checked in mixer_callback)
 	int adlib_enabled;
 	int sb16_enabled;
 	int pcspk_enabled;
+	int tandy_enabled;
 	int mouse_enabled;
 
 	I440FXState *i440fx;

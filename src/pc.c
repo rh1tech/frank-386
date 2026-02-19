@@ -108,7 +108,13 @@ static u8 pc_io_read(void *o, int addr)
 	case 0x481: case 0x482: case 0x483: case 0x487:
 		val = i8257_read_pageh(pc->isa_dma, addr - 0x480);
 		return val;
-	case 0xc0: case 0xc2: case 0xc4: case 0xc6:
+	case 0xc0: case 0xc1:
+		/* SN76489 is write-only; return 0xFF on read when Tandy active */
+		if (pc->sn76489 && pc->tandy_enabled)
+			return 0xff;
+		val = i8257_read_chan(pc->isa_hdma, addr - 0xc0, 1);
+		return val;
+	case 0xc2: case 0xc4: case 0xc6:
 	case 0xc8: case 0xca: case 0xcc: case 0xce:
 		val = i8257_read_chan(pc->isa_hdma, addr - 0xc0, 1);
 		return val;
@@ -320,7 +326,15 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x481: case 0x482: case 0x483: case 0x487:
 		i8257_write_pageh(pc->isa_dma, addr - 0x480, val);
 		return;
-	case 0xc0: case 0xc2: case 0xc4: case 0xc6:
+	/* 0xC0/0xC1: SN76489 data port when Tandy enabled, hdma ch0 otherwise.
+	 * 0xC2-0xCE: always hdma (Tandy only occupied 0xC0). */
+	case 0xc0: case 0xc1:
+		if (pc->sn76489 && pc->tandy_enabled)
+			sn76489_write(pc->sn76489, val);
+		else
+			i8257_write_chan(pc->isa_hdma, addr - 0xc0, val, 1);
+		return;
+	case 0xc2: case 0xc4: case 0xc6:
 	case 0xc8: case 0xca: case 0xcc: case 0xce:
 		i8257_write_chan(pc->isa_hdma, addr - 0xc0, val, 1);
 		return;
@@ -342,6 +356,14 @@ static void pc_io_write(void *o, int addr, u8 val)
 		return;
 	case 0x226: case 0x22c:
 		sb16_dsp_write(pc->sb16, addr, val);
+		return;
+	/* Tandy 3-Voice Sound (SN76489) - additional alias ports.
+	 * Primary port 0xC0 is handled above.
+	 * 0x1E0: Tandy 1000 SX/TX/HX data port
+	 * 0x2C0: Tandy 1000 A/B mirror */
+	case 0x1E0: case 0x2C0:
+		if (pc->sn76489 && pc->tandy_enabled)
+			sn76489_write(pc->sn76489, val);
 		return;
 	/* Emulink removed - using INT 13h disk handler instead */
 	case 0xf1f4:
@@ -737,12 +759,14 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
 	pc->pcspk = pcspk_init(pc->pit);
+	pc->sn76489 = sn76489_new();
 
 	// Audio/mouse enable flags default to enabled
 	// These can be disabled via config_set_* functions at runtime
 	pc->adlib_enabled = 1;
 	pc->sb16_enabled = 1;
 	pc->pcspk_enabled = 1;
+	pc->tandy_enabled = 1;
 	pc->mouse_enabled = 1;
 
 	pc->port92 = 0x2;
@@ -764,7 +788,8 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 	assert(free / 2 <= MIXER_BUF_LEN);
 
 	// Early exit if all audio disabled - major performance optimization
-	if (!pc->adlib_enabled && !pc->sb16_enabled && !pc->pcspk_enabled) {
+	if (!pc->adlib_enabled && !pc->sb16_enabled && !pc->pcspk_enabled &&
+	    !pc->tandy_enabled) {
 		memset(stream, 0, free);
 		return;
 	}
@@ -804,6 +829,22 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 			if (res > 32767) res = 32767;
 			if (res < -32768) res = -32768;
 			d2[i] = res;
+		}
+	}
+
+	// Tandy 3-Voice Sound (SN76489) - stereo int16 (only if enabled)
+	// tmpbuf is MIXER_BUF_LEN bytes; sn76489_callback uses 'free' bytes
+	// but free (stereo s16) can exceed MIXER_BUF_LEN, so clamp to buffer size.
+	if (pc->sn76489 && pc->tandy_enabled) {
+		int tandy_len = free < MIXER_BUF_LEN ? free : MIXER_BUF_LEN;
+		memset(tmpbuf, 0, tandy_len);
+		sn76489_callback(pc->sn76489, tmpbuf, tandy_len);
+		int16_t *tandy = (int16_t *)tmpbuf;
+		for (int i = 0; i < tandy_len / 2; i++) {
+			int res = (int)d2[i] + (int)tandy[i];
+			if (res > 32767)  res = 32767;
+			if (res < -32768) res = -32768;
+			d2[i] = (int16_t)res;
 		}
 	}
 }

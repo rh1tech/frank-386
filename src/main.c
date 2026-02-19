@@ -811,9 +811,11 @@ static bool init_emulator(void) {
     pc->pcspk_enabled = config_get_pcspeaker();
     pc->adlib_enabled = config_get_adlib();
     pc->sb16_enabled = config_get_soundblaster();
+    pc->tandy_enabled = config_get_tandy();
     pc->mouse_enabled = config_get_mouse();
-    DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, Mouse=%d\n",
-              pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mouse_enabled);
+    DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, Tandy=%d, Mouse=%d\n",
+              pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled,
+              pc->tandy_enabled, pc->mouse_enabled);
 
     // Check if BIOS file exists before loading
     DBG_PRINT("Loading BIOS...\n");
