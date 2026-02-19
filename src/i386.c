@@ -349,7 +349,7 @@ enum {
 	CC_AND, CC_OR, CC_XOR,
 };
 
-static int get_CF(CPUI386 *cpu)
+static int __not_in_flash_func(get_CF)(CPUI386 *cpu)
 {
 	/* Fast path: CF not lazy - just return from flags */
 	if (likely(!(cpu->cc.mask & CF))) {
@@ -421,7 +421,7 @@ const static u8 parity_tab[256] __not_in_flash("parity_tab") = {
   1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1
 };
 
-static int get_PF(CPUI386 *cpu)
+static int __always_inline get_PF(CPUI386 *cpu)
 {
 	if (likely(!(cpu->cc.mask & PF))) {
 		return !!(cpu->flags & PF);
@@ -429,7 +429,7 @@ static int get_PF(CPUI386 *cpu)
 	return parity_tab[cpu->cc.dst & 0xff];
 }
 
-static int get_AF(CPUI386 *cpu)
+static int __not_in_flash_func(get_AF)(CPUI386 *cpu)
 {
 	if (likely(!(cpu->cc.mask & AF))) {
 		return !!(cpu->flags & AF);
@@ -464,7 +464,7 @@ static int get_AF(CPUI386 *cpu)
 	return 0;
 }
 
-static int IRAM_ATTR get_ZF(CPUI386 *cpu)
+static int __always_inline get_ZF(CPUI386 *cpu)
 {
 	if (likely(!(cpu->cc.mask & ZF))) {
 		return !!(cpu->flags & ZF);
@@ -472,7 +472,7 @@ static int IRAM_ATTR get_ZF(CPUI386 *cpu)
 	return cpu->cc.dst == 0;
 }
 
-static int IRAM_ATTR get_SF(CPUI386 *cpu)
+static int __always_inline get_SF(CPUI386 *cpu)
 {
 	if (likely(!(cpu->cc.mask & SF))) {
 		return !!(cpu->flags & SF);
@@ -480,7 +480,7 @@ static int IRAM_ATTR get_SF(CPUI386 *cpu)
 	return cpu->cc.dst >> (sizeof(uword) * 8 - 1);
 }
 
-static int get_OF(CPUI386 *cpu)
+static int __not_in_flash_func(get_OF)(CPUI386 *cpu)
 {
 	if (likely(!(cpu->cc.mask & OF))) {
 		return !!(cpu->flags & OF);

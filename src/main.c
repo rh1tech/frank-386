@@ -1106,9 +1106,7 @@ int main(void) {
             }
 
             // For text mode, submit frame with current offset
-            if (vga_mode == 1) {
-                vga_hw_set_vram_offset(vga_get_start_addr(pc->vga));
-            }
+            // (graphics mode offset is now updated immediately via CRTC write hook)
         }
 
         // Check for reset request

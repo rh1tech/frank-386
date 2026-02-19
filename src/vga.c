@@ -40,10 +40,6 @@
 #elif defined(RP2350_BUILD)
 #include "pico/stdlib.h"
 #include "vga_hw.h"
-
-// Visual debug state — defined in vga_hw.c, updated here so ISR can show on screen
-extern volatile uint8_t vdbg_vblank;
-extern volatile uint8_t vdbg_vram_ok;
 #define IRAM_ATTR __time_critical_func()
 #else
 #define IRAM_ATTR
@@ -1235,25 +1231,7 @@ static int __not_in_flash_func(vga_update_retrace)(VGAState *s)
 
 int __not_in_flash_func(vga_step)(VGAState *s)
 {
-#ifdef RP2350_BUILD
-    /* On RP2350 the DMA scanline counter is the authoritative vblank source.
-     * Drive st01 directly from it so both the vga_step path and the
-     * vga_ioport_read(0x3DA) path agree — eliminating the race where
-     * vga_update_retrace() overwrites st01 between port reads. */
-    int was_in_retrace = (s->st01 & ST01_V_RETRACE) != 0;
-    if (vga_hw_in_vblank()) {
-        s->st01 |=  ST01_V_RETRACE;
-        s->st01 &= ~ST01_DISP_ENABLE;
-    } else {
-        s->st01 &= ~ST01_V_RETRACE;
-        s->st01 |=  ST01_DISP_ENABLE;
-    }
-    /* Return 1 on the rising edge of vblank (same contract as before) */
-    int now_in_retrace = (s->st01 & ST01_V_RETRACE) != 0;
-    return (!was_in_retrace && now_in_retrace) ? 1 : 0;
-#else
     return vga_update_retrace(s);
-#endif
 }
 
 void __not_in_flash_func(vga_refresh)(VGAState *s,
@@ -1341,26 +1319,14 @@ uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
 
     /* Always handle status registers 0x3BA and 0x3DA regardless of color mode.
      * Some games (like Goblins) poll 0x3BA for vertical retrace even in color mode.
-     * On RP2350 we drive st01 directly from the DMA scanline counter (real HW
-     * vblank) so games that busy-poll this port get accurate timing without
-     * drifting away from the actual display signal.  The software-timer fallback
-     * (vga_update_retrace) is kept for non-RP builds and for vga_step(). */
+     * Update retrace status on each read so tight polling loops see changes. */
     if (addr == 0x3ba || addr == 0x3da) {
-#ifdef RP2350_BUILD
-        bool vblank_now = vga_hw_in_vblank();
-        if (vblank_now) {
-            // In vertical blanking: V_RETRACE=1, DISP_ENABLE=0
-            s->st01 |=  ST01_V_RETRACE;
-            s->st01 &= ~ST01_DISP_ENABLE;
-        } else {
-            // In active display: V_RETRACE=0, DISP_ENABLE=1
-            s->st01 &= ~ST01_V_RETRACE;
-            s->st01 |=  ST01_DISP_ENABLE;
-        }
-        vdbg_vblank = (uint8_t)vblank_now;
-#else
         vga_update_retrace(s);
-#endif
+        // TODO: Use real scan timing from VGA DMA
+//        if (vga_hw_in_vblank())
+//            s->st01 |= (ST01_V_RETRACE | ST01_DISP_ENABLE);
+//        else
+//            s->st01 &= ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
         val = s->st01;
         s->ar_flip_flop = 0;
         goto done;
@@ -1559,10 +1525,19 @@ void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
         case 0x01: /* horizontal display end */
         case 0x07:
         case 0x09:
-        case 0x0c:
-        case 0x0d:
         case 0x12: /* vertical display end */
             s->cr[s->cr_index] = val;
+            break;
+        case 0x0c: /* start address high */
+        case 0x0d: /* start address low */
+            s->cr[s->cr_index] = val;
+            /* Immediately forward to display driver so the ISR latches it
+             * at the next vblank boundary — this is what makes Mode X
+             * page-flipping tear-free.  vga_hw_set_vram_offset() just
+             * writes a volatile variable; the ISR snapshots it safely. */
+#ifdef RP2350_BUILD
+            vga_hw_set_vram_offset((uint16_t)((s->cr[0x0c] << 8) | s->cr[0x0d]));
+#endif
             break;
         default:
             s->cr[s->cr_index] = val;
@@ -1928,7 +1903,6 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 #ifdef DEBUG_VGA_MEM
             printf("vga: chain4: [0x" TARGET_FMT_plx "]\n", addr);
 #endif
-            vdbg_vram_ok = 1;
 //            s->plane_updated |= mask; /* only used to detect font change */
 //            memory_region_set_dirty(&s->vram, addr, 1);
         }
@@ -2020,7 +1994,6 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
         ((uint32_t *)s->vga_ram)[addr] =
             (((uint32_t *)s->vga_ram)[addr] & ~write_mask) |
             (val & write_mask);
-        vdbg_vram_ok = 1;
 #ifdef DEBUG_VGA_MEM
         printf("vga: latch: [0x" TARGET_FMT_plx "] mask=0x%08x val=0x%08x\n",
                addr * 4, write_mask, val);
@@ -2641,8 +2614,16 @@ int vga_get_graphics_mode(VGAState *s, int *width, int *height)
         // Mode X (320x200 256-color planar, unchained)
         // Wolf3D and many DOS games use this for page-flipping.
         // Our VRAM model stores planar bytes as packed-planes dwords.
+        /// TODO: vga_planar_mode = !(vga.sequencer[4] & 8) || !(vga.sequencer[4] & 6);
         if (!(s->sr[VGA_SEQ_MEMORY_MODE] & 0x04u) && (s->ar[0x10] & 0x40) && w == 320) {
             return 5; // VGA 256-color planar (Mode X)
+        }
+        // Debug: print register values for 640-wide modes
+        static int debug_640 = 0;
+        if (w >= 640 && debug_640 < 3) {
+            printf("[VGA] 640-wide mode: shift=%d gr5=0x%02x gr6=0x%02x cr17=0x%02x\n",
+                   shift_control, s->gr[0x05], s->gr[0x06], s->cr[0x17]);
+            debug_640++;
         }
         // Check for CGA graphics modes (memory map = B8000-BFFFF, GR6 bits 2-3 = 11)
         // Mode 6 uses shift_control=0 with CGA memory mapping
