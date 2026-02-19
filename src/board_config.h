@@ -228,7 +228,7 @@ static inline uint get_psram_pin(void) {
 // Adjust this value to center the display on your monitor
 // Default: 106 (tuned for typical monitor centering)
 #ifndef VGA_SHIFT_PICTURE
-#define VGA_SHIFT_PICTURE 106
+#define VGA_SHIFT_PICTURE 144
 #endif
 
 //=============================================================================

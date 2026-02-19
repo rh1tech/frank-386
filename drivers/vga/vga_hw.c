@@ -45,7 +45,7 @@ static const struct pio_program pio_vga_program = {
 // VGA Timing (640x480 @ 60Hz - standard? VGA text mode timing)
 // ============================================================================
 #ifndef VGA_SHIFT_PICTURE
-#define VGA_SHIFT_PICTURE 106
+#define VGA_SHIFT_PICTURE 144
 #endif
 
 #define VGA_CLK 25175000.0f
