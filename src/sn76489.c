@@ -43,14 +43,16 @@
 /* ── volume table ────────────────────────────────────────────────────────── */
 /*
  * 2 dB per step, 16 entries (15 = silence).
- * Values are in the range 0..8192 (13-bit) so that 4 channels summed
- * stay within int32, and the final >>2 fits int16.
+ * Max value 16384: four channels summed -> max acc = 65536,
+ * divided by >>2 in sn76489_tick -> max output = 16384 (50% of int16).
+ * This matches the ~50% level of SB16/Adlib (both attenuated >>1 in mixer),
+ * giving equal perceived loudness when mixed.
  */
 static const uint16_t vol_table[16] = {
-    8192, 6507, 5168, 4104,
-    3261, 2590, 2057, 1634,
-    1298, 1031,  819,  651,
-     517,  411,  326,    0
+    16384, 13014, 10338,  8211,
+     6523,  5181,  4115,  3269,
+     2597,  2063,  1638,  1301,
+     1034,   821,   652,     0
 };
 
 /* ── noise LFSR parity (feedback taps: bit0 XOR bit3) ───────────────────── */

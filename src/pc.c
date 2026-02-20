@@ -1,4 +1,5 @@
 #include "pc.h"
+#include "dss.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -6,7 +7,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <hardware/watchdog.h>
-
 
 #ifdef USEKVM
 #define cpu_raise_irq cpukvm_raise_irq
@@ -140,11 +140,17 @@ static u8 pc_io_read(void *o, int addr)
 		 * Bits 3-0: axes timeout (0 = timed out, no joystick)
 		 * Return 0xF0 to indicate axes have timed out (no joystick present) */
 		return 0xf0;
+	// Disney Sound Source
+	case 0x378:
+	case 0x379:
+		if (pc->dss_enabled)
+			return dss_in(addr);
+		return 0xFF;
 	/* LPT data ports (Covox): write-only DAC, reads return 0xFF */
-	case 0x378: case 0x278:
+	case 0x278:
 		return 0xff;
 	/* LPT status ports: bit7=nBusy(1=ready), bits6..3=1 (idle/ready) */
-	case 0x379: case 0x279:
+	case 0x279:
 		return 0xf8;
 	/* LPT control ports */
 	case 0x37a: case 0x27a:
@@ -375,15 +381,20 @@ static void pc_io_write(void *o, int addr, u8 val)
 			sn76489_write(pc->sn76489, val);
 		return;
 	/* Covox Speech Thing (parallel port DAC)
-	 * 0x378 = LPT1 data, 0x278 = LPT2 data.
-	 * Both mapped: software uses either depending on which LPT Covox is on. */
-	case 0x378: case 0x278:
+	 * 0x278 = LPT2 data. */
+	case 0x278:
 		if (pc->covox_enabled)
 			pc->covox_sample = (int16_t)((val - 128) << 6);
 		return;
+	// Disney Sound Source
+    case 0x378:
+    case 0x37A:
+		if (pc->dss_enabled)
+			dss_out(addr, val);
+		return;
 	/* LPT status/control ports are read-only - writes ignored */
 	case 0x379: case 0x279:
-	case 0x37a: case 0x27a:
+	case 0x27a:
 		return;
 	default:
 ///		fprintf(stderr, "out 0x%x => 0x%x\n", val, addr);
@@ -786,6 +797,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->tandy_enabled = 1;
 	pc->covox_enabled = 1;
 	pc->covox_sample  = 0;
+	pc->dss_enabled = 1;
 	pc->mouse_enabled = 1;
 
 	pc->port92 = 0x2;
@@ -852,29 +864,57 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 	}
 
 	// Tandy 3-Voice Sound (SN76489) - stereo int16 (only if enabled)
-	// tmpbuf is MIXER_BUF_LEN bytes; sn76489_callback uses 'free' bytes
-	// but free (stereo s16) can exceed MIXER_BUF_LEN, so clamp to buffer size.
+	// Uses a static buffer sized for a full audio frame to avoid truncation.
+	// tmpbuf is only MIXER_BUF_LEN bytes which is smaller than 'free' bytes
+	// for stereo output, so we use a dedicated static buffer here.
 	if (pc->sn76489 && pc->tandy_enabled) {
-		int tandy_len = free < MIXER_BUF_LEN ? free : MIXER_BUF_LEN;
-		memset(tmpbuf, 0, tandy_len);
-		sn76489_callback(pc->sn76489, tmpbuf, tandy_len);
-		int16_t *tandy = (int16_t *)tmpbuf;
-		for (int i = 0; i < tandy_len / 2; i++) {
-			int res = (int)d2[i] + (int)tandy[i];
+		// Static buffer: max 768 stereo int16 frames (> 735 TARGET_SAMPLES_PER_FRAME)
+		static int16_t tandy_buf[768 * 2];
+		int frames = free / 4;     // number of stereo frames needed
+		if (frames > 768) frames = 768;
+		int tandy_bytes = frames * 4;
+		memset(tandy_buf, 0, tandy_bytes);
+		sn76489_callback(pc->sn76489, (uint8_t *)tandy_buf, tandy_bytes);
+		for (int i = 0; i < frames * 2; i++) {
+			int res = (int)d2[i] + (int)tandy_buf[i];
 			if (res > 32767)  res = 32767;
 			if (res < -32768) res = -32768;
 			d2[i] = (int16_t)res;
 		}
 	}
 
-	// Covox Speech Thing - sample-and-hold DAC on LPT port (only if enabled)
-	if (pc->covox_enabled && pc->covox_sample != 0) {
+	// Covox Speech Thing - sample-and-hold DAC on LPT2 port (only if enabled)
+	// covox_sample decays toward silence between writes to avoid DC offset buzz
+	if (pc->covox_enabled) {
 		int16_t cv = pc->covox_sample;
-		for (int i = 0; i < free / 2; i++) {
-			int res = (int)d2[i] + (int)cv;
-			if (res > 32767)  res = 32767;
+		if (cv != 0) {
+			for (int i = 0; i < free / 2; i++) {
+				int res = (int)d2[i] + (int)cv;
+				if (res > 32767)  res = 32767;
+				if (res < -32768) res = -32768;
+				d2[i] = (int16_t)res;
+			}
+			// Decay toward silence: shift right each frame (~60ms to silence)
+			pc->covox_sample = (int16_t)(cv - (cv >> 4));
+			if (pc->covox_sample > -2 && pc->covox_sample < 2)
+				pc->covox_sample = 0;
+		}
+	}
+
+	// Disney Sound Source
+	if (pc->dss_enabled) {
+		for (int i = 0; i < free / 2; i += 2) {
+			int16_t cv = dss_sample_step();
+			// Left
+			int res = d2[i] + cv;
+			if (res > 32767) res = 32767;
 			if (res < -32768) res = -32768;
-			d2[i] = (int16_t)res;
+			d2[i] = res;
+			// Right
+			res = d2[i + 1] + cv;
+			if (res > 32767) res = 32767;
+			if (res < -32768) res = -32768;
+			d2[i + 1] = res;
 		}
 	}
 }

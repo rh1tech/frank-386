@@ -813,10 +813,11 @@ static bool init_emulator(void) {
     pc->sb16_enabled = config_get_soundblaster();
     pc->tandy_enabled = config_get_tandy();
     pc->covox_enabled = config_get_covox();
+    pc->dss_enabled = config_get_dss();
     pc->mouse_enabled = config_get_mouse();
-    DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, Tandy=%d, Covox=%d, Mouse=%d\n",
+    DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
               pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled,
-              pc->tandy_enabled, pc->covox_enabled, pc->mouse_enabled);
+              pc->tandy_enabled, pc->covox_enabled, pc->dss_enabled, pc->mouse_enabled);
 
     // Check if BIOS file exists before loading
     DBG_PRINT("Loading BIOS...\n");
@@ -999,14 +1000,14 @@ int main(void) {
     // VGA update timing
     uint64_t last_vga_update = 0;
     const uint64_t vga_interval_us = 16000; // ~60Hz
-
+#if THROTTLING
     // Frame rate throttling for audio sync
     // Target ~60fps to match audio processing rate (16666us per frame)
     uint64_t frame_start_time = time_us_64();
     const uint64_t target_frame_time_us = 16666; // 60Hz = 16.666ms per frame
     int frame_step_count = 0;
     const int steps_per_frame = 100; // Number of outer loop iterations per frame
-
+#endif
     // Retrace-based frame submission state
     static bool was_in_retrace = false;
     static uint16_t latched_start_addr = 0;
@@ -1119,6 +1120,7 @@ int main(void) {
         // Check for reset request
         if (pc->reset_request) {
             pc->reset_request = 0;
+            *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
             load_bios_and_reset(pc);
         }
 
@@ -1127,6 +1129,7 @@ int main(void) {
             settingsui_clear_restart();
             DBG_PRINT("Settings changed - triggering RP reset...\n");
             // Full hardware reset via watchdog
+            *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
             watchdog_reboot(0, 0, 0);
         }
 
@@ -1134,7 +1137,7 @@ int main(void) {
         if (pc->shutdown_state) {
             break;
         }
-
+#if THROTTLING
         // Frame rate throttling for audio synchronization
         frame_step_count++;
         if (frame_step_count >= steps_per_frame) {
@@ -1150,13 +1153,13 @@ int main(void) {
             // Reset frame timer for next frame
             frame_start_time = time_us_64();
         }
+#endif
     }
 
     DBG_PRINT("\nEmulation stopped.\n");
-
-    while (true) {
-        sleep_ms(1000);
-    }
-
+    *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
+    watchdog_reboot(0, 0, 0);
+    while (true);
+    __unreachable();
     return 0;
 }

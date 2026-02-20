@@ -69,6 +69,7 @@ typedef struct {
 	int pcspk_enabled;
 	int tandy_enabled;
 	int covox_enabled;
+	int dss_enabled;
 	int mouse_enabled;
 
 	I440FXState *i440fx;
