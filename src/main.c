@@ -997,9 +997,6 @@ int main(void) {
 
     DBG_PRINT("\nStarting emulation...\n");
 
-    // VGA update timing
-    uint64_t last_vga_update = 0;
-    const uint64_t vga_interval_us = 16000; // ~60Hz
 #if THROTTLING
     // Frame rate throttling for audio sync
     // Target ~60fps to match audio processing rate (16666us per frame)
@@ -1009,10 +1006,6 @@ int main(void) {
     const int steps_per_frame = 100; // Number of outer loop iterations per frame
 #endif
     // Retrace-based frame submission state
-    static bool was_in_retrace = false;
-    static uint16_t latched_start_addr = 0;
-    static uint8_t latched_panning = 0;
-    static int latched_line_compare = -1;
     static int last_vga_mode = -1;
 
     // Main emulation loop (Core 0)
@@ -1037,21 +1030,6 @@ int main(void) {
         for (int i = 0; i < 10; i++) {
             pc_step(pc);
         }
-// TODO: avoid it there (use vsync)
-        // Check retrace and submit frame (fast path)
-        // We must check this frequently to catch the VBLANK edge
-        bool in_retrace = vga_in_retrace(pc->vga);
-        // Latch values at the END of retrace (falling edge of VBLANK)
-        if (was_in_retrace && !in_retrace) {
-            // Text geometry:
-            // - visible cols from CRTC 0x01 (40/80)
-            // - stride in cells from CRTC 0x13 (offset) * 2
-            int cols = vga_get_text_cols(pc->vga);
-            int cr13 = vga_get_line_offset(pc->vga);   // CRTC offset register
-            int stride_cells = cr13 * 2;
-            vga_hw_submit_text_geom(cols, stride_cells);
-        }
-        was_in_retrace = in_retrace;
 
         // Poll keyboard less frequently (every 20 iterations ~5ms)
         // Keyboard events are buffered, so missing a few cycles is fine
@@ -1059,62 +1037,6 @@ int main(void) {
         if (++poll_counter >= 20) {
             poll_counter = 0;
             poll_keyboard();
-        }
-
-        // Update heavy VGA state periodically (~60Hz)
-        // Note: Audio processing is handled by Core 1 for better performance
-        uint64_t now = time_us_64();
-        if (now - last_vga_update >= vga_interval_us) {
-            last_vga_update = now;
-
-            // Update cursor
-            int cx, cy, cs, ce, cv;
-            vga_get_cursor_info(pc->vga, &cx, &cy, &cs, &ce, &cv);
-            int char_height = vga_get_char_height(pc->vga);
-            if (cv) {
-                vga_hw_set_cursor(cx, cy, cs, ce, char_height);
-                // Sync cursor blink phase with emulator
-                vga_hw_set_cursor_blink(vga_get_cursor_blink_phase(pc->vga));
-            } else {
-                vga_hw_set_cursor(-1, -1, 0, 0, 16);  // Hide cursor
-            }
-
-            // Update VGA mode
-            int vga_mode = vga_get_mode(pc->vga);
-            if (vga_mode != last_vga_mode) {
-                printf("[VGA_HW] Mode change: %d -> %d\n", last_vga_mode, vga_mode);
-                vga_hw_set_mode(vga_mode);
-                last_vga_mode = vga_mode;
-            }
-
-            // Update palette and graphics submode for graphics modes
-            if (vga_mode == 2) {
-                // Only update palette when it actually changed
-                if (vga_is_palette_dirty(pc->vga)) {
-                    vga_hw_set_palette(vga_get_palette(pc->vga));
-                }
-
-                int gfx_w, gfx_h;
-                int gfx_submode = vga_get_graphics_mode(pc->vga, &gfx_w, &gfx_h);
-                int line_offset = vga_get_line_offset(pc->vga);
-                static int last_submode = -1;
-                if (gfx_submode != last_submode) {
-                    printf("[VGA_HW] Graphics submode=%d %dx%d offset=%d\n",
-                           gfx_submode, gfx_w, gfx_h, line_offset);
-                    last_submode = gfx_submode;
-                }
-                vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
-
-                // For EGA mode, also update the 16-color palette
-                if (gfx_submode == 2) {
-                    uint8_t ega_pal[48];
-                    vga_get_palette16(pc->vga, ega_pal);
-                    vga_hw_set_palette16(ega_pal);
-                }
-            }
-
-            // For text mode, submit frame with current offset
-            // (graphics mode offset is now updated immediately via CRTC write hook)
         }
 
         // Check for reset request

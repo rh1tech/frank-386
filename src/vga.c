@@ -2332,7 +2332,7 @@ static void vga_initmode(VGAState *s)
 
 // Visible columns are derived from CRTC Horizontal Display End (index 0x01).
 // In text modes this is 39 (40 cols) or 79 (80 cols).
-int vga_get_text_cols(VGAState *s) {
+int __time_critical_func(vga_get_text_cols)(VGAState *s) {
     if (!s) return 80;
     int cols = (int)s->cr[0x01] + 1;
     if (cols == 40 || cols == 80) return cols;
@@ -2341,7 +2341,7 @@ int vga_get_text_cols(VGAState *s) {
 }
 
 /* Get current VGA mode: 0=blank, 1=text, 2=graphics */
-int vga_get_mode(VGAState *s)
+int __time_critical_func(vga_get_mode)(VGAState *s)
 {
     if (!(s->ar_index & 0x20)) {
         return 0;  // blank
@@ -2365,7 +2365,7 @@ uint8_t vga_get_panning(VGAState *s)
 }
 
 /* Get cursor info for external VGA drivers */
-void vga_get_cursor_info(VGAState *s, int *x, int *y, int *start, int *end, int *visible)
+void __time_critical_func(vga_get_cursor_info)(VGAState *s, int *x, int *y, int *start, int *end, int *visible)
 {
     if (!s) {
         if (x) *x = 0;
@@ -2401,13 +2401,13 @@ void vga_get_cursor(VGAState *s, int *x, int *y, int *start, int *end)
 }
 
 /* Get pointer to VGA DAC palette (768 bytes: 256 colors × 3 RGB values, each 0-63) */
-const uint8_t *vga_get_palette(VGAState *s)
+const uint8_t* __time_critical_func(vga_get_palette)(VGAState *s)
 {
     return s->palette;
 }
 
 /* Check if palette was modified since last call (clears the flag) */
-int vga_is_palette_dirty(VGAState *s)
+int __time_critical_func(vga_is_palette_dirty)(VGAState *s)
 {
     int dirty = s->palette_dirty;
     s->palette_dirty = 0;
@@ -2417,7 +2417,7 @@ int vga_is_palette_dirty(VGAState *s)
 /* Get EGA 16-color palette (applies AC palette register indirection)
  * Fills palette16 with 16 entries of RGB triplets (48 bytes total)
  */
-void vga_get_palette16(VGAState *s, uint8_t *palette16)
+void __time_critical_func(vga_get_palette16)(VGAState *s, uint8_t *palette16)
 {
     for (int i = 0; i < 16; i++) {
         int v = s->ar[i];
@@ -2436,7 +2436,7 @@ void vga_get_palette16(VGAState *s, uint8_t *palette16)
  * Returns: 0=text, 1=CGA, 2=EGA planar 16-color, 3=VGA 256-color (mode 13h)
  * Also fills in width, height if pointers are non-NULL
  */
-int vga_get_graphics_mode(VGAState *s, int *width, int *height)
+int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *height)
 {
     // Check if display is enabled
     if (!(s->ar_index & 0x20)) {
@@ -2521,7 +2521,7 @@ int vga_get_graphics_mode(VGAState *s, int *width, int *height)
 /* Get VGA line offset (bytes per scanline in video memory)
  * For EGA planar mode, this is the number of uint32_t words per line
  */
-int vga_get_line_offset(VGAState *s)
+int __time_critical_func(vga_get_line_offset)(VGAState *s)
 {
     // cr[0x13] is the line offset in words (2 bytes each)
     // For planar mode, each "word" is a 32-bit value (4 planes packed)
@@ -2558,7 +2558,7 @@ int vga_get_cursor_blink_phase(VGAState *s)
 
 /* Get character cell height (from CRT register 0x09 max scan line + 1)
  * Typically 8 for CGA-style modes or 16 for VGA text mode */
-int vga_get_char_height(VGAState *s)
+int __time_critical_func(vga_get_char_height)(VGAState *s)
 {
     if (!s) return 16;
     int cheight = (s->cr[0x09] & 0x1f) + 1;

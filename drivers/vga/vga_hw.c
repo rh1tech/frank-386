@@ -155,6 +155,26 @@ static int      frame_line_compare  = -1;
 // Debug counters
 static volatile uint32_t gfx_fallback_count = 0;
 
+
+static volatile int text_cols = 80;
+// Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
+// For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
+static volatile int text_stride_cells = 80;
+
+static volatile int pending_text_cols = 80;
+static volatile int pending_text_stride = 80;
+static volatile int text_geom_pending = 0;
+
+inline static void vga_hw_submit_text_geom(int cols, int stride_cells) {
+    if (cols != 40 && cols != 80)
+        return;
+    if (stride_cells <= 0 || stride_cells > 256)
+        return;
+    pending_text_cols = cols;
+    pending_text_stride = stride_cells;
+    text_geom_pending = 1;
+}
+
 // ============================================================================
 // Color Conversion
 // ============================================================================
@@ -168,7 +188,7 @@ static const uint8_t conv1[] = { 0b00, 0b01, 0b01, 0b01, 0b10, 0b11, 0b11, 0b11 
 
 // Convert 6-bit VGA DAC values (0-63) to 8-bit output with sync bits
 // Used for EGA/CGA palettes (no dithering)
-static uint8_t vga_color_to_output(uint8_t r6, uint8_t g6, uint8_t b6) {
+static inline uint8_t vga_color_to_output(uint8_t r6, uint8_t g6, uint8_t b6) {
     // Map 6-bit VGA colors to 2-bit per channel (RRGGBB in bits 0-5)
     // Bits 6-7 are sync: 0xC0 = no sync pulses during active video
     uint8_t r2 = r6 >> 4;  // 6-bit to 2-bit
@@ -608,25 +628,6 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     }
 }
 
-static volatile int text_cols = 80;
-// Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
-// For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
-static volatile int text_stride_cells = 80;
-
-static volatile int pending_text_cols = 80;
-static volatile int pending_text_stride = 80;
-static volatile int text_geom_pending = 0;
-
-void vga_hw_submit_text_geom(int cols, int stride_cells) {
-    if (cols != 40 && cols != 80)
-        return;
-    if (stride_cells <= 0 || stride_cells > 256)
-        return;
-    pending_text_cols = cols;
-    pending_text_stride = stride_cells;
-    text_geom_pending = 1;
-}
-
 // 80 cols: one uint16 = 2 pixels (left in low byte, right in high byte)
 // 40 cols: need true 2x horizontal scaling per pixel: A B -> A A B B
 static inline void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint16_t v) {
@@ -806,6 +807,23 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
         return;
     }
 #endif
+    // Check retrace and submit frame (fast path)
+    // We must check this frequently to catch the VBLANK edge
+    static bool was_in_retrace = false;
+    bool in_retrace = vga_in_retrace(vga_state);
+    // Latch values at the END of retrace (falling edge of VBLANK)
+    if (was_in_retrace && !in_retrace) {
+        // Text geometry:
+        // - visible cols from CRTC 0x01 (40/80)
+        // - stride in cells from CRTC 0x13 (offset) * 2
+        int cols = vga_get_text_cols(vga_state);
+        int cr13 = vga_get_line_offset(vga_state);   // CRTC offset register
+        int stride_cells = cr13 * 2;
+        vga_hw_submit_text_geom(cols, stride_cells);
+    }
+    was_in_retrace = in_retrace;
+
+
     // --- Верхнее поле ---
     if (line < ACTIVE_START) {
         uint32_t blank = TMPL_LINE | (TMPL_LINE<<8) | (TMPL_LINE<<16) | (TMPL_LINE<<24);
@@ -864,8 +882,52 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
     for (int i = 0; i < 160; i++) out32[i] = blank;
 }
 
-bool __time_critical_func(vga_hw_in_vblank)(void) {
-    return in_vblank;
+static inline void vga_hw_set_mode(int mode);
+
+static void __time_critical_func(vga_hw_new_frame)(void) {
+    static int last_vga_mode = -1;
+    // Update cursor
+    int cx, cy, cs, ce, cv;
+    vga_get_cursor_info(vga_state, &cx, &cy, &cs, &ce, &cv);
+    int char_height = vga_get_char_height(vga_state);
+    if (cv) {
+        vga_hw_set_cursor(cx, cy, cs, ce, char_height);
+        // Sync cursor blink phase with emulator
+        cursor_blink_state = vga_get_cursor_blink_phase(vga_state);
+    } else {
+        vga_hw_set_cursor(-1, -1, 0, 0, 16);  // Hide cursor
+    }
+
+    // Update VGA mode
+    int vga_mode = vga_get_mode(vga_state);
+    if (vga_mode != last_vga_mode) {
+        vga_hw_set_mode(vga_mode);
+        last_vga_mode = vga_mode;
+    }
+
+    // Update palette and graphics submode for graphics modes
+    if (vga_mode == 2) {
+        // Only update palette when it actually changed
+        if (vga_is_palette_dirty(vga_state)) {
+            vga_hw_set_palette(vga_get_palette(vga_state));
+        }
+
+        int gfx_w, gfx_h;
+        int gfx_submode = vga_get_graphics_mode(vga_state, &gfx_w, &gfx_h);
+        int line_offset = vga_get_line_offset(vga_state);
+        static int last_submode = -1;
+        if (gfx_submode != last_submode) {
+            last_submode = gfx_submode;
+        }
+        vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
+
+        // For EGA mode, also update the 16-color palette
+        if (gfx_submode == 2) {
+            uint8_t ega_pal[48];
+            vga_get_palette16(vga_state, ega_pal);
+            vga_hw_set_palette16(ega_pal);
+        }
+    }
 }
 
 static void __isr __time_critical_func(dma_handler_vga)(void) {
@@ -875,7 +937,7 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
     if (current_line >= N_LINES_TOTAL) {
         current_line = 0;
         frame_count++;
-        // Note: cursor_blink_state is now set externally via vga_hw_set_cursor_blink()
+        vga_hw_new_frame();
     }
     
     in_vblank = (current_line >= N_LINES_VISIBLE);
@@ -1076,7 +1138,7 @@ void vga_hw_init(void) {
     DBG_PRINT("  VGA started (640x400 text mode, IRQ priority=0x00)!\n");
 }
 
-void vga_hw_set_mode(int mode) {
+static inline void vga_hw_set_mode(int mode) {
     // Ignore mode 0 (blank): this is a transient state the BIOS sets
     // while reprogramming registers during mode switches.  If we apply
     // it we permanently black out the display until the next reboot.
@@ -1091,7 +1153,7 @@ void vga_hw_set_mode(int mode) {
     }
 }
 
-void vga_hw_set_cursor(int x, int y, int start, int end, int char_height) {
+void __time_critical_func(vga_hw_set_cursor)(int x, int y, int start, int end, int char_height) {
     cursor_x = x;
     cursor_y = y;
     // Scale cursor scanlines from emulated char_height to our 16-line font
@@ -1106,10 +1168,6 @@ void vga_hw_set_cursor(int x, int y, int start, int end, int char_height) {
         cursor_start = start;
         cursor_end = end;
     }
-}
-
-void vga_hw_set_cursor_blink(int blink_phase) {
-    cursor_blink_state = blink_phase;
 }
 
 // These setters are no longer used — ISR reads VGA registers directly.
@@ -1137,7 +1195,7 @@ void vga_hw_set_palette(const uint8_t *palette_data) {
 
 // Update EGA 16-color palette from AC palette registers
 // palette16_data is 48 bytes (16 entries × 3 bytes RGB, each 0-63)
-void vga_hw_set_palette16(const uint8_t *palette16_data) {
+void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
     for (int i = 0; i < 16; i++) {
         uint8_t r6 = palette16_data[i * 3 + 0];
         uint8_t g6 = palette16_data[i * 3 + 1];
@@ -1147,7 +1205,7 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
 }
 
 // Set graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
-void vga_hw_set_gfx_mode(int submode, int width, int height, int line_offset) {
+void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
     vdbg_mode_sub = (uint8_t)((2 << 4) | (submode & 0xF));
     gfx_submode = submode;
     gfx_width = width;
