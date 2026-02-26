@@ -915,6 +915,7 @@ static void vga_graphic_refresh(VGAState *s,
             int x1 = x / xdiv;
             uint32_t color;
             if (shift_control == 0) {
+#if 0
                 static int ega_debug = 0;
                 if (ega_debug < 3 && x == 0 && y == 0) {
                     printf("[EGA] w=%d h=%d xdiv=%d line_offset=%d addr1=0x%x\n",
@@ -925,6 +926,7 @@ static void vga_graphic_refresh(VGAState *s,
                            vram[0], vram[1], vram[2], vram[3], vram[4], vram[5], vram[6], vram[7]);
                     ega_debug++;
                 }
+#endif
                 int k = ((vram[addr + 4 * (x1 >> 3)] >> (7 - (x1 & 7))) & 1) << 0;
                 k |= ((vram[addr + 4 * (x1 >> 3) + 1] >> (7 - (x1 & 7))) & 1) << 1;
                 k |= ((vram[addr + 4 * (x1 >> 3) + 2] >> (7 - (x1 & 7))) & 1) << 2;
@@ -935,12 +937,14 @@ static void vga_graphic_refresh(VGAState *s,
                 /* Check if this is CGA 640x200 2-color mode (1bpp) vs 320x200 4-color (2bpp)
                  * Use original CRTC width to distinguish: 640 = 1bpp, 320 = 2bpp */
                 int crtc_width = (s->cr[0x01] + 1) * 8;
+#if 0
                 static int cga_debug = 0;
                 if (cga_debug < 5 && x == 0 && y == 0) {
                     printf("[CGA] shift_control=%d crtc_width=%d w=%d xdiv=%d cr17=%02x sr01=%02x\n",
                            shift_control, crtc_width, w, xdiv, s->cr[0x17], s->sr[0x01]);
                     cga_debug++;
                 }
+#endif
                 if (crtc_width >= 640) {
                     /* CGA mode 6: 640x200, 1 bit per pixel, 8 pixels per byte
                      * All pixels in plane 0 only, so don't add plane offset */

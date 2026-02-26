@@ -8,23 +8,6 @@
 #include "i386.h"
 #include "ff.h"
 
-#undef printf
-#if DISK_LOG
-#define printf(...) do { \
-    FIL _df; \
-    char _buf[128]; \
-    UINT _bw; \
-    snprintf(_buf, sizeof(_buf), __VA_ARGS__); \
-    if (f_open(&_df, "/386.log", FA_OPEN_ALWAYS | FA_WRITE) == FR_OK) { \
-        f_lseek(&_df, f_size(&_df)); \
-        f_write(&_df, _buf, strlen(_buf), &_bw); \
-        f_close(&_df); \
-    } \
-} while(0)
-#else
-#define printf(...) do { } while(0)
-#endif
-
 extern FATFS fs;
 
 int hdcount = 0, fdcount = 0;
@@ -107,7 +90,7 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     if (is_vhd) {
         // Fixed VHD: subtract 512-byte footer
         usable_size -= 512;
-        printf("disk: '%s': VHD detected, data size %u bytes\n", pathname, (unsigned)usable_size);
+        //printf("disk: '%s': VHD detected, data size %u bytes\n", pathname, (unsigned)usable_size);
     }
 
     // Validate size constraints
@@ -181,11 +164,11 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
 
     // Track filename for disk UI
     disk_set_filename(drivenum, pathname);
-
+/*
     printf("disk: '%s' -> drive %d (%s, %uC/%uH/%uS, %u KB)\n",
            pathname, drivenum, drivenum >= 2 ? "HDD" : "FDD",
            cyls, heads, sects, (unsigned)(usable_size / 1024));
-
+*/
     return 1;
 }
 
@@ -375,12 +358,8 @@ void diskhandler(CPUI386 *cpu) {
     uint8_t drivenum = cpu_get_dl(cpu);
     uint8_t ah = cpu_get_ah(cpu);
 
-    printf("INT13: AH=%02X DL=%02X\n", ah, drivenum);
-
     // Normalize drivenum for hard drives
     if (drivenum & 0x80) drivenum -= 126;
-
-    printf("INT13: AH=%02X drivenum=%d inserted=%d\n", ah, drivenum, disk[drivenum].inserted);
 
     // Handle the interrupt service based on the function requested in AH
     switch (ah) {
@@ -438,9 +417,9 @@ void diskhandler(CPUI386 *cpu) {
                 cpu_set_dh(cpu, disk[drivenum].heads - 1);
 // TODO: DDP
                 // ES:DI = 0000:0000 (нет таблицы параметров)
-                cpu->seg[0].sel  = 0; // ES = 0
-                cpu->seg[0].base = 0;
-                cpu->gprx[7].r16 = 0; // DI = 0
+//                cpu->seg[0].sel  = 0; // ES = 0
+//                cpu->seg[0].base = 0;
+//                cpu->gprx[7].r16 = 0; // DI = 0
 
                 // Set DL and BL for floppy or hard drive
                 if (cpu_get_dl(cpu) < 2) {
