@@ -8,6 +8,23 @@
 #include "i386.h"
 #include "ff.h"
 
+#undef printf
+#if DISK_LOG
+#define printf(...) do { \
+    FIL _df; \
+    char _buf[128]; \
+    UINT _bw; \
+    snprintf(_buf, sizeof(_buf), __VA_ARGS__); \
+    if (f_open(&_df, "/386.log", FA_OPEN_ALWAYS | FA_WRITE) == FR_OK) { \
+        f_lseek(&_df, f_size(&_df)); \
+        f_write(&_df, _buf, strlen(_buf), &_bw); \
+        f_close(&_df); \
+    } \
+} while(0)
+#else
+#define printf(...) do { } while(0)
+#endif
+
 extern FATFS fs;
 
 int hdcount = 0, fdcount = 0;
@@ -356,11 +373,14 @@ void diskhandler(CPUI386 *cpu) {
     disk_mem[0x475] = hdcount;
 
     uint8_t drivenum = cpu_get_dl(cpu);
+    uint8_t ah = cpu_get_ah(cpu);
+
+    printf("INT13: AH=%02X DL=%02X\n", ah, drivenum);
 
     // Normalize drivenum for hard drives
     if (drivenum & 0x80) drivenum -= 126;
 
-    uint8_t ah = cpu_get_ah(cpu);
+    printf("INT13: AH=%02X drivenum=%d inserted=%d\n", ah, drivenum, disk[drivenum].inserted);
 
     // Handle the interrupt service based on the function requested in AH
     switch (ah) {
@@ -416,11 +436,16 @@ void diskhandler(CPUI386 *cpu) {
                 cpu_set_ch(cpu, disk[drivenum].cyls - 1);
                 cpu_set_cl(cpu, (disk[drivenum].sects & 63) + ((disk[drivenum].cyls / 256) * 64));
                 cpu_set_dh(cpu, disk[drivenum].heads - 1);
+// TODO: DDP
+                // ES:DI = 0000:0000 (нет таблицы параметров)
+                cpu->seg[0].sel  = 0; // ES = 0
+                cpu->seg[0].base = 0;
+                cpu->gprx[7].r16 = 0; // DI = 0
 
                 // Set DL and BL for floppy or hard drive
                 if (cpu_get_dl(cpu) < 2) {
                     cpu_set_bl(cpu, 4);  // Floppy
-                    cpu_set_dl(cpu, 2);
+                    cpu_set_dl(cpu, 2);  // We have 2 drives
                 } else {
                     cpu_set_dl(cpu, hdcount);  // Hard disk
                 }
@@ -429,7 +454,18 @@ void diskhandler(CPUI386 *cpu) {
                 cpu_set_ah(cpu, 0xAA);  // Error code for no disk inserted
             }
             break;
-
+/* TODO:
+        case 0x41:  // Check Extensions Present
+            if (drivenum >= 2) {
+                cpu_set_ah(cpu, 0x30);  // version 3.0
+                cpu_set_bx(cpu, 0xAA55);
+                cpu_set_cx(cpu, 0x0007);  // поддерживаем функции 1,2,3
+                cpu_set_cf(cpu, 0);
+            } else {
+                cpu_set_cf(cpu, 1);
+            }
+            break;
+*/
         default:  // Unknown function requested
             cpu_set_cf(cpu, 1);  // Error
             break;

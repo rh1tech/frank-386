@@ -8,6 +8,24 @@
 #include <unistd.h>
 #include <hardware/watchdog.h>
 
+#undef printf
+#if DISK_LOG
+#include "ff.h"
+#define printf(...) do { \
+    FIL _df; \
+    char _buf[128]; \
+    UINT _bw; \
+    snprintf(_buf, sizeof(_buf), __VA_ARGS__); \
+    if (f_open(&_df, "/386.log", FA_OPEN_ALWAYS | FA_WRITE) == FR_OK) { \
+        f_lseek(&_df, f_size(&_df)); \
+        f_write(&_df, _buf, strlen(_buf), &_bw); \
+        f_close(&_df); \
+    } \
+} while(0)
+#else
+#define printf(...) do { } while(0)
+#endif
+
 #ifdef USEKVM
 #define cpu_raise_irq cpukvm_raise_irq
 #define cpu_get_cycle cpukvm_get_cycle
@@ -723,7 +741,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 		uint8_t drivenum = (i < 2) ? (0x80 + i) : (0x80 + i);
 		insertdisk(drivenum, disks[i]);
 	}
-
+	printf("pc_new: hdcount=%d after HDD insert\n", hdcount);
 	/* Tell SeaBIOS about hard drives via CMOS so it sets up INT 13h
 	 * and BDA 0x475.  Without this the BIOS never probes our INT 13h
 	 * handler and DOS sees zero hard drives.
@@ -744,7 +762,16 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 		}
 		if (cmos12)
 			cmos_set(pc->cmos, 0x12, cmos12);
+		// Keep BDA hard drive count
+	    mem[0x475] = hdcount;
 	}
+	/* we have emulation for 2 FDDs (CMOS 0x10):
+		биты 7-4 = тип A:
+		биты 3-0 = тип B:
+		значение 4 = 1.44MB 3.5"
+	*/
+	cmos_set(pc->cmos, 0x10, 0x44); // A: = 1.44MB, B: = 1.44MB
+	cmos_set(pc->cmos, 0x14, 0x41); // бит 0 = флоппи есть, биты 7-6 = 01 = два дисковода
 
 	int piix3_devfn;
 	pc->i440fx = i440fx_init(&pc->pcibus, &piix3_devfn);
