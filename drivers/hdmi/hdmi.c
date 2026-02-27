@@ -77,9 +77,12 @@ static uint32_t irq_inx = 0;
 
 //функции и константы HDMI
 
-#define BASE_HDMI_CTRL_INX (251)
-//программа конвертации адреса
+#define HDMI_CTRL_0 (252)
+#define HDMI_CTRL_1 (253)
+#define HDMI_CTRL_2 (254)
+#define HDMI_CTRL_3 (255)
 
+//программа конвертации адреса
 uint16_t pio_program_instructions_conv_HDMI[] = {
     0x80a0, //  0: pull   block
     0x40e8, //  1: in     osr, 8
@@ -217,6 +220,9 @@ static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t 
     return ptr;
 }
 
+#define is_hdmi_sync(c) (c == HDMI_CTRL_0 || c == HDMI_CTRL_1 || c == HDMI_CTRL_2 || c == HDMI_CTRL_3)
+#define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (c & 0x7F) : c; }
+
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
     uint32_t char_row = line >> 4; // div 16
     uint32_t glyph_line = line & 15;
@@ -248,19 +254,20 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
             register uint8_t bg_color0 = bg_color1 >> 4;
             register uint8_t fg_color1 = fg_color0 << 4;
             if (!double_h) {
-                *output_buffer++ = ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0);
+                ob( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
             } else {
-                *output_buffer++ = ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000001) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b00000010) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00000100) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b00001000) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00010000) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b00100000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b01000000) ? fg_color0 : bg_color0);
-                *output_buffer++ = ((glyph & 0b10000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0);
+                // TODO: optimize it
+                ob( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000001) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b00000010) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00000100) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b00001000) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00010000) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b00100000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b01000000) ? fg_color0 : bg_color0) );
+                ob( ((glyph & 0b10000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
             }
         }
     }
@@ -283,11 +290,10 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
     register size_t x = 0;
     while (activ_buf_end > output_buffer) {
         if (input_buffer < input_buffer_end) {
-            register uint8_t c = input_buffer[x++];
-            *output_buffer++ = c >= BASE_HDMI_CTRL_INX ? 255 : c;
+            ob( input_buffer[x++] );
         }
         else {
-            *output_buffer++ = 255;
+            ob(0);
         }
     }
 }
@@ -314,12 +320,12 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
 
         // --- Верхнее поле ---
         if (line < (uint32_t)active_start) {
-            nf_memset(output_buffer, 255, SCREEN_WIDTH);
+            nf_memset(output_buffer, 0, SCREEN_WIDTH);
             goto f;
         }
         // --- Нижнее поле ---
         if (line >= (uint32_t)active_end) {
-            nf_memset(output_buffer, 255, SCREEN_WIDTH);
+            nf_memset(output_buffer, 0, SCREEN_WIDTH);
             goto f;
         }
         render_line(line - active_start, output_buffer);
@@ -328,9 +334,9 @@ f:
         //для выравнивания синхры
         // --|_|---|_|---|_|----
         //---|___________|-----
-        nf_memset(activ_buf + 48,BASE_HDMI_CTRL_INX, 24);
-        nf_memset(activ_buf,BASE_HDMI_CTRL_INX + 1, 48);
-        nf_memset(activ_buf + 392,BASE_HDMI_CTRL_INX, 8);
+        nf_memset(activ_buf + 48, HDMI_CTRL_0, 24);
+        nf_memset(activ_buf, HDMI_CTRL_1, 48);
+        nf_memset(activ_buf + 392, HDMI_CTRL_0, 8);
     }
     else {
         if ((line >= 490) && (line < 492)) {
@@ -338,14 +344,14 @@ f:
             //для выравнивания синхры
             // --|_|---|_|---|_|----
             //---|___________|-----
-            nf_memset(activ_buf + 48,BASE_HDMI_CTRL_INX + 2, 352);
-            nf_memset(activ_buf,BASE_HDMI_CTRL_INX + 3, 48);
+            nf_memset(activ_buf + 48, HDMI_CTRL_2, 352);
+            nf_memset(activ_buf, HDMI_CTRL_3, 48);
         }
         else {
             //ССИ без изображения
             //для выравнивания синхры
-            nf_memset(activ_buf + 48,BASE_HDMI_CTRL_INX, 352);
-            nf_memset(activ_buf,BASE_HDMI_CTRL_INX + 1, 48);
+            nf_memset(activ_buf + 48, HDMI_CTRL_0, 352);
+            nf_memset(activ_buf, HDMI_CTRL_1, 48);
         };
 
         // Line N_LINES_TOTAL-4 (521): late in vblank, just before DMA needs line 0.
@@ -451,7 +457,6 @@ static inline bool hdmi_init() {
         for (int c2 = 0; c2 < 16; ++c2) {
             const uint8_t* c23 = cga_colors[c2];
             int ci = c1 << 4 | c2; // compund index
-            // 6-бит (0-63) → 8-бит (0-255)
             graphics_set_palette_hdmi2(
                 c13[0] << 2, c13[1] << 2, c13[2] << 2,
                 c23[0] << 2, c23[1] << 2, c23[2] << 2,
@@ -460,29 +465,24 @@ static inline bool hdmi_init() {
         }
     }
 
-    //255 - цвет фона
-    graphics_set_palette_hdmi(0, 0, 0, 255);
-
-
     //BASE_HDMI_CTRL_INX +3 служебные данные(синхра) напрямую вносим в массив -конвертер
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     const uint16_t b0 = 0b1101010100;
     const uint16_t b1 = 0b0010101011;
     const uint16_t b2 = 0b0101010100;
     const uint16_t b3 = 0b1010101011;
-    const int base_inx = BASE_HDMI_CTRL_INX;
 
-    conv_color64[2 * base_inx + 0] = get_ser_diff_data(b0, b0, b3);
-    conv_color64[2 * base_inx + 1] = get_ser_diff_data(b0, b0, b3);
+    conv_color64[2 * HDMI_CTRL_0 + 0] = get_ser_diff_data(b0, b0, b3);
+    conv_color64[2 * HDMI_CTRL_0 + 1] = get_ser_diff_data(b0, b0, b3);
 
-    conv_color64[2 * (base_inx + 1) + 0] = get_ser_diff_data(b0, b0, b2);
-    conv_color64[2 * (base_inx + 1) + 1] = get_ser_diff_data(b0, b0, b2);
+    conv_color64[2 * HDMI_CTRL_1 + 0] = get_ser_diff_data(b0, b0, b2);
+    conv_color64[2 * HDMI_CTRL_1 + 1] = get_ser_diff_data(b0, b0, b2);
 
-    conv_color64[2 * (base_inx + 2) + 0] = get_ser_diff_data(b0, b0, b1);
-    conv_color64[2 * (base_inx + 2) + 1] = get_ser_diff_data(b0, b0, b1);
+    conv_color64[2 * HDMI_CTRL_2 + 0] = get_ser_diff_data(b0, b0, b1);
+    conv_color64[2 * HDMI_CTRL_2 + 1] = get_ser_diff_data(b0, b0, b1);
 
-    conv_color64[2 * (base_inx + 3) + 0] = get_ser_diff_data(b0, b0, b0);
-    conv_color64[2 * (base_inx + 3) + 1] = get_ser_diff_data(b0, b0, b0);
+    conv_color64[2 * HDMI_CTRL_3 + 0] = get_ser_diff_data(b0, b0, b0);
+    conv_color64[2 * HDMI_CTRL_3 + 1] = get_ser_diff_data(b0, b0, b0);
 
     //настройка PIO SM для конвертации
 
@@ -650,7 +650,7 @@ static inline bool hdmi_init() {
 };
 
 void graphics_set_palette_hdmi(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
-    if ((i >= BASE_HDMI_CTRL_INX) && (i != 255)) return; //не записываем "служебные" цвета
+    if is_hdmi_sync(i) return; //не записываем "служебные" цвета
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     conv_color64[i * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
     conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ 0x0003ffffffffffffl;
@@ -661,7 +661,7 @@ void graphics_set_palette_hdmi2(
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
     uint8_t i
 ) {
-    if ((i >= BASE_HDMI_CTRL_INX) && (i != 255)) return;
+    if is_hdmi_sync(i) return; //не записываем "служебные" цвета
     uint64_t* conv_color64 = (uint64_t*)conv_color;
     uint64_t c1 = get_ser_diff_data(tmds_encoder(R1), tmds_encoder(G1), tmds_encoder(B1));
     uint64_t c2 = get_ser_diff_data(tmds_encoder(R2), tmds_encoder(G2), tmds_encoder(B2));
