@@ -7,7 +7,9 @@
 #include <pico/time.h>
 #include <pico/multicore.h>
 #include <hardware/clocks.h>
+#include "vga.h"
 #include "hdmi.h"
+#include "font8x16.h"
 
 //PIO параметры
 static uint offs_prg0 = 0;
@@ -18,7 +20,7 @@ static int SM_video = -1;
 static int SM_conv = -1;
 
 //активный видеорежим
-extern enum graphics_mode_t graphics_mode;
+extern int current_mode;  // Default text mode
 
 //буфер  палитры 256 цветов в формате R8G8B8
 extern uint32_t palette_a[256];
@@ -28,6 +30,17 @@ extern uint32_t palette_a[256];
 
 #define GFX_BUFFER_SIZE (256 * 1024)
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
+extern volatile int text_cols;
+// Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
+// For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
+extern volatile int text_stride_cells;
+// Direct pointer to VGA register state (set once by core0 after vga_init).
+// ISR reads cr[], ar[] directly at the right moment — no volatile intermediates.
+extern VGAState *vga_state;
+// Per-frame values latched by ISR from vga_state->cr[] late in vblank
+extern uint16_t frame_vram_offset;
+extern uint8_t  frame_pixel_panning;
+extern int      frame_line_compare;
 
 // #define HDMI_WIDTH 480 //480 Default
 // #define HDMI_HEIGHT 644 //524 Default
@@ -197,6 +210,53 @@ static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t 
     return ptr;
 }
 
+static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *output_buffer) {
+    uint32_t char_row = line / 16;
+    uint32_t glyph_line = line & 15;
+
+    int cols = text_cols;
+    int double_h = (cols == 40);  // 40 columns => 2x horizontal scaling
+
+    if (char_row < 25) {
+        // Use snapped start address for the frame (prevents mid-frame tearing).
+        const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
+        const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
+
+        for (int col = 0; col < cols; col++) {
+            uint16_t cell = text_row[col];
+            uint8_t ch   = (uint8_t)(cell & 0xFF);
+            uint8_t attr = (uint8_t)(cell >> 8);
+            uint8_t glyph = font_8x16[ch * 16 + glyph_line];
+        /* TODO:
+            uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
+
+            if (cursor_blink_state && col == cursor_x &&
+                char_row == (uint32_t)cursor_y &&
+                glyph_line >= (uint32_t)cursor_start &&
+                glyph_line <= (uint32_t)cursor_end) {
+                glyph = 0xFF;
+            }
+
+            // 8px glyph -> 4x uint16 (каждый uint16 = 2 пикселя)
+            uint16_t v;
+            if (!double_h) {
+                v = pal[glyph & 3];           *out16++ = v;
+                v = pal[(glyph >> 2) & 3];    *out16++ = v;
+                v = pal[(glyph >> 4) & 3];    *out16++ = v;
+                v = pal[(glyph >> 6) & 3];    *out16++ = v;
+            } else {
+                // true per-pixel doubling: (A,B) -> (A,A,B,B)
+                v = pal[glyph & 3];           out16_2x_per_pixel(&out16, v);
+                v = pal[(glyph >> 2) & 3];    out16_2x_per_pixel(&out16, v);
+                v = pal[(glyph >> 4) & 3];    out16_2x_per_pixel(&out16, v);
+                v = pal[(glyph >> 6) & 3];    out16_2x_per_pixel(&out16, v);
+            }*/
+        }
+    }
+}
+
+void pre_render_line(void);
+
 static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
     static uint32_t inx_buf_dma;
     static uint line = 0;
@@ -204,6 +264,8 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
 
     dma_hw->ints0 = 1u << dma_chan_ctrl;
     dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[inx_buf_dma & 1], false);
+
+    pre_render_line();
 
     if (line++ > 524) line = 0;
 
@@ -258,6 +320,21 @@ f:
             nf_memset(activ_buf + 48,BASE_HDMI_CTRL_INX, 352);
             nf_memset(activ_buf,BASE_HDMI_CTRL_INX + 1, 48);
         };
+
+        // Line N_LINES_TOTAL-4 (521): late in vblank, just before DMA needs line 0.
+        // Wolf3D has already written the new page address to CRTC by now.
+        // Read cr[] and ar[] directly — no intermediate volatile copies.
+        if (line == 521) {
+            if (vga_state) {
+                const uint8_t *cr = vga_state->cr;
+                frame_vram_offset = (uint16_t)((cr[0x0c] << 8) | cr[0x0d]);
+                frame_pixel_panning = vga_state->ar[0x13] & 0x07;
+                int lc = (int)cr[0x18]
+                       | (((int)cr[0x07] & 0x10) << 4)
+                       | (((int)cr[0x09] & 0x40) << 3);
+                frame_line_compare = (lc > 0 && lc < 480) ? lc : -1;
+            }
+        }
     }
 }
 

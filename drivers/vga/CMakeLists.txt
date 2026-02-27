@@ -2,6 +2,7 @@ add_library(vga INTERFACE)
 
 target_sources(vga INTERFACE
         ${CMAKE_CURRENT_LIST_DIR}/vga_hw.c
+        ${CMAKE_CURRENT_LIST_DIR}/font8x16.c
         ${CMAKE_CURRENT_LIST_DIR}/test_pins.c
 )
 

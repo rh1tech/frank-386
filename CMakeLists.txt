@@ -165,6 +165,7 @@ add_library(video_driver
     drivers/vga/test_pins.c
     drivers/vga/vga_hw.c
     drivers/vga/vga_osd.c
+    drivers/vga/font8x16.c
 )
 target_include_directories(video_driver PUBLIC drivers/vga drivers/hdmi src)
 target_compile_definitions(video_driver PRIVATE

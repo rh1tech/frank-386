@@ -112,9 +112,6 @@ volatile uint8_t vdbg_vblank = 0;      // last vblank state seen at 0x3DA read
 volatile uint8_t vdbg_palette_ok = 0;  // set when palette first loaded
 volatile uint8_t vdbg_vram_ok = 0;     // set when first gfx VRAM write seen
 
-// Text mode palette (16 colors -> 6-bit VGA)
-static uint8_t txt_palette[16];
-
 // Fast text palette for 2-bit pixel pairs
 static uint16_t txt_palette_fast[256 * 4];
 
@@ -132,7 +129,7 @@ static uint8_t ega_palette[16];
 static uint8_t cga_palette[4];
 
 // Current video mode (0=blank, 1=text, 2=graphics)
-static int current_mode = 1;  // Default text mode
+int current_mode = 1;  // Default text mode
 static volatile int pending_mode = -1;  // Pending mode change (-1 = none)
 
 // Graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
@@ -149,21 +146,21 @@ static int cursor_blink_state = 1;
 
 // Direct pointer to VGA register state (set once by core0 after vga_init).
 // ISR reads cr[], ar[] directly at the right moment — no volatile intermediates.
-static VGAState *vga_state = NULL;
+VGAState *vga_state = NULL;
 
 // Per-frame values latched by ISR from vga_state->cr[] late in vblank
-static uint16_t frame_vram_offset   = 0;
-static uint8_t  frame_pixel_panning = 0;
-static int      frame_line_compare  = -1;
+uint16_t frame_vram_offset   = 0;
+uint8_t  frame_pixel_panning = 0;
+int      frame_line_compare  = -1;
 
 // Debug counters
 static volatile uint32_t gfx_fallback_count = 0;
 
 
-static volatile int text_cols = 80;
+volatile int text_cols = 80;
 // Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
 // For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
-static volatile int text_stride_cells = 80;
+volatile int text_stride_cells = 80;
 
 static volatile int pending_text_cols = 80;
 static volatile int pending_text_stride = 80;
@@ -230,27 +227,23 @@ static void init_palettes(void) {
     // Standard 16-color text palette (CGA colors)
     // Each entry is 6-bit: RRGGBB
     static const uint8_t cga_colors[16] = {
-        0x00,  // 0: Black
-        0x02,  // 1: Blue
-        0x08,  // 2: Green
-        0x0A,  // 3: Cyan
-        0x20,  // 4: Red
-        0x22,  // 5: Magenta
-        0x28,  // 6: Brown (dark yellow)
-        0x2A,  // 7: Light Gray
-        0x15,  // 8: Dark Gray
-        0x17,  // 9: Light Blue
-        0x1D,  // 10: Light Green
-        0x1F,  // 11: Light Cyan
-        0x35,  // 12: Light Red
-        0x37,  // 13: Light Magenta
-        0x3D,  // 14: Yellow
-        0x3F,  // 15: White
+        0x00 | TMPL_LINE,  // 0: Black
+        0x02 | TMPL_LINE,  // 1: Blue
+        0x08 | TMPL_LINE,  // 2: Green
+        0x0A | TMPL_LINE,  // 3: Cyan
+        0x20 | TMPL_LINE,  // 4: Red
+        0x22 | TMPL_LINE,  // 5: Magenta
+        0x28 | TMPL_LINE,  // 6: Brown (dark yellow)
+        0x2A | TMPL_LINE,  // 7: Light Gray
+        0x15 | TMPL_LINE,  // 8: Dark Gray
+        0x17 | TMPL_LINE,  // 9: Light Blue
+        0x1D | TMPL_LINE,  // 10: Light Green
+        0x1F | TMPL_LINE,  // 11: Light Cyan
+        0x35 | TMPL_LINE,  // 12: Light Red
+        0x37 | TMPL_LINE,  // 13: Light Magenta
+        0x3D | TMPL_LINE,  // 14: Yellow
+        0x3F | TMPL_LINE,  // 15: White
     };
-    
-    for (int i = 0; i < 16; i++) {
-        txt_palette[i] = cga_colors[i] | TMPL_LINE;
-    }
     
     // Build fast palette for text rendering
     // Each entry handles 2 pixels (foreground/background combinations)
@@ -259,8 +252,8 @@ static void init_palettes(void) {
     // Index XY (X=bit7, Y=bit6): X is left pixel, Y is right pixel
     // Output 16-bit: low byte outputs first (left), high byte outputs second (right)
     for (int i = 0; i < 256; i++) {
-        uint8_t fg = txt_palette[i & 0x0F];
-        uint8_t bg = txt_palette[i >> 4];
+        uint8_t fg = cga_colors[i & 0x0F];
+        uint8_t bg = cga_colors[i >> 4];
         
         // Index bits: [left_pixel][right_pixel]
         // For little-endian 16-bit output: low byte = left, high byte = right
@@ -810,15 +803,8 @@ static void __time_critical_func(render_vdbg_line)(uint32_t line, uint32_t *outp
     }
 }
 #endif
-// Dispatch to appropriate renderer based on current mode
-static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_buffer) {
-#if DBG_OVERLAY
-    // Visual debug overlay: always show status in top 16 scanlines
-    if (line < 16) {
-        render_vdbg_line(line, output_buffer);
-        return;
-    }
-#endif
+
+void __time_critical_func(pre_render_line)(void) {
     // Check retrace and submit frame (fast path)
     // We must check this frequently to catch the VBLANK edge
     static bool was_in_retrace = false;
@@ -834,8 +820,18 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
         vga_hw_submit_text_geom(cols, stride_cells);
     }
     was_in_retrace = in_retrace;
+}
 
-
+// Dispatch to appropriate renderer based on current mode
+static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_buffer) {
+    pre_render_line();
+#if DBG_OVERLAY
+    // Visual debug overlay: always show status in top 16 scanlines
+    if (line < 16) {
+        render_vdbg_line(line, output_buffer);
+        return;
+    }
+#endif
     // --- Верхнее поле ---
     if (line < (uint32_t)active_start) {
         uint32_t blank = TMPL_LINE | (TMPL_LINE<<8) | (TMPL_LINE<<16) | (TMPL_LINE<<24);
