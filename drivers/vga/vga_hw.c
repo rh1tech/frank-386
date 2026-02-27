@@ -140,9 +140,9 @@ static int gfx_line_offset = 40;  // Words per line (40 for 320px EGA, 80 for 64
 static int gfx_sram_stride = 41;  // Words per line in SRAM buffer (width/8 + 1)
 
 // Cursor state
-static int cursor_x = 0, cursor_y = 0;
-static int cursor_start = 0, cursor_end = 15;
-static int cursor_blink_state = 1;
+int cursor_x = 0, cursor_y = 0;
+int cursor_start = 0, cursor_end = 15;
+int cursor_blink_state = 1;
 
 // Direct pointer to VGA register state (set once by core0 after vga_init).
 // ISR reads cr[], ar[] directly at the right moment — no volatile intermediates.

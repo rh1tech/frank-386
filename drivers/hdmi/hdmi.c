@@ -41,6 +41,10 @@ extern VGAState *vga_state;
 extern uint16_t frame_vram_offset;
 extern uint8_t  frame_pixel_panning;
 extern int      frame_line_compare;
+// Cursor state
+extern int cursor_x, cursor_y;
+extern int cursor_start, cursor_end;
+extern int cursor_blink_state;
 
 extern int active_start;
 extern int active_end;
@@ -77,12 +81,10 @@ static uint32_t irq_inx = 0;
 //программа конвертации адреса
 
 uint16_t pio_program_instructions_conv_HDMI[] = {
-    //         //     .wrap_target
     0x80a0, //  0: pull   block
     0x40e8, //  1: in     osr, 8
     0x4034, //  2: in     x, 20
     0x8020, //  3: push   block
-    //     .wrap
 };
 
 
@@ -215,8 +217,8 @@ static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t 
     return ptr;
 }
 
-static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *output_buffer) {
-    uint32_t char_row = line / 16;
+static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
+    uint32_t char_row = line >> 4; // div 16
     uint32_t glyph_line = line & 15;
 
     int cols = text_cols;
@@ -231,36 +233,64 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             uint16_t cell = text_row[col];
             uint8_t ch   = (uint8_t)(cell & 0xFF);
             uint8_t attr = (uint8_t)(cell >> 8);
-            uint8_t glyph = font_8x16[ch * 16 + glyph_line];
-        /* TODO:
-            uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
-
+            register uint8_t glyph = font_8x16[ch * 16 + glyph_line];
             if (cursor_blink_state && col == cursor_x &&
                 char_row == (uint32_t)cursor_y &&
                 glyph_line >= (uint32_t)cursor_start &&
                 glyph_line <= (uint32_t)cursor_end) {
                 glyph = 0xFF;
-            }
-
-            // 8px glyph -> 4x uint16 (каждый uint16 = 2 пикселя)
-            uint16_t v;
-            if (!double_h) {
-                v = pal[glyph & 3];           *out16++ = v;
-                v = pal[(glyph >> 2) & 3];    *out16++ = v;
-                v = pal[(glyph >> 4) & 3];    *out16++ = v;
-                v = pal[(glyph >> 6) & 3];    *out16++ = v;
             } else {
-                // true per-pixel doubling: (A,B) -> (A,A,B,B)
-                v = pal[glyph & 3];           out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 2) & 3];    out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 4) & 3];    out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 6) & 3];    out16_2x_per_pixel(&out16, v);
-            }*/
+                glyph = font_8x16[ch * 16 + glyph_line];
+            }
+           // uint8_t blink_or_highlite_bg = attr & 0b10000000; // TODO: use it?
+            register uint8_t fg_color0 = attr & 0b00001111;
+            register uint8_t bg_color1 = attr & 0b01110000;
+            register uint8_t bg_color0 = bg_color1 >> 4;
+            register uint8_t fg_color1 = fg_color0 << 4;
+            if (!double_h) {
+                *output_buffer++ = ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0);
+            } else {
+                *output_buffer++ = ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000001) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b00000010) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00000100) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b00001000) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00010000) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b00100000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b01000000) ? fg_color0 : bg_color0);
+                *output_buffer++ = ((glyph & 0b10000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0);
+            }
         }
     }
 }
 
 void pre_render_line(void);
+static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
+    pre_render_line();
+    if (current_mode == 1) {
+        // Text mode now rendered from linear framebuffer
+        render_text_line(line, output_buffer);
+        return;
+    }
+    if (!(line & 1)) return; // повторяем чётные строки на нечётных
+    int y = line >> 1;
+    uint8_t* input_buffer = gfx_buffer + y * SCREEN_WIDTH;
+    uint8_t* activ_buf_end = output_buffer + SCREEN_WIDTH;
+    //рисуем видеобуфер
+    const uint8_t* input_buffer_end = input_buffer + SCREEN_WIDTH;
+    register size_t x = 0;
+    while (activ_buf_end > output_buffer) {
+        if (input_buffer < input_buffer_end) {
+            register uint8_t c = input_buffer[x++];
+            *output_buffer++ = c >= BASE_HDMI_CTRL_INX ? 255 : c;
+        }
+        else {
+            *output_buffer++ = 255;
+        }
+    }
+}
 
 static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
     static uint32_t inx_buf_dma;
@@ -270,14 +300,11 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
     dma_hw->ints0 = 1u << dma_chan_ctrl;
     dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[inx_buf_dma & 1], false);
 
-    pre_render_line();
-
     if (line++ > 524) {
         line = 0;
         vga_hw_new_frame();
     }
 
-    if ((line & 1) == 1) return; // повторяем чётные строки на нечётных
     inx_buf_dma++;
 
     uint8_t* activ_buf = (uint8_t *)dma_lines[inx_buf_dma & 1];
@@ -295,26 +322,7 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
             nf_memset(output_buffer, 255, SCREEN_WIDTH);
             goto f;
         }
-
-        int y = (line - active_start) >> 1;
-        //заполняем пространство снизу графического буфера
-        if (y >= SCREEN_HEIGHT) {
-            nf_memset(output_buffer, 255, SCREEN_WIDTH);
-            goto f;
-        }
-        uint8_t* input_buffer = gfx_buffer + y * SCREEN_WIDTH;
-        uint8_t* activ_buf_end = output_buffer + SCREEN_WIDTH;
-        //рисуем видеобуфер
-        const uint8_t* input_buffer_end = input_buffer + SCREEN_WIDTH;
-        register size_t x = 0;
-        while (activ_buf_end > output_buffer) {
-            if (input_buffer < input_buffer_end) {
-                register uint8_t c = input_buffer[x++];
-                *output_buffer++ = c >= BASE_HDMI_CTRL_INX ? 255 : c;
-            }
-            else
-                *output_buffer++ = 255;
-        }
+        render_line(line - active_start, output_buffer);
 f:
         //ССИ
         //для выравнивания синхры
