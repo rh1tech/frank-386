@@ -356,24 +356,59 @@ static void i2s_volume(int8_t volume) {
 #include <hardware/pwm.h>
 #define PWM_BITS 12
 #define PWM_WRAP ((1 << PWM_BITS) - 1)
-#define PWM_OSR               16
 #define PWM_AUDIO_RATE        AUDIO_SAMPLE_RATE
 #define PWM_DMA_SAMPLES       TARGET_SAMPLES_PER_FRAME
 
-static int g_pwm_dma_chan = -1;
-static uint g_pwm_slice = 0;
+// Ping-pong DMA: два канала и два буфера, аналогично I2S-реализации.
+// Канал A воспроизводит буфер 0, затем запускает канал B (chain_to).
+// Канал B воспроизводит буфер 1, затем запускает канал A.
+// По завершению каждый канал генерирует DMA_IRQ_1; обработчик сбрасывает
+// read_addr/trans_count и выставляет бит в pwm_buffers_free_mask.
+// audio_needs_samples() проверяет маску без какого-либо ожидания.
 
-// DMA буфер: по одному 32-бит слову на сэмпл (L в low16, R в high16)
-static uint32_t *g_pwm_dma_buf = NULL;
+#define PWM_DMA_CH_A  8
+#define PWM_DMA_CH_B  9
+
+static uint g_pwm_slice = 0;
+static int  g_pwm_dma_chan_a = -1;
+static int  g_pwm_dma_chan_b = -1;
 static uint32_t g_pwm_dma_count = 0;
-static bool g_pwm_dma_active = false;
+
+static uint32_t __attribute__((aligned(4))) pwm_dma_buffers[2][PWM_DMA_SAMPLES];
+static volatile uint32_t pwm_buffers_free_mask = 0;  // бит N = буфер N свободен
+
+// Pre-roll: заполнить оба буфера до старта DMA
+#define PWM_PREROLL_BUFFERS 2
+static volatile int pwm_preroll_count = 0;
+
+static void audio_pwm_dma_irq_handler(void) {
+    uint32_t ints = dma_hw->ints1;
+    uint32_t mask = 0;
+    if (g_pwm_dma_chan_a >= 0) mask |= (1u << g_pwm_dma_chan_a);
+    if (g_pwm_dma_chan_b >= 0) mask |= (1u << g_pwm_dma_chan_b);
+    ints &= mask;
+    if (!ints) return;
+
+    if ((g_pwm_dma_chan_a >= 0) && (ints & (1u << g_pwm_dma_chan_a))) {
+        dma_hw->ints1 = (1u << g_pwm_dma_chan_a);
+        dma_channel_set_read_addr(g_pwm_dma_chan_a, pwm_dma_buffers[0], false);
+        dma_channel_set_trans_count(g_pwm_dma_chan_a, g_pwm_dma_count, false);
+        pwm_buffers_free_mask |= 1u;
+    }
+
+    if ((g_pwm_dma_chan_b >= 0) && (ints & (1u << g_pwm_dma_chan_b))) {
+        dma_hw->ints1 = (1u << g_pwm_dma_chan_b);
+        dma_channel_set_read_addr(g_pwm_dma_chan_b, pwm_dma_buffers[1], false);
+        dma_channel_set_trans_count(g_pwm_dma_chan_b, g_pwm_dma_count, false);
+        pwm_buffers_free_mask |= 2u;
+    }
+}
 
 static void audio_pwm_init(void) {
     // PWM pins must be adjacent for single-slice stereo via CC
     gpio_set_function(PWM_RIGHT_PIN, GPIO_FUNC_PWM);
     gpio_set_function(PWM_LEFT_PIN,  GPIO_FUNC_PWM);
 
-    // Both pins (10/11) share the same slice
     g_pwm_slice = pwm_gpio_to_slice_num(PWM_RIGHT_PIN);
     pwm_config pcfg = pwm_get_default_config();
     // PWM frequency = clk_sys / (clkdiv * (PWM_WRAP + 1))
@@ -382,38 +417,70 @@ static void audio_pwm_init(void) {
     pwm_config_set_clkdiv(&pcfg, clkdiv);
     pwm_config_set_wrap(&pcfg, PWM_WRAP);
     pwm_init(g_pwm_slice, &pcfg, true);
-    // Enable both PWM channels explicitly
     pwm_set_chan_level(g_pwm_slice, PWM_CHAN_A, PWM_WRAP >> 1);
     pwm_set_chan_level(g_pwm_slice, PWM_CHAN_B, PWM_WRAP >> 1);
     pwm_set_enabled(g_pwm_slice, true);
 
-    // init duty to mid
-    pwm_set_gpio_level(PWM_RIGHT_PIN, PWM_WRAP >> 1);
-    pwm_set_gpio_level(PWM_LEFT_PIN,  PWM_WRAP >> 1);
+    // Инициализировать DMA буферы тишиной
+    uint32_t mid = ((uint32_t)(PWM_WRAP >> 1) << 16) | (PWM_WRAP >> 1);
+    for (uint32_t i = 0; i < PWM_DMA_SAMPLES; i++) {
+        pwm_dma_buffers[0][i] = mid;
+        pwm_dma_buffers[1][i] = mid;
+    }
 
-    // Allocate DMA buffer sized to ONE audio buffer worth of frames
-    static uint32_t dma_buf[PWM_DMA_SAMPLES];
-    g_pwm_dma_count = PWM_DMA_SAMPLES;
-    g_pwm_dma_buf = dma_buf;
+    g_pwm_dma_count   = PWM_DMA_SAMPLES;
+    pwm_preroll_count = 0;
+    pwm_buffers_free_mask = (1u << 2) - 1u;  // оба свободны
 
-    g_pwm_dma_chan = dma_claim_unused_channel(true);
+    // Захватить фиксированные каналы (не пересекаются с I2S каналами 10/11)
+    dma_channel_abort(PWM_DMA_CH_A);
+    dma_channel_abort(PWM_DMA_CH_B);
+    while (dma_channel_is_busy(PWM_DMA_CH_A) || dma_channel_is_busy(PWM_DMA_CH_B))
+        tight_loop_contents();
+    dma_channel_unclaim(PWM_DMA_CH_A);
+    dma_channel_unclaim(PWM_DMA_CH_B);
+    dma_channel_claim(PWM_DMA_CH_A);
+    dma_channel_claim(PWM_DMA_CH_B);
+    g_pwm_dma_chan_a = PWM_DMA_CH_A;
+    g_pwm_dma_chan_b = PWM_DMA_CH_B;
 
-    dma_channel_config dcfg = dma_channel_get_default_config(g_pwm_dma_chan);
-    channel_config_set_transfer_data_size(&dcfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&dcfg, true);
-    channel_config_set_write_increment(&dcfg, false);
-    channel_config_set_dreq(&dcfg, pwm_get_dreq(g_pwm_slice));
+    // Канал A → chain B, канал B → chain A (ping-pong)
+    dma_channel_config cfg_a = dma_channel_get_default_config(g_pwm_dma_chan_a);
+    channel_config_set_transfer_data_size(&cfg_a, DMA_SIZE_32);
+    channel_config_set_read_increment(&cfg_a, true);
+    channel_config_set_write_increment(&cfg_a, false);
+    channel_config_set_dreq(&cfg_a, pwm_get_dreq(g_pwm_slice));
+    channel_config_set_chain_to(&cfg_a, g_pwm_dma_chan_b);
 
-    // Destination = PWM CC register (writes both A/B in one 32-bit word)
-    dma_channel_configure(
-        g_pwm_dma_chan,
-        &dcfg,
+    dma_channel_config cfg_b = dma_channel_get_default_config(g_pwm_dma_chan_b);
+    channel_config_set_transfer_data_size(&cfg_b, DMA_SIZE_32);
+    channel_config_set_read_increment(&cfg_b, true);
+    channel_config_set_write_increment(&cfg_b, false);
+    channel_config_set_dreq(&cfg_b, pwm_get_dreq(g_pwm_slice));
+    channel_config_set_chain_to(&cfg_b, g_pwm_dma_chan_a);
+
+    dma_channel_configure(g_pwm_dma_chan_a, &cfg_a,
         &pwm_hw->slice[g_pwm_slice].cc,
-        g_pwm_dma_buf,
-        g_pwm_dma_count,
-        false
-    );
+        pwm_dma_buffers[0], g_pwm_dma_count, false);
+
+    dma_channel_configure(g_pwm_dma_chan_b, &cfg_b,
+        &pwm_hw->slice[g_pwm_slice].cc,
+        pwm_dma_buffers[1], g_pwm_dma_count, false);
+
+    // Подключить IRQ1 (не конфликтует с VGA на IRQ0)
+    // Если I2S тоже использует IRQ1 — нужен общий handler; здесь PWM и I2S
+    // не могут быть активны одновременно (определяется FEATURE_AUDIO_PWM /
+    // FEATURE_AUDIO_I2S), поэтому exclusive handler безопасен.
+    dma_hw->ints1 = (1u << g_pwm_dma_chan_a) | (1u << g_pwm_dma_chan_b);
+    irq_set_exclusive_handler(AUDIO_DMA_IRQ, audio_pwm_dma_irq_handler);
+    irq_set_priority(AUDIO_DMA_IRQ, 0x80);
+    irq_set_enabled(AUDIO_DMA_IRQ, true);
+    dma_channel_set_irq1_enabled(g_pwm_dma_chan_a, true);
+    dma_channel_set_irq1_enabled(g_pwm_dma_chan_b, true);
+
     audio_running = false;
+    DBG_PRINT("Audio: PWM ping-pong DMA ready (ch %d/%d, IRQ=%d)\n",
+              g_pwm_dma_chan_a, g_pwm_dma_chan_b, AUDIO_DMA_IRQ);
 }
 
 static inline uint16_t s16_to_pwm_u16(int16_t s) {
@@ -428,43 +495,68 @@ static inline uint32_t pack_pwm_cc(uint16_t left, uint16_t right) {
     return ((uint32_t)right << 16) | left;
 }
 
-void pwm_dma_write_count(const int16_t *samples,
-                         uint32_t sample_count)
+void pwm_dma_write_count(const int16_t *samples, uint32_t sample_count)
 {
-    if (!samples || !g_pwm_dma_buf || g_pwm_dma_chan < 0)
+    if (!samples || g_pwm_dma_chan_a < 0)
         return;
 
     if (sample_count > g_pwm_dma_count)
         sample_count = g_pwm_dma_count;
 
-    // Дождаться завершения предыдущего DMA
-    if (g_pwm_dma_active) {
-        dma_channel_wait_for_finish_blocking(g_pwm_dma_chan);
-        g_pwm_dma_active = false;
+    // Выбрать свободный буфер без блокировки
+    uint8_t buf_index = 0;
+    int timeout = 10000;
+    while (true) {
+        uint32_t irq_state = save_and_disable_interrupts();
+        uint32_t free_mask = pwm_buffers_free_mask;
+
+        if (!audio_running) {
+            // Pre-roll: заполнить буферы по порядку
+            buf_index = (uint8_t)pwm_preroll_count;
+            if (buf_index < 2 && (free_mask & (1u << buf_index))) {
+                pwm_buffers_free_mask &= ~(1u << buf_index);
+                restore_interrupts(irq_state);
+                break;
+            }
+        } else if (free_mask) {
+            buf_index = (free_mask & 1u) ? 0 : 1;
+            pwm_buffers_free_mask &= ~(1u << buf_index);
+            restore_interrupts(irq_state);
+            break;
+        }
+
+        restore_interrupts(irq_state);
+        if (--timeout <= 0) return;  // буфер не освободился — пропустить кадр
+        tight_loop_contents();
     }
 
-    // Заполнить DMA буфер
+    // Конвертировать и заполнить буфер
+    uint32_t *dst = pwm_dma_buffers[buf_index];
     for (uint32_t i = 0; i < sample_count; i++) {
-        int16_t l = samples[i * 2 + 0];
-        int16_t r = samples[i * 2 + 1];
-        g_pwm_dma_buf[i] =
-            pack_pwm_cc(s16_to_pwm_u16(l),
-                        s16_to_pwm_u16(r));
+        dst[i] = pack_pwm_cc(s16_to_pwm_u16(samples[i * 2]),
+                             s16_to_pwm_u16(samples[i * 2 + 1]));
     }
-
-    // Добить остаток тишиной
     uint32_t mid = pack_pwm_cc(PWM_WRAP >> 1, PWM_WRAP >> 1);
-    for (uint32_t i = sample_count; i < g_pwm_dma_count; i++) {
-        g_pwm_dma_buf[i] = mid;
-    }
+    for (uint32_t i = sample_count; i < g_pwm_dma_count; i++)
+        dst[i] = mid;
 
     __dmb();
 
-    dma_channel_set_read_addr(g_pwm_dma_chan, g_pwm_dma_buf, false);
-    dma_channel_set_trans_count(g_pwm_dma_chan, g_pwm_dma_count, false);
-    dma_channel_start(g_pwm_dma_chan);
-
-    g_pwm_dma_active = true;
+    if (!audio_running) {
+        pwm_preroll_count++;
+        if (pwm_preroll_count >= PWM_PREROLL_BUFFERS) {
+            // Оба буфера заполнены — запустить воспроизведение
+            dma_channel_start(g_pwm_dma_chan_a);
+            audio_running = true;
+        }
+    } else {
+        // Защита от underrun: перезапустить цепочку если встала
+        if (!dma_channel_is_busy(g_pwm_dma_chan_a) &&
+            !dma_channel_is_busy(g_pwm_dma_chan_b)) {
+            if (buf_index == 0) dma_channel_start(g_pwm_dma_chan_a);
+            else                dma_channel_start(g_pwm_dma_chan_b);
+        }
+    }
 }
 
 #endif
@@ -608,7 +700,7 @@ bool __not_in_flash() audio_needs_samples(void) {
 #if FEATURE_AUDIO_I2S
     return (dma_buffers_free_mask != 0);
 #elif defined(FEATURE_AUDIO_PWM)
-    return true; /// blocking call. TODO: !g_pwm_dma_active || !dma_channel_is_busy(g_pwm_dma_chan);
+    return (pwm_buffers_free_mask != 0);
 #else
     return false;
 #endif
