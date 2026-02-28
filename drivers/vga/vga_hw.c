@@ -118,11 +118,11 @@ static uint8_t cga_palette[4];
 int current_mode = 1;  // Default text mode
 
 // Graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
-static int gfx_submode = 3;
-static int gfx_width = 320;
-static int gfx_height = 200;
-static int gfx_line_offset = 40;  // Words per line (40 for 320px EGA, 80 for 640px)
-static int gfx_sram_stride = 41;  // Words per line in SRAM buffer (width/8 + 1)
+int gfx_submode = 3;
+int gfx_width = 320;
+int gfx_height = 200;
+int gfx_line_offset = 40;  // Words per line (40 for 320px EGA, 80 for 640px)
+int gfx_sram_stride = 41;  // Words per line in SRAM buffer (width/8 + 1)
 
 // Cursor state
 int cursor_x = 0, cursor_y = 0;
@@ -711,7 +711,7 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
     // If OSD is visible, it takes over the display completely
     // (it reuses text_buffer_sram so we can't render normal text)
     if (osd_is_visible()) {
-        osd_render_line(line, output_buffer);
+        osd_render_line_vga(line, output_buffer);
         return;
     }
     if (current_mode == 1) {
@@ -991,7 +991,16 @@ void vga_hw_init(void) {
     DBG_PRINT("  VGA started (640x400 text mode, IRQ priority=0x00)!\n");
 }
 
+void hdmi_repair_text_pal();
 static inline void vga_hw_set_mode(int mode) {
+    if (!SELECT_VGA && vga_state) { // W/A
+        if (mode == 1 && current_mode != 1) { // switch to text
+            hdmi_repair_text_pal();
+        }
+        if (mode == 2 && current_mode != 2) { // switch to graphics
+            vga_state->palette_dirty = 1;
+        }
+    }
     // Ignore mode 0 (blank): this is a transient state the BIOS sets
     // while reprogramming registers during mode switches.  If we apply
     // it we permanently black out the display until the next reboot.

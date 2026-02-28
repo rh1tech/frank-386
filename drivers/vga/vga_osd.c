@@ -201,7 +201,7 @@ void osd_draw_plasma_background(int seed, int wx, int wy, int ww, int wh) {
 
 // Render OSD overlay onto a scanline
 // This is called from the VGA ISR, so it must be fast
-void __time_critical_func(osd_render_line)(uint32_t line, uint32_t *output_buffer) {
+void __time_critical_func(osd_render_line_vga)(uint32_t line, uint32_t *output_buffer) {
     if (!osd_visible) return;
 
     // VGA output is 640x400, text mode is 80x25 with 8x16 font

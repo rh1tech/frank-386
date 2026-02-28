@@ -8,6 +8,7 @@
 #include <pico/multicore.h>
 #include <hardware/clocks.h>
 #include "vga.h"
+#include "vga_osd.h"
 #include "hdmi.h"
 #include "font8x16.h"
 
@@ -30,6 +31,7 @@ extern uint32_t palette_a[256];
 
 #define GFX_BUFFER_SIZE (256 * 1024)
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
+extern uint8_t text_buffer_sram[80 * 25 * 2];
 extern int text_cols;
 // Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
 // For VGA CRTC Offset (0x13): cells_per_row = cr13 * 2 (80-col -> 40*2, 40-col -> 20*2).
@@ -48,6 +50,12 @@ extern int cursor_blink_state;
 
 extern int active_start;
 extern int active_end;
+
+extern int gfx_submode;
+extern int gfx_width;
+extern int gfx_height;
+extern int gfx_line_offset;  // Words per line (40 for 320px EGA, 80 for 640px)
+extern int gfx_sram_stride;  // Words per line in SRAM buffer (width/8 + 1)
 
 void vga_hw_new_frame(void); // vsync
 
@@ -273,29 +281,110 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
     }
 }
 
+static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8_t *output_buffer) {
+    // Determine source line based on graphics height
+    // If height > 200 (e.g. 400 in Mode X), map 1:1
+    // If height <= 200 (e.g. 320x200), double lines
+    uint32_t src_line;
+    if (gfx_height > 200) {
+        src_line = line;
+    } else {
+        src_line = line > 1;
+    }
+
+    if (src_line >= gfx_height && gfx_height > 0) {
+        // Blank line below visible area
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+    } else if (src_line >= 200 && gfx_height <= 0) {
+         // Fallback if gfx_height not set
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+    } else {
+        // Read from VRAM (stable during active video)
+        // Stride comes from CRTC Offset (CR13) which is in words for VGA.
+        // We use 32-bit words for fetch, so convert words->dwords.
+        uint32_t stride = (gfx_line_offset > 0) ? ((uint32_t)gfx_line_offset * 2u) : 80u;
+        uint32_t offset;
+        if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+            offset = (src_line - frame_line_compare) * stride;
+        } else {
+            offset = frame_vram_offset + src_line * stride;
+        }
+        offset &= 0xFFFF;
+        const uint8_t *input_buffer = gfx_buffer + offset;
+        // 320 pixels, 1 pyte per pixel
+        for (int i = 0; i < SCREEN_WIDTH; i++) {
+            ob( input_buffer[i] );
+        }
+    }
+}
+
+// Render OSD overlay onto a scanline
+// This is called from the ISR, so it must be fast
+void __time_critical_func(osd_render_line_hdmi)(uint32_t line, uint8_t *output_buffer) {
+    // VGA output is 640x400, text mode is 80x25 with 8x16 font
+    // So each character row is 16 scanlines
+    uint32_t char_row = line >> 4;
+    uint32_t glyph_line = line & 15;
+
+    if (char_row >= OSD_ROWS) return;
+
+    // Get pointer to this row in OSD buffer (reuses text_buffer_sram)
+    uint8_t *row_data = &text_buffer_sram[char_row * OSD_COLS * 2];
+
+    // Render each character
+    // Bit order matches render_text_line: bits 1,0 are leftmost pair, etc.
+    for (int col = 0; col < (OSD_COLS << 1);) {
+        uint32_t ch = row_data[col++];
+        uint8_t attr = row_data[col++];
+        // Get foreground and background colors
+        uint8_t fg = attr & 0x0F;
+        uint8_t bg = attr >> 4;
+        // Get glyph data for this scanline
+        register uint8_t glyph = font_8x16[(ch << 4) + glyph_line];
+        register uint8_t fg_color0 = attr & 0b00001111;
+        register uint8_t bg_color1 = attr & 0b01110000;
+        register uint8_t bg_color0 = bg_color1 >> 4;
+        register uint8_t fg_color1 = fg_color0 << 4;
+        ob( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
+        ob( ((glyph & 0b00000100) ? fg_color1 : bg_color1) | ((glyph & 0b00001000) ? fg_color0 : bg_color0) );
+        ob( ((glyph & 0b00010000) ? fg_color1 : bg_color1) | ((glyph & 0b00100000) ? fg_color0 : bg_color0) );
+        ob( ((glyph & 0b01000000) ? fg_color1 : bg_color1) | ((glyph & 0b10000000) ? fg_color0 : bg_color0) );
+    }
+}
+
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
     pre_render_line();
+    // If OSD is visible, it takes over the display completely
+    // (it reuses text_buffer_sram so we can't render normal text)
+    if (osd_is_visible()) {
+        return osd_render_line_hdmi(line, output_buffer);
+    }
     if (current_mode == 1) {
         // Text mode now rendered from linear framebuffer
-        render_text_line(line, output_buffer);
-        return;
-    }
-    if (line & 1) return; // повторяем чётные строки на нечётных
-    int y = line >> 1;
-    uint8_t* input_buffer = gfx_buffer + y * SCREEN_WIDTH;
-    uint8_t* activ_buf_end = output_buffer + SCREEN_WIDTH;
-    //рисуем видеобуфер
-    const uint8_t* input_buffer_end = input_buffer + SCREEN_WIDTH;
-    register size_t x = 0;
-    while (activ_buf_end > output_buffer) {
-        if (input_buffer < input_buffer_end) {
-            ob( input_buffer[x++] );
+        return render_text_line(line, output_buffer);
+    }/*
+    if (current_mode == 2) {
+        // Graphics mode - choose renderer based on submode
+        if (gfx_submode == 1) {
+            // CGA 4-color
+//            render_gfx_line_cga(line, output_buffer);
+        } else if (gfx_submode == 2) {
+            // EGA planar 16-color
+//            render_gfx_line_ega(line, output_buffer);
+        } else if (gfx_submode == 4) {
+            // CGA 2-color (640x200 monochrome)
+//            render_gfx_line_cga2(line, output_buffer);
+        } else if (gfx_submode == 5) {
+            // VGA 256-color planar (Mode X)
+            //render_gfx_line_vga_planar256(line, output_buffer);
+        } else {
+            // VGA 256-color (mode 13h) - default
+            return render_gfx_line_from_sram(line, output_buffer);
         }
-        else {
-            ob(0);
-        }
-    }
+    }*/
+    // mode 0 - blank screen (gray?)
+    nf_memset(output_buffer, 0x77, SCREEN_WIDTH);
 }
 
 static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
@@ -317,7 +406,6 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
 
     if (line < 480) { //область изображения
         uint8_t* output_buffer = activ_buf + 72; //для выравнивания синхры;
-
         // --- Верхнее поле ---
         if (line < (uint32_t)active_start) {
             nf_memset(output_buffer, 0, SCREEN_WIDTH);
@@ -389,6 +477,46 @@ void graphics_set_palette_hdmi2(
     uint8_t i
 );
 
+static bool required_to_repair_text_pal = true;
+void __not_in_flash_func(hdmi_repair_text_pal)() {
+    if (!required_to_repair_text_pal) return;
+    required_to_repair_text_pal = false;
+    // Заполнение палитры — CGA 16 цветов (индексы 0-15)
+    // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
+    static uint8_t cga_colors[16][3] = {
+        { 0,  0,  0},  //  0: Black
+        { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
+        { 0, 42,  0},  //  2: Green
+        { 0, 42, 42},  //  3: Cyan
+        {42,  0,  0},  //  4: Red
+        {42,  0, 42},  //  5: Magenta
+        {42, 21,  0},  //  6: Brown
+        {42, 42, 42},  //  7: Light Gray
+        {21, 21, 21},  //  8: Dark Gray
+        {21, 21, 63},  //  9: Light Blue
+        {21, 63, 21},  // 10: Light Green
+        {21, 63, 63},  // 11: Light Cyan
+        {63, 21, 21},  // 12: Light Red
+        {63, 21, 63},  // 13: Light Magenta
+        {63, 63, 21},  // 14: Yellow
+        {63, 63, 63},  // 15: White
+    };
+    
+    // заполнение палитры (text) 4 старших bit первый пиксел, 4 младших - второй
+    for (int c1 = 0; c1 < 16; ++c1) {
+        const uint8_t* c13 = cga_colors[c1];
+        for (int c2 = 0; c2 < 16; ++c2) {
+            const uint8_t* c23 = cga_colors[c2];
+            int ci = c1 << 4 | c2; // compund index
+            graphics_set_palette_hdmi2(
+                c13[0] << 2, c13[1] << 2, c13[2] << 2,
+                c23[0] << 2, c23[1] << 2, c23[2] << 2,
+                ci
+            );
+        }
+    }
+}
+
 //деинициализация - инициализация ресурсов
 static inline bool hdmi_init() {
     //выключение прерывания DMA
@@ -430,40 +558,7 @@ static inline bool hdmi_init() {
     offs_prg0 = pio_add_program(PIO_VIDEO, &program_PIO_HDMI);
     pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 12));
 
-    // Заполнение палитры — CGA 16 цветов (индексы 0-15)
-    // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
-    static const uint8_t cga_colors[16][3] = {
-        { 0,  0,  0},  //  0: Black
-        { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
-        { 0, 42,  0},  //  2: Green
-        { 0, 42, 42},  //  3: Cyan
-        {42,  0,  0},  //  4: Red
-        {42,  0, 42},  //  5: Magenta
-        {42, 21,  0},  //  6: Brown
-        {42, 42, 42},  //  7: Light Gray
-        {21, 21, 21},  //  8: Dark Gray
-        {21, 21, 63},  //  9: Light Blue
-        {21, 63, 21},  // 10: Light Green
-        {21, 63, 63},  // 11: Light Cyan
-        {63, 21, 21},  // 12: Light Red
-        {63, 21, 63},  // 13: Light Magenta
-        {63, 63, 21},  // 14: Yellow
-        {63, 63, 63},  // 15: White
-    };
-    
-    // заполнение палитры (text) 4 старших bit первый пиксел, 4 младших - второй
-    for (int c1 = 0; c1 < 16; ++c1) {
-        const uint8_t* c13 = cga_colors[c1];
-        for (int c2 = 0; c2 < 16; ++c2) {
-            const uint8_t* c23 = cga_colors[c2];
-            int ci = c1 << 4 | c2; // compund index
-            graphics_set_palette_hdmi2(
-                c13[0] << 2, c13[1] << 2, c13[2] << 2,
-                c23[0] << 2, c23[1] << 2, c23[2] << 2,
-                ci
-            );
-        }
-    }
+    hdmi_repair_text_pal();
 
     //BASE_HDMI_CTRL_INX +3 служебные данные(синхра) напрямую вносим в массив -конвертер
     uint64_t* conv_color64 = (uint64_t *)conv_color;
@@ -651,6 +746,7 @@ static inline bool hdmi_init() {
 
 void graphics_set_palette_hdmi(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
     if is_hdmi_sync(i) return; //не записываем "служебные" цвета
+    required_to_repair_text_pal = true;
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     conv_color64[i * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
     conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ 0x0003ffffffffffffl;

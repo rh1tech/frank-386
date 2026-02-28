@@ -87,6 +87,7 @@ void osd_draw_plasma_background(int seed, int wx, int wy, int ww, int wh);
 
 // Render OSD overlay to VGA output
 // Called from VGA driver during scanline rendering
-void osd_render_line(uint32_t line, uint32_t *output_buffer);
+void osd_render_line_vga(uint32_t line, uint32_t *output_buffer);
+void osd_render_line_hdmi(uint32_t line, uint8_t *output_buffer);
 
 #endif // VGA_OSD_H
