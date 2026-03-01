@@ -8,6 +8,8 @@
 #include <unistd.h>
 #include <hardware/watchdog.h>
 
+#include "mpu401.c.inl"
+
 #ifdef USEKVM
 #define cpu_raise_irq cpukvm_raise_irq
 #define cpu_get_cycle cpukvm_get_cycle
@@ -140,6 +142,14 @@ static u8 pc_io_read(void *o, int addr)
 		 * Bits 3-0: axes timeout (0 = timed out, no joystick)
 		 * Return 0xF0 to indicate axes have timed out (no joystick present) */
 		return 0xf0;
+	case 0x27A: // Covox Speech Thing
+		return 0;
+	// MPU-401
+	case 0x330:
+	case 0x331:
+		if (pc->mpu401_enabled)
+	        return mpu401_read(addr);
+		return 0xFF;
 	// Disney Sound Source
 	case 0x378:
 	case 0x379:
@@ -153,7 +163,7 @@ static u8 pc_io_read(void *o, int addr)
 	case 0x279:
 		return 0xf8;
 	/* LPT control ports */
-	case 0x37a: case 0x27a:
+	case 0x37a:
 		return 0x04;
 	default:
 		//fprintf(stderr, "in 0x%x <= 0x%x\n", addr, 0xff);
@@ -385,6 +395,12 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x278:
 		if (pc->covox_enabled)
 			pc->covox_sample = val;
+		return;
+	// MPU-401
+	case 0x330:
+	case 0x331:
+		if (pc->mpu401_enabled)
+			mpu401_write(addr, val);
 		return;
 	// Disney Sound Source
     case 0x378:
@@ -830,10 +846,11 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->adlib_enabled = 1;
 	pc->sb16_enabled = 1;
 	pc->pcspk_enabled = 1;
-	pc->tandy_enabled = 1;
+	pc->tandy_enabled = 0;
 	pc->covox_enabled = 1;
+	pc->mpu401_enabled = 1;
 	pc->covox_sample  = 0;
-	pc->dss_enabled = 1;
+	pc->dss_enabled = 0;
 	pc->mouse_enabled = 1;
 
 	pc->port92 = 0x2;

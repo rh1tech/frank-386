@@ -27,9 +27,10 @@ static bool cfg_changed = false;
 static int cfg_pcspeaker = 1;
 static int cfg_adlib = 1;
 static int cfg_soundblaster = 1;
-static int cfg_tandy = 1;
+static int cfg_tandy = 0;
 static int cfg_covox = 1;
-static int cfg_dss = 1;
+static int cfg_mpu401 = 1;
+static int cfg_dss = 0;
 static int cfg_mouse = 1;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
@@ -120,6 +121,14 @@ int config_get_covox(void) { return cfg_covox; }
 void config_set_covox(int enabled) {
     if (cfg_covox != enabled) {
         cfg_covox = enabled;
+        cfg_changed = true;
+    }
+}
+
+int config_get_mpu401(void) { return cfg_mpu401; }
+void config_set_mpu401(int enabled) {
+    if (cfg_mpu401 != enabled) {
+        cfg_mpu401 = enabled;
         cfg_changed = true;
     }
 }
@@ -239,6 +248,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "covox=%d\n", cfg_covox);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "mpu401=%d\n", cfg_mpu401);
+    write_line(&fp, line);
     snprintf(line, sizeof(line), "dss=%d\n", cfg_dss);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "mouse=%d\n", cfg_mouse);
@@ -276,6 +287,8 @@ int parse_murm386_ini(void* user, const char* section,
         cfg_tandy = atoi(value);
     } else if (strcmp(name, "covox") == 0) {
         cfg_covox = atoi(value);
+    } else if (strcmp(name, "mpu401") == 0) {
+        cfg_mpu401 = atoi(value);
     } else if (strcmp(name, "dss") == 0) {
         cfg_dss = atoi(value);
     } else if (strcmp(name, "mouse") == 0) {

@@ -31,6 +31,7 @@ typedef enum {
     SETTING_PCSPEAKER,
     SETTING_ADLIB,
     SETTING_SOUNDBLASTER,
+    SETTING_MPU401,
     SETTING_TANDY,
     SETTING_COVOX,
     SETTING_DSS,
@@ -62,7 +63,7 @@ static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_fill_cmos;
-static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse;
+static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq;
 
 // UI dimensions
@@ -95,6 +96,7 @@ void settingsui_open(void) {
     orig_adlib = config_get_adlib();
     orig_soundblaster = config_get_soundblaster();
     orig_tandy = config_get_tandy();
+    orig_mpu401 = config_get_mpu401();
     orig_covox = config_get_covox();
     orig_dss = config_get_dss();
     orig_mouse = config_get_mouse();
@@ -121,6 +123,7 @@ void settingsui_close(void) {
         config_set_soundblaster(orig_soundblaster);
         config_set_tandy(orig_tandy);
         config_set_covox(orig_covox);
+        config_set_mpu401(orig_mpu401);
         config_set_dss(orig_dss);
         config_set_mouse(orig_mouse);
         config_set_cpu_freq(orig_cpu_freq);
@@ -195,6 +198,10 @@ static void cycle_option(int direction) {
             config_set_tandy(config_get_tandy() ? 0 : 1);
             break;
 
+        case SETTING_MPU401:
+            config_set_mpu401(config_get_mpu401() ? 0 : 1);
+            break;
+
         case SETTING_COVOX:
             config_set_covox(config_get_covox() ? 0 : 1);
             break;
@@ -243,6 +250,7 @@ static void draw_settings_menu(void) {
         "PC Speaker:",
         "AdLib:",
         "SoundBlaster:",
+        "Roland MPU-401:",
         "Tandy Sound:",
         "Covox (LPT2):",
         "Disney Sound Source:",
@@ -287,6 +295,9 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_TANDY:
                 snprintf(value, sizeof(value), "< %s >", config_get_tandy() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_MPU401:
+                snprintf(value, sizeof(value), "< %s >", config_get_mpu401() ? "Enabled" : "Disabled");
                 break;
             case SETTING_COVOX:
                 snprintf(value, sizeof(value), "< %s >", config_get_covox() ? "Enabled" : "Disabled");

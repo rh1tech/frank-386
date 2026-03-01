@@ -60,15 +60,16 @@ typedef struct {
 	PCSpkState *pcspk;
 
 	// Covox Speech Thing - no state object needed, just last sample + enable
-	uint8_t covox_sample;      /* last written DAC value */
+	volatile uint8_t covox_sample;      /* last written DAC value */
 
 	// Runtime enable flags for audio devices (checked in mixer_callback)
-	int adlib_enabled;
-	int sb16_enabled;
-	int pcspk_enabled;
-	int tandy_enabled;
-	int covox_enabled;
-	int dss_enabled;
+	volatile int adlib_enabled;
+	volatile int sb16_enabled;
+	volatile int pcspk_enabled;
+	volatile int tandy_enabled;
+	volatile int covox_enabled;
+	volatile int mpu401_enabled;
+	volatile int dss_enabled;
 	int mouse_enabled;
 
 	I440FXState *i440fx;
@@ -125,5 +126,7 @@ void mixer_callback(void *opaque, uint8_t *stream, int free);
 int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value);
 void load_bios_and_reset(PC *pc);
+
+int16_t midi_sample(void);
 
 #endif /* PC_H */

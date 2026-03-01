@@ -814,10 +814,11 @@ static bool init_emulator(void) {
     pc->sb16_enabled = config_get_soundblaster();
     pc->tandy_enabled = config_get_tandy();
     pc->covox_enabled = config_get_covox();
+    pc->mpu401_enabled = config_get_mpu401();
     pc->dss_enabled = config_get_dss();
     pc->mouse_enabled = config_get_mouse();
-    DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
-              pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled,
+    DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, MPU401=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
+              pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mpu401_enabled,
               pc->tandy_enabled, pc->covox_enabled, pc->dss_enabled, pc->mouse_enabled);
 
     // Check if BIOS file exists before loading
@@ -872,6 +873,11 @@ static bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     }
     if (pc->tandy_enabled) {
         int16_t sample = sn76489_sample(); // 16-bit
+        r_v += sample;
+        l_v += sample;
+    }
+    if (pc->mpu401_enabled) {
+        int16_t sample = midi_sample();
         r_v += sample;
         l_v += sample;
     }

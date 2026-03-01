@@ -55,6 +55,9 @@ void config_set_dss(int enabled);
 int config_get_covox(void);
 void config_set_covox(int enabled);
 
+int config_get_mpu401(void);
+void config_set_mpu401(int enabled);
+
 int config_get_mouse(void);
 void config_set_mouse(int enabled);
 
