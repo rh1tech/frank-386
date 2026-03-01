@@ -190,5 +190,5 @@ int16_t __not_in_flash_func(pcspk_sample)(PCSpkState *s)
     phase += inc;
 
     /* квадратная волна */
-    return (phase & 0x80000000) ? 0x7FFF : 0;
+    return (phase & 0x80000000) ? 1 : 0;
 }

@@ -79,7 +79,6 @@ static uint32_t noise_seed = 0x7EC80000;  // Best overall for drums
 #define SET_CHANNEL_SUSTAIN(idx) (channels_sustain_bitmask |= (1U << (idx)))
 #define CLEAR_CHANNEL_SUSTAIN(idx) (channels_sustain_bitmask &= ~(1U << (idx)))
 #define IS_CHANNEL_SUSTAIN(idx) ((channels_sustain_bitmask & (1U << (idx))) != 0)
-#define SOUND_FREQUENCY 44100
 
 #define SIN_STEP (SOUND_FREQUENCY * 100 / 4096)
 static INLINE int32_t sine_lookup(const uint32_t angle) {

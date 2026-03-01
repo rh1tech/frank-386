@@ -23,7 +23,7 @@ set(BUILD_NAME "386")
 set(FIRMWARE_VERSION "v1.01" CACHE STRING "Firmware version string")
 
 # Board configuration variant (M1, M2)
-set(BOARD "M1" CACHE STRING "Board variant: M1 or M2")
+set(BOARD "M2" CACHE STRING "Board variant: M1 or M2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -187,10 +187,10 @@ target_compile_definitions(audio_driver PRIVATE
 pico_generate_pio_header(audio_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/audio/audio_i2s.pio)
 if(AUDIO_TYPE STREQUAL "I2S")
     target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq)
-    target_compile_definitions(audio_driver PRIVATE FEATURE_AUDIO_I2S=1)
+    target_compile_definitions(audio_driver PRIVATE FEATURE_AUDIO_I2S=1 SOUND_FREQUENCY=44100)
 elseif(AUDIO_TYPE STREQUAL "PWM")
     target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq hardware_pwm)
-    target_compile_definitions(audio_driver PRIVATE FEATURE_AUDIO_PWM=1)
+    target_compile_definitions(audio_driver PRIVATE FEATURE_AUDIO_PWM=1 SOUND_FREQUENCY=44100)
 endif()
 
 #=============================================================================
@@ -305,6 +305,8 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 
     # Performance optimizations
     I386_ENABLE_INLINE=1
+
+    SOUND_FREQUENCY=44100
 )
 
 # Add DEBUG_ENABLED if enabled

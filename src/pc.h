@@ -63,13 +63,13 @@ typedef struct {
 	volatile uint8_t covox_sample;      /* last written DAC value */
 
 	// Runtime enable flags for audio devices (checked in mixer_callback)
-	volatile int adlib_enabled;
-	volatile int sb16_enabled;
-	volatile int pcspk_enabled;
-	volatile int tandy_enabled;
-	volatile int covox_enabled;
-	volatile int mpu401_enabled;
-	volatile int dss_enabled;
+	int adlib_enabled;
+	int sb16_enabled;
+	int pcspk_enabled;
+	int tandy_enabled;
+	int covox_enabled;
+	int mpu401_enabled;
+	int dss_enabled;
 	int mouse_enabled;
 
 	I440FXState *i440fx;

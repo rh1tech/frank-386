@@ -1486,11 +1486,11 @@ void sb16_audio_callback (void *opaque, uint8_t *stream, int free)
     switch (s->fmt) {
     case AUDIO_FORMAT_S16:
         if (s->fmt_stereo) {
-            i = resample_s16s((int16_t *) stream, free / 2, 44100,
+            i = resample_s16s((int16_t *) stream, free / 2, SOUND_FREQUENCY,
                               (int16_t *) s->audio_buf, p / 2, len / 2,
                               AUDIO_BUF_LEN / 2, s->freq);
         } else {
-            i = resample_s16m((int16_t *) stream, free / 2, 44100,
+            i = resample_s16m((int16_t *) stream, free / 2, SOUND_FREQUENCY,
                               (int16_t *) s->audio_buf, p / 2, len / 2,
                               AUDIO_BUF_LEN / 2, s->freq);
         }

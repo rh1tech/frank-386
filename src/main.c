@@ -893,15 +893,13 @@ static bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     r_v += dss_v;
     l_v += dss_v;
     #if FEATURE_AUDIO_PWM
-        uint16_t ub_v = (b_v + 32768) >> 4; // 16 signed bit to 12 unsigned
-        uint16_t ur_v = (r_v + 32768) >> 4;
+        uint16_t ur_v = (r_v + 32768) >> 4; // 16 signed bit to 12 unsigned
         uint16_t ul_v = (l_v + 32768) >> 4;
-        if (ub_v > 4095) ub_v = 4095;
         if (ur_v > 4095) ur_v = 4095;
         if (ul_v > 4095) ul_v = 4095;
         pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
         pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
-        pwm_set_gpio_level(BEEPER_PIN, ub_v);
+        pwm_set_gpio_level(BEEPER_PIN, b_v ? 4095 : 0);
     #elif FEATURE_AUDIO_I2S
     // TODO:
     #endif

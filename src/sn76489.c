@@ -21,7 +21,6 @@
 #include <pico.h>
 
 #define INLINE __always_inline
-#define SOUND_FREQUENCY 44100
 #define GETA_BITS 24
 #define clock_increment_base (uint32_t) ((double) 3579545 * (1 << GETA_BITS) / (16 * SOUND_FREQUENCY))
 
