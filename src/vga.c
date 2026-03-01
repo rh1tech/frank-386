@@ -1215,7 +1215,7 @@ static const uint8_t gr_mask[16] __not_in_flash("gr_mask") = {
     (uint8_t)~0xff, /* 0x0f */
 };
 
-uint32_t vga_ioport_read(VGAState *s, uint32_t addr)
+uint32_t __not_in_flash_func(vga_ioport_read)(VGAState *s, uint32_t addr)
 {
     int val, index;
 
@@ -1315,7 +1315,7 @@ done:
     return val;
 }
 
-void vga_ioport_write(VGAState *s, uint32_t addr, uint32_t val)
+void __not_in_flash_func(vga_ioport_write)(VGAState *s, uint32_t addr, uint32_t val)
 {
     int index;
 
@@ -1889,7 +1889,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
     }
 }
 
-uint8_t vga_mem_read(VGAState *s, uint32_t addr)
+uint8_t __not_in_flash_func(vga_mem_read)(VGAState *s, uint32_t addr)
 {
     int memory_map_mode, plane;
     uint32_t ret;
