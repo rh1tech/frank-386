@@ -21,15 +21,21 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  */
+#include "pc.h"
 #include "audio.h"
+#include "dss.h"
+#include "adlib.h"
 #include "board_config.h"
+#include <pico/time.h>
 
 #ifdef FEATURE_AUDIO_PWM
-#include <pico/time.h>
 #include <hardware/pwm.h>
 #include <hardware/clocks.h>
 #endif
 
+static uint8_t volume = 0; // 0 - MAX vol, 16 - silece (for i2s, for pwm - 12)
+
+#ifdef FEATURE_AUDIO_I2S
 /**
  * return the default i2s context used to store information about the setup
  */
@@ -43,8 +49,7 @@ i2s_config_t i2s_get_default_config(void) {
             .sm = 0,
             .dma_channel = 0,
             .dma_buf = NULL,
-            .dma_trans_count = 0,
-            .volume = 0,
+            .dma_trans_count = 0
     };
     return i2s_config;
 }
@@ -54,7 +59,6 @@ i2s_config_t i2s_get_default_config(void) {
  * i2s_config: I2S context obtained by i2s_get_default_config()
  */
 void i2s_init(i2s_config_t *i2s_config) {
-#ifndef FEATURE_AUDIO_PWM
     uint8_t func = GPIO_FUNC_PIO1;    // TODO: GPIO_FUNC_PIO0 for pio0 or GPIO_FUNC_PIO1 for pio1
     gpio_set_function(i2s_config->data_pin, func);
     gpio_set_function(i2s_config->clock_pin_base, func);
@@ -73,13 +77,11 @@ void i2s_init(i2s_config_t *i2s_config) {
 #else
     uint offset = pio_add_program(i2s_config->pio, &audio_i2s_program);
     audio_i2s_program_init(i2s_config->pio, i2s_config->sm, offset, i2s_config->data_pin, i2s_config->clock_pin_base);
-
 #endif
 
     pio_sm_set_clkdiv_int_frac(i2s_config->pio, i2s_config->sm, divider >> 8u, divider & 0xffu);
 
     pio_sm_set_enabled(i2s_config->pio, i2s_config->sm, false);
-#endif
     /* Allocate memory for the DMA buffer */
     i2s_config->dma_buf = malloc(i2s_config->dma_trans_count * sizeof(uint32_t));
 
@@ -92,22 +94,7 @@ void i2s_init(i2s_config_t *i2s_config) {
     channel_config_set_transfer_data_size(&dma_config, DMA_SIZE_32);
 
     volatile uint32_t *addr_write_DMA = &(i2s_config->pio->txf[i2s_config->sm]);
-#ifdef FEATURE_AUDIO_PWM
-    gpio_set_function(PWM_RIGHT_PIN, GPIO_FUNC_PWM);
-    gpio_set_function(PWM_LEFT_PIN, GPIO_FUNC_PWM);
-    uint slice_num = pwm_gpio_to_slice_num(PWM_RIGHT_PIN);
-    pwm_config c_pwm=pwm_get_default_config();
-    pwm_config_set_clkdiv(&c_pwm,1.0);
-    //pwm_config_set_wrap(&c_pwm,(1<<12)-1);//MAX PWM value
-    pwm_config_set_wrap(&c_pwm,clock_get_hz(clk_sys)/(i2s_config->sample_freq));//MAX PWM value
-    pwm_init(slice_num,&c_pwm,true);
-
-    //Для синхронизации используем другой произвольный канал ШИМ
-    channel_config_set_dreq(&dma_config, pwm_get_dreq(slice_num));     
-    addr_write_DMA=(uint32_t*)&pwm_hw->slice[slice_num].cc;
-#else
     channel_config_set_dreq(&dma_config, pio_get_dreq(i2s_config->pio, i2s_config->sm, true));
-#endif
     dma_channel_configure(i2s_config->dma_channel,
                           &dma_config,
                           addr_write_DMA,    // Destination pointer
@@ -137,23 +124,13 @@ void i2s_write(const i2s_config_t *i2s_config, const int16_t *samples, const siz
  * i2s_config: I2S context obtained by i2s_get_default_config()
  *     sample: pointer to an array of dma_trans_count x 32 bits samples
  */
-void i2s_dma_write(i2s_config_t *i2s_config, const int16_t *samples) {
+void __not_in_flash_func(i2s_dma_write)(i2s_config_t *i2s_config, const int16_t *samples) {
     /* Wait the completion of the previous DMA transfer */
     dma_channel_wait_for_finish_blocking(i2s_config->dma_channel);
     /* Copy samples into the DMA buffer */
-#ifdef FEATURE_AUDIO_PWM
-    for(uint16_t i=0;i<i2s_config->dma_trans_count*2;i++) {
-        i2s_config->dma_buf[i] = (65536/2+(samples[i]))>>(3+i2s_config->volume);
+    for (int i = 0; i < i2s_config->dma_trans_count * 2; ++i) {
+        i2s_config->dma_buf[i] = samples[i] >> volume;
     }
-#else
-    if (i2s_config->volume == 0) {
-        memcpy(i2s_config->dma_buf, samples, i2s_config->dma_trans_count * sizeof(int32_t));
-    } else {
-        for (uint16_t i = 0; i < i2s_config->dma_trans_count * 2; i++) {
-            i2s_config->dma_buf[i] = samples[i] >> i2s_config->volume;
-        }
-    }
-#endif
     /* Initiate the DMA transfer */
     dma_channel_transfer_from_buffer_now(i2s_config->dma_channel,
                                          i2s_config->dma_buf,
@@ -165,17 +142,17 @@ void i2s_dma_write(i2s_config_t *i2s_config, const int16_t *samples) {
  * i2s_config: I2S context obtained by i2s_get_default_config()
  *     volume: desired volume between 0 (highest. volume) and 16 (lowest volume)
  */
-void i2s_volume(i2s_config_t *i2s_config, uint8_t volume) {
-    if (volume > 16) volume = 16;
-    i2s_config->volume = volume;
+void i2s_volume(i2s_config_t *i2s_config, uint8_t vol) {
+    if (vol > 16) vol = 16;
+    volume = vol;
 }
 
 /**
  * Increases the output volume
  */
 void i2s_increase_volume(i2s_config_t *i2s_config) {
-    if (i2s_config->volume > 0) {
-        i2s_config->volume--;
+    if (volume > 0) {
+        volume--;
     }
 }
 
@@ -183,24 +160,24 @@ void i2s_increase_volume(i2s_config_t *i2s_config) {
  * Decreases the output volume
  */
 void i2s_decrease_volume(i2s_config_t *i2s_config) {
-    if (i2s_config->volume < 16) {
-        i2s_config->volume++;
+    if (volume < 16) {
+        volume++;
     }
 }
 
-#if FEATURE_AUDIO_I2S
-i2s_config_t i2s_config;
+static i2s_config_t i2s_config;
 #elif FEATURE_AUDIO_PWM || FEATURE_AUDIO_HW
-pwm_config pwm;
+static pwm_config pwm;
 #endif
 
 void audio_set_enabled(bool v) {
 #if FEATURE_AUDIO_I2S
-    i2s_volume(&i2s_config, v ? 16 : 0);
+    volume = v ? 0 : 16;
 #elif FEATURE_AUDIO_PWM
-// TODO:
+    volume = v ? 0 : 12;
 #elif FEATURE_AUDIO_HW
-// TODO:
+// TODO: ?
+    volume = v ? 0 : 16;
 #endif
 }
 
@@ -233,4 +210,83 @@ void audio_init(void) {
     pwm_config_set_wrap(&pwm, (1 << 12) - 1); // MAX PWM value
     pwm_init(pwm_gpio_to_slice_num(PCM_PIN), &pwm, true);
 #endif
+}
+
+static int16_t samples[2] = { 0 };
+
+//=============================================================================
+// Core 1 Entry Point (Audio processing)
+//=============================================================================
+bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
+    static uint64_t t_dss = 0;
+    static int dss_v = 0;
+    PC* pc = (PC*)rt->user_data;
+    // Disney Sound Source 7 kHz
+    if (pc->dss_enabled) {
+        uint64_t t = time_us_64();
+        if (t - t_dss >= 1000000 / 7000) { // 142 us for 7 kHz
+            t_dss = t;
+            dss_v = dss_sample();
+        }
+    }
+    // output:
+    int b_v = 0;
+    int r_v = 0;
+    int l_v = 0;
+    if (pc->pcspk_enabled) {
+        b_v = pcspk_sample(pc->pcspk);
+    }
+    if (pc->covox_enabled && pc->covox_sample) {
+        int16_t sample = ((int16_t)pc->covox_sample - 127) << 8;
+        r_v += sample;
+        l_v += sample;
+    }
+    if (pc->tandy_enabled) {
+        int16_t sample = sn76489_sample(); // 16-bit
+        r_v += sample;
+        l_v += sample;
+    }
+    if (pc->mpu401_enabled) {
+        int16_t sample = midi_sample();
+        r_v += sample;
+        l_v += sample;
+    }
+    if (pc->adlib_enabled) {
+        int16_t sample = adlib_getsample(pc->adlib);
+        r_v += sample;
+        l_v += sample;
+    }
+    if (pc->sb16_enabled) {
+        sb16_getsample(pc->sb16, &r_v, &l_v);
+    }
+    r_v += dss_v;
+    l_v += dss_v;
+    #if FEATURE_AUDIO_PWM
+        r_v >>= volume;
+        l_v >>= volume;
+        uint16_t ur_v = (r_v + 32768) >> 4; // 16 signed bit to 12 unsigned
+        uint16_t ul_v = (l_v + 32768) >> 4;
+        if (ur_v > 4095) ur_v = 4095;
+        if (ul_v > 4095) ul_v = 4095;
+        pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
+        pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
+        b_v = b_v ? (4095 >> volume) : 0;
+        pwm_set_gpio_level(BEEPER_PIN, b_v);
+    #elif FEATURE_AUDIO_I2S
+        if (b_v) { r_v = l_v = 0x7FFF; }
+        if (r_v > 0x7FFF) r_v = 0x7FFF;
+        if (r_v < -32768) r_v = -32768;
+        if (l_v > 0x7FFF) l_v = 0x7FFF;
+        if (l_v < -32768) l_v = -32768;
+        samples[0] = r_v;
+        samples[1] = l_v;
+    #endif
+    return true;
+}
+
+// to call DMA-wait not from ISR for timer
+bool __not_in_flash_func(repeat_me_often)(void) {
+    #if FEATURE_AUDIO_I2S
+        i2s_dma_write(&i2s_config, samples);
+    #endif
 }

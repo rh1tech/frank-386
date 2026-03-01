@@ -44,7 +44,6 @@ typedef struct i2s_config {
     uint8_t dma_channel;
     uint16_t dma_trans_count;
     uint16_t *dma_buf;
-    uint8_t volume;
 } i2s_config_t;
 
 i2s_config_t i2s_get_default_config(void);

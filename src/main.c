@@ -37,8 +37,6 @@
 #include "audio.h"
 
 #include "pc.h"
-#include "dss.h"
-#include "adlib.h"
 #include "ini.h"
 #include "debug.h"
 #include "diskui.h"
@@ -733,12 +731,6 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing USB HID keyboard...\n");
     usbkbd_init();
 #endif
-
-    // Initialize I2S Audio
-    DBG_PRINT("Initializing I2S Audio...\n");
-    DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
-           I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
-    audio_init();
     return true;
 }
 
@@ -846,75 +838,9 @@ static bool init_emulator(void) {
     return true;
 }
 
-//=============================================================================
-// Core 1 Entry Point (Audio processing)
-//=============================================================================
-static bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
-    static uint64_t t_dss = 0;
-    static int dss_v = 0;
-    // Disney Sound Source 7 kHz
-    if (pc->dss_enabled) {
-        uint64_t t = time_us_64();
-        if (t - t_dss >= 1000000 / 7000) { // 142 us for 7 kHz
-            t_dss = t;
-            dss_v = dss_sample();
-        }
-    }
-    // output:
-    int b_v = 0;
-    int r_v = 0;
-    int l_v = 0;
-    if (pc->pcspk_enabled) {
-        b_v = pcspk_sample(pc->pcspk);
-    }
-    if (pc->covox_enabled && pc->covox_sample) {
-        int16_t sample = ((int16_t)pc->covox_sample - 127) << 8;
-        r_v += sample;
-        l_v += sample;
-    }
-    if (pc->tandy_enabled) {
-        int16_t sample = sn76489_sample(); // 16-bit
-        r_v += sample;
-        l_v += sample;
-    }
-    if (pc->mpu401_enabled) {
-        int16_t sample = midi_sample();
-        r_v += sample;
-        l_v += sample;
-    }
-    if (pc->adlib_enabled) {
-        int16_t sample = adlib_getsample(pc->adlib);
-        r_v += sample;
-        l_v += sample;
-    }
-    if (pc->sb16_enabled) {
-        sb16_getsample(pc->sb16, &r_v, &l_v);
-    }
-    r_v += dss_v;
-    l_v += dss_v;
-    #if FEATURE_AUDIO_PWM
-        uint16_t ur_v = (r_v + 32768) >> 4; // 16 signed bit to 12 unsigned
-        uint16_t ul_v = (l_v + 32768) >> 4;
-        if (ur_v > 4095) ur_v = 4095;
-        if (ul_v > 4095) ul_v = 4095;
-        pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
-        pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
-        pwm_set_gpio_level(BEEPER_PIN, b_v ? 4095 : 0);
-    #elif FEATURE_AUDIO_I2S
-    // TODO:
-    #endif
-    /*
-    // Process audio whenever the driver needs samples (DMA buffer free)
-    // This decouples audio generation from CPU time and locks it to
-    // the actual playback rate (preventing underruns/clicks).
-    if (audio_needs_samples()) {
-        // Mix SB16, Adlib, PC Speaker and output to I2S
-        audio_process_frame(pc);
-    }
-    */
-    return true;
-}
-
+bool timer_callback(repeating_timer_t *rt);
+// to call DMA wait not from ISR for timer
+bool repeat_me_often(void);
 static void __not_in_flash_func(core1_entry)(void) {
 
     DBG_PRINT("[Core 1] Initializing VGA...\n");
@@ -922,13 +848,23 @@ static void __not_in_flash_func(core1_entry)(void) {
     vga_hw_init();
     vga_initialized = true;
 
+    // Initialize I2S Audio
+    DBG_PRINT("Initializing I2S Audio...\n");
+    DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
+           I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
+    audio_init();
     while(!pc) {
         sleep_ms(1);
         __dmb;
     }
     static repeating_timer_t m_timer = { 0 };
     int hz = 44100;
-	add_repeating_timer_us(-1000000 / hz, timer_callback, NULL, &m_timer);
+	add_repeating_timer_us(-1000000 / hz, timer_callback, pc, &m_timer);
+    while(1) {
+        repeat_me_often();
+        sleep_us(1);
+    }
+    __unreachable();
 }
 
 //=============================================================================
