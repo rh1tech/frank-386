@@ -23,7 +23,7 @@ set(BUILD_NAME "386")
 set(FIRMWARE_VERSION "v1.01" CACHE STRING "Firmware version string")
 
 # Board configuration variant (M1, M2)
-set(BOARD "M2" CACHE STRING "Board variant: M1 or M2")
+set(BOARD "M1" CACHE STRING "Board variant: M1 or M2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -267,6 +267,12 @@ if(USB_HID_ENABLED)
     target_include_directories(${BUILD_NAME} PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/drivers/usbhid
     )
+endif()
+
+if(AUDIO_TYPE STREQUAL "I2S")
+    target_compile_definitions(${BUILD_NAME} PRIVATE FEATURE_AUDIO_I2S=1)
+elseif(AUDIO_TYPE STREQUAL "PWM")
+    target_compile_definitions(${BUILD_NAME} PRIVATE FEATURE_AUDIO_PWM=1)
 endif()
 
 target_compile_definitions(${BUILD_NAME} PRIVATE

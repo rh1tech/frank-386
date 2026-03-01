@@ -25,6 +25,7 @@
 #include "pcspk.h"
 #include <stdlib.h>
 #include <string.h>
+#include <pico.h>
 
 #if defined(BUILD_ESP32) || defined(RP2350_BUILD)
 void *pcmalloc(long size);
@@ -156,4 +157,38 @@ PCSpkState *pcspk_init(PITState *pit)
 //    register_ioport_read(0x61, 1, 1, pcspk_ioport_read, s);
 //    register_ioport_write(0x61, 1, 1, pcspk_ioport_write, s);
     return s;
+}
+
+int16_t __not_in_flash_func(pcspk_sample)(PCSpkState *s)
+{
+    if (!s || !s->data_on)
+        return 0;
+
+  //  return pit_get_out(s->pit, 2) ? (1 << 12) - 1 : 0;
+
+    if (pit_get_mode(s->pit, 2) != 3)
+        return 0;
+
+    if (!pit_get_gate(s->pit, 2))
+        return 0;
+
+    uint32_t count = pit_get_initial_count(s->pit, 2);
+    if (count < PCSPK_MIN_COUNT)
+        return 0;
+
+    /* частота PIT */
+    uint32_t freq = PIT_FREQ / count;
+
+    if (freq == 0)
+        return 0;
+
+    /* фаза */
+    static uint32_t phase = 0;
+
+    /* phase increment в fixed-point 32.32 */
+    uint64_t inc = ((uint64_t)freq << 32) / PCSPK_SAMPLE_RATE;
+    phase += inc;
+
+    /* квадратная волна */
+    return (phase & 0x80000000) ? 0x7FFF : 0;
 }

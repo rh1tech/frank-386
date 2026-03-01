@@ -58,7 +58,6 @@ typedef struct {
 	I8257State *isa_dma, *isa_hdma;
 	SB16State *sb16;
 	PCSpkState *pcspk;
-	SN76489State *sn76489;
 
 	// Covox Speech Thing - no state object needed, just last sample + enable
 	uint8_t covox_sample;      /* last written DAC value */

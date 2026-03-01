@@ -42,11 +42,41 @@ bitloop0:
 public entry_point:
     set x, 14         side 0b11
 
+.program audio_i2s_cs4334
+.side_set 2
+public entry_point:
+     out pins, 31       side 0b11
+.wrap_target
+loop:
+     set y,4             side 0b10
+     set x,15            side 0b11
+l0:
+     out pins, 1         side 0b10
+     nop                 side 0b11
+l1:
+     nop                 side 0b10
+     jmp y--,l1          side 0b11
+     set y,5             side 0b10
+     jmp x--,l0          side 0b11
+
+     set y,4             side 0b00
+     set x,15            side 0b01
+
+l2:
+     out pins, 1         side 0b00
+     nop                 side 0b01
+l3:
+     nop                 side 0b00
+     jmp y--,l3          side 0b01
+     set y,5             side 0b00
+
+     jmp x--,l2          side 0b01
+
 % c-sdk {
 
 static inline void audio_i2s_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin_base) {
     pio_sm_config sm_config = audio_i2s_program_get_default_config(offset);
-
+    
     sm_config_set_out_pins(&sm_config, data_pin, 1);
     sm_config_set_sideset_pins(&sm_config, clock_pin_base);
     sm_config_set_out_shift(&sm_config, false, true, 32);
@@ -60,4 +90,20 @@ static inline void audio_i2s_program_init(PIO pio, uint sm, uint offset, uint da
     pio_sm_exec(pio, sm, pio_encode_jmp(offset + audio_i2s_offset_entry_point));
 }
 
+
+static inline void audio_i2s_cs4334_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin_base) {
+    pio_sm_config sm_config = audio_i2s_cs4334_program_get_default_config(offset);
+
+    sm_config_set_out_pins(&sm_config, data_pin, 1);
+    sm_config_set_sideset_pins(&sm_config, clock_pin_base);
+    sm_config_set_out_shift(&sm_config, false, true, 32);
+
+    pio_sm_init(pio, sm, offset, &sm_config);
+
+    uint pin_mask = (1u << data_pin) | (3u << clock_pin_base);
+    pio_sm_set_pindirs_with_mask(pio, sm, pin_mask, pin_mask);
+    pio_sm_set_pins(pio, sm, 0); // clear pins
+
+    //pio_sm_exec(pio, sm, pio_encode_jmp(offset + 0));
+}
 %}

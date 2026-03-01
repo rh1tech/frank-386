@@ -110,7 +110,7 @@ static u8 pc_io_read(void *o, int addr)
 		return val;
 	case 0xc0: case 0xc1:
 		/* SN76489 is write-only; return 0xFF on read when Tandy active */
-		if (pc->sn76489 && pc->tandy_enabled)
+		if (pc->tandy_enabled)
 			return 0xff;
 		val = i8257_read_chan(pc->isa_hdma, addr - 0xc0, 1);
 		return val;
@@ -344,8 +344,8 @@ static void pc_io_write(void *o, int addr, u8 val)
 	/* 0xC0/0xC1: SN76489 data port when Tandy enabled, hdma ch0 otherwise.
 	 * 0xC2-0xCE: always hdma (Tandy only occupied 0xC0). */
 	case 0xc0: case 0xc1:
-		if (pc->sn76489 && pc->tandy_enabled)
-			sn76489_write(pc->sn76489, val);
+		if (pc->tandy_enabled)
+			sn76489_out(val);
 		else
 			i8257_write_chan(pc->isa_hdma, addr - 0xc0, val, 1);
 		return;
@@ -377,8 +377,8 @@ static void pc_io_write(void *o, int addr, u8 val)
 	 * 0x1E0: Tandy 1000 SX/TX/HX data port
 	 * 0x2C0: Tandy 1000 A/B mirror */
 	case 0x1E0: case 0x2C0:
-		if (pc->sn76489 && pc->tandy_enabled)
-			sn76489_write(pc->sn76489, val);
+		if (pc->tandy_enabled)
+			sn76489_out(val);
 		return;
 	/* Covox Speech Thing (parallel port DAC)
 	 * 0x278 = LPT2 data. */
@@ -823,7 +823,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
 	pc->pcspk = pcspk_init(pc->pit);
-	pc->sn76489 = sn76489_new();
+	sn76489_reset();
 
 	// Audio/mouse enable flags default to enabled
 	// These can be disabled via config_set_* functions at runtime
@@ -848,6 +848,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 #else
 #define MIXER_BUF_LEN 2048
 #endif
+/// deprecated: TODO: remove it
 void mixer_callback (void *opaque, uint8_t *stream, int free)
 {
 	uint8_t tmpbuf[MIXER_BUF_LEN];
@@ -899,26 +900,6 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 		}
 	}
 
-	// Tandy 3-Voice Sound (SN76489) - stereo int16 (only if enabled)
-	// Uses a static buffer sized for a full audio frame to avoid truncation.
-	// tmpbuf is only MIXER_BUF_LEN bytes which is smaller than 'free' bytes
-	// for stereo output, so we use a dedicated static buffer here.
-	if (pc->sn76489 && pc->tandy_enabled) {
-		// Static buffer: max 768 stereo int16 frames (> 735 TARGET_SAMPLES_PER_FRAME)
-		static int16_t tandy_buf[768 * 2];
-		int frames = free / 4;     // number of stereo frames needed
-		if (frames > 768) frames = 768;
-		int tandy_bytes = frames * 4;
-		memset(tandy_buf, 0, tandy_bytes);
-		sn76489_callback(pc->sn76489, (uint8_t *)tandy_buf, tandy_bytes);
-		for (int i = 0; i < frames * 2; i++) {
-			int res = (int)d2[i] + (int)tandy_buf[i];
-			if (res > 32767)  res = 32767;
-			if (res < -32768) res = -32768;
-			d2[i] = (int16_t)res;
-		}
-	}
-
 	// Covox Speech Thing - sample-and-hold DAC on LPT2 port (only if enabled)
 	if (pc->covox_enabled && pc->covox_sample) {
 		int cv = (int)pc->covox_sample << 4;
@@ -927,11 +908,6 @@ void mixer_callback (void *opaque, uint8_t *stream, int free)
 			if (res > 32767)  res = 32767;
 			d2[i] = (int16_t)res;
 		}
-	}
-
-	// Disney Sound Source
-	if (pc->dss_enabled) {
-		dss_samples(d2, free);
 	}
 }
 
@@ -949,6 +925,7 @@ void load_bios_and_reset(PC *pc)
 	} else if (pc->vga_bios && pc->vga_bios[0]) {
 		printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
 	}
+	sn76489_reset();
 
 	// Debug: verify BIOS loaded at reset vector
 	uint8_t *reset_vec = (uint8_t *)pc->phys_mem + 0xFFFF0;

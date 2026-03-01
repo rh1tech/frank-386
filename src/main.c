@@ -37,12 +37,17 @@
 #include "audio.h"
 
 #include "pc.h"
+#include "dss.h"
 #include "ini.h"
 #include "debug.h"
 #include "diskui.h"
 #include "settingsui.h"
 #include "config_save.h"
 #include "vga_osd.h"
+
+#if FEATURE_AUDIO_PWM
+#include <hardware/pwm.h>
+#endif
 
 //=============================================================================
 // Version Information
@@ -71,7 +76,7 @@ static uint8_t *framebuffer = NULL;
 static FATFS fatfs;
 
 // Flag to track if VGA is initialized (for error display)
-static bool vga_initialized = false;
+static volatile bool vga_initialized = false;
 
 //=============================================================================
 // Error Display
@@ -636,7 +641,7 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
 //=============================================================================
 // Hardware Initialization
 //=============================================================================
-
+static void core1_entry(void);
 static bool init_hardware(void) {
     // Configure clocks (including overclock if enabled)
     configure_clocks();
@@ -655,10 +660,9 @@ static bool init_hardware(void) {
     DBG_PRINT("  PSRAM test passed (8MB)\n");
 
     // Initialize VGA early so we can show errors on screen
-    DBG_PRINT("Initializing VGA...\n");
-    DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
-    vga_hw_init();
-    vga_initialized = true;
+    multicore_launch_core1(core1_entry);
+
+    while(!vga_initialized) sleep_ms(1);
 
     // Initialize SD card
     DBG_PRINT("Initializing SD card...\n");
@@ -733,10 +737,7 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing I2S Audio...\n");
     DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
            I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
-    if (!audio_init()) {
-        printf("WARNING: Audio initialization failed\n");
-    }
-
+    audio_init();
     return true;
 }
 
@@ -847,19 +848,68 @@ static bool init_emulator(void) {
 // Core 1 Entry Point (Audio processing)
 //=============================================================================
 
-static void __not_in_flash() core1_entry(void) {
-    DBG_PRINT("[Core 1] Audio started\n");
-    uint64_t t_dss = time_us_64();
-    while (true) {
-        if (initialized && pc) {
-            // Disney Sound Source 7 kHz
-            if (pc->dss_enabled) {
-                uint64_t t = time_us_64();
-                if (t - t_dss >= 1000000 / 7000) { // 142 us for 7 kHz
-                    dss_process_sample();
-                    t_dss = t;
-                }
+static void __not_in_flash_func(core1_entry)(void) {
+
+    DBG_PRINT("[Core 1] Initializing VGA...\n");
+    DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
+    vga_hw_init();
+    vga_initialized = true;
+
+    while(!pc) {
+        sleep_ms(1);
+        __dmb;
+    }
+    uint64_t t_44100 = time_us_64();
+    uint32_t t_dss = time_us_32();
+    int dss_v = 0;
+    while (1) {
+        // Disney Sound Source 7 kHz
+        if (pc->dss_enabled) {
+            uint32_t t = time_us_32();
+            if (t - t_dss >= 1000000 / 7000) { // 142 us for 7 kHz
+                t_dss = t;
+                dss_v = dss_sample();
             }
+        }
+        uint64_t t = time_us_64();
+        if (t - t_44100 < (1000000 / 44100)) // ~22 us for 44.1 kHz
+            continue;
+        t_44100 = t;
+        // output:
+        int b_v = 0;
+        int r_v = 0;
+        int l_v = 0;
+        if (pc->pcspk_enabled) {
+            b_v = pcspk_sample(pc->pcspk);
+        }
+        if (pc->covox_enabled && pc->covox_sample) {
+            int16_t sample = ((int16_t)pc->covox_sample - 127) << 8;
+            r_v += sample;
+            l_v += sample;
+        }
+        if (pc->tandy_enabled) {
+            int16_t sample = sn76489_sample(); // 16-bit
+            r_v += sample;
+            l_v += sample;
+        }
+        r_v += dss_v;
+        l_v += dss_v;
+        #if FEATURE_AUDIO_PWM
+            uint16_t ub_v = (b_v + 32768) >> 4; // 16 signed bit to 12 unsigned
+            uint16_t ur_v = (r_v + 32768) >> 4;
+            uint16_t ul_v = (l_v + 32768) >> 4;
+            if (ub_v > 4095) ub_v = 4095;
+            if (ur_v > 4095) ur_v = 4095;
+            if (ul_v > 4095) ul_v = 4095;
+            pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
+            pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
+            pwm_set_gpio_level(BEEPER_PIN, ub_v);
+        #elif FEATURE_AUDIO_I2S
+        // TODO:
+        #endif
+    }
+    __unreachable();
+            /*
             // Process audio whenever the driver needs samples (DMA buffer free)
             // This decouples audio generation from CPU time and locks it to
             // the actual playback rate (preventing underruns/clicks).
@@ -867,9 +917,8 @@ static void __not_in_flash() core1_entry(void) {
                 // Mix SB16, Adlib, PC Speaker and output to I2S
                 audio_process_frame(pc);
             }
-        }
-        tight_loop_contents();
-    }
+            */
+
 }
 
 //=============================================================================
@@ -989,9 +1038,6 @@ int main(void) {
             sleep_ms(1000);
         }
     }
-
-    // Start Core 1 for audio processing
-    multicore_launch_core1(core1_entry);
 
     initialized = true;
 

@@ -318,7 +318,7 @@ int pit_get_out(PITState *pit, int channel)
 	return pit_get_out1(s, uticks);
 }
 
-int pit_get_gate(PITState *pit, int channel)
+int __not_in_flash_func(pit_get_gate)(PITState *pit, int channel)
 {
 	PITChannelState *s = &pit->channels[channel];
 	return s->gate;
@@ -354,13 +354,13 @@ void pit_set_gate(PITState *pit, int channel, int val)
 	s->gate = val;
 }
 
-int pit_get_initial_count(PITState *pit, int channel)
+int __not_in_flash_func(pit_get_initial_count)(PITState *pit, int channel)
 {
 	PITChannelState *s = &pit->channels[channel];
 	return s->count;
 }
 
-int pit_get_mode(PITState *pit, int channel)
+int __not_in_flash_func(pit_get_mode)(PITState *pit, int channel)
 {
 	PITChannelState *s = &pit->channels[channel];
 	return s->mode;

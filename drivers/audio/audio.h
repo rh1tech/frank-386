@@ -1,56 +1,63 @@
 /**
- * murm386 - I2S Audio Driver for RP2350
+ * MIT License
  *
- * DMA-based I2S audio output using PIO for the Sound Blaster 16,
- * Adlib/OPL2, and PC Speaker emulation.
+ * Copyright (c) 2022 Vincent Mistler
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
  */
 
-#ifndef AUDIO_H
-#define AUDIO_H
+#pragma once
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#include <stdint.h>
-#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <hardware/pio.h>
 #include <hardware/clocks.h>
 #include <hardware/dma.h>
+#include "audio_i2s.pio.h"
 
-// Audio sample rate - Sound Blaster uses 44100 Hz
-#define AUDIO_SAMPLE_RATE 44100
+typedef struct i2s_config {
+    uint32_t sample_freq;
+    uint16_t channel_count;
+    uint8_t data_pin;
+    uint8_t clock_pin_base;
+    PIO pio;
+    uint8_t sm;
+    uint8_t dma_channel;
+    uint16_t dma_trans_count;
+    uint16_t *dma_buf;
+    uint8_t volume;
+} i2s_config_t;
 
-// Audio buffer size - enough samples for ~20ms at 44.1kHz
-// 44100 / 50 = 882 samples per frame at 50Hz
-// Use 1024 for headroom
-#define AUDIO_BUFFER_SAMPLES 1024
+i2s_config_t i2s_get_default_config(void);
+void i2s_init(i2s_config_t *i2s_config);
+void i2s_write(const i2s_config_t *i2s_config, const int16_t *samples, const size_t len);
+void i2s_dma_write(i2s_config_t *i2s_config, const int16_t *samples);
+void i2s_volume(i2s_config_t *i2s_config, uint8_t volume);
+void i2s_increase_volume(i2s_config_t *i2s_config);
+void i2s_decrease_volume(i2s_config_t *i2s_config);
 
-//=============================================================================
-// High-level audio API for murm386
-//=============================================================================
+void audio_set_enabled(bool);
+void audio_init(void);
 
-// Initialize audio system
-bool audio_init(void);
-
-// Process audio for one frame - call from main loop
-// This invokes mixer_callback and sends samples to I2S
-void audio_process_frame(void *pc);
-
-// Set master volume (0-128)
-void audio_set_volume(int volume);
-
-// Get current master volume
-int audio_get_volume(void);
-
-// Enable/disable audio
-void audio_set_enabled(bool enabled);
-
-// Check if audio is enabled
-bool audio_is_enabled(void);
-
-// Check if audio system needs more samples (buffer free)
-bool audio_needs_samples(void);
-
-/// TODO: 
-void dss_process_sample(void);
-
-#endif // AUDIO_H
+#ifdef __cplusplus
+}
+#endif
