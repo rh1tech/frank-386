@@ -749,7 +749,7 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
 
 static inline void vga_hw_set_mode(int mode);
 
-void __time_critical_func(vga_hw_new_frame)(void) {
+static void vga_hw_new_frame_deferred(void) {
     static int last_vga_mode = -1;
     // Update cursor
     int cx, cy, cs, ce, cv;
@@ -820,6 +820,8 @@ static uint32_t anomaly_ever_seen = 0;
 static uint32_t pio_stall_ever_seen = 0;
 // Max observed vga_hw_new_frame duration in µs (for debugging long new_frame calls)
 static uint32_t new_frame_max_us = 0;
+// Deferred frame update flag (set in ISR, processed outside)
+volatile uint32_t frame_update_request = 0;
 
 // Frame period in µs — computed in vga_hw_init() to avoid overflow.
 static uint32_t frame_period_us = 16688u;
@@ -906,14 +908,16 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
         missed_isr_count  = 0;
         if (missed_isr_prev || blank_frame_prev)
             anomaly_ever_seen = 1;
-        {
+       /* {
             uint32_t t0 = timer_hw->timerawl;
             vga_hw_new_frame();
             uint32_t dt = timer_hw->timerawl - t0;
             if (dt > new_frame_max_us) new_frame_max_us = dt;
             // If new_frame took more than one scanline (~32µs), that's a problem
             if (dt > 32) anomaly_ever_seen = 1;
-        }
+        }*/
+        // Defer heavy frame work outside ISR
+        frame_update_request = 1;
         if (vga_state && vga_get_mode(vga_state) == 0)
             blank_frame_count = 1;
     }
@@ -1216,17 +1220,15 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
     }
 }
 
-// Legacy API for compatibility
-uint8_t *vga_hw_get_framebuffer(void) {
-    return NULL;  // No framebuffer in this mode
-}
-
-void vga_hw_clear(uint8_t color) {
-    (void)color;
-    // No-op - VRAM is managed by emulator
-}
-
-void vga_hw_set_pixel(int x, int y, uint8_t color) {
-    (void)x; (void)y; (void)color;
-    // No-op - VRAM is managed by emulator
+void __not_in_flash_func(vga_hw_process_deferred)(void) {
+    if (!frame_update_request)
+        return;
+    frame_update_request = 0;
+    uint32_t t0 = timer_hw->timerawl;
+    vga_hw_new_frame_deferred();
+    uint32_t dt = timer_hw->timerawl - t0;
+    if (dt > new_frame_max_us)
+        new_frame_max_us = dt;
+    if (dt > 32)
+        anomaly_ever_seen = 1;
 }

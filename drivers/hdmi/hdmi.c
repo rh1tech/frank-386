@@ -57,7 +57,7 @@ extern int gfx_height;
 extern int gfx_line_offset;  // Words per line (40 for 320px EGA, 80 for 640px)
 extern int gfx_sram_stride;  // Words per line in SRAM buffer (width/8 + 1)
 
-void vga_hw_new_frame(void); // vsync
+extern volatile uint32_t frame_update_request;
 
 // #define HDMI_WIDTH 480 //480 Default
 // #define HDMI_HEIGHT 644 //524 Default
@@ -397,7 +397,7 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
 
     if (line++ > 524) {
         line = 0;
-        vga_hw_new_frame();
+        frame_update_request = 1;
     }
 
     inx_buf_dma++;
