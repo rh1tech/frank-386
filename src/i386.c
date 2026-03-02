@@ -201,6 +201,13 @@ inline static uword sext32(u32 a)
 
 #if EMULATE_LTEMS
 #include "ems.c.inl"
+// Guard macro: evaluates condition only when EMS is active, always true otherwise.
+// Used in fast-path string ops to skip the bulk memcpy shortcut when source/dest
+// falls inside the EMS window (0xD0000-0xDFFFF) — those addresses must be
+// redirected through ems_read/write, not accessed as raw phys_mem.
+#define IF_EMULATE_LTEMS(cond) (cond)
+#else
+#define IF_EMULATE_LTEMS(cond) 1
 #endif
 
 #ifdef I386_OPT1
@@ -2728,7 +2735,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		if (cpu->cb.iomem_write_string && in_iomem(memld.addr1) && \
 		    dir > 0  && in_iomem(memld.addr1 + count - 1) && \
 		    (memls.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
+		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095) && \
+		    IF_EMULATE_LTEMS(!(memls.addr1 - EMS_START < (EMS_END - EMS_START)))) { \
 			if (cpu->cb.iomem_write_string( \
 				    cpu->cb.iomem, memld.addr1, \
 				    cpu->phys_mem + memls.addr1, count * dir)) { \
@@ -2837,7 +2845,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			count = countd; \
 		if (cpu->cb.io_read_string && dir > 0 && \
 		    (memld.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | 4095)) { \
+		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | 4095) && \
+		    IF_EMULATE_LTEMS(!(memld.addr1 - EMS_START < (EMS_END - EMS_START)))) { \
 			int count1 = cpu->cb.io_read_string( \
 				cpu->cb.io, lreg16(2), \
 				cpu->phys_mem + memld.addr1, dir, count); \
@@ -2900,7 +2909,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			count = counts; \
 		if (cpu->cb.io_write_string && dir > 0 && \
 		    (memls.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
+		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095) && \
+		    IF_EMULATE_LTEMS(!(memls.addr1 - EMS_START < (EMS_END - EMS_START)))) { \
 			int count1 = cpu->cb.io_write_string( \
 				cpu->cb.io, lreg16(2), \
 				cpu->phys_mem + memls.addr1, dir, count); \

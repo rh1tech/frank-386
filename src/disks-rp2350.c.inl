@@ -7,6 +7,7 @@
 #include <hardware/gpio.h>
 #include "i386.h"
 #include "ff.h"
+#include "ems.h"
 
 extern FATFS fs;
 
@@ -232,19 +233,16 @@ static void readdisk(uint8_t drivenum,
         }
 
         if (is_verify) {
-            for (int sectoffset = 0; sectoffset < 512; sectoffset++) {
-                // Verify sector data
-                if (disk_mem[memdest++] != sectorbuffer[sectoffset]) {
-                    // Sector verify failed
-                    cpu_set_al(disk_cpu, cursect);
-                    cpu_set_cf(disk_cpu, 1);
-                    cpu_set_ah(disk_cpu, 0xBB);
-                    return;
-                }
+            if (!ems_verify_guest(disk_mem, memdest, sectorbuffer, 512)) {
+                cpu_set_al(disk_cpu, cursect);
+                cpu_set_cf(disk_cpu, 1);
+                cpu_set_ah(disk_cpu, 0xBB);
+                return;
             }
+            memdest += 512;
         } else {
-            // Copy sector data to memory
-            memcpy(disk_mem + memdest, sectorbuffer, 512);
+            // Copy sector data to guest memory (EMS-aware)
+            ems_copy_to_guest(disk_mem, memdest, sectorbuffer, 512);
             memdest += 512;
         }
 
@@ -315,8 +313,8 @@ static void writedisk(uint8_t drivenum,
 
     // Write each sector
     for (cursect = 0; cursect < sectcount; cursect++) {
-        // Copy from memory to sector buffer
-        memcpy(sectorbuffer, disk_mem + memdest, 512);
+        // Copy from guest memory to sector buffer (EMS-aware)
+        ems_copy_from_guest(disk_mem, memdest, sectorbuffer, 512);
         memdest += 512;
 
         // Write the buffer to the file

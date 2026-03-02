@@ -296,7 +296,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     EMU_VGA_MEM_SIZE_KB=256
     EMU_CPU_GEN=4
 
-    EMULATE_LTEMS=0
+    EMULATE_LTEMS=1
 
     # Disable features for initial port
 #    NO_FPU=1

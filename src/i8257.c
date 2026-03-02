@@ -27,6 +27,7 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ems.h"
 
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
@@ -416,10 +417,11 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
 
     uint8_t *p = buf;
     if (r->mode & 0x20) {
-        for (hwaddr i = 0;
-             addr - pos - len + i < d->phys_mem_size && i < len;
-             i++) {
-            p[i] = d->phys_mem[addr - pos - len + i];
+        /* Decrement mode: guest address runs backwards */
+        hwaddr base = addr - pos - len;
+        for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
+            uint32_t a = (uint32_t)(base + i);
+            p[i] = ems_in_window(a) ? *ems_host_ptr(a) : d->phys_mem[a];
         }
         //cpu_physical_memory_read (d->phys_mem + addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -428,10 +430,11 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
             p[i] = b;
         }
     } else {
-        for (hwaddr i = 0;
-             addr + pos + i < d->phys_mem_size && i < len;
-             i++) {
-            p[i] = d->phys_mem[addr + pos + i];
+        /* Normal (increment) mode */
+        hwaddr base = addr + pos;
+        for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
+            uint32_t a = (uint32_t)(base + i);
+            p[i] = ems_in_window(a) ? *ems_host_ptr(a) : d->phys_mem[a];
         }
         //cpu_physical_memory_read (addr + pos, buf, len);
     }
@@ -452,10 +455,14 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
 
     uint8_t *p = buf;
     if (r->mode & 0x20) {
-        for (hwaddr i = 0;
-             addr - pos - len + i < s->phys_mem_size && i < len;
-             i++) {
-            s->phys_mem[addr - pos - len + i] = p[i];
+        /* Decrement mode */
+        hwaddr base = addr - pos - len;
+        for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
+            uint32_t a = (uint32_t)(base + i);
+            if (ems_in_window(a))
+                *ems_host_ptr(a) = p[i];
+            else
+                s->phys_mem[a] = p[i];
         }
         //cpu_physical_memory_write (addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -464,10 +471,14 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
             p[i] = b;
         }
     } else {
-        for (hwaddr i = 0;
-             addr + pos + i < s->phys_mem_size && i < len;
-             i++) {
-            s->phys_mem[addr + pos + i] = p[i];
+        /* Normal (increment) mode */
+        hwaddr base = addr + pos;
+        for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
+            uint32_t a = (uint32_t)(base + i);
+            if (ems_in_window(a))
+                *ems_host_ptr(a) = p[i];
+            else
+                s->phys_mem[a] = p[i];
         }
         //cpu_physical_memory_write (addr + pos, buf, len);
     }
