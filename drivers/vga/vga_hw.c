@@ -26,6 +26,7 @@
 #include "hardware/irq.h"
 #include "hardware/pio.h"
 #include "hardware/sync.h"
+#include "hardware/timer.h"
 
 bool SELECT_VGA = false;
 
@@ -794,14 +795,127 @@ void __time_critical_func(vga_hw_new_frame)(void) {
     }
 }
 
+// ============================================================================
+// Core 1 ISR load meter
+// Displayed as a 5-pixel-tall bar in the inactive region BELOW the active
+// picture (lines active_end .. N_LINES_VISIBLE-1, typically 440..479 = 40 px).
+//   RED    = ISR busy time fraction of full frame
+//   GREEN  = remaining budget
+//   YELLOW = 4px marker at left edge when a missed/late ISR was detected
+// 640 pixels wide = full frame budget.
+// ============================================================================
+#define LOAD_BAR_ENABLE  0   // set to 0 to disable
+#define LOAD_BAR_HEIGHT  10   // 5px ISR load + 5px new_frame duration
+
+static uint32_t isr_busy_us_acc  = 0;
+static uint32_t isr_busy_us_prev = 0;
+static uint32_t blank_frame_count = 0;
+static uint32_t blank_frame_prev  = 0;
+// Missed ISR: detected when current_line jumps by >1 between two calls
+static uint32_t missed_isr_count = 0;
+static uint32_t missed_isr_prev  = 0;
+// Once any missed ISR or blank frame is detected, stay yellow forever
+static uint32_t anomaly_ever_seen = 0;
+// PIO TX stall detected (FDEBUG.TXSTALL) - confirmed sync loss
+static uint32_t pio_stall_ever_seen = 0;
+// Max observed vga_hw_new_frame duration in µs (for debugging long new_frame calls)
+static uint32_t new_frame_max_us = 0;
+
+// Frame period in µs — computed in vga_hw_init() to avoid overflow.
+static uint32_t frame_period_us = 16688u;
+
+// Render the load bar directly into a line buffer.
+// Called for absolute scanlines in range [active_end .. active_end+LOAD_BAR_HEIGHT).
+static void __time_critical_func(render_load_bar)(uint32_t abs_line,
+                                                   uint32_t *output_buffer) {
+#if LOAD_BAR_ENABLE
+    if (abs_line < (uint32_t)active_end) return;
+    if (abs_line >= (uint32_t)active_end + LOAD_BAR_HEIGHT) return;
+
+    uint8_t *out = (uint8_t *)output_buffer + SHIFT_PICTURE;
+
+    // Top 5 rows: ISR total load (red/green/yellow/blue as before)
+    // Bottom 5 rows: vga_hw_new_frame() duration vs 32µs budget (orange/green)
+    bool is_bottom = (abs_line >= (uint32_t)active_end + 5);
+
+    if (!is_bottom) {
+        // ISR load bar
+        uint32_t busy  = isr_busy_us_prev;
+        uint32_t total = frame_period_us ? frame_period_us : 16688u;
+        if (busy > total) busy = total;
+        uint32_t red_px = (busy * 640u) / total;
+
+        uint8_t idle_color;
+        if (pio_stall_ever_seen)
+            idle_color = 0xC3u;  // blue
+        else if (anomaly_ever_seen)
+            idle_color = 0xFCu;  // yellow
+        else
+            idle_color = 0xCCu;  // green
+
+        for (uint32_t x = 0; x < 640; x++)
+            out[x] = (x < red_px) ? 0xF0u : idle_color;
+    } else {
+        // new_frame duration bar: budget = 32µs = one scanline
+        // ORANGE pixel: R=3,G=1,B=0 → 0xC0|0x34 = 0xF4
+        uint32_t nf = new_frame_max_us;
+        uint32_t budget = 32u;
+        if (nf > 640u) nf = 640u;  // cap visual at 640µs (20× budget)
+        // Scale: 640px = 20 × budget; each px = 1µs
+        uint32_t orange_px = (nf < 640u) ? nf : 640u;
+        // Mark the budget boundary with a bright white tick
+        for (uint32_t x = 0; x < 640; x++) {
+            if (x == budget)
+                out[x] = 0xFFu;  // white tick at 32µs mark
+            else if (x < orange_px)
+                out[x] = 0xF4u;  // orange: used new_frame time
+            else
+                out[x] = 0xCCu;  // green: spare
+        }
+    }
+#endif
+}
+
 static void __isr __time_critical_func(dma_handler_vga)(void) {
+    uint32_t t_enter = timer_hw->timerawl;
     dma_hw->ints0 = 1u << dma_ctrl_chan;
     static uint32_t current_line = 0;
+    static uint32_t prev_line    = 0xFFFFFFFF;
     uint32_t line = current_line++;
-    
+
+    // Check PIO FDEBUG.TXSTALL - sticky bit set if PIO ever ran out of data
+    // This is the definitive indicator of a DMA underrun causing sync loss.
+    uint32_t txstall_bit = 1u << (8 + vga_sm);
+    if (VGA_PIO->fdebug & txstall_bit) {
+        VGA_PIO->fdebug = txstall_bit;  // clear (write 1 to clear)
+        pio_stall_ever_seen = 1;
+    }
+
+    // Detect missed ISR: DMA advanced more than 1 line between two ISR calls
+    if (prev_line != 0xFFFFFFFF && line > prev_line + 1)
+        missed_isr_count += line - prev_line - 1;
+    prev_line = line;
+
     if (line >= N_LINES_TOTAL) {
-        line = current_line = 0;
-        vga_hw_new_frame();
+        line = current_line = prev_line = 0;
+        isr_busy_us_prev  = isr_busy_us_acc;
+        isr_busy_us_acc   = 0;
+        blank_frame_prev  = blank_frame_count;
+        blank_frame_count = 0;
+        missed_isr_prev   = missed_isr_count;
+        missed_isr_count  = 0;
+        if (missed_isr_prev || blank_frame_prev)
+            anomaly_ever_seen = 1;
+        {
+            uint32_t t0 = timer_hw->timerawl;
+            vga_hw_new_frame();
+            uint32_t dt = timer_hw->timerawl - t0;
+            if (dt > new_frame_max_us) new_frame_max_us = dt;
+            // If new_frame took more than one scanline (~32µs), that's a problem
+            if (dt > 32) anomaly_ever_seen = 1;
+        }
+        if (vga_state && vga_get_mode(vga_state) == 0)
+            blank_frame_count = 1;
     }
     
     // Update VGA status register 1 (port 0x3DA) from ISR — this is the
@@ -832,7 +946,16 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
         if (line == N_LINES_TOTAL - 4) {
             if (vga_state) {
                 const uint8_t *cr = vga_state->cr;
-                frame_vram_offset = (uint16_t)((cr[0x0c] << 8) | cr[0x0d]);
+                // Wolf3D writes cr[0x0c] and cr[0x0d] as two separate OUT
+                // instructions. The ISR may land between them and read a
+                // half-updated 16-bit address.  Re-read until both bytes
+                // are stable (usually only one extra read is needed).
+                uint8_t hi, lo;
+                do {
+                    hi = cr[0x0c];
+                    lo = cr[0x0d];
+                } while (hi != cr[0x0c]);
+                frame_vram_offset = (uint16_t)((hi << 8) | lo);
                 frame_pixel_panning = vga_state->ar[0x13] & 0x07;
                 int lc = (int)cr[0x18]
                        | (((int)cr[0x07] & 0x10) << 4)
@@ -851,14 +974,19 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
     uint32_t read_buf = 2 + (line & 3);
     uint32_t render_buf = 2 + ((line + 2) & 3);
     uint32_t render_line_num = line + 2;
-    
+
     // Set DMA to read from the buffer we already rendered
     dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[read_buf], false);
-    
-    // Pre-render 2 lines ahead (if still in active region)
+
+    // Pre-render 2 lines ahead
     if (render_line_num < N_LINES_VISIBLE) {
         render_line(render_line_num, lines_pattern[render_buf]);
+        // Load bar goes into the inactive region below active_end (e.g. lines 440-479)
+        render_load_bar(render_line_num, lines_pattern[render_buf]);
     }
+
+    // Accumulate ISR busy time (µs)
+    isr_busy_us_acc += timer_hw->timerawl - t_enter;
 }
 
 // ============================================================================
@@ -885,8 +1013,13 @@ void vga_hw_init(void) {
     float sys_clk = (float)clock_get_hz(clk_sys);
     float clk_div = sys_clk / VGA_CLK;
 
+    // Frame period: LINE_SIZE pixels per line, N_LINES_TOTAL lines, at VGA_CLK px/s
+    // Use float to avoid 32-bit overflow (800*525*1e6 ≈ 4.2e11)
+    frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
+
     DBG_PRINT("  System clock: %.1f MHz\n", sys_clk / 1e6f);
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
+    DBG_PRINT("  Frame period: %lu us\n", (unsigned long)frame_period_us);
     
     // Allocate line pattern buffers (6 buffers: 2 sync + 4 active)
     lines_pattern_data = (uint32_t *)calloc(LINE_SIZE * 6 / 4, sizeof(uint32_t));

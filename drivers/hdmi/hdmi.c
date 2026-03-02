@@ -125,7 +125,7 @@ static const struct pio_program program_PIO_HDMI = {
     .origin = -1,
 };
 
-static uint64_t get_ser_diff_data(const uint16_t dataR, const uint16_t dataG, const uint16_t dataB) {
+static uint64_t __time_critical_func(get_ser_diff_data)(const uint16_t dataR, const uint16_t dataG, const uint16_t dataB) {
     uint64_t out64 = 0;
     for (int i = 0; i < 10; i++) {
         out64 <<= 6;
@@ -163,7 +163,7 @@ static uint64_t get_ser_diff_data(const uint16_t dataR, const uint16_t dataG, co
 }
 
 //конвертор TMDS
-static uint tmds_encoder(const uint8_t d8) {
+static uint __time_critical_func(tmds_encoder)(const uint8_t d8) {
     int s1 = 0;
     for (int i = 0; i < 8; i++) s1 += (d8 & (1 << i)) ? 1 : 0;
     bool is_xnor = false;
@@ -744,7 +744,7 @@ static inline bool hdmi_init() {
     return true;
 };
 
-void graphics_set_palette_hdmi(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
+void __time_critical_func(graphics_set_palette_hdmi)(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
     if is_hdmi_sync(i) return; //не записываем "служебные" цвета
     required_to_repair_text_pal = true;
     uint64_t* conv_color64 = (uint64_t *)conv_color;
