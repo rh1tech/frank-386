@@ -64,12 +64,19 @@ void osd_init(void) {
     osd_visible = false;
 }
 
+extern bool required_to_repair_text_pal;
+extern int current_mode;
+int mode_bak;
 void osd_show(void) {
+    required_to_repair_text_pal = true;
     osd_visible = true;
+    mode_bak = current_mode;
+    current_mode = 0;
 }
 
 void osd_hide(void) {
     osd_visible = false;
+    current_mode = mode_bak;
 }
 
 bool __time_critical_func(osd_is_visible)(void) {

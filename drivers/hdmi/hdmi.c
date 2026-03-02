@@ -79,6 +79,8 @@ static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[2];
 //ДМА палитра для конвертации
 //в хвосте этой памяти выделяется dma_data
 alignas(4096) uint32_t conv_color[1224];
+uint32_t conv_color2[1224]; // backup to fast restore pallete
+bool required_to_repair_text_pal = false;
 
 //индекс, проверяющий зависание
 static uint32_t irq_inx = 0;
@@ -477,44 +479,8 @@ void graphics_set_palette_hdmi2(
     uint8_t i
 );
 
-static bool required_to_repair_text_pal = true;
 void __not_in_flash_func(hdmi_repair_text_pal)() {
-    if (!required_to_repair_text_pal) return;
-    required_to_repair_text_pal = false;
-    // Заполнение палитры — CGA 16 цветов (индексы 0-15)
-    // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
-    static uint8_t cga_colors[16][3] = {
-        { 0,  0,  0},  //  0: Black
-        { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
-        { 0, 42,  0},  //  2: Green
-        { 0, 42, 42},  //  3: Cyan
-        {42,  0,  0},  //  4: Red
-        {42,  0, 42},  //  5: Magenta
-        {42, 21,  0},  //  6: Brown
-        {42, 42, 42},  //  7: Light Gray
-        {21, 21, 21},  //  8: Dark Gray
-        {21, 21, 63},  //  9: Light Blue
-        {21, 63, 21},  // 10: Light Green
-        {21, 63, 63},  // 11: Light Cyan
-        {63, 21, 21},  // 12: Light Red
-        {63, 21, 63},  // 13: Light Magenta
-        {63, 63, 21},  // 14: Yellow
-        {63, 63, 63},  // 15: White
-    };
-    
-    // заполнение палитры (text) 4 старших bit первый пиксел, 4 младших - второй
-    for (int c1 = 0; c1 < 16; ++c1) {
-        const uint8_t* c13 = cga_colors[c1];
-        for (int c2 = 0; c2 < 16; ++c2) {
-            const uint8_t* c23 = cga_colors[c2];
-            int ci = c1 << 4 | c2; // compund index
-            graphics_set_palette_hdmi2(
-                c13[0] << 2, c13[1] << 2, c13[2] << 2,
-                c23[0] << 2, c23[1] << 2, c23[2] << 2,
-                ci
-            );
-        }
-    }
+    required_to_repair_text_pal = true;
 }
 
 //деинициализация - инициализация ресурсов
@@ -558,7 +524,40 @@ static inline bool hdmi_init() {
     offs_prg0 = pio_add_program(PIO_VIDEO, &program_PIO_HDMI);
     pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 12));
 
-    hdmi_repair_text_pal();
+    // Заполнение палитры — CGA 16 цветов (индексы 0-15)
+    // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
+    static uint8_t cga_colors[16][3] = {
+        { 0,  0,  0},  //  0: Black
+        { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
+        { 0, 42,  0},  //  2: Green
+        { 0, 42, 42},  //  3: Cyan
+        {42,  0,  0},  //  4: Red
+        {42,  0, 42},  //  5: Magenta
+        {42, 21,  0},  //  6: Brown
+        {42, 42, 42},  //  7: Light Gray
+        {21, 21, 21},  //  8: Dark Gray
+        {21, 21, 63},  //  9: Light Blue
+        {21, 63, 21},  // 10: Light Green
+        {21, 63, 63},  // 11: Light Cyan
+        {63, 21, 21},  // 12: Light Red
+        {63, 21, 63},  // 13: Light Magenta
+        {63, 63, 21},  // 14: Yellow
+        {63, 63, 63},  // 15: White
+    };
+    
+    // заполнение палитры (text) 4 старших bit первый пиксел, 4 младших - второй
+    for (int c1 = 0; c1 < 16; ++c1) {
+        const uint8_t* c13 = cga_colors[c1];
+        for (int c2 = 0; c2 < 16; ++c2) {
+            const uint8_t* c23 = cga_colors[c2];
+            int ci = c1 << 4 | c2; // compund index
+            graphics_set_palette_hdmi2(
+                c13[0] << 2, c13[1] << 2, c13[2] << 2,
+                c23[0] << 2, c23[1] << 2, c23[2] << 2,
+                ci
+            );
+        }
+    }
 
     //BASE_HDMI_CTRL_INX +3 служебные данные(синхра) напрямую вносим в массив -конвертер
     uint64_t* conv_color64 = (uint64_t *)conv_color;
@@ -579,8 +578,9 @@ static inline bool hdmi_init() {
     conv_color64[2 * HDMI_CTRL_3 + 0] = get_ser_diff_data(b0, b0, b0);
     conv_color64[2 * HDMI_CTRL_3 + 1] = get_ser_diff_data(b0, b0, b0);
 
-    //настройка PIO SM для конвертации
+    memcpy(conv_color2, conv_color, sizeof(conv_color));
 
+    //настройка PIO SM для конвертации
     pio_sm_config c_c = pio_get_default_sm_config();
     sm_config_set_wrap(&c_c, offs_prg1, offs_prg1 + (pio_program_conv_addr_HDMI.length - 1));
     sm_config_set_in_shift(&c_c, true, false, 32);
@@ -601,7 +601,7 @@ static inline bool hdmi_init() {
         gpio_set_slew_rate(beginHDMI_PIN_clk + i, GPIO_SLEW_RATE_FAST);
     }
 
-#if ZERO2
+#if BOARD_Z2
     // Настройка направлений пинов для state machines
     pio_sm_set_consecutive_pindirs(PIO_VIDEO, SM_video, HDMI_BASE_PIN, 8, true);
     pio_sm_set_consecutive_pindirs(PIO_VIDEO_ADDR, SM_conv, HDMI_BASE_PIN, 8, true);

@@ -29,6 +29,7 @@
 #include "hardware/timer.h"
 
 bool SELECT_VGA = false;
+extern bool required_to_repair_text_pal;
 
 // ============================================================================
 // PIO Program
@@ -1220,11 +1221,17 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
     }
 }
 
+extern uint32_t conv_color[1224], conv_color2[1224];
+
 void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (!frame_update_request)
         return;
     frame_update_request = 0;
     uint32_t t0 = timer_hw->timerawl;
+    if (required_to_repair_text_pal) {
+        required_to_repair_text_pal = false;
+        memcpy(conv_color, conv_color2, sizeof(conv_color));
+    }
     vga_hw_new_frame_deferred();
     uint32_t dt = timer_hw->timerawl - t0;
     if (dt > new_frame_max_us)

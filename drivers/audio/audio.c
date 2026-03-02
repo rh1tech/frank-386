@@ -45,7 +45,7 @@ i2s_config_t i2s_get_default_config(void) {
             .channel_count = 2,
     		.data_pin = I2S_DATA_PIN,
 	    	.clock_pin_base = I2S_CLOCK_PIN_BASE,
-            .pio = pio1,
+            .pio = pio2, // RP2350 only
             .sm = 0,
             .dma_channel = 0,
             .dma_buf = NULL,
@@ -59,7 +59,10 @@ i2s_config_t i2s_get_default_config(void) {
  * i2s_config: I2S context obtained by i2s_get_default_config()
  */
 void i2s_init(i2s_config_t *i2s_config) {
-    uint8_t func = GPIO_FUNC_PIO1;    // TODO: GPIO_FUNC_PIO0 for pio0 or GPIO_FUNC_PIO1 for pio1
+    uint8_t func;
+    if      (i2s_config->pio == pio0) func = GPIO_FUNC_PIO0;
+    else if (i2s_config->pio == pio1) func = GPIO_FUNC_PIO1;
+    else                              func = GPIO_FUNC_PIO2;  // RP2350 only
     gpio_set_function(i2s_config->data_pin, func);
     gpio_set_function(i2s_config->clock_pin_base, func);
     gpio_set_function(i2s_config->clock_pin_base + 1, func);
