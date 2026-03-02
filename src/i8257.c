@@ -304,15 +304,12 @@ static bool i8257_dma_has_autoinitialization(IsaDma *obj, int nchan)
     return (d->regs[nchan & 3].mode >> 4) & 1;
 }
 #endif
-
+// core1
 void __not_in_flash_func(i8257_dma_hold_DREQ)(IsaDma *obj, int nchan)
 {
     I8257State *d = I8257(obj);
-    int ichan;
-
-    ichan = nchan & 3;
-    d->status |= 1 << (ichan + 4);
-    i8257_dma_run(d);
+    d->status |= 1 << ((nchan & 3) + 4);
+    // НЕ вызываем i8257_dma_run — это сделает pc_step
 }
 
 void i8257_dma_release_DREQ(IsaDma *obj, int nchan)

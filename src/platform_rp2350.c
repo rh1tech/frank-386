@@ -191,19 +191,22 @@ void platform_feed_watchdog(void) {
 //=============================================================================
 
 static uint32_t saved_irq_state;
+static int critical_depth = 0;
 
 /**
  * Enter critical section (disable interrupts).
  */
 void platform_enter_critical(void) {
-    saved_irq_state = save_and_disable_interrupts();
+    if (critical_depth++ == 0)
+        saved_irq_state = save_and_disable_interrupts();
 }
 
 /**
  * Exit critical section (restore interrupts).
  */
 void platform_exit_critical(void) {
-    restore_interrupts(saved_irq_state);
+    if (--critical_depth == 0)
+        restore_interrupts(saved_irq_state);
 }
 
 //=============================================================================
