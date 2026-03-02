@@ -37,7 +37,7 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
 
 # Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
+set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
@@ -230,7 +230,7 @@ set(EMU_CORE_SOURCES
     src/dss.c        # Disney Sound Source
 
     # Optional devices (can be disabled for size)
-    # src/fpu.c      # FPU emulation - disabled for initial port
+    src/fpu.c      # FPU emulation - disabled for initial port
     # src/ne2000.c   # Network - disabled for initial port
 
     # Configuration
@@ -299,7 +299,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     EMULATE_LTEMS=0
 
     # Disable features for initial port
-    NO_FPU=1
+#    NO_FPU=1
     # NO_SOUND=1  # Sound enabled with I2S output
     NO_NETWORK=1
 
