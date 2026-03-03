@@ -382,6 +382,49 @@ void __time_critical_func(osd_render_line_hdmi)(uint32_t line, uint8_t *output_b
     }
 }
 
+// Render CGA 4-color graphics line (320x200, 2 bits per pixel, interleaved)
+// VGA stores CGA data in odd/even mode with interleaved planes
+static void __time_critical_func(render_gfx_line_cga)(uint32_t line, uint8_t *output_buffer) {
+    // CGA 320x200 mode (doubled to 640x400)
+    uint32_t src_line = line >> 1;
+    if (src_line >= 200) {
+        // Blank line
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+    } else {
+        // CGA interleaved scanlines:
+        // Even lines (0,2,4,...) at offset 0x0000
+        // Odd lines (1,3,5,...) at offset 0x2000
+        uint32_t cga_bank = (src_line & 1) ? 0x2000 : 0x0000;
+        uint32_t cga_row = src_line >> 1;  // Which row within bank (0-99)
+        uint32_t cga_line_offset;
+        if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+            cga_line_offset = cga_bank + (src_line - frame_line_compare) * 80;
+        } else {
+            cga_line_offset = frame_vram_offset + cga_bank + cga_row * 80;
+        }
+        cga_line_offset &= 0xFFFF;
+
+        const uint8_t *src = gfx_buffer;
+
+        // In CGA/odd-even mode, data is stored linearly in planes 0 and 1
+        // Even bytes go to plane 0, odd bytes go to plane 1
+        // VGA address = ((cga_addr & ~1) << 1) | (cga_addr & 1)
+        // This spreads byte pairs across 4-byte boundaries
+
+        // 80 bytes per CGA scanline = 320 pixels, doubled to 640
+        uint32_t cga_addr = cga_line_offset;
+        for (int i = 0; i < 80; i++, cga_addr++) {
+            uint32_t vga_addr = ((cga_addr & ~1) << 1) | (cga_addr & 1);
+            uint8_t byte = src[vga_addr];
+            // Extract 4 pixels (2 bits each), MSB first
+            ob ( (byte >> 6) & 3 );
+            ob ( (byte >> 4) & 3 );
+            ob ( (byte >> 2) & 3 );
+            ob ( byte & 3 );
+        }
+    }
+}
+
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
     pre_render_line();
@@ -400,8 +443,7 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
         // Graphics mode - choose renderer based on submode
         if (submode == 1) {
             // CGA 4-color
-//            render_gfx_line_cga(line, output_buffer);
-nf_memset(output_buffer, 0xAA, SCREEN_WIDTH);
+            render_gfx_line_cga(line, output_buffer);
             return;
         }
         if (submode == 2) {

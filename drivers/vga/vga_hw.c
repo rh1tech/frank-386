@@ -794,6 +794,14 @@ static void vga_hw_new_frame_deferred(void) {
         }
         vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
 
+        // CGA 4-color
+        if (!SELECT_VGA && gfx_submode == 1) {
+            graphics_set_palette_hdmi(0, 0, 0, 0);     // Black
+            graphics_set_palette_hdmi(0, 63 << 2, 63 << 2, 1);   // Cyan (bright)
+            graphics_set_palette_hdmi(63 << 2, 0, 63 << 2, 2);   // Magenta (bright)
+            graphics_set_palette_hdmi(63 << 2, 63 << 2, 63 << 2, 3);  // White
+        }
+
         // For EGA mode, also update the 16-color palette
         if (gfx_submode == 2) {
             uint8_t ega_pal[48];
@@ -1142,7 +1150,7 @@ static inline void vga_hw_set_mode(int mode) {
             required_to_repair_text_pal = true;
         }
         if (mode == 2 && current_mode != 2) { // switch to graphics
-            vga_state->palette_dirty = 1;
+//            vga_state->palette_dirty = 1;
         }
     }
     // Ignore mode 0 (blank): this is a transient state the BIOS sets
