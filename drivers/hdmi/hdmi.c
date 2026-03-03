@@ -469,6 +469,130 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint8_t *o
     }
 }
 
+// Spread 8 bits of a byte into positions 0,4,8,...28
+static inline uint32_t spread8(uint32_t plane) {
+    plane = (plane | (plane << 12)) & 0x000F000Fu;
+    plane = (plane | (plane <<  6)) & 0x03030303u;
+    plane = (plane | (plane <<  3)) & 0x11111111u;
+    return plane;
+}
+
+// Merge 4 plane bytes [P3|P2|P1|P0] into 8 nibbles (pixel color indices).
+static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
+    const uint32_t pixel1 = spread8(ega_planes        & 0xFFu);
+    const uint32_t pixel2 = spread8((ega_planes >> 8) & 0xFFu);
+    const uint32_t pixel3 = spread8((ega_planes >>16) & 0xFFu);
+    const uint32_t pixel4 = spread8(ega_planes >>24);
+
+    return pixel1 | pixel2 << 1 | pixel3 << 2 | pixel4 << 3;
+}
+
+// Render EGA planar 16-color graphics line
+// Supports both 320x200 (doubled) and 640x350 (native) modes
+// Reads from SRAM buffer (copied from PSRAM during main loop)
+ void __scratch_x("render_gfx_line_ega") render_gfx_line_ega(uint32_t line, uint8_t *output_buffer) {
+    // Determine if we need pixel doubling (for 320-wide modes)
+    int double_pixels = (gfx_width <= 320);
+
+    // Determine source line with appropriate scaling
+    // 400 display lines -> gfx_height source lines
+    // gfx_height is the actual number of unique scanlines in VRAM
+    uint32_t src_line;
+    int height = gfx_height > 0 ? gfx_height : 200;
+
+    // Calculate vertical scale factor: how many display lines per source line
+    // For 400 display lines and 200 source lines: scale = 2 (double each line)
+    // For 400 display lines and 100 source lines: scale = 4 (quadruple each line)
+    // For 400 display lines and 350 source lines: scale ≈ 1.14
+    if (height <= 100) {
+        // Very low res (e.g., 640x100 doubled twice): each source line shows 4x
+        src_line = line >> 2;
+    } else if (height <= 200) {
+        // 200-line mode: double vertically (400/2 = 200)
+        src_line = line >> 1;
+    } else if (height <= 350) {
+        // 350-line mode: map active display lines to 350 source lines
+        // Scale: src = line * 350 / 400 = line * 7 / 8
+        int ega_active_lines = active_end - active_start;
+        src_line = (line * height) / ega_active_lines;
+    } else {
+        // 400-line mode: 1:1 mapping
+        src_line = line;
+    }
+
+    // Check if source line is beyond the actual height
+    if (src_line >= (uint32_t)height) {
+        // Blank line - fast fill
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+        return;
+    }
+    uint32_t gfx_width8 = gfx_width >> 3;
+    uint32_t stride = gfx_line_offset > 0 ? (gfx_line_offset << 1) : gfx_width8;
+
+    uint32_t offset;
+    if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+        offset = (src_line - frame_line_compare) * stride;
+    } else {
+        offset = frame_vram_offset + src_line * stride;
+    }
+
+    offset &= 0xFFFF;
+
+    const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
+    int panning = frame_pixel_panning;
+    int shift = panning << 2;
+
+    // Loop over display width
+    int words_to_render = gfx_width8;
+    if (words_to_render > 80) words_to_render = 80; // Cap at 640px
+
+    if (double_pixels) {
+        // 320-wide mode: double each pixel horizontally
+        for (int i = 0; i < words_to_render; i++) {
+            uint32_t ega_planes = src32[i];
+            uint32_t eight_pixels = ega_pack8_from_planes(ega_planes);
+
+            if (panning > 0) {
+                uint32_t next_planes = src32[i+1];
+                uint32_t next_eight = ega_pack8_from_planes(next_planes);
+                eight_pixels = (eight_pixels << shift) | (next_eight >> (32 - shift));
+            }
+
+            // Lookup and double each pixel
+            ob ( eight_pixels >> 28 );
+            ob ( (eight_pixels >> 24) & 0xF );
+            ob ( (eight_pixels >> 20) & 0xF );
+            ob ( (eight_pixels >> 16) & 0xF );
+            ob ( (eight_pixels >> 12) & 0xF );
+            ob ( (eight_pixels >> 8) & 0xF );
+            ob ( (eight_pixels >> 4) & 0xF );
+            ob ( eight_pixels & 0xF );
+        }
+    } else {
+        // 640-wide mode: no horizontal doubling
+        for (int i = 0; i < words_to_render; i++) {
+            uint32_t ega_planes = src32[i];
+            uint32_t eight_pixels = ega_pack8_from_planes(ega_planes);
+
+            if (panning > 0) {
+                uint32_t next_planes = src32[i+1];
+                uint32_t next_eight = ega_pack8_from_planes(next_planes);
+                eight_pixels = (eight_pixels << shift) | (next_eight >> (32 - shift));
+            }
+/// TODO: compose palleter for this case
+            // Lookup each pixel (no doubling)
+            ob ( eight_pixels >> 28 );
+        //    uint8_t c1 = (eight_pixels >> 24) & 0xF; // TODO:
+            ob ( (eight_pixels >> 20) & 0xF );
+        //    uint8_t c3 = (eight_pixels >> 16) & 0xF;
+            ob ( (eight_pixels >> 12) & 0xF );
+        //    uint8_t c5 = (eight_pixels >> 8) & 0xF;
+            ob ( (eight_pixels >> 4) & 0xF );
+        //    uint8_t c7 = eight_pixels & 0xF;
+        }
+    }
+}
+
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
     pre_render_line();
@@ -492,8 +616,7 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
         }
         if (submode == 2) {
             // EGA planar 16-color
-//            render_gfx_line_ega(line, output_buffer);
-render_text_line(line, output_buffer);
+            render_gfx_line_ega(line, output_buffer);
             return;
         }
         if (submode == 4) {
@@ -514,7 +637,7 @@ render_text_line(line, output_buffer);
     nf_memset(output_buffer, 0x77, SCREEN_WIDTH);
 }
 
-static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
+static void __scratch_x("hdmi_driver") dma_handler_HDMI() {
     static uint32_t inx_buf_dma;
     static uint line = 0;
     irq_inx++;
