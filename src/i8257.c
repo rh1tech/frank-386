@@ -421,7 +421,11 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
         hwaddr base = addr - pos - len;
         for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
             uint32_t a = (uint32_t)(base + i);
-            p[i] = ems_in_window(a) ? *ems_host_ptr(a) : d->phys_mem[a];
+            p[i] =
+#if EMULATE_LTEMS
+            ems_in_window(a) ? *ems_host_ptr(a) :
+#endif
+             d->phys_mem[a];
         }
         //cpu_physical_memory_read (d->phys_mem + addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -434,7 +438,11 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
         hwaddr base = addr + pos;
         for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
             uint32_t a = (uint32_t)(base + i);
-            p[i] = ems_in_window(a) ? *ems_host_ptr(a) : d->phys_mem[a];
+            p[i] =
+#if EMULATE_LTEMS
+             ems_in_window(a) ? *ems_host_ptr(a) :
+#endif
+             d->phys_mem[a];
         }
         //cpu_physical_memory_read (addr + pos, buf, len);
     }
@@ -459,9 +467,11 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
         hwaddr base = addr - pos - len;
         for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
             uint32_t a = (uint32_t)(base + i);
+#if EMULATE_LTEMS
             if (ems_in_window(a))
                 *ems_host_ptr(a) = p[i];
             else
+#endif
                 s->phys_mem[a] = p[i];
         }
         //cpu_physical_memory_write (addr - pos - len, buf, len);
@@ -475,9 +485,11 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
         hwaddr base = addr + pos;
         for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
             uint32_t a = (uint32_t)(base + i);
+#if EMULATE_LTEMS
             if (ems_in_window(a))
                 *ems_host_ptr(a) = p[i];
             else
+#endif
                 s->phys_mem[a] = p[i];
         }
         //cpu_physical_memory_write (addr + pos, buf, len);

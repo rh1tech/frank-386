@@ -481,6 +481,8 @@ static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
     return pixel1 | pixel2 << 1 | pixel3 << 2 | pixel4 << 3;
 }
 
+// 4-bit + 4-bit color idx to 8-bit + 8-bit colors idx
+uint16_t ega_pair_lut[256];
 // Render EGA planar 16-color graphics line
 // Supports both 320x200 (doubled) and 640x350 (native) modes
 // Reads from SRAM buffer (copied from PSRAM during main loop)
@@ -532,57 +534,40 @@ static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
 
     offset &= 0xFFFF;
 
-    const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
-    int panning = frame_pixel_panning;
-    int shift = panning << 2;
+    register const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
+    register int panning = frame_pixel_panning;
+    register uint8_t shift1 = panning << 2;
+    register uint8_t shift2 = 32 - shift1;
 
     // Loop over display width
     int words_to_render = gfx_width8;
     if (words_to_render > 80) words_to_render = 80; // Cap at 640px
 
     if (double_pixels) {
+        register uint32_t* out32 = (uint32_t*)output_buffer;
         // 320-wide mode: double each pixel horizontally
-        for (int i = 0; i < words_to_render; i++) {
-            uint32_t ega_planes = src32[i];
-            uint32_t eight_pixels = ega_pack8_from_planes(ega_planes);
-
+        for (int i = 0; i < words_to_render; ++i) {
+            register uint32_t eight_pixels = ega_pack8_from_planes(src32[i]);
             if (panning > 0) {
-                uint32_t next_planes = src32[i+1];
-                uint32_t next_eight = ega_pack8_from_planes(next_planes);
-                eight_pixels = (eight_pixels << shift) | (next_eight >> (32 - shift));
+                eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(src32[i+1]) >> shift2);
             }
-
-            // Lookup and double each pixel
-            *output_buffer++ = eight_pixels >> 28;
-            *output_buffer++ = (eight_pixels >> 24) & 0xF;
-            *output_buffer++ = (eight_pixels >> 20) & 0xF;
-            *output_buffer++ = (eight_pixels >> 16) & 0xF;
-            *output_buffer++ = (eight_pixels >> 12) & 0xF;
-            *output_buffer++ = (eight_pixels >> 8) & 0xF;
-            *output_buffer++ = (eight_pixels >> 4) & 0xF;
-            *output_buffer++ = eight_pixels & 0xF;
+            *out32++ = (uint32_t)ega_pair_lut[eight_pixels >> 24] | ((uint32_t)ega_pair_lut[(eight_pixels >> 16) & 0xFF] << 16);
+            *out32++ = (uint32_t)ega_pair_lut[(eight_pixels >> 8) & 0xFF] | ((uint32_t)ega_pair_lut[eight_pixels & 0xFF] << 16);
         }
     } else {
         // 640-wide mode: no horizontal doubling
-        for (int i = 0; i < words_to_render; i++) {
-            uint32_t ega_planes = src32[i];
-            uint32_t eight_pixels = ega_pack8_from_planes(ega_planes);
+        for (register int i = 0; i < words_to_render; i++) {
+            register uint32_t eight_pixels = ega_pack8_from_planes(src32[i]);
 
             if (panning > 0) {
-                uint32_t next_planes = src32[i+1];
-                uint32_t next_eight = ega_pack8_from_planes(next_planes);
-                eight_pixels = (eight_pixels << shift) | (next_eight >> (32 - shift));
+                eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(src32[i+1]) >> shift2);
             }
 /// TODO: compose palleter for this case
             // Lookup each pixel (no doubling)
-            ob ( eight_pixels >> 28 );
-        //    uint8_t c1 = (eight_pixels >> 24) & 0xF; // TODO:
-            ob ( (eight_pixels >> 20) & 0xF );
-        //    uint8_t c3 = (eight_pixels >> 16) & 0xF;
-            ob ( (eight_pixels >> 12) & 0xF );
-        //    uint8_t c5 = (eight_pixels >> 8) & 0xF;
-            ob ( (eight_pixels >> 4) & 0xF );
-        //    uint8_t c7 = eight_pixels & 0xF;
+            ob ( (eight_pixels >> 24) );
+            ob ( (eight_pixels >> 16) );
+            ob ( (eight_pixels >> 8) );
+            ob ( eight_pixels );
         }
     }
 }
@@ -1025,6 +1010,10 @@ void graphics_init_hdmi() {
     dma_chan = dma_claim_unused_channel(true);
     dma_chan_pal_conv_ctrl = dma_claim_unused_channel(true);
     dma_chan_pal_conv = dma_claim_unused_channel(true);
+
+    for (int a = 0; a < 16; a++)
+        for (int b = 0; b < 16; b++)
+            ega_pair_lut[(a << 4) | b] = (uint16_t)a | ((uint16_t)b << 8);
 
     hdmi_init();
 }
