@@ -740,7 +740,7 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
         if (gfx_submode == 1) {
             // CGA 4-color
             render_gfx_line_cga(line, output_buffer);
-        } else if (gfx_submode == 2) {
+        } else if (gfx_submode == 2 || gfx_submode == 6) {
             // EGA planar 16-color
             render_gfx_line_ega(line, output_buffer);
         } else if (gfx_submode == 4) {
@@ -795,14 +795,15 @@ static void vga_hw_new_frame_deferred(void) {
         int gfx_w, gfx_h;
         int gfx_submode = vga_get_graphics_mode(vga_state, &gfx_w, &gfx_h);
         int line_offset = vga_get_line_offset(vga_state);
-        static int last_submode = -1;
-        if (gfx_submode != last_submode) {
-            last_submode = gfx_submode;
+        if (gfx_submode == 2) {
+            if (gfx_w <= 320) {
+                gfx_submode = 6; // EGA 320*
+            }
         }
         vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
 
         // For EGA mode, also update the 16-color palette
-        if (gfx_submode == 2) {
+        if (gfx_submode == 2 || gfx_submode == 6) {
             uint8_t ega_pal[48];
             vga_get_palette16(vga_state, ega_pal);
             vga_hw_set_palette16(ega_pal);
