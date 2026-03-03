@@ -66,7 +66,6 @@ void osd_init(void) {
 
 extern bool SELECT_VGA;
 extern uint32_t conv_color[1224], conv_color2[1224];
-extern bool required_to_repair_text_pal;
 void osd_show(void) {
     if (SELECT_VGA) {
         osd_visible = true;

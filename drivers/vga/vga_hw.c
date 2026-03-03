@@ -184,6 +184,12 @@ static inline int c6_to_8(int v)
 }
 
 void graphics_set_palette_hdmi(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i);
+void graphics_set_palette_hdmi2(
+    const uint8_t R1, const uint8_t G1, const uint8_t B1,
+    const uint8_t R2, const uint8_t G2, const uint8_t B2,
+    uint8_t i
+);
+
 // Convert 6-bit VGA DAC values to 16-bit dithered output
 // Returns: low byte = c_hi (conv0), high byte = c_lo (conv1)
 // When output as 16-bit, adjacent pixels get different colors for spatial dithering
@@ -794,19 +800,31 @@ static void vga_hw_new_frame_deferred(void) {
         }
         vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
 
-        // CGA 4-color
-        if (!SELECT_VGA && gfx_submode == 1) {
-            graphics_set_palette_hdmi(0, 0, 0, 0);     // Black
-            graphics_set_palette_hdmi(0, 63 << 2, 63 << 2, 1);   // Cyan (bright)
-            graphics_set_palette_hdmi(63 << 2, 0, 63 << 2, 2);   // Magenta (bright)
-            graphics_set_palette_hdmi(63 << 2, 63 << 2, 63 << 2, 3);  // White
-        }
-
         // For EGA mode, also update the 16-color palette
         if (gfx_submode == 2) {
             uint8_t ega_pal[48];
             vga_get_palette16(vga_state, ega_pal);
             vga_hw_set_palette16(ega_pal);
+            return;
+        }
+        // HDMI only:
+        if (!SELECT_VGA) {
+            // CGA 4-color
+            if(gfx_submode == 1) {
+                uint8_t c = c6_to_8(63);
+                graphics_set_palette_hdmi(0, 0, 0, 0);     // Black
+                graphics_set_palette_hdmi(0, c, c, 1);   // Cyan (bright)
+                graphics_set_palette_hdmi(c, 0, c, 2);   // Magenta (bright)
+                graphics_set_palette_hdmi(c, c, c, 3);  // White
+                return;
+            }
+            // CGA 2-color (640x200 monochrome)
+            if(gfx_submode == 4) {
+                graphics_set_palette_hdmi2(0,0,0,       0,0,0,       0b00); // Black+Black
+                graphics_set_palette_hdmi2(0,0,0,       255,255,255, 0b01); // Black+White
+                graphics_set_palette_hdmi2(255,255,255, 0,0,0,       0b10); // White+Black
+                graphics_set_palette_hdmi2(255,255,255, 255,255,255, 0b11); // White+White
+            }
         }
     }
 }
@@ -1212,7 +1230,11 @@ void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
         uint8_t r6 = palette16_data[i * 3 + 0];
         uint8_t g6 = palette16_data[i * 3 + 1];
         uint8_t b6 = palette16_data[i * 3 + 2];
-        ega_palette[i] = vga_color_to_output(r6, g6, b6);
+        if (SELECT_VGA) {
+            ega_palette[i] = vga_color_to_output(r6, g6, b6);
+        } else {
+            graphics_set_palette_hdmi(c6_to_8(r6), c6_to_8(g6), c6_to_8(b6), i);
+        }
     }
 }
 
