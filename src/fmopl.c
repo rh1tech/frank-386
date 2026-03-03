@@ -48,17 +48,21 @@
 #if defined(BUILD_ESP32) || defined(RP2350_BUILD)
 void *pcmalloc(long size);
 void *psmalloc(long size);
-// Use dynamic tables allocated from PSRAM (no fmopl.inc needed)
-// #define FMOPL_USE_STATIC_TABLE
+//#define FMOPL_USE_STATIC_TABLE 1
 #else
 #define pcmalloc malloc
 #define psmalloc malloc
 #endif
-
+/// to regenerate fmopl.inc (FMOPL_USE_STATIC_TABLE)
+#ifdef GENTABLE_ONLINE
+#undef FMOPL_USE_STATIC_TABLE
+#include "ff.h"
+static void OPLSaveTableToFile(void);
+#endif
 /* -------------------- for debug --------------------- */
 /* #define OPL_OUTPUT_LOG */
 #ifdef OPL_OUTPUT_LOG
-static FILE *opl_dbg_fp = NULL;
+static FIL *opl_dbg_fp = NULL;
 static FM_OPL *opl_dbg_opl[16];
 static int opl_dbg_maxchip,opl_dbg_chip;
 #endif
@@ -711,6 +715,9 @@ static int OPLOpenTable( void )
 		VIB_TABLE[VIB_ENT+i] = VIB_RATE + (pom*0.14); /* +-14cent */
 		/* LOG(LOG_INF,("vib %d=%d\n",i,VIB_TABLE[VIB_ENT+i])); */
 	}
+#ifdef GENTABLE_ONLINE
+    OPLSaveTableToFile();
+#endif
 	return 1;
 }
 
@@ -1261,5 +1268,49 @@ int main(int argc, char *argv[])
 	P(VIB_TABLE, 2 * VIB_ENT);
 	P(ENV_CURVE, (2 * EG_ENT) + 1);
 	return 0;
+}
+#endif
+
+#ifdef GENTABLE_ONLINE
+static void OPLSaveTableToFile(void)
+{
+    FIL fp;
+    FRESULT res;
+    int i;
+
+    res = f_open(&fp, "fmopl.inc", FA_WRITE | FA_CREATE_ALWAYS);
+    if (res != FR_OK) return;
+
+    /* TL_TABLE */
+    f_printf(&fp, "static const int32_t TL_TABLE[] = {\n");
+    for (i = 0; i < TL_MAX * 2; i++)
+        f_printf(&fp, " %d,", TL_TABLE[i]);
+    f_printf(&fp, "\n};\n\n");
+
+    /* SIN_TABLE — храним как смещения от TL_TABLE */
+    f_printf(&fp, "static const int32_t * const SIN_TABLE[] = {\n");
+    for (i = 0; i < SIN_ENT * 4; i++)
+        f_printf(&fp, "&TL_TABLE[%d],", (int)(SIN_TABLE[i] - TL_TABLE));
+    f_printf(&fp, "\n};\n\n");
+
+    /* AMS_TABLE */
+    f_printf(&fp, "static const int32_t AMS_TABLE[] = {\n");
+    for (i = 0; i < AMS_ENT * 2; i++)
+        f_printf(&fp, " %d,", AMS_TABLE[i]);
+    f_printf(&fp, "\n};\n\n");
+
+    /* VIB_TABLE */
+    f_printf(&fp, "static const int32_t VIB_TABLE[] = {\n");
+    for (i = 0; i < VIB_ENT * 2; i++)
+        f_printf(&fp, " %d,", VIB_TABLE[i]);
+    f_printf(&fp, "\n};\n\n");
+
+    /* ENV_CURVE */
+    f_printf(&fp, "static const int32_t ENV_CURVE[] = {\n");
+    for (i = 0; i < 2 * EG_ENT + 1; i++)
+        f_printf(&fp, " %d,", ENV_CURVE[i]);
+    f_printf(&fp, "\n};\n\n");
+
+    f_close(&fp);
 }
 #endif
