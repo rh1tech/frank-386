@@ -65,15 +65,17 @@ void osd_init(void) {
 }
 
 extern bool SELECT_VGA;
-extern uint32_t conv_color[1224];
-uint32_t vga_pal_bak[1224];
+extern uint32_t conv_color[1224], conv_color2[1224];
 extern bool required_to_repair_text_pal;
 void osd_show(void) {
     if (SELECT_VGA) {
         osd_visible = true;
     } else { // hdmi only
-        memcpy(vga_pal_bak, conv_color, sizeof(conv_color));
-        required_to_repair_text_pal = true;
+        for(int i = 0; i < sizeof(conv_color) / sizeof(conv_color[0]); ++i) {
+            uint32_t t = conv_color[i];
+            conv_color[i] = conv_color2[i];
+            conv_color2[i] = t;
+        }
         osd_visible = true;
     }
 }
@@ -81,7 +83,11 @@ void osd_show(void) {
 void osd_hide(void) {
     osd_visible = false;
     if (!SELECT_VGA) { // hdmi only
-        memcpy(conv_color, vga_pal_bak, sizeof(conv_color));
+        for(int i = 0; i < sizeof(conv_color) / sizeof(conv_color[0]); ++i) {
+            uint32_t t = conv_color[i];
+            conv_color[i] = conv_color2[i];
+            conv_color2[i] = t;
+        }
     }
 }
 
