@@ -37,7 +37,7 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
 
 # Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
+set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
@@ -291,8 +291,8 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     PICO_ON_DEVICE=1
     RP2350_BUILD=1
 
-    # Emulator configuration (7MB max to fit in 8MB PSRAM with VGA memory)
-    EMU_MEM_SIZE_MB=6
+    # Emulator configuration (8MB PSRAM)
+    EMU_MEM_SIZE_MB=7
     EMU_VGA_MEM_SIZE_KB=256
     EMU_CPU_GEN=4
 
