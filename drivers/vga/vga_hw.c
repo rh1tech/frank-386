@@ -176,13 +176,20 @@ static inline uint8_t vga_color_to_output(uint8_t r6, uint8_t g6, uint8_t b6) {
     return TMPL_LINE | (r2 << 4) | (g2 << 2) | b2;
 }
 
+static inline int c6_to_8(int v)
+{
+    v &= 0x3f;
+    int b = v & 1;
+    return (v << 2) | (b << 1) | b;
+}
+
 void graphics_set_palette_hdmi(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i);
 // Convert 6-bit VGA DAC values to 16-bit dithered output
 // Returns: low byte = c_hi (conv0), high byte = c_lo (conv1)
 // When output as 16-bit, adjacent pixels get different colors for spatial dithering
 static void vga_color_to_dithered(uint8_t r6, uint8_t g6, uint8_t b6, uint32_t idx) {
     if (!SELECT_VGA) {
-        graphics_set_palette_hdmi(r6, g6, b6, idx);
+        graphics_set_palette_hdmi(c6_to_8(r6), c6_to_8(g6), c6_to_8(b6), idx);
         return;
     }
     // Convert 6-bit (0-63) to 3-bit (0-7) for dither table lookup
@@ -1129,11 +1136,10 @@ void vga_hw_init(void) {
     DBG_PRINT("  VGA started (640x400 text mode, IRQ priority=0x00)!\n");
 }
 
-void hdmi_repair_text_pal();
 static inline void vga_hw_set_mode(int mode) {
     if (!SELECT_VGA && vga_state) { // W/A
         if (mode == 1 && current_mode != 1) { // switch to text
-            hdmi_repair_text_pal();
+            required_to_repair_text_pal = true;
         }
         if (mode == 2 && current_mode != 2) { // switch to graphics
             vga_state->palette_dirty = 1;

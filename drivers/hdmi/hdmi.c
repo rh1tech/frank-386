@@ -289,18 +289,13 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
     // Determine source line based on graphics height
     // If height > 200 (e.g. 400 in Mode X), map 1:1
     // If height <= 200 (e.g. 320x200), double lines
-    uint32_t src_line;
-    if (gfx_height > 200) {
-        src_line = line;
-    } else {
-        src_line = line >> 1;
-    }
+    uint32_t src_line = (gfx_height > 200) ? line : (line >> 1);
 
     if (src_line >= gfx_height && gfx_height > 0) {
         // Blank line below visible area
         nf_memset(output_buffer, 0, SCREEN_WIDTH);
     } else if (src_line >= 200 && gfx_height <= 0) {
-         // Fallback if gfx_height not set
+        // Fallback if gfx_height not set
         nf_memset(output_buffer, 0, SCREEN_WIDTH);
     } else {
         // Read from VRAM (stable during active video)
@@ -315,13 +310,10 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
             offset = frame_vram_offset + src_line * stride;
         }
         offset &= 0xFFFF;
-        const uint32_t *src32 = (const uint32_t *)(gfx_buffer + offset * 4);
-        for (int i = 0; i < SCREEN_WIDTH / 4; i++) {
-            uint32_t pixels = src32[i];
-            ob( pixels & 0xFF );
-            ob( (pixels >> 8)  & 0xFF );
-            ob( (pixels >> 16) & 0xFF );
-            ob( (pixels >> 24) & 0xFF );
+        // chain4: pixels are stored linearly, addr IS the byte offset
+        const uint8_t *src = gfx_buffer + (offset << 2);
+        for (int i = 0; i < SCREEN_WIDTH; ++i) {
+            ob( *src++ );
         }
     }
 }
@@ -401,7 +393,7 @@ render_text_line(line, output_buffer);
             return;
         }
             // VGA 256-color (mode 13h) - default
-            return render_gfx_line_from_sram(line, output_buffer);
+        render_gfx_line_from_sram(line, output_buffer);
 //nf_memset(output_buffer, 0x88, SCREEN_WIDTH);
         return;
     }
@@ -420,6 +412,20 @@ static void __scratch_y("hdmi_driver") dma_handler_HDMI() {
     if (line++ > 524) {
         line = 0;
         frame_update_request = 1;
+    }
+
+    // Update VGA status register 1 (port 0x3DA) from ISR — this is the
+    // authoritative source. Core0 reads it as-is without any logic.
+    // Bit 0 (DISP_ENABLE): 1 = active display, 0 = blanking interval
+    // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
+    if (vga_state) {
+        if (line >= 480) {
+            vga_state->st01 |=  ST01_V_RETRACE;
+            vga_state->st01 &= ~ST01_DISP_ENABLE;
+        } else {
+            vga_state->st01 &= ~ST01_V_RETRACE;
+            vga_state->st01 |=  ST01_DISP_ENABLE;
+        }
     }
 
     inx_buf_dma++;
@@ -492,16 +498,11 @@ static inline void irq_set_exclusive_handler_DMA_core1() {
     irq_set_enabled(VIDEO_DMA_IRQ, true);
 }
 
-void graphics_set_palette_hdmi(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i);
 void graphics_set_palette_hdmi2(
     const uint8_t R1, const uint8_t G1, const uint8_t B1,
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
     uint8_t i
 );
-
-void __not_in_flash_func(hdmi_repair_text_pal)() {
-    required_to_repair_text_pal = true;
-}
 
 //деинициализация - инициализация ресурсов
 static inline bool hdmi_init() {

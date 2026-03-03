@@ -64,19 +64,25 @@ void osd_init(void) {
     osd_visible = false;
 }
 
+extern bool SELECT_VGA;
+extern uint32_t conv_color[1224];
+uint32_t vga_pal_bak[1224];
 extern bool required_to_repair_text_pal;
-extern int current_mode;
-int mode_bak;
 void osd_show(void) {
-    required_to_repair_text_pal = true;
-    osd_visible = true;
-    mode_bak = current_mode;
-    current_mode = 0;
+    if (SELECT_VGA) {
+        osd_visible = true;
+    } else { // hdmi only
+        memcpy(vga_pal_bak, conv_color, sizeof(conv_color));
+        required_to_repair_text_pal = true;
+        osd_visible = true;
+    }
 }
 
 void osd_hide(void) {
     osd_visible = false;
-    current_mode = mode_bak;
+    if (!SELECT_VGA) { // hdmi only
+        memcpy(conv_color, vga_pal_bak, sizeof(conv_color));
+    }
 }
 
 bool __time_critical_func(osd_is_visible)(void) {
