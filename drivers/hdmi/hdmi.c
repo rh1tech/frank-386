@@ -481,8 +481,10 @@ static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
     return pixel1 | pixel2 << 1 | pixel3 << 2 | pixel4 << 3;
 }
 
-// 4-bit + 4-bit color idx to 8-bit + 8-bit colors idx
-uint16_t ega_pair_lut[256];
+static inline uint32_t ega_pair(uint8_t ab) {
+    return ((uint32_t)(ab & 15) << 8) | (uint32_t)(ab >> 4);
+}
+
 // Render EGA planar 16-color graphics line
 // Supports both 320x200 (doubled) and 640x350 (native) modes
 // Reads from SRAM buffer (copied from PSRAM during main loop)
@@ -551,8 +553,8 @@ uint16_t ega_pair_lut[256];
             if (panning > 0) {
                 eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(src32[i+1]) >> shift2);
             }
-            *out32++ = (uint32_t)ega_pair_lut[eight_pixels >> 24] | ((uint32_t)ega_pair_lut[(eight_pixels >> 16) & 0xFF] << 16);
-            *out32++ = (uint32_t)ega_pair_lut[(eight_pixels >> 8) & 0xFF] | ((uint32_t)ega_pair_lut[eight_pixels & 0xFF] << 16);
+            *out32++ = ega_pair(eight_pixels >> 24) | (ega_pair(eight_pixels >> 16) << 16);
+            *out32++ = ega_pair(eight_pixels >> 8) | (ega_pair(eight_pixels) << 16);
         }
     } else {
         // 640-wide mode: no horizontal doubling
@@ -1010,10 +1012,6 @@ void graphics_init_hdmi() {
     dma_chan = dma_claim_unused_channel(true);
     dma_chan_pal_conv_ctrl = dma_claim_unused_channel(true);
     dma_chan_pal_conv = dma_claim_unused_channel(true);
-
-    for (int a = 0; a < 16; a++)
-        for (int b = 0; b < 16; b++)
-            ega_pair_lut[(a << 4) | b] = (uint16_t)a | ((uint16_t)b << 8);
 
     hdmi_init();
 }
