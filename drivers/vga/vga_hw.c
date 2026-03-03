@@ -1238,7 +1238,20 @@ void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
         if (SELECT_VGA) {
             ega_palette[i] = vga_color_to_output(r6, g6, b6);
         } else {
-            graphics_set_palette_hdmi(c6_to_8(r6), c6_to_8(g6), c6_to_8(b6), i);
+            if (gfx_submode == 2) {
+                for (int j = 0; j < 16; j++) {
+                    uint8_t rj = palette16_data[j * 3 + 0];
+                    uint8_t gj = palette16_data[j * 3 + 1];
+                    uint8_t bj = palette16_data[j * 3 + 2];
+                    graphics_set_palette_hdmi2(
+                        c6_to_8(r6), c6_to_8(g6), c6_to_8(b6),
+                        c6_to_8(rj), c6_to_8(gj), c6_to_8(bj),
+                        (i << 4) | j
+                    );
+                }
+            } else {
+                graphics_set_palette_hdmi(c6_to_8(r6), c6_to_8(g6), c6_to_8(b6), i);
+            }
         }
     }
 }
