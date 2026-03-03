@@ -727,14 +727,14 @@ static bool init_emulator(void) {
     DBG_PRINT("  Floppy B: %s\n", config.fdd[1] ? config.fdd[1] : "(none)");
 
     // Calculate total PSRAM needed
-    size_t total_psram = config.mem_size + config.vga_mem_size;
+    size_t total_psram = config.mem_size;
     DBG_PRINT("  PSRAM needed: %lu KB (available: %lu KB)\n",
            (unsigned long)(total_psram / 1024),
            (unsigned long)(PSRAM_SIZE_BYTES / 1024));
 
     if (total_psram > PSRAM_SIZE_BYTES) {
         printf("WARNING: Reducing memory to fit in PSRAM\n");
-        config.mem_size = PSRAM_SIZE_BYTES - config.vga_mem_size - (64 * 1024);  // Leave 64KB margin
+        config.mem_size = PSRAM_SIZE_BYTES;
         DBG_PRINT("  Adjusted memory: %ld MB\n", config.mem_size / (1024 * 1024));
     }
 
@@ -876,6 +876,10 @@ static void show_welcome_screen(void) {
     osd_print_center(wy + 8, "Platform: M1", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #elif defined(BOARD_M2)
     osd_print_center(wy + 8, "Platform: M2", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+#elif defined(BOARD_PC)
+    osd_print_center(wy + 8, "Platform: Olimex PICO-PC", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+#elif defined(BOARD_Z2)
+    osd_print_center(wy + 8, "Platform: RP2350-PiZero", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #else
     osd_print_center(wy + 8, "Platform: Unknown", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #endif

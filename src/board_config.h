@@ -217,6 +217,11 @@ static inline uint get_psram_pin(void) {
 #define SDCARD_PIN_D0     4
 #define SDCARD_PIN_D3     22
 
+#define SDCARD_PIN_SPI0_SCK   SDCARD_PIN_CLK
+#define SDCARD_PIN_SPI0_MOSI  SDCARD_PIN_CMD
+#define SDCARD_PIN_SPI0_MISO  SDCARD_PIN_D0
+#define SDCARD_PIN_SPI0_CS    SDCARD_PIN_D3
+
 /*
         # GP-0  DBG1-1
         # GP-1  DBG1-2

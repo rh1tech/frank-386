@@ -196,15 +196,19 @@ void audio_init(void) {
     pwm = pwm_get_default_config();
     gpio_set_function(PWM_LEFT_PIN, GPIO_FUNC_PWM);
     gpio_set_function(PWM_RIGHT_PIN, GPIO_FUNC_PWM);
-    gpio_set_function(BEEPER_PIN, GPIO_FUNC_PWM);
+    #ifdef BEEPER_PIN
+        gpio_set_function(BEEPER_PIN, GPIO_FUNC_PWM);
+    #endif
     pwm_config_set_clkdiv(&pwm, 1.0f);
     pwm_config_set_wrap(&pwm, (1 << 12) - 1); // MAX PWM value
     uint sln_l = pwm_gpio_to_slice_num(PWM_LEFT_PIN);
     pwm_init(sln_l, &pwm, true);
     uint sln_r = pwm_gpio_to_slice_num(PWM_RIGHT_PIN);
     if (sln_r != sln_l) pwm_init(sln_r, &pwm, true);
-    uint sln_b = pwm_gpio_to_slice_num(BEEPER_PIN);
-    if (sln_r != sln_b && sln_l != sln_b) pwm_init(sln_b, &pwm, true);
+    #ifdef BEEPER_PIN
+        uint sln_b = pwm_gpio_to_slice_num(BEEPER_PIN);
+        if (sln_r != sln_b && sln_l != sln_b) pwm_init(sln_b, &pwm, true);
+    #endif
 #elif FEATURE_AUDIO_HW
     init_74hc595();
     pwm = pwm_get_default_config();
@@ -271,10 +275,14 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
         uint16_t ul_v = (l_v + 32768) >> 4;
         if (ur_v > 4095) ur_v = 4095;
         if (ul_v > 4095) ul_v = 4095;
+        #ifdef BEEPER_PIN
+            b_v = b_v ? (4095 >> volume) : 0;
+            pwm_set_gpio_level(BEEPER_PIN, b_v);
+        #else
+            if (b_v) { r_v = l_v = 0x7FFF; }
+        #endif
         pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
         pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
-        b_v = b_v ? (4095 >> volume) : 0;
-        pwm_set_gpio_level(BEEPER_PIN, b_v);
     #elif FEATURE_AUDIO_I2S
         if (b_v) { r_v = l_v = 0x7FFF; }
         if (r_v > 0x7FFF) r_v = 0x7FFF;

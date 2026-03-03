@@ -23,7 +23,7 @@ set(BUILD_NAME "386")
 set(FIRMWARE_VERSION "v1.01" CACHE STRING "Firmware version string")
 
 # Board configuration variant (M1, M2)
-set(BOARD "M2" CACHE STRING "Board variant: M1 or M2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2 or PC")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -37,7 +37,7 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
 
 # Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
+set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
