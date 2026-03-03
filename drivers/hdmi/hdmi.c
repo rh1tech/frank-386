@@ -425,6 +425,50 @@ static void __time_critical_func(render_gfx_line_cga)(uint32_t line, uint8_t *ou
     }
 }
 
+// Render CGA 2-color graphics line (640x200, 1 bit per pixel, interleaved)
+// Mode 6: 640x200 monochrome CGA mode
+// Memory layout: planar (4 bytes per screen byte), plane 0 only contains data
+// Row interleaving: even rows at bank 0, odd rows at bank 1 (0x2000 offset)
+static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint8_t *output_buffer) {
+    // CGA 640x200 mode (doubled to 640x400)
+    uint32_t src_line = line >> 1;
+    if (src_line >= 200) {
+        // Blank line
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+    } else {
+        // CGA interleaved scanlines:
+        // Even lines (0,2,4,...) at offset 0x0000
+        // Odd lines (1,3,5,...) at offset 0x2000 (which is 0x800 words)
+        // Each "byte" of screen data is stored at 4-byte boundaries (planar layout)
+        uint32_t bank_offset = (src_line & 1) ? 0x2000 : 0x0000;
+        uint32_t row_in_bank = src_line >> 1;  // Which row within bank (0-99)
+        // Base address for this scanline (in bytes): bank + row * 80 bytes/row
+        // In planar layout: multiply by 4 to get actual byte offset
+        uint32_t offset;
+        if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
+            offset = bank_offset + (src_line - frame_line_compare) * 80;
+        } else {
+            offset = frame_vram_offset + bank_offset + row_in_bank * 80;
+        }
+        offset &= 0xFFFF;
+        uint32_t base_addr = offset * 4;
+        const uint8_t *src = gfx_buffer;
+        // 80 bytes per CGA scanline = 640 pixels (1 bit per pixel)
+        // Data is in plane 0 (every 4th byte in planar layout)
+        for (int i = 0; i < 80; i++) {
+            // In planar layout, plane 0 is at offset 0, 4, 8, 12, ...
+            uint8_t byte = src[base_addr + i * 4];
+
+            // Extract 8 pixels (1 bit each), MSB first
+            // Output directly (no horizontal doubling since 640 is native width)
+            ob ( ((byte >> 7) << 1) | ((byte >> 6) & 1) );
+            ob ( (((byte >> 5) & 1) << 1) | ((byte >> 4) & 1) );
+            ob ( (((byte >> 3) & 1) << 1) | ((byte >> 2) & 1) );
+            ob ( (((byte >> 1) & 1) << 1) | (byte & 1) );
+        }
+    }
+}
+
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
     pre_render_line();
@@ -454,8 +498,7 @@ render_text_line(line, output_buffer);
         }
         if (submode == 4) {
             // CGA 2-color (640x200 monochrome)
-//            render_gfx_line_cga2(line, output_buffer);
-nf_memset(output_buffer, 0x99, SCREEN_WIDTH);
+            render_gfx_line_cga2(line, output_buffer);
             return;
         }
         if (submode == 5) {
