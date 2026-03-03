@@ -230,7 +230,9 @@ static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t 
     return ptr;
 }
 
-#define is_hdmi_sync(c) (c == HDMI_CTRL_0 || c == HDMI_CTRL_1 || c == HDMI_CTRL_2 || c == HDMI_CTRL_3)
+#define is_hdmi_sync(c) (c >= HDMI_CTRL_0)
+// ^ just faster than:
+//#define is_hdmi_sync(c) (c == HDMI_CTRL_0 || c == HDMI_CTRL_1 || c == HDMI_CTRL_2 || c == HDMI_CTRL_3)
 #define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (c & 0x7F) : c; }
 
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
@@ -291,7 +293,7 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
     if (gfx_height > 200) {
         src_line = line;
     } else {
-        src_line = line > 1;
+        src_line = line >> 1;
     }
 
     if (src_line >= gfx_height && gfx_height > 0) {
@@ -304,7 +306,8 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
         // Read from VRAM (stable during active video)
         // Stride comes from CRTC Offset (CR13) which is in words for VGA.
         // We use 32-bit words for fetch, so convert words->dwords.
-        uint32_t stride = (gfx_line_offset > 0) ? ((uint32_t)gfx_line_offset * 2u) : 80u;
+        uint32_t off = gfx_line_offset;
+        uint32_t stride = (off > 0) ? (off << 1) : 80u;
         uint32_t offset;
         if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
             offset = (src_line - frame_line_compare) * stride;
@@ -312,10 +315,13 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
             offset = frame_vram_offset + src_line * stride;
         }
         offset &= 0xFFFF;
-        const uint8_t *input_buffer = gfx_buffer + offset;
-        // 320 pixels, 1 pyte per pixel
-        for (int i = 0; i < SCREEN_WIDTH; i++) {
-            ob( input_buffer[i] );
+        const uint32_t *src32 = (const uint32_t *)(gfx_buffer + offset * 4);
+        for (int i = 0; i < SCREEN_WIDTH / 4; i++) {
+            uint32_t pixels = src32[i];
+            ob( pixels & 0xFF );
+            ob( (pixels >> 8)  & 0xFF );
+            ob( (pixels >> 16) & 0xFF );
+            ob( (pixels >> 24) & 0xFF );
         }
     }
 }
@@ -362,29 +368,43 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
     if (osd_is_visible()) {
         return osd_render_line_hdmi(line, output_buffer);
     }
-    if (current_mode == 1) {
+    int mode = current_mode;
+    if (mode == 1) {
         // Text mode now rendered from linear framebuffer
         return render_text_line(line, output_buffer);
-    }/*
-    if (current_mode == 2) {
+    }
+    if (mode == 2) {
+        uint8_t submode = gfx_submode;
         // Graphics mode - choose renderer based on submode
-        if (gfx_submode == 1) {
+        if (submode == 1) {
             // CGA 4-color
 //            render_gfx_line_cga(line, output_buffer);
-        } else if (gfx_submode == 2) {
+nf_memset(output_buffer, 0xAA, SCREEN_WIDTH);
+            return;
+        }
+        if (submode == 2) {
             // EGA planar 16-color
 //            render_gfx_line_ega(line, output_buffer);
-        } else if (gfx_submode == 4) {
+render_text_line(line, output_buffer);
+            return;
+        }
+        if (submode == 4) {
             // CGA 2-color (640x200 monochrome)
 //            render_gfx_line_cga2(line, output_buffer);
-        } else if (gfx_submode == 5) {
+nf_memset(output_buffer, 0x99, SCREEN_WIDTH);
+            return;
+        }
+        if (submode == 5) {
             // VGA 256-color planar (Mode X)
-            //render_gfx_line_vga_planar256(line, output_buffer);
-        } else {
+//            render_gfx_line_vga_planar256(line, output_buffer);
+render_text_line(line, output_buffer);
+            return;
+        }
             // VGA 256-color (mode 13h) - default
             return render_gfx_line_from_sram(line, output_buffer);
-        }
-    }*/
+//nf_memset(output_buffer, 0x88, SCREEN_WIDTH);
+        return;
+    }
     // mode 0 - blank screen (gray?)
     nf_memset(output_buffer, 0x77, SCREEN_WIDTH);
 }
@@ -746,7 +766,6 @@ static inline bool hdmi_init() {
 
 void __time_critical_func(graphics_set_palette_hdmi)(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
     if is_hdmi_sync(i) return; //не записываем "служебные" цвета
-    required_to_repair_text_pal = true;
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     conv_color64[i * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
     conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ 0x0003ffffffffffffl;
