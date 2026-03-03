@@ -225,9 +225,12 @@ set(EMU_CORE_SOURCES
     src/adlib.c      # Adlib/OPL2
     src/sb16.c       # Sound Blaster 16
     src/pcspk.c      # PC Speaker
-    src/fmopl.c      # FM OPL synthesis engine
     src/sn76489.c    # Tandy 3-Voice Sound (SN76489)
     src/dss.c        # Disney Sound Source
+    # FM OPL synthesis engine
+    src/emu8950/emu8950.c
+    src/emu8950/emuadpcm.c
+    src/emu8950/slot_render.cpp
 
     # Optional devices (can be disabled for size)
     src/fpu.c      # FPU emulation - disabled for initial port
@@ -307,6 +310,22 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     I386_ENABLE_INLINE=1
 
     SOUND_FREQUENCY=44100
+
+    # OPL2
+    USE_EMU8950_OPL
+    EMU8950_SLOT_RENDER=1
+    EMU8950_NO_RATECONV=1
+    EMU8950_NO_WAVE_TABLE_MAP=1
+    EMU8950_NO_TLL=1
+    EMU8950_NO_FLOAT=1
+    EMU8950_NO_TIMER=1
+    EMU8950_NO_TEST_FLAG=1
+    EMU8950_SIMPLER_NOISE=1
+    EMU8950_SHORT_NOISE_UPDATE_CHECK=1
+    EMU8950_LINEAR_SKIP=1
+    EMU8950_LINEAR_END_OF_NOTE_OPTIMIZATION
+    EMU8950_NO_PERCUSSION_MODE=1
+    EMU8950_LINEAR=1
 )
 
 # Add DEBUG_ENABLED if enabled
@@ -324,6 +343,7 @@ target_compile_options(${BUILD_NAME} PRIVATE
     -O3
     -ffunction-sections
     -fdata-sections
+    -fms-extensions
 )
 
 # ARM assembly flags for Cortex-M33
@@ -342,6 +362,7 @@ target_link_libraries(${BUILD_NAME}
     hardware_flash
     hardware_watchdog
     hardware_irq
+    hardware_interp
     fatfs
     sdcard
     ps2kbd

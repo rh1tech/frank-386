@@ -28,124 +28,52 @@
 #include <string.h>
 #include <stdlib.h>
 #include "adlib.h"
-
-//#define DEBUG
-
-#define ADLIB_KILL_TIMERS 1
+#include "emu8950/emu8950.h"
 
 #define ADLIB_DESC "Yamaha YM3812 (OPL2)"
 
-#ifdef DEBUG
-#include "qemu/timer.h"
-#endif
-
-#ifdef DEBUG
-#define ldebug(...) dolog (__VA_ARGS__)
-#else
-#define ldebug(...)
-#endif
-
-#include "fmopl.h"
-#define SHIFT 1
-
 struct AdlibState {
     uint32_t freq;
-    uint32_t port;
-    int ticking[2];
-    int enabled;
-    int active;
-#ifdef DEBUG
-    int64_t exp[2];
-#endif
-    void *voice;
-    FM_OPL *opl;
+    uint16_t adlibregmem[5], adlib_register;
+    uint8_t adlibstatus;
+    OPL *opl;
 };
-
-static void adlib_stop_opl_timer (AdlibState *s, size_t n)
-{
-    OPLTimerOver (s->opl, n);
-    s->ticking[n] = 0;
-}
-
-static void adlib_kill_timers (AdlibState *s)
-{
-    size_t i;
-
-    for (i = 0; i < 2; ++i) {
-        if (s->ticking[i]) {
-            adlib_stop_opl_timer (s, i);
-        }
-    }
-}
 
 void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 {
     AdlibState *s = opaque;
-    int a = nport & 3;
-
-    s->active = 1;
-//    AUD_set_active_out (s->voice, 1);
-
-    adlib_kill_timers (s);
-
-    OPLWrite (s->opl, a, val);
+    switch (nport)
+    {
+        case 0x388:
+            s->adlib_register = val;
+            break;
+        case 0x389:
+            if (s->adlib_register <= 4) {
+                s->adlibregmem[s->adlib_register] = val;
+                if (s->adlib_register == 4 && (val & 0x80)) {
+                    s->adlibstatus = 0;
+                    s->adlibregmem[4] = 0;
+                }
+            }
+            OPL_writeReg(s->opl, s->adlib_register, val);
+    }
 }
 
 uint32_t adlib_read(void *opaque, uint32_t nport)
 {
     AdlibState *s = opaque;
-    int a = nport & 3;
-
-    adlib_kill_timers (s);
-    return OPLRead (s->opl, a);
-}
-
-static void timer_handler (void *opaque, int c, FLOAT interval_Sec)
-{
-    AdlibState *s = opaque;
-    unsigned n = c & 1;
-#ifdef DEBUG
-    double interval;
-    int64_t exp;
-#endif
-
-    if (interval_Sec == 0.0) {
-        s->ticking[n] = 0;
-        return;
+    switch (nport)
+    {
+        case 0x388:
+        case 0x389:
+            if (!s->adlibregmem[4])
+                s->adlibstatus = 0;
+            else
+                s->adlibstatus = 0x80;
+            s->adlibstatus = s->adlibstatus + (s->adlibregmem[4] & 1) * 0x40 + (s->adlibregmem[4] & 2) * 0x10;
+            return s->adlibstatus;
     }
-
-    s->ticking[n] = 1;
-#ifdef DEBUG
-    interval = NANOSECONDS_PER_SECOND * interval_Sec;
-    exp = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + interval;
-    s->exp[n] = exp;
-#endif
-
-//    AUD_init_time_stamp_out (s->voice, &s->ats);
-}
-
-void adlib_callback (void *opaque, uint8_t *stream, int free)
-{
-    AdlibState *s = opaque;
-    int samples;
-
-    samples = free >> SHIFT;
-    if (!(s->active && s->enabled) || !samples) {
-        return;
-    }
-    YM3812UpdateOne (s->opl, (void *) stream, samples);
-}
-
-void adlib_free(AdlibState *s)
-{
-    if (s->opl) {
-        OPLDestroy (s->opl);
-        s->opl = NULL;
-    }
-
-    s->active = 0;
-    s->enabled = 0;
-    free(s);
+    return 0xFF;
 }
 
 AdlibState *adlib_new()
@@ -153,27 +81,19 @@ AdlibState *adlib_new()
     AdlibState *s = malloc(sizeof(AdlibState));
     memset(s, 0, sizeof(AdlibState));
     s->freq = SOUND_FREQUENCY;
-    s->opl = OPLCreate (3600000, s->freq);
+    s->opl = OPL_new(3579552, s->freq);
     if (!s->opl) {
         return NULL;
-    }
-    else {
-        OPLSetTimerHandler(s->opl, timer_handler, s);
-        s->enabled = 1;
     }
     return s;
 }
 
 // call it 44100 times per sec
 int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
-    if (!s->opl || !(s->active && s->enabled)) {
+    if (!s->opl) {
         return 0;
     }
-    static int16_t samples[64] = { 0 };
-    static uint8_t cnt = 64;
-    if (cnt == 64) {
-        cnt = 0;
-        YM3812UpdateOne(s->opl, (void*)samples, 64);
-    }
-    return samples[cnt++] * 2; // TODO: may be 1.5?
+    int32_t sample = 0;
+    OPL_calc_buffer_linear(s->opl, &sample, 1);
+    return sample;
 }

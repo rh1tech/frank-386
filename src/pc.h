@@ -121,8 +121,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 void pc_vga_step(void *o);
 void pc_step(PC *pc);
 
-void mixer_callback(void *opaque, uint8_t *stream, int free);
-
 int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value);
 void load_bios_and_reset(PC *pc);
