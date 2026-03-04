@@ -7259,6 +7259,10 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		cpu->int13_handler(cpu, cpu->int13_opaque);
 		return true;
 	}
+	if (no == 0x2F && cpu->int2f_handler && !(cpu->cr0 & 1)) {
+		cpu->int2f_handler(cpu, cpu->int2f_opaque);
+		if (cpu_get_cf(cpu) == 0) return true; /* handled */
+	}
 
 	if (!(cpu->cr0 & 1)) {
 		/* REAL-ADDRESS-MODE */
@@ -8026,6 +8030,12 @@ u16 cpu_get_es(CPUI386 *cpu) { return cpu->seg[SEG_ES].sel; }
 void cpu_set_bx(CPUI386 *cpu, u16 val) { sreg16(3, val); }
 void cpu_set_cx(CPUI386 *cpu, u16 val) { sreg16(1, val); }
 void cpu_set_dx(CPUI386 *cpu, u16 val) { sreg16(2, val); }
+u16 cpu_get_si(CPUI386 *cpu) { return lreg16(6); }
+u16 cpu_get_di(CPUI386 *cpu) { return lreg16(7); }
+void cpu_set_si(CPUI386 *cpu, u16 val) { sreg16(6, val); }
+void cpu_set_di(CPUI386 *cpu, u16 val) { sreg16(7, val); }
+u16 cpu_get_ds(CPUI386 *cpu) { return cpu->seg[SEG_DS].sel; }
+u16 cpu_get_ss(CPUI386 *cpu) { return cpu->seg[SEG_SS].sel; }
 
 void cpu_set_cf(CPUI386 *cpu, int val)
 {
@@ -8055,4 +8065,10 @@ void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque)
 {
 	cpu->int13_handler = handler;
 	cpu->int13_opaque = opaque;
+}
+
+void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque)
+{
+	cpu->int2f_handler = handler;
+	cpu->int2f_opaque  = opaque;
 }

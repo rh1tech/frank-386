@@ -156,6 +156,11 @@ static void cmos_update_time(CMOS *s)
 	s->data[0x32] = bin2bcd((tm.tm_year / 100) + 19);
 }
 
+void cmos_set_floppy_types(CMOS *c, uint8_t type_a, uint8_t type_b) {
+    if (!c) return;
+    c->data[0x10] = ((type_a & 0xF) << 4) | (type_b & 0xF);
+}
+
 CMOS *cmos_init(long mem_size, int irq, void *pic, void (*set_irq)(void *pic, int irq, int level))
 {
 	CMOS *c = malloc(sizeof(CMOS));
@@ -165,6 +170,7 @@ CMOS *cmos_init(long mem_size, int irq, void *pic, void (*set_irq)(void *pic, in
 	c->set_irq = set_irq;
 
 	cmos_update_time(c);
+	c->data[0x10] = 0x44;  /* floppy: A=1.44M(4), B=1.44M(4) */
 	c->data[10] = 0x26;
 	c->data[11] = 0x02;
 	c->data[12] = 0x00;

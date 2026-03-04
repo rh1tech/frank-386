@@ -24,12 +24,22 @@ struct struct_drive {
     uint16_t heads;
     uint8_t inserted;
     uint8_t readonly;
-    uint8_t iscdrom;  // CD-ROM flag for drive E:
+    uint8_t iscdrom;
+    uint8_t drive_type;  /* BIOS/CMOS type: 1=360K 2=1.2M 3=720K 4=1.44M 5=2.88M */  // CD-ROM flag for drive E:
 } disk[5];  // 0-1: floppy, 2-3: HDD, 4: CD-ROM
 
 static int led_state = 0;
 static CPUI386 *disk_cpu = NULL;
 static uint8_t *disk_mem = NULL;
+static void (*disk_cmos_update_cb)(uint8_t type_a, uint8_t type_b) = NULL;
+void disk_set_cmos_callback(void (*cb)(uint8_t, uint8_t)) { disk_cmos_update_cb = cb; }
+
+static void update_floppy_cmos(void) {
+    if (!disk_cmos_update_cb) return;
+    uint8_t ta = disk[0].inserted ? disk[0].drive_type : 4;  /* default 1.44M */
+    uint8_t tb = disk[1].inserted ? disk[1].drive_type : 4;
+    disk_cmos_update_cb(ta, tb);
+}
 
 // Detect fixed VHD (footer at end)
 static int detect_vhd(FIL *file, size_t size) {
@@ -60,6 +70,7 @@ static inline void ejectdisk(uint8_t drivenum) {
         f_close(&disk[drivenum].diskfile);
         disk[drivenum].inserted = 0;
         disk_set_filename(drivenum, NULL);
+        if (drivenum < 2) update_floppy_cmos();
         if (drivenum >= 2)
             hdcount--;
         else
@@ -133,14 +144,27 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
         sects = 18;
         heads = 2;
 
-        if (size <= 368640) {  // 360 KB or lower
-            cyls = 40;
-            sects = 9;
-            heads = 2;
-        } else if (size <= 737280) {
-            sects = 9;
-        } else if (size <= 1228800) {
-            sects = 15;
+        /* Floppy geometry by image size:
+         * 360K  = 40 cyl, 2 head,  9 sect (5.25" DD)
+         * 720K  = 80 cyl, 2 head,  9 sect (3.5" DD)
+         * 1.2M  = 80 cyl, 2 head, 15 sect (5.25" HD)
+         * 1.44M = 80 cyl, 2 head, 18 sect (3.5" HD)  <-- default
+         * 2.88M = 80 cyl, 2 head, 36 sect (3.5" ED) */
+        if (size <= 368640) {        // 360K
+            cyls = 40; sects = 9; heads = 2;
+            disk[drivenum].drive_type = 1;
+        } else if (size <= 737280) { // 720K
+            cyls = 80; sects = 9; heads = 2;
+            disk[drivenum].drive_type = 3;
+        } else if (size <= 1228800) { // 1.2M
+            cyls = 80; sects = 15; heads = 2;
+            disk[drivenum].drive_type = 2;
+        } else if (size <= 1474560) { // 1.44M
+            cyls = 80; sects = 18; heads = 2;
+            disk[drivenum].drive_type = 4;
+        } else {                      // 2.88M
+            cyls = 80; sects = 36; heads = 2;
+            disk[drivenum].drive_type = 5;
         }
     }
 
@@ -163,6 +187,8 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
         fdcount++;
     }
 
+    // Update CMOS floppy type if floppy
+    if (drivenum < 2) update_floppy_cmos();
     // Track filename for disk UI
     disk_set_filename(drivenum, pathname);
 /*
@@ -421,7 +447,7 @@ void diskhandler(CPUI386 *cpu) {
 
                 // Set DL and BL for floppy or hard drive
                 if (cpu_get_dl(cpu) < 2) {
-                    cpu_set_bl(cpu, 4);  // Floppy
+                    cpu_set_bl(cpu, disk[drivenum].drive_type ? disk[drivenum].drive_type : 4);
                     cpu_set_dl(cpu, 2);  // We have 2 drives
                 } else {
                     cpu_set_dl(cpu, hdcount);  // Hard disk

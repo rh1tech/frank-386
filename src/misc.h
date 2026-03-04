@@ -17,6 +17,7 @@ uint8_t cmos_ioport_read(CMOS *cmos, int addr);
 void cmos_ioport_write(CMOS *cmos, int addr, uint8_t val);
 
 uint8_t cmos_set(void *cmos, int addr, uint8_t val);
+void cmos_set_floppy_types(CMOS *c, uint8_t type_a, uint8_t type_b);
 
 /* EMULINK removed - disk operations use INT 13h disk handler instead */
 

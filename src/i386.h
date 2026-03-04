@@ -134,6 +134,8 @@ struct CPUI386 {
 	/* INT 13h disk handler hook */
 	void (*int13_handler)(struct CPUI386 *cpu, void *opaque);
 	void *int13_opaque;
+	void (*int2f_handler)(struct CPUI386 *cpu, void *opaque);
+	void *int2f_opaque;
 };
 
 typedef struct CPUI386 CPUI386;
@@ -189,6 +191,12 @@ void cpu_set_bx(CPUI386 *cpu, u16 val);
 void cpu_set_cx(CPUI386 *cpu, u16 val);
 void cpu_set_dx(CPUI386 *cpu, u16 val);
 // Carry flag
+u16 cpu_get_si(CPUI386 *cpu);
+u16 cpu_get_di(CPUI386 *cpu);
+void cpu_set_si(CPUI386 *cpu, u16 val);
+void cpu_set_di(CPUI386 *cpu, u16 val);
+u16 cpu_get_ds(CPUI386 *cpu);
+u16 cpu_get_ss(CPUI386 *cpu);
 void cpu_set_cf(CPUI386 *cpu, int val);
 int cpu_get_cf(CPUI386 *cpu);
 // Physical memory access
@@ -198,6 +206,9 @@ long cpu_get_phys_mem_size(CPUI386 *cpu);
 // INT 13h disk handler callback
 typedef void (*int13_handler_t)(CPUI386 *cpu, void *opaque);
 void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque);
+
+typedef void (*int2f_handler_t)(CPUI386 *cpu, void *opaque);
+void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque);
 
 /* Profiling support (enable with -DI386_PROFILE) */
 #ifdef I386_PROFILE

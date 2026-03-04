@@ -22,6 +22,7 @@ uint8_t disk_is_inserted(uint8_t drivenum);
 void disk_set_filename(uint8_t drivenum, const char *filename);
 const char* disk_get_filename(uint8_t drivenum);
 void disk_set_cdrom(uint8_t drivenum, uint8_t iscdrom);
+void disk_set_cmos_callback(void (*cb)(uint8_t type_a, uint8_t type_b));
 uint8_t disk_is_cdrom(uint8_t drivenum);
 
 // INT 13h handler wrapper for CPU hook (matches int13_handler_t signature)

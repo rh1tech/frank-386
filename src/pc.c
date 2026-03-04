@@ -1,5 +1,6 @@
 #include "pc.h"
 #include "dss.h"
+#include "misc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,6 +10,7 @@
 #include <hardware/watchdog.h>
 
 #include "mpu401.c.inl"
+void netredirect_init(CPUI386 *cpu);
 
 #ifdef USEKVM
 #define cpu_raise_irq cpukvm_raise_irq
@@ -699,11 +701,16 @@ static void pc_reset_request(void *p)
 extern uint8_t gfx_buffer[256ul << 10];
 
 
+static CMOS *_pc_cmos_for_floppy = NULL;
+static void cmos_floppy_update(uint8_t ta, uint8_t tb) {
+    cmos_set_floppy_types(_pc_cmos_for_floppy, ta, tb);
+}
+
 PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
 	PC *pc = malloc(sizeof(PC));
-	char *mem = (uint8_t*)0x11000000; //bigmalloc(conf->mem_size);
+    char *mem = (uint8_t*)0x11000000;
 	CPU_CB *cb = NULL;
 	memset(mem, 0, conf->mem_size);
 #ifdef BUILD_ESP32
@@ -739,10 +746,13 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->pit = i8254_init(0, pc->pic, set_irq);
 	pc->serial = u8250_init(4, pc->pic, set_irq);
 	pc->cmos = cmos_init(conf->mem_size, 8, pc->pic, set_irq);
+	_pc_cmos_for_floppy = pc->cmos;
 
 	/* Set up INT 13h disk handler */
 	disk_set_cpu(pc->cpu);
 	cpu_set_int13_handler(pc->cpu, diskhandler_wrapper, NULL);
+	disk_set_cmos_callback(cmos_floppy_update);
+	netredirect_init(pc->cpu);
 
 	/* Attach hard disks using INT 13h disk handler */
 	const char **disks = conf->disks;
