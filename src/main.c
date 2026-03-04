@@ -809,9 +809,14 @@ static bool init_emulator(void) {
 }
 
 bool timer_callback(repeating_timer_t *rt);
+void vga_hw_process_deferred(void);
+static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
+    timer_callback(rt);
+    vga_hw_process_deferred();
+    return true;
+}
 // to call DMA wait not from ISR for timer
 bool repeat_me_often(void);
-void vga_hw_process_deferred(void);
 static void __not_in_flash_func(core1_entry)(void) {
 
     DBG_PRINT("[Core 1] Initializing VGA...\n");
@@ -830,10 +835,9 @@ static void __not_in_flash_func(core1_entry)(void) {
     }
     static repeating_timer_t m_timer = { 0 };
     int hz = 44100;
-	add_repeating_timer_us(-1000000 / hz, timer_callback, pc, &m_timer);
+	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
     while(1) {
         repeat_me_often();
-        vga_hw_process_deferred();
         sleep_us(1);
     }
     __unreachable();
