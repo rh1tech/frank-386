@@ -118,14 +118,15 @@ void settingsui_close(void) {
         config_set_cpu_gen(orig_cpu);
         config_set_fpu(orig_fpu);
         config_set_fill_cmos(orig_fill_cmos);
-        config_set_pcspeaker(orig_pcspeaker);
-        config_set_adlib(orig_adlib);
-        config_set_soundblaster(orig_soundblaster);
-        config_set_tandy(orig_tandy);
-        config_set_covox(orig_covox);
-        config_set_mpu401(orig_mpu401);
-        config_set_dss(orig_dss);
-        config_set_mouse(orig_mouse);
+        // do not recover not "critical", just allow to change 'em without apply
+    //    config_set_pcspeaker(orig_pcspeaker);
+    //    config_set_adlib(orig_adlib);
+    //    config_set_soundblaster(orig_soundblaster);
+    //    config_set_tandy(orig_tandy);
+    //    config_set_covox(orig_covox);
+    //    config_set_mpu401(orig_mpu401);
+    //    config_set_dss(orig_dss);
+    //    config_set_mouse(orig_mouse);
         config_set_cpu_freq(orig_cpu_freq);
         config_set_psram_freq(orig_psram_freq);
         config_clear_changes();

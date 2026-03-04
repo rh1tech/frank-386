@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "pc.h"
 
 // Current configuration values (minimal storage)
 static int cfg_mem_mb = 4;
@@ -35,6 +36,8 @@ static int cfg_mouse = 1;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
 static bool cfg_hw_changed = false;
+
+extern PC *pc;
 
 // INI file path
 #define CONFIG_PATH "386/config.ini"
@@ -87,6 +90,7 @@ void config_set_fill_cmos(int enabled) {
 // Hardware settings
 int config_get_pcspeaker(void) { return cfg_pcspeaker; }
 void config_set_pcspeaker(int enabled) {
+    pc->pcspk_enabled = enabled;
     if (cfg_pcspeaker != enabled) {
         cfg_pcspeaker = enabled;
         cfg_changed = true;
@@ -95,6 +99,7 @@ void config_set_pcspeaker(int enabled) {
 
 int config_get_adlib(void) { return cfg_adlib; }
 void config_set_adlib(int enabled) {
+    pc->adlib_enabled = enabled;
     if (cfg_adlib != enabled) {
         cfg_adlib = enabled;
         cfg_changed = true;
@@ -103,6 +108,7 @@ void config_set_adlib(int enabled) {
 
 int config_get_soundblaster(void) { return cfg_soundblaster; }
 void config_set_soundblaster(int enabled) {
+    pc->sb16_enabled = enabled;
     if (cfg_soundblaster != enabled) {
         cfg_soundblaster = enabled;
         cfg_changed = true;
@@ -111,6 +117,7 @@ void config_set_soundblaster(int enabled) {
 
 int config_get_tandy(void) { return cfg_tandy; }
 void config_set_tandy(int enabled) {
+    pc->tandy_enabled = enabled;
     if (cfg_tandy != enabled) {
         cfg_tandy = enabled;
         cfg_changed = true;
@@ -119,6 +126,7 @@ void config_set_tandy(int enabled) {
 
 int config_get_covox(void) { return cfg_covox; }
 void config_set_covox(int enabled) {
+    pc->covox_enabled = enabled;
     if (cfg_covox != enabled) {
         cfg_covox = enabled;
         cfg_changed = true;
@@ -127,6 +135,7 @@ void config_set_covox(int enabled) {
 
 int config_get_mpu401(void) { return cfg_mpu401; }
 void config_set_mpu401(int enabled) {
+    pc->mpu401_enabled = enabled;
     if (cfg_mpu401 != enabled) {
         cfg_mpu401 = enabled;
         cfg_changed = true;
@@ -135,6 +144,7 @@ void config_set_mpu401(int enabled) {
 
 int config_get_dss(void) { return cfg_dss; }
 void config_set_dss(int enabled) {
+    pc->dss_enabled = enabled;
     if (cfg_dss != enabled) {
         cfg_dss = enabled;
         cfg_changed = true;
@@ -143,6 +153,7 @@ void config_set_dss(int enabled) {
 
 int config_get_mouse(void) { return cfg_mouse; }
 void config_set_mouse(int enabled) {
+    pc->mouse_enabled = enabled;
     if (cfg_mouse != enabled) {
         cfg_mouse = enabled;
         cfg_changed = true;

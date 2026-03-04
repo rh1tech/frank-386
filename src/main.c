@@ -64,7 +64,7 @@
 // Global State
 //=============================================================================
 
-static PC *pc = NULL;
+PC *pc = NULL;
 static PCConfig config;
 static bool initialized = false;
 
