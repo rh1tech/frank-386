@@ -17,7 +17,7 @@
 #if EMULATE_LTEMS
 
 /* Physical base of EMS storage in PSRAM — must match ems.c.inl */
-#define EMS_PSRAM_OFFSET ((4096ul + 2048ul) << 10)
+#define EMS_PSRAM_OFFSET ((EMU_MEM_SIZE_MB * 1024 - 2048ul) << 10)
 #define EMS_BASE_PTR     ((uint8_t *)0x11000000 + EMS_PSRAM_OFFSET)
 
 /* Guest physical window occupied by the four 16-KB EMS frames */

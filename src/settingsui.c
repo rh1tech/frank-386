@@ -52,7 +52,11 @@ static const int vol_options[] = { 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
 static const int vol_option_count = 13;
 #endif
 
+#if EMULATE_LTEMS
+static const int mem_options[] = { 1, 2, 4, 6 };
+#else
 static const int mem_options[] = { 1, 2, 4, 8 };
+#endif
 static const int mem_option_count = 4;
 
 static const int cpu_options[] = { 3, 4, 5 };

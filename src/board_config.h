@@ -77,7 +77,11 @@
 #define PSRAM_PIN_RP2350B 47
 
 // PSRAM memory size (8MB)
-#define PSRAM_SIZE (8 * 1024 * 1024)
+#if EMULATE_LTEMS
+    #define PSRAM_SIZE (6 * 1024 * 1024)
+#else
+    #define PSRAM_SIZE (8 * 1024 * 1024)
+#endif
 #define PSRAM_BASE 0x11000000
 
 // Aliases for compatibility with psram_init.h
@@ -343,7 +347,7 @@ static inline uint get_psram_pin(void) {
 
 // Main memory size (configurable, limited by 8MB PSRAM minus VGA memory)
 #ifndef EMU_MEM_SIZE_MB
-#define EMU_MEM_SIZE_MB 7
+#define EMU_MEM_SIZE_MB 4
 #endif
 
 // VGA memory size (up to 2MB)

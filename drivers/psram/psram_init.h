@@ -16,7 +16,7 @@
 #define PSRAM_BASE_ADDR   0x11000000
 #endif
 #ifndef PSRAM_SIZE_BYTES
-#define PSRAM_SIZE_BYTES  (8 * 1024 * 1024)  // 8MB
+#define PSRAM_SIZE_BYTES  (4 * 1024 * 1024)  // 4 MB
 #endif
 
 /**
@@ -59,6 +59,7 @@ static inline void *psram_get_ptr(void) {
  * @return Size of PSRAM in bytes
  */
 static inline size_t psram_get_size(void) {
+    /// TODO: implment real chip size detection
     return PSRAM_SIZE_BYTES;
 }
 

@@ -414,7 +414,11 @@ static void load_default_config(void) {
     memset(&config, 0, sizeof(config));
 
     // Default memory configuration
+#if EMULATE_LTEMS
     config.mem_size = EMU_MEM_SIZE_MB * 1024 * 1024;
+#else
+    config.mem_size = (EMU_MEM_SIZE_MB - 2) * 1024 * 1024;
+#endif
     config.vga_mem_size = EMU_VGA_MEM_SIZE_KB * 1024;
 
     // CPU configuration
@@ -732,7 +736,7 @@ static bool init_emulator(void) {
            (unsigned long)(total_psram / 1024),
            (unsigned long)(PSRAM_SIZE_BYTES / 1024));
 
-    if (total_psram > PSRAM_SIZE_BYTES) {
+           if (total_psram > PSRAM_SIZE_BYTES) {
         printf("WARNING: Reducing memory to fit in PSRAM\n");
         config.mem_size = PSRAM_SIZE_BYTES;
         DBG_PRINT("  Adjusted memory: %ld MB\n", config.mem_size / (1024 * 1024));

@@ -39,6 +39,9 @@ set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
 # Audio output configuration (I2S or PWM)
 set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 
+# Enable LTEMM support (performance degradation is expected)
+option(EMM "Enable LTEMM support" OFF)
+
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
 
@@ -198,7 +201,11 @@ endif()
 #=============================================================================
 add_subdirectory(drivers/usbhid)
 
-SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
+if(EMM)
+    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}-emm")
+else ()
+    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
+endif()
 
 #=============================================================================
 # Core 386 Emulator Sources
@@ -281,6 +288,9 @@ elseif(AUDIO_TYPE STREQUAL "PWM")
     target_compile_definitions(${BUILD_NAME} PRIVATE FEATURE_AUDIO_PWM=1)
 endif()
 
+if(EMM)
+    target_compile_definitions(${BUILD_NAME} PRIVATE EMULATE_LTEMS=1)
+endif()
 target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
     MURM386_VERSION_MAJOR=${MURM386_VERSION_MAJOR}
@@ -301,8 +311,6 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     EMU_MEM_SIZE_MB=8
     EMU_VGA_MEM_SIZE_KB=256
     EMU_CPU_GEN=4
-
-    EMULATE_LTEMS=0
 
     # Disable features for initial port
 #    NO_FPU=1
@@ -393,6 +401,7 @@ endif()
 message(STATUS "")
 message(STATUS "murm386 Build Configuration:")
 message(STATUS "  Board Variant:  ${BOARD}")
+message(STATUS "  EMM:            ${EMM}")
 message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
