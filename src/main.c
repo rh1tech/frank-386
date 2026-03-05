@@ -635,7 +635,11 @@ static bool init_hardware(void) {
     // Initialize VGA early so we can show errors on screen
     multicore_launch_core1(core1_entry);
 
-    while(!vga_initialized) sleep_ms(1);
+    while(!vga_initialized) {
+        sleep_ms(1);
+        __dmb();
+    }
+    __dmb();
 
     // Initialize SD card
     DBG_PRINT("Initializing SD card...\n");
@@ -826,6 +830,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     DBG_PRINT("[Core 1] Initializing VGA...\n");
     DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
     vga_hw_init();
+    sleep_ms(100);
     vga_initialized = true;
 
     // Initialize I2S Audio
