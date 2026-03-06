@@ -7,6 +7,7 @@
 #include <pico/time.h>
 #include <pico/multicore.h>
 #include <hardware/clocks.h>
+#include "hardware/structs/bus_ctrl.h"
 #include "vga.h"
 #include "vga_osd.h"
 #include "hdmi.h"
@@ -73,8 +74,11 @@ static int dma_chan_pal_conv;
 
 //DMA буферы
 //основные строчные данные
-static uint32_t* __scratch_y("hdmi_ptr_3") dma_lines[2] = { NULL,NULL };
-static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[2];
+// 4 line buffers for 2-line-ahead rendering (prevents DMA underflow)
+static uint32_t* __scratch_y("hdmi_ptr_3") dma_lines[4] = { NULL,NULL,NULL,NULL };
+static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[4];
+// Extra 2 line buffers (buffers 0-1 are in conv_color, 2-3 are here)
+static uint32_t hdmi_extra_line_buf[2][100];
 
 //ДМА палитра для конвертации
 //в хвосте этой памяти выделяется dma_data
@@ -84,6 +88,7 @@ bool required_to_repair_text_pal = false;
 
 //индекс, проверяющий зависание
 static uint32_t irq_inx = 0;
+
 
 //функции и константы HDMI
 
@@ -231,8 +236,6 @@ static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t 
 }
 
 #define is_hdmi_sync(c) (c >= HDMI_CTRL_0)
-// ^ just faster than:
-//#define is_hdmi_sync(c) (c == HDMI_CTRL_0 || c == HDMI_CTRL_1 || c == HDMI_CTRL_2 || c == HDMI_CTRL_3)
 #define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (HDMI_CTRL_0 - 1) : c; }
 
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
@@ -626,9 +629,13 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
 
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
+    // Before emulator init: output black, avoid calling any flash-resident
+    // functions that could cause XIP contention with Core 0's BIOS loading.
+    if (!vga_state) {
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+        return;
+    }
     pre_render_line();
-    // If OSD is visible, it takes over the display completely
-    // (it reuses text_buffer_sram so we can't render normal text)
     if (osd_is_visible()) {
         return osd_render_line_hdmi(line, output_buffer);
     }
@@ -669,27 +676,24 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
         render_gfx_line_from_sram(line, output_buffer);
         return;
     }
-    // mode 0 - blank screen (gray?)
+    // mode 0 - blank screen (gray)
     nf_memset(output_buffer, 0x77, SCREEN_WIDTH);
 }
 
 static void __time_critical_func(dma_handler_HDMI)() {
-    static uint32_t inx_buf_dma;
     static uint line = 0;
     irq_inx++;
 
     dma_hw->ints0 = 1u << dma_chan_ctrl;
-    dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[inx_buf_dma & 1], false);
 
-    if (line++ > 524) {
+    if (line >= 524) {
         line = 0;
         frame_update_request = 1;
+    } else {
+        ++line;
     }
 
-    // Update VGA status register 1 (port 0x3DA) from ISR — this is the
-    // authoritative source. Core0 reads it as-is without any logic.
-    // Bit 0 (DISP_ENABLE): 1 = active display, 0 = blanking interval
-    // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
+    // Update VGA status register 1 (port 0x3DA) from ISR
     if (vga_state) {
         if (line >= 480) {
             vga_state->st01 |=  ST01_V_RETRACE;
@@ -700,18 +704,19 @@ static void __time_critical_func(dma_handler_HDMI)() {
         }
     }
 
-    inx_buf_dma++;
+    // 4-buffer rendering: DMA reads buf (line % 4), ISR renders (line+2) % 4.
+    uint32_t read_buf = line & 3;
+    uint32_t render_buf = (line + 2) & 3;
+    dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[read_buf], false);
 
-    uint8_t* activ_buf = (uint8_t *)dma_lines[inx_buf_dma & 1];
+    uint8_t* activ_buf = (uint8_t *)dma_lines[render_buf];
 
     if (line < 480) { //область изображения
-        uint8_t* output_buffer = activ_buf + 72; //для выравнивания синхры;
-        // --- Верхнее поле ---
+        uint8_t* output_buffer = activ_buf + 72;
         if (line < (uint32_t)active_start) {
             nf_memset(output_buffer, 0, SCREEN_WIDTH);
             goto f;
         }
-        // --- Нижнее поле ---
         if (line >= (uint32_t)active_end) {
             nf_memset(output_buffer, 0, SCREEN_WIDTH);
             goto f;
@@ -927,14 +932,17 @@ static inline bool hdmi_init() {
     pio_sm_init(PIO_VIDEO, SM_video, offs_prg0, &c_c);
     pio_sm_set_enabled(PIO_VIDEO, SM_video, true);
 
-    //настройки DMA
+    //настройки DMA — 4 line buffers (2 in conv_color, 2 separate)
     dma_lines[0] = &conv_color[1024];
     dma_lines[1] = &conv_color[1124];
+    dma_lines[2] = hdmi_extra_line_buf[0];
+    dma_lines[3] = hdmi_extra_line_buf[1];
 
     //основной рабочий канал
     dma_channel_config cfg_dma = dma_channel_get_default_config(dma_chan);
     channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_8);
-    channel_config_set_chain_to(&cfg_dma, dma_chan_ctrl); // chain to other channel
+    channel_config_set_chain_to(&cfg_dma, dma_chan_ctrl);
+    channel_config_set_high_priority(&cfg_dma, true);
 
     channel_config_set_read_increment(&cfg_dma, true);
     channel_config_set_write_increment(&cfg_dma, false);
@@ -957,13 +965,16 @@ static inline bool hdmi_init() {
     //контрольный канал для основного
     cfg_dma = dma_channel_get_default_config(dma_chan_ctrl);
     channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_32);
-    channel_config_set_chain_to(&cfg_dma, dma_chan); // chain to other channel
+    channel_config_set_chain_to(&cfg_dma, dma_chan);
+    channel_config_set_high_priority(&cfg_dma, true);
 
     channel_config_set_read_increment(&cfg_dma, false);
     channel_config_set_write_increment(&cfg_dma, false);
 
     DMA_BUF_ADDR[0] = &dma_lines[0][0];
     DMA_BUF_ADDR[1] = &dma_lines[1][0];
+    DMA_BUF_ADDR[2] = &dma_lines[2][0];
+    DMA_BUF_ADDR[3] = &dma_lines[3][0];
 
     dma_channel_configure(
         dma_chan_ctrl,
@@ -978,7 +989,8 @@ static inline bool hdmi_init() {
 
     cfg_dma = dma_channel_get_default_config(dma_chan_pal_conv);
     channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_32);
-    channel_config_set_chain_to(&cfg_dma, dma_chan_pal_conv_ctrl); // chain to other channel
+    channel_config_set_chain_to(&cfg_dma, dma_chan_pal_conv_ctrl);
+    channel_config_set_high_priority(&cfg_dma, true);
 
     channel_config_set_read_increment(&cfg_dma, true);
     channel_config_set_write_increment(&cfg_dma, false);
@@ -1037,11 +1049,15 @@ static inline bool hdmi_init() {
     return true;
 };
 
+// DC balance XOR mask — inverts differential pairs for alternating pixels.
+// Flips TMDS bits 0-7 and bit 9 (DC balance flag) but NOT bit 8 (encoding method).
+#define HDMI_DC_BAL_XOR 0x0003ffffffffffffllu
+
 void __time_critical_func(graphics_set_palette_hdmi)(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
-    if is_hdmi_sync(i) return; //не записываем "служебные" цвета
+    if is_hdmi_sync(i) return;
     uint64_t* conv_color64 = (uint64_t *)conv_color;
     conv_color64[i * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
-    conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ 0x0003ffffffffffffl;
+    conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ HDMI_DC_BAL_XOR;
 };
 
 void graphics_set_palette_hdmi2(
@@ -1049,12 +1065,12 @@ void graphics_set_palette_hdmi2(
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
     uint8_t i
 ) {
-    if is_hdmi_sync(i) return; //не записываем "служебные" цвета
+    if is_hdmi_sync(i) return;
     uint64_t* conv_color64 = (uint64_t*)conv_color;
     uint64_t c1 = get_ser_diff_data(tmds_encoder(R1), tmds_encoder(G1), tmds_encoder(B1));
     uint64_t c2 = get_ser_diff_data(tmds_encoder(R2), tmds_encoder(G2), tmds_encoder(B2));
     conv_color64[i * 2]     = c1;
-    conv_color64[i * 2 + 1] = (c1 == c2) ? (c2 ^ 0x0003ffffffffffffl) : c2;
+    conv_color64[i * 2 + 1] = (c1 == c2) ? (c2 ^ HDMI_DC_BAL_XOR) : c2;
 }
 
 #define RGB888(r, g, b) ((r<<16) | (g << 8 ) | b )
@@ -1068,5 +1084,15 @@ void graphics_init_hdmi() {
     dma_chan_pal_conv_ctrl = dma_claim_unused_channel(true);
     dma_chan_pal_conv = dma_claim_unused_channel(true);
 
+    // DMA high priority is set per-channel below (after hdmi_init).
+    // Do NOT set bus_ctrl_hw->priority here — it starves CPU PSRAM writes.
+
     hdmi_init();
+
+    // Set high priority on all 4 video DMA channels AFTER hdmi_init
+    // (dma_channel_configure overwrites ctrl, so we must set priority here)
+    hw_set_bits(&dma_hw->ch[dma_chan].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
+    hw_set_bits(&dma_hw->ch[dma_chan_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
+    hw_set_bits(&dma_hw->ch[dma_chan_pal_conv].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
+    hw_set_bits(&dma_hw->ch[dma_chan_pal_conv_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
 }

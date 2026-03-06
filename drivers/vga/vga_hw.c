@@ -27,6 +27,9 @@
 #include "hardware/pio.h"
 #include "hardware/sync.h"
 #include "hardware/timer.h"
+#include "hardware/vreg.h"
+#include "pico/time.h"
+#include "../../drivers/psram/psram_init.h"
 
 bool SELECT_VGA = false;
 extern bool required_to_repair_text_pal;
@@ -687,6 +690,7 @@ void __time_critical_func(pre_render_line)(void) {
     // Check retrace and submit frame (fast path)
     // We must check this frequently to catch the VBLANK edge
     static bool was_in_retrace = false;
+    if (!vga_state) return;
     bool in_retrace = vga_in_retrace(vga_state);
     // Latch values at the END of retrace (falling edge of VBLANK)
     if (was_in_retrace && !in_retrace) {
@@ -765,6 +769,7 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
 static inline void vga_hw_set_mode(int mode);
 
 static void vga_hw_new_frame_deferred(void) {
+    if (!vga_state) return;
     static int last_vga_mode = -1;
     // Update cursor
     int cx, cy, cs, ce, cv;
@@ -1034,6 +1039,27 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
 // ============================================================================
 int testPins(uint32_t pin0, uint32_t pin1);
 void graphics_init_hdmi();
+// From main.c — needed for safe flash access at high clock speeds
+extern void set_flash_timings(int cpu_mhz);
+
+// HDMI TMDS requires an exact 252 MHz PIO clock. Boost clk_sys to 504 MHz
+// so the PIO divider is an integer 2 (no jitter).
+#define HDMI_SYS_CLOCK_MHZ 504
+
+static void hdmi_boost_clock(void) {
+    int cur_mhz = clock_get_hz(clk_sys) / 1000000;
+    if (cur_mhz >= HDMI_SYS_CLOCK_MHZ) return;
+    vreg_disable_voltage_limit();
+    vreg_set_voltage(VREG_VOLTAGE_1_65);
+    sleep_ms(50);
+    set_flash_timings(HDMI_SYS_CLOCK_MHZ);
+    set_sys_clock_khz(HDMI_SYS_CLOCK_MHZ * 1000, false);
+    // Immediately reinit PSRAM for the new clock speed.
+    // Without this, PSRAM runs at ~177 MHz (overclocked) until
+    // reconfigure_clocks runs much later, causing intermittent hangs.
+    psram_init_with_freq(get_psram_pin(), PSRAM_MAX_FREQ_MHZ);
+}
+
 void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
         spread8_lut[i] = spread8(i);
@@ -1045,6 +1071,7 @@ void vga_hw_init(void) {
         SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
     #endif
     if (!SELECT_VGA) {
+        hdmi_boost_clock();
         graphics_init_hdmi();
         return;
     }
@@ -1284,7 +1311,8 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
     uint32_t t0 = timer_hw->timerawl;
     if (required_to_repair_text_pal) {
         required_to_repair_text_pal = false;
-        memcpy(conv_color, conv_color2, sizeof(conv_color));
+        // Only restore palette entries (0..1023), not the DMA line buffers (1024..1223)
+        memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
     }
     vga_hw_new_frame_deferred();
     uint32_t dt = timer_hw->timerawl - t0;

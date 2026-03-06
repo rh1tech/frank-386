@@ -225,7 +225,7 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
 extern "C" void ps2kbd_init(int clk_pin) {
     kbd_clk_pin = clk_pin;
     // PS2 keyboard: CLK = clk_pin, DATA = clk_pin + 1
-    kbd = new Ps2Kbd_Mrmltr(pio1, clk_pin, key_handler);
+    kbd = new Ps2Kbd_Mrmltr(pio0, clk_pin, key_handler);
     kbd->init_gpio();
 }
 
