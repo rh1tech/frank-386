@@ -1193,7 +1193,6 @@ static int write_audio (SB16State *s, int nchan, int dma_pos,
 
     while (temp) {
         int left = dma_len - dma_pos;
-        int copied;
         size_t to_copy;
 
         to_copy = temp;
@@ -1203,35 +1202,35 @@ static int write_audio (SB16State *s, int nchan, int dma_pos,
             to_copy = sizeof (tmpbuf);
         }
 
-        copied = i8257_dma_read_memory(isa_dma, nchan, tmpbuf, dma_pos, to_copy);
+        int copied = i8257_dma_read_memory(isa_dma, nchan, tmpbuf, dma_pos, to_copy);
 
-        unsigned int len = AUDIO_BUF_LEN - (s->audio_q - s->audio_p);
-        if (len > AUDIO_BUF_LEN)
-            len = 0;
-        if (copied < len)
-            len = copied;
-        if (len) {
+        /* Store as much as fits in the ring buffer; discard the rest.
+         * On real hardware DMA completes at bus speed regardless of
+         * whether the DAC has finished playing.  We must advance the
+         * DMA position by the full 'copied' amount so that the SB IRQ
+         * fires on time instead of being throttled by the ring buffer
+         * drain rate. */
+        unsigned int avail = AUDIO_BUF_LEN - (s->audio_q - s->audio_p);
+        if (avail > AUDIO_BUF_LEN)
+            avail = 0;
+        unsigned int store = (unsigned int)copied < avail ? copied : avail;
+        if (store) {
             unsigned int q = s->audio_q % AUDIO_BUF_LEN;
-            if (q + len < AUDIO_BUF_LEN) {
-                memcpy(s->audio_buf + q, tmpbuf, len);
+            if (q + store <= AUDIO_BUF_LEN) {
+                memcpy(s->audio_buf + q, tmpbuf, store);
             } else {
                 unsigned int r = AUDIO_BUF_LEN - q;
                 memcpy(s->audio_buf + q, tmpbuf, r);
-                memcpy(s->audio_buf, tmpbuf + r, len - r);
+                memcpy(s->audio_buf, tmpbuf + r, store - r);
             }
-            s->audio_q += len;
+            s->audio_q += store;
         }
-        copied = len;
 
         temp -= copied;
         dma_pos = (dma_pos + copied) % dma_len;
         net += copied;
 
         if (!copied) {
-#if defined(RP2350_BUILD) || defined(BUILD_ESP32)
-            // Buffer full: release DREQ to stop DMA spinning
-            i8257_dma_release_DREQ(isa_dma, nchan);
-#endif
             break;
         }
     }
