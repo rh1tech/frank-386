@@ -32,4 +32,8 @@ static inline void diskhandler_wrapper(CPUI386 *cpu, void *opaque)
 	diskhandler(cpu);
 }
 
+uint16_t disk_get_cyls(uint8_t drivenum);
+uint16_t disk_get_heads(uint8_t drivenum);
+uint16_t disk_get_sects(uint8_t drivenum);
+
 #endif /* DISK_H */

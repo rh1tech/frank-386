@@ -775,18 +775,46 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	 */
 	{
 		uint8_t cmos12 = 0;
+		/* drivenum 2 = C:, drivenum 3 = D: */
 		if (hdcount >= 1) {
-			cmos12 |= 0xF0;        /* drive 0 = type 47 */
-			cmos_set(pc->cmos, 0x19, 47);
+			cmos12 |= 0xF0;
+			cmos_set(pc->cmos, 0x19, 47);  /* type 47 = user-defined */
+			/* CMOS 0x1B-0x23: Type 47 geometry for drive C: */
+			uint16_t cyls  = disk_get_cyls(2);
+			uint8_t  heads = disk_get_heads(2);
+			uint8_t  sects = disk_get_sects(2);
+			uint8_t  ctrl  = (heads > 8) ? 0x08 : 0x00;
+			cmos_set(pc->cmos, 0x1B, cyls & 0xFF);
+			cmos_set(pc->cmos, 0x1C, cyls >> 8);
+			cmos_set(pc->cmos, 0x1D, heads);
+			cmos_set(pc->cmos, 0x1E, cyls & 0xFF);  /* write precomp = cyls */
+			cmos_set(pc->cmos, 0x1F, cyls >> 8);
+			cmos_set(pc->cmos, 0x20, ctrl);
+			cmos_set(pc->cmos, 0x21, cyls & 0xFF);  /* landing zone = cyls */
+			cmos_set(pc->cmos, 0x22, cyls >> 8);
+			cmos_set(pc->cmos, 0x23, sects);
 		}
 		if (hdcount >= 2) {
-			cmos12 |= 0x0F;        /* drive 1 = type 47 */
-			cmos_set(pc->cmos, 0x1A, 47);
+			cmos12 |= 0x0F;
+			cmos_set(pc->cmos, 0x1A, 47);  /* type 47 = user-defined */
+			/* CMOS 0x24-0x2C: Type 47 geometry for drive D: */
+			uint16_t cyls  = disk_get_cyls(3);
+			uint8_t  heads = disk_get_heads(3);
+			uint8_t  sects = disk_get_sects(3);
+			uint8_t  ctrl  = (heads > 8) ? 0x08 : 0x00;
+			cmos_set(pc->cmos, 0x24, cyls & 0xFF);
+			cmos_set(pc->cmos, 0x25, cyls >> 8);
+			cmos_set(pc->cmos, 0x26, heads);
+			cmos_set(pc->cmos, 0x27, cyls & 0xFF);
+			cmos_set(pc->cmos, 0x28, cyls >> 8);
+			cmos_set(pc->cmos, 0x29, ctrl);
+			cmos_set(pc->cmos, 0x2A, cyls & 0xFF);
+			cmos_set(pc->cmos, 0x2B, cyls >> 8);
+			cmos_set(pc->cmos, 0x2C, sects);
 		}
 		if (cmos12)
 			cmos_set(pc->cmos, 0x12, cmos12);
-		// Keep BDA hard drive count
-	    mem[0x475] = hdcount;
+		mem[0x475] = hdcount;
 	}
 	/* we have emulation for 2 FDDs (CMOS 0x10):
 		биты 7-4 = тип A:
@@ -795,6 +823,8 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	*/
 	cmos_set(pc->cmos, 0x10, 0x44); // A: = 1.44MB, B: = 1.44MB
 	cmos_set(pc->cmos, 0x14, 0x41); // бит 0 = флоппи есть, биты 7-6 = 01 = два дисковода
+	/* Checksum ПОСЛЕ всех записей в диапазон 0x10-0x2D */
+	cmos_update_checksum(pc->cmos);
 
 	int piix3_devfn;
 	pc->i440fx = i440fx_init(&pc->pcibus, &piix3_devfn);

@@ -384,9 +384,22 @@ void cmos_ioport_write(CMOS *cmos, int addr, uint8_t val)
 uint8_t cmos_set(void *cmos, int addr, uint8_t val)
 {
 	CMOS *s = cmos;
-	if (addr < 128)
+	if (addr < 128) {
 		s->data[addr] = val;
+	}
 	return val;
+}
+
+/* Пересчитать CMOS checksum (0x10..0x2D) и записать в 0x2E/0x2F.
+ * Вызывать после любых изменений CMOS, до старта BIOS. */
+void cmos_update_checksum(void *cmos)
+{
+	CMOS *s = cmos;
+	uint16_t sum = 0;
+	for (int i = 0x10; i <= 0x2D; i++)
+		sum += s->data[i];
+	s->data[0x2E] = (sum >> 8) & 0xFF;
+	s->data[0x2F] = sum & 0xFF;
 }
 
 /* EMULINK removed - disk operations use INT 13h disk handler instead */

@@ -37,10 +37,42 @@ static uint8_t *disk_mem = NULL;
 static void (*disk_cmos_update_cb)(uint8_t type_a, uint8_t type_b) = NULL;
 void disk_set_cmos_callback(void (*cb)(uint8_t, uint8_t)) { disk_cmos_update_cb = cb; }
 
+/* Установить FDPT (Fixed Disk Parameter Table) и INT 41h/46h векторы.
+ * Вызывается при каждом INT 13h для HDD — перезаписывает то что мог
+ * поставить SeaBIOS во время boot.
+ * Раскладка IBM AT BIOS: +00 word cyls, +02 byte heads,
+ * +04..07 precomp (0xFFFF), +09 control, +0D word landing zone, +0F byte sects. */
+static void install_fdpt(void) {
+    /* Всегда перезаписываем — SeaBIOS может восстановить свои векторы */
+#define FDPT(base, c, h, s) do { \
+    uint16_t _c=(c); uint8_t _h=(h),_s=(s),_ctrl=(_h>8)?0x08:0x00; \
+    disk_mem[(base)+0x00]=_c&0xFF; disk_mem[(base)+0x01]=_c>>8; \
+    disk_mem[(base)+0x02]=_h;      disk_mem[(base)+0x03]=0; \
+    disk_mem[(base)+0x04]=0xFF;    disk_mem[(base)+0x05]=0xFF; /* reduced write */ \
+    disk_mem[(base)+0x06]=0xFF;    disk_mem[(base)+0x07]=0xFF; /* write precomp */ \
+    disk_mem[(base)+0x08]=0;       disk_mem[(base)+0x09]=_ctrl; \
+    disk_mem[(base)+0x0A]=0;       disk_mem[(base)+0x0B]=0; \
+    disk_mem[(base)+0x0C]=0; \
+    disk_mem[(base)+0x0D]=_c&0xFF; disk_mem[(base)+0x0E]=_c>>8; /* landing zone */ \
+    disk_mem[(base)+0x0F]=_s; /* sectors per track */ \
+} while(0)
+    if (disk[2].inserted) {
+        FDPT(0x522, disk[2].cyls, disk[2].heads, disk[2].sects);
+        disk_mem[0x104]=0x22; disk_mem[0x105]=0x05;
+        disk_mem[0x106]=0x00; disk_mem[0x107]=0x00;
+    }
+    if (disk[3].inserted) {
+        FDPT(0x532, disk[3].cyls, disk[3].heads, disk[3].sects);
+        disk_mem[0x118]=0x32; disk_mem[0x119]=0x05;
+        disk_mem[0x11A]=0x00; disk_mem[0x11B]=0x00;
+    }
+#undef FDPT
+}
+
 static void update_floppy_cmos(void) {
     if (!disk_cmos_update_cb) return;
-    uint8_t ta = disk[0].inserted ? disk[0].drive_type : 4;  /* default 1.44M */
-    uint8_t tb = disk[1].inserted ? disk[1].drive_type : 4;
+    uint8_t ta = disk[0].drive_type;  // всегда 4 (1.44M) если не было mount
+    uint8_t tb = disk[1].drive_type;
     disk_cmos_update_cb(ta, tb);
 }
 
@@ -386,6 +418,14 @@ void diskhandler(CPUI386 *cpu) {
     uint8_t drivenum = (dl_orig & 0x80) ? (uint8_t)(2u + (dl_orig & 0x7Fu)) : dl_orig;
     uint8_t ah = cpu_get_ah(cpu);
 
+// TODO:    if (dl_orig & 0x80) install_fdpt();
+    // HDD drivenum 4+ не существует (4 = CD-ROM слот, 5+ = OOB)
+    if ((dl_orig & 0x80) && drivenum >= 4) {
+        cpu_set_ah(cpu, 0x01);  // invalid drive
+        cpu_set_cf(cpu, 1);
+        return;
+    }
+
     // Handle the interrupt service based on the function requested in AH
     switch (ah) {
         case 0x00:  // Reset disk system
@@ -404,7 +444,7 @@ void diskhandler(CPUI386 *cpu) {
 
         case 0x02:  // Read sector(s) into memory
             readdisk(drivenum, cpu_get_es(cpu), cpu_get_bx(cpu),
-                     cpu_get_ch(cpu) + (cpu_get_cl(cpu) / 64) * 256,  // Cylinder
+                     ((uint16_t)cpu_get_ch(cpu) | (((uint16_t)cpu_get_cl(cpu) & 0xC0u) << 2)),  // Cylinder
                      cpu_get_cl(cpu) & 63,                            // Sector
                      cpu_get_dh(cpu),                                 // Head
                      cpu_get_al(cpu),                                 // Sector count
@@ -413,7 +453,7 @@ void diskhandler(CPUI386 *cpu) {
 
         case 0x03:  // Write sector(s) from memory
             writedisk(drivenum, cpu_get_es(cpu), cpu_get_bx(cpu),
-                      cpu_get_ch(cpu) + (cpu_get_cl(cpu) / 64) * 256,  // Cylinder
+                      ((uint16_t)cpu_get_ch(cpu) | (((uint16_t)cpu_get_cl(cpu) & 0xC0u) << 2)),  // Cylinder
                       cpu_get_cl(cpu) & 63,                            // Sector
                       cpu_get_dh(cpu),                                 // Head
                       cpu_get_al(cpu));                                // Sector count
@@ -421,7 +461,7 @@ void diskhandler(CPUI386 *cpu) {
 
         case 0x04:  // Verify sectors
             readdisk(drivenum, cpu_get_es(cpu), cpu_get_bx(cpu),
-                     cpu_get_ch(cpu) + (cpu_get_cl(cpu) / 64) * 256,   // Cylinder
+                     ((uint16_t)cpu_get_ch(cpu) | (((uint16_t)cpu_get_cl(cpu) & 0xC0u) << 2)),   // Cylinder
                      cpu_get_cl(cpu) & 63,                             // Sector
                      cpu_get_dh(cpu),                                  // Head
                      cpu_get_al(cpu),                                  // Sector count
@@ -434,33 +474,23 @@ void diskhandler(CPUI386 *cpu) {
             break;
 
         case 0x08: {  // Get drive parameters
-            // AH=08h описывает дисковод (железо), а не вставленную дискету.
-            // Для флоппи отвечаем всегда: drive_type инициализирован в 4 (1.44M)
-            // и обновляется при каждом mount, но не сбрасывается при unmount.
             if (dl_orig & 0x80) {
-                // HDD — отвечаем только если диск вставлен
+                // HDD
                 if (!disk[drivenum].inserted) {
-                    cpu_set_cf(cpu, 1);
-                    cpu_set_ah(cpu, 0x07);
-                    break;
+                    cpu_set_cf(cpu, 1); cpu_set_ah(cpu, 0x07); break;
                 }
                 uint16_t mc = disk[drivenum].cyls - 1u;
+                uint8_t  ch = (uint8_t)(mc & 0xFFu);
+                uint8_t  cl = (uint8_t)((disk[drivenum].sects & 0x3Fu) | (((mc >> 8) & 0x03u) << 6));
+                uint8_t  dh = disk[drivenum].heads - 1u;
                 cpu_set_cf(cpu, 0); cpu_set_ah(cpu, 0);
-                cpu_set_ch(cpu, (uint8_t)(mc & 0xFFu));
-                cpu_set_cl(cpu, (uint8_t)((disk[drivenum].sects & 0x3Fu) | (((mc >> 8) & 0x03u) << 6)));
-                cpu_set_dh(cpu, disk[drivenum].heads - 1);
-                cpu_set_dl(cpu, hdcount);
+                cpu_set_ch(cpu, ch); cpu_set_cl(cpu, cl);
+                cpu_set_dh(cpu, dh); cpu_set_dl(cpu, hdcount);
             } else {
-                // Флоппи — всегда отвечаем; геометрия из вставленной дискеты
-                // или максимальная для данного типа дисковода (если пусто).
+                // Флоппи — отвечаем всегда; drive_type инициализирован в 4 (1.44M)
+                // и обновляется при mount, но не сбрасывается при unmount.
                 static const uint8_t fd_geom[6][3] = {
-                    /* type  cyls heads sects */
-                    /* 0 */  { 80, 2, 18 },  // неизвестно — считаем 1.44M
-                    /* 1 */  { 40, 2,  9 },  // 360K
-                    /* 2 */  { 80, 2, 15 },  // 1.2M
-                    /* 3 */  { 80, 2,  9 },  // 720K
-                    /* 4 */  { 80, 2, 18 },  // 1.44M
-                    /* 5 */  { 80, 2, 36 },  // 2.88M
+                    {80,2,18},{40,2,9},{80,2,15},{80,2,9},{80,2,18},{80,2,36}
                 };
                 uint8_t dt = disk[drivenum].drive_type;
                 if (dt > 5) dt = 4;
@@ -472,8 +502,8 @@ void diskhandler(CPUI386 *cpu) {
                 cpu_set_ch(cpu, (uint8_t)(mc & 0xFFu));
                 cpu_set_cl(cpu, (uint8_t)((sects & 0x3Fu) | (((mc >> 8) & 0x03u) << 6)));
                 cpu_set_dh(cpu, heads - 1);
-                cpu_set_bl(cpu, dt);       // тип дисковода
-                cpu_set_dl(cpu, fdcount);  // количество флоппи-дисководов
+                cpu_set_bl(cpu, dt);
+                cpu_set_dl(cpu, fdcount);
             }
             break;
         }
@@ -557,3 +587,8 @@ uint8_t disk_is_cdrom(uint8_t drivenum) {
     if (drivenum > 4) return 0;
     return disk[drivenum].iscdrom;
 }
+
+// Get disk geometry (для записи в CMOS)
+uint16_t disk_get_cyls(uint8_t drivenum)  { return drivenum < 5 ? disk[drivenum].cyls  : 0; }
+uint16_t disk_get_heads(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].heads : 0; }
+uint16_t disk_get_sects(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].sects : 0; }
