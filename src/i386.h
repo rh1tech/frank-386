@@ -136,6 +136,8 @@ struct CPUI386 {
 	void *int13_opaque;
 	void (*int2f_handler)(struct CPUI386 *cpu, void *opaque);
 	void *int2f_opaque;
+
+	uint32_t a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
 };
 
 typedef struct CPUI386 CPUI386;
@@ -191,6 +193,7 @@ void cpu_set_bx(CPUI386 *cpu, u16 val);
 void cpu_set_cx(CPUI386 *cpu, u16 val);
 void cpu_set_dx(CPUI386 *cpu, u16 val);
 // Carry flag
+u16 cpu_get_bp(CPUI386 *cpu);
 u16 cpu_get_si(CPUI386 *cpu);
 u16 cpu_get_di(CPUI386 *cpu);
 void cpu_set_si(CPUI386 *cpu, u16 val);
@@ -202,6 +205,9 @@ int cpu_get_cf(CPUI386 *cpu);
 // Physical memory access
 u8 *cpu_get_phys_mem(CPUI386 *cpu);
 long cpu_get_phys_mem_size(CPUI386 *cpu);
+// A20 gate control
+void cpu_set_a20(CPUI386 *cpu, int enabled);
+int cpu_get_a20(CPUI386 *cpu);
 
 // INT 13h disk handler callback
 typedef void (*int13_handler_t)(CPUI386 *cpu, void *opaque);

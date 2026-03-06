@@ -36,6 +36,7 @@ static int after_eq(uint32_t a, uint32_t b)
 }
 
 #include "i8042.h"
+#include "i386.h"
 
 #ifdef BUILD_ESP32
 #include "freertos/FreeRTOS.h"
@@ -112,13 +113,20 @@ struct KBDState {
     void (*system_reset_request)(void *sys);
 };
 
+/* A20 gate — controlled by KBC commands 0xDD/0xDF and output port bit 1.
+ * The CPU pointer is set once from pc_new() via i8042_set_cpu(). */
+static CPUI386 *a20_cpu = NULL;
+
+void i8042_set_cpu(void *cpu) { a20_cpu = (CPUI386 *)cpu; }
+
 static void ioport_set_a20(int val)
 {
+    if (a20_cpu) cpu_set_a20(a20_cpu, val);
 }
 
 static int ioport_get_a20(void)
 {
-    return 1;
+    return a20_cpu ? cpu_get_a20(a20_cpu) : 1;
 }
 
 /* update irq and KBD_STAT_[MOUSE_]OBF */

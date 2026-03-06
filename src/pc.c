@@ -309,6 +309,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 		return;
 	case 0x92:
 		pc->port92 = val;
+		cpu_set_a20(pc->cpu, (val >> 1) & 1);
 		return;
 	case 0x60:
 		kbd_write_data(pc->i8042, addr, val);
@@ -858,6 +859,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	vga_set_force_8dm(pc->vga, conf->vga_force_8dm);
 	pc->pci_vga = vga_pci_init(pc->vga, pc->pcibus, pc, set_pci_vga_bar);
 	pc->pci_vga_ram_addr = -1;
+	disk_set_vga(pc->vga);
 
 	/* Attach floppy disks using INT 13h disk handler */
 	const char **fdd = conf->fdd;
@@ -884,6 +886,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->i8042 = i8042_init(&(pc->kbd), &(pc->mouse),
 			       1, 12, pc->pic, set_irq,
 			       pc, pc_reset_request);
+	i8042_set_cpu(pc->cpu);
 	pc->adlib = adlib_new();
 	/* NE2000 networking removed */
 	pc->isa_dma = i8257_new(pc->phys_mem, pc->phys_mem_size,

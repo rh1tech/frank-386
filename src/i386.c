@@ -216,6 +216,7 @@ inline static uword sext32(u32 a)
 /* ARM Cortex-M33 optimized versions using inline assembly macros */
 static inline u8 pload8(CPUI386 *cpu, uword addr)
 {
+	addr &= cpu->a20_mask;
 #if EMULATE_LTEMS
 	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
 		return ems_read(addr - EMS_START);
@@ -226,6 +227,7 @@ static inline u8 pload8(CPUI386 *cpu, uword addr)
 
 static inline u16 pload16(CPUI386 *cpu, uword addr)
 {
+	addr &= cpu->a20_mask;
 #if EMULATE_LTEMS
 	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
 		return ems_readw(addr - EMS_START);
@@ -236,6 +238,7 @@ static inline u16 pload16(CPUI386 *cpu, uword addr)
 
 static inline u32 pload32(CPUI386 *cpu, uword addr)
 {
+	addr &= cpu->a20_mask;
 #if EMULATE_LTEMS
 	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
 		return ems_readdw(addr - EMS_START);
@@ -246,6 +249,7 @@ static inline u32 pload32(CPUI386 *cpu, uword addr)
 
 static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
 {
+	addr &= cpu->a20_mask;
 #if EMULATE_LTEMS
 	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
 		return ems_write(addr - EMS_START, val);
@@ -256,6 +260,7 @@ static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
 
 static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
 {
+	addr &= cpu->a20_mask;
 #if EMULATE_LTEMS
 	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
 		return ems_writew(addr - EMS_START, val);
@@ -266,6 +271,7 @@ static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
 
 static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
 {
+	addr &= cpu->a20_mask;
 #if EMULATE_LTEMS
 	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
 		return ems_writedw(addr - EMS_START, val);
@@ -7906,6 +7912,7 @@ CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 
 	cpu->phys_mem = (u8 *) phys_mem;
 	cpu->phys_mem_size = phys_mem_size;
+	cpu->a20_mask = 0xFFFFFFFFu;  /* A20 enabled at startup */
 
 	cpu->cycle = 0;
 
@@ -8030,6 +8037,7 @@ u16 cpu_get_es(CPUI386 *cpu) { return cpu->seg[SEG_ES].sel; }
 void cpu_set_bx(CPUI386 *cpu, u16 val) { sreg16(3, val); }
 void cpu_set_cx(CPUI386 *cpu, u16 val) { sreg16(1, val); }
 void cpu_set_dx(CPUI386 *cpu, u16 val) { sreg16(2, val); }
+u16 cpu_get_bp(CPUI386 *cpu) { return lreg16(5); }
 u16 cpu_get_si(CPUI386 *cpu) { return lreg16(6); }
 u16 cpu_get_di(CPUI386 *cpu) { return lreg16(7); }
 void cpu_set_si(CPUI386 *cpu, u16 val) { sreg16(6, val); }
@@ -8071,4 +8079,14 @@ void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque)
 {
 	cpu->int2f_handler = handler;
 	cpu->int2f_opaque  = opaque;
+}
+
+void cpu_set_a20(CPUI386 *cpu, int enabled)
+{
+	cpu->a20_mask = enabled ? 0xFFFFFFFFu : 0xFFEFFFFFu;
+}
+
+int cpu_get_a20(CPUI386 *cpu)
+{
+	return cpu->a20_mask >> 20 & 1;
 }
