@@ -43,7 +43,7 @@ set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 option(EMM "Enable LTEMM support" OFF)
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
-option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" OFF)
+option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
 
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)

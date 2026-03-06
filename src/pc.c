@@ -556,7 +556,14 @@ void __not_in_flash_func(pc_step)(PC *pc)
 #if defined(BUILD_ESP32)
 	cpui386_step(pc->cpu, 512);
 #elif defined(RP2350_BUILD)
-	cpui386_step(pc->cpu, 4096);
+	if (pc->adlib_enabled) {
+		for (int i = 0; i < 409; ++i) {
+			cpui386_step(pc->cpu, 10);
+			adlib_core0(pc->adlib);
+		}
+	} else {
+		cpui386_step(pc->cpu, 4096);
+	}
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif

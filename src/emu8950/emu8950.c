@@ -1692,9 +1692,14 @@ void OPL_calc_buffer_linear(OPL *opl, int32_t *buffer, uint32_t nsamples) {
     // kind of a nit pick, but so cheap - saves a bug every 24 hours due to an optimization
     // (we require that incrementing eg_counter is never zero during the rendering loop)
     opl->eg_counter = (opl->eg_counter & 0x3fffffffu) | 0x80000000u;
-    static uint8_t lfo_am_buffer_lsl3;
+    /* lfo_am_buffer_lsl3 was previously a scalar (1 byte) which only worked
+     * for nsamples==1.  It is now sized to SAMPLE_BUF_SIZE so that batch
+     * calls (e.g. ADLIB_BATCH_SIZE=64) work correctly.  slot_render.cpp
+     * indexes it as lfo_am_buffer_lsl3[s], so the array must be filled for
+     * all nsamples before the slot render loops below. */
+    static uint8_t lfo_am_buffer_lsl3[SAMPLE_BUF_SIZE];
     assert(nsamples <= sizeof(lfo_am_buffer_lsl3));
-    opl->lfo_am_buffer_lsl3 = &lfo_am_buffer_lsl3;
+    opl->lfo_am_buffer_lsl3 = lfo_am_buffer_lsl3;
 #else
     static uint8_t lfo_am_buffer[SAMPLE_BUF_SIZE];
     assert(nsamples <= sizeof(lfo_am_buffer));
@@ -1705,23 +1710,20 @@ void OPL_calc_buffer_linear(OPL *opl, int32_t *buffer, uint32_t nsamples) {
     opl->mod_buffer = mod_buffer;
     opl->buffer = buffer;
 
-    // todo achievable by memcpy
-//    for(uint32_t s = 0; s<nsamples; s++)
-    const uint32_t sample_index = 0;
-    {
-        // generate amplitude modulation same for all channels
-        // need am_phase and lfo_am
+    /* Fill AM buffer for all nsamples up front.
+     * Previously this block was a commented-out loop reduced to a single
+     * sample_index=0 case — restored to a real loop for batch support. */
+    for (uint32_t s = 0; s < nsamples; s++) {
         opl->am_phase_index++;
         if (opl->am_phase_index == sizeof(am_table)) opl->am_phase_index = 0;
-        // todo this is a candidate for remove simply because it is not super noticeable without
 
 #if EMU8950_SLOT_RENDER
         // note <<3 still fits within 8 bits
-        lfo_am_buffer_lsl3 = (am_table[opl->am_phase_index] >> (opl->am_mode ? 0 : 2)) << 3;
+        lfo_am_buffer_lsl3[s] = (am_table[opl->am_phase_index] >> (opl->am_mode ? 0 : 2)) << 3;
 #else
         lfo_am_buffer[s] = (am_table[opl->am_phase_index] >> (opl->am_mode ? 0 : 2));
 #endif
-        buffer[sample_index]=0;
+        buffer[s] = 0;
     }
 
     for (i = 0; i < 18; i++) {
