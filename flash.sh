@@ -2,7 +2,7 @@
 # Flash murm386 to connected Pico device
 
 # Default to ELF file from build directory
-FIRMWARE="${1:-./build/murm386.elf}"
+FIRMWARE="${1:-./build/m2p2-386-378MHz-P133-PWM-v1.01.elf}"
 
 # Check if firmware file exists
 if [ ! -f "$FIRMWARE" ]; then
