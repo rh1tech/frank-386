@@ -41,35 +41,18 @@
 #define ADLIB_DESC "Yamaha YM3812 (OPL2)"
 
 /*
- * Double-buffer layout
- * --------------------
- * buf[2][ADLIB_BATCH_SIZE] — two batches of pre-rendered samples.
+ * Double-buffer:
+ *   buf[2][ADLIB_BATCH_SIZE] — two batches.
+ *   ready[2]  — Core 0 sets ready[i]=1 after filling buf[i],
+ *               Core 1 sets ready[i]=0 after consuming buf[i].
+ *   play_buf  — which buffer Core 1 is currently reading (0 or 1).
+ *   read_pos  — sample index within buf[play_buf].
  *
- * read_offset  — monotonically increasing counter owned by Core 1.
- *                sample index within the flat view: buf[read_offset / ADLIB_BATCH_SIZE]
- *                                                              [read_offset % ADLIB_BATCH_SIZE]
- *                When it reaches write_offset the buffer is empty → return silence.
- *
- * write_offset — monotonically increasing counter owned by Core 0.
- *                Always a multiple of ADLIB_BATCH_SIZE.
- *                Advances by ADLIB_BATCH_SIZE after each rendered batch.
- *                Wraps together with read_offset at 2*ADLIB_BATCH_SIZE so both
- *                counters always index into buf[0..1] correctly.
- *
- * Invariants:
- *   write_offset - read_offset == 0            → buffer empty  (Core 0 behind)
- *   write_offset - read_offset == ADLIB_BATCH_SIZE → one batch ready
- *   write_offset - read_offset == 2*ADLIB_BATCH_SIZE → both batches full (Core 0 ahead)
- *
- * Core 0 may fill at most one buffer ahead (stops when distance == 2*BATCH).
- * Core 1 returns 0 (silence) when distance == 0.
- *
- * No locks needed: write_offset is written only by Core 0, read_offset only by
- * Core 1. A __dmb() on Core 0 ensures buf contents are visible before the
- * counter update is seen by Core 1.
+ * Core 0 fills whichever buffer is NOT ready (i.e. already consumed).
+ * Core 1 reads from play_buf; when exhausted, switches to the other one
+ * if it's ready, otherwise returns silence.
+ * Each ready[i] is written by one core at a time — no contention.
  */
-
-#define BUF_TOTAL (2 * ADLIB_BATCH_SIZE)   /* wrap modulus */
 
 struct AdlibState {
     uint32_t freq;
@@ -77,17 +60,18 @@ struct AdlibState {
     uint8_t  adlibstatus;
     OPL     *opl;
 
-    /* double-buffer */
     int32_t  buf[2][ADLIB_BATCH_SIZE];
-    volatile uint32_t write_offset;   /* Core 0 writes, Core 1 reads */
-    volatile uint32_t read_offset;    /* Core 1 writes, Core 0 reads */
+    volatile uint8_t ready[2];  /* 1 = filled by Core 0, not yet consumed */
+    uint8_t  play_buf;          /* Core 1: which buf is being played */
+    uint32_t read_pos;          /* Core 1: next sample index in play_buf */
+
+    uint32_t underrun_count;
 };
 
 void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 {
     AdlibState *s = opaque;
-    switch (nport)
-    {
+    switch (nport) {
         case 0x388:
             s->adlib_register = val;
             break;
@@ -106,15 +90,16 @@ void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 uint32_t adlib_read(void *opaque, uint32_t nport)
 {
     AdlibState *s = opaque;
-    switch (nport)
-    {
+    switch (nport) {
         case 0x388:
         case 0x389:
             if (!s->adlibregmem[4])
                 s->adlibstatus = 0;
             else
                 s->adlibstatus = 0x80;
-            s->adlibstatus = s->adlibstatus + (s->adlibregmem[4] & 1) * 0x40 + (s->adlibregmem[4] & 2) * 0x10;
+            s->adlibstatus = s->adlibstatus
+                           + (s->adlibregmem[4] & 1) * 0x40
+                           + (s->adlibregmem[4] & 2) * 0x10;
             return s->adlibstatus;
     }
     return 0xFF;
@@ -124,9 +109,9 @@ AdlibState *adlib_new()
 {
     AdlibState *s = malloc(sizeof(AdlibState));
     memset(s, 0, sizeof(AdlibState));
-    s->freq         = SOUND_FREQUENCY;
-    s->write_offset = 0;
-    s->read_offset  = 0;
+    s->freq     = SOUND_FREQUENCY;
+    s->play_buf = 0;
+    s->read_pos = 0;
     s->opl = OPL_new(3579552, s->freq);
     if (!s->opl) {
         return NULL;
@@ -136,31 +121,20 @@ AdlibState *adlib_new()
 
 // call it 44100 times per sec from timer on core1 (ISR, so should be fast)
 int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
-    if (!s->opl) {
+    if (!s->opl) return 0;
+
+    if (!s->ready[s->play_buf]) {
+        s->underrun_count++;
         return 0;
     }
 
-    volatile uint32_t *offset = &s->read_offset;   /* Core 1 owns this */
-    uint32_t  woffset = s->write_offset;
+    int16_t sample = (int16_t)s->buf[s->play_buf][s->read_pos++];
 
-    /* Buffer empty — Core 0 hasn't rendered anything yet. Return silence. */
-    if (*offset == woffset) {
-        return 0;
-    }
-
-    /* Select the right buffer half and hand out the next sample. */
-    int32_t *samples = s->buf[(*offset / ADLIB_BATCH_SIZE) & 1];
-    int16_t  sample  = (int16_t)samples[*offset % ADLIB_BATCH_SIZE];
-    (*offset)++;
-
-    /* Wrap both counters together to keep them in [0, 2*BATCH_SIZE). */
-    if (*offset >= BUF_TOTAL) {
-        *offset       -= BUF_TOTAL;
-        /* write_offset may have also wrapped; keep it consistent.
-         * Safe: Core 0 only advances write_offset in multiples of BATCH_SIZE,
-         * and always checks distance before writing, so it will never be
-         * more than BUF_TOTAL ahead. */
-        s->write_offset -= BUF_TOTAL;
+    if (s->read_pos >= ADLIB_BATCH_SIZE) {
+        /* Mark this buffer as consumed, switch to the other one. */
+        s->ready[s->play_buf] = 0;
+        s->play_buf ^= 1;
+        s->read_pos = 0;
     }
 
     return sample;
@@ -168,24 +142,25 @@ int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
 
 // call it from main cycle on core0
 void __not_in_flash_func(adlib_core0)(AdlibState *s) {
-    if (!s->opl) {
-        return;
+    if (!s->opl) return;
+
+    /* Fill buf[0] first, then buf[1], alternating.
+     * Fill whichever buffer is free (not ready). Prefer the one
+     * Core 1 is about to play (play_buf) if it's empty, otherwise
+     * fill the other one as look-ahead. */
+    for (int i = 0; i < 2; i++) {
+        uint8_t fill_buf = (s->play_buf + i) & 1;
+        if (s->ready[fill_buf]) continue;  /* already full */
+
+        OPL_calc_buffer_linear(s->opl, s->buf[fill_buf], ADLIB_BATCH_SIZE);
+        __dmb();
+        s->ready[fill_buf] = 1;
+        return;  /* fill one buffer per call */
     }
+}
 
-    uint32_t roffset = s->read_offset;
-    uint32_t woffset = s->write_offset;
-
-    /* Both buffers are full — Core 1 is behind. Nothing to do. */
-    if (woffset - roffset >= BUF_TOTAL) {
-        return;
-    }
-
-    /* Fill the buffer that write_offset points into. */
-    int32_t *samples = s->buf[(woffset / ADLIB_BATCH_SIZE) & 1];
-    OPL_calc_buffer_linear(s->opl, samples, ADLIB_BATCH_SIZE);
-
-    /* Ensure all sample writes are visible to Core 1 before counter update. */
-    __dmb();
-
-    s->write_offset = woffset + ADLIB_BATCH_SIZE;
+uint32_t adlib_underruns(AdlibState *s) {
+    uint32_t u = s->underrun_count;
+    s->underrun_count = 0;
+    return u;
 }
