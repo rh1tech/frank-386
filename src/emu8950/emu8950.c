@@ -14,7 +14,7 @@
 #include <string.h>
 #include <assert.h>
 
-#define SAMPLE_BUF_SIZE 64
+#define SAMPLE_BUF_SIZE 1024
 
 #ifndef INLINE
 #if defined(_MSC_VER)

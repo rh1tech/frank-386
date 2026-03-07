@@ -37,13 +37,13 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
 
 # Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
+set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
-option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
+option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" OFF)
 
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
