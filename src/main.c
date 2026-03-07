@@ -612,6 +612,9 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
     // Re-initialize PSRAM with the new frequency
     psram_init_with_freq(psram_pin, psram_mhz);
 
+    // Recalculate VGA PIO clock divider (vga_hw_init ran before this call)
+    vga_hw_reclock();
+
     DBG_PRINT("Clock reconfiguration complete: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
 

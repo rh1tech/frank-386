@@ -29,15 +29,15 @@ if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
-# CPU overclock configuration (378, 504 MHz)
-# 378 = stable overclock (default), 504 = high overclock
-set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
+# CPU overclock configuration (252, 378, 504 MHz)
+# 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
+set(CPU_SPEED "252" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
-set(PSRAM_SPEED "166" CACHE STRING "PSRAM max frequency in MHz: 133, 166")
+set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
 
 # Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
+set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)

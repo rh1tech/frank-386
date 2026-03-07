@@ -46,6 +46,9 @@
 #define VGA_FB_WIDTH  320
 #define VGA_FB_HEIGHT 200
 
+// Recalculate PIO clock divider after sysclk change (call after reconfigure_clocks)
+void vga_hw_reclock(void);
+
 // Initialize VGA hardware subsystem
 void vga_hw_init(void);
 

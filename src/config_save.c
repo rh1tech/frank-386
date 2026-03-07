@@ -305,8 +305,8 @@ int parse_murm386_ini(void* user, const char* section,
     } else if (strcmp(name, "mouse") == 0) {
         cfg_mouse = atoi(value);
 /// TODO: it breaks REINIT vga clk?
-//    } else if (strcmp(name, "cpu_freq") == 0) {
-//        cfg_cpu_freq = atoi(value);
+    } else if (strcmp(name, "cpu_freq") == 0) {
+        cfg_cpu_freq = atoi(value);
     } else if (strcmp(name, "psram_freq") == 0) {
         cfg_psram_freq = atoi(value);
     }

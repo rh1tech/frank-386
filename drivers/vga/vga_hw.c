@@ -1060,6 +1060,16 @@ static void hdmi_boost_clock(void) {
     psram_init_with_freq(get_psram_pin(), PSRAM_MAX_FREQ_MHZ);
 }
 
+/* Recalculate and apply VGA PIO clock divider after a sysclk change. */
+void vga_hw_reclock(void) {
+    if (!SELECT_VGA) return;
+    float clk_div = (float)clock_get_hz(clk_sys) / VGA_CLK;
+    uint32_t div_int  = (uint32_t)clk_div;
+    uint32_t div_frac = (uint32_t)((clk_div - (float)div_int) * 256.0f);
+    VGA_PIO->sm[vga_sm].clkdiv = (div_int << 16) | (div_frac << 8);
+    frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
+}
+
 void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
         spread8_lut[i] = spread8(i);
