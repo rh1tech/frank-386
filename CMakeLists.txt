@@ -163,19 +163,38 @@ target_link_libraries(psram pico_stdlib hardware_clocks)
 #=============================================================================
 # VGA Video Driver
 #=============================================================================
-add_library(video_driver
-    drivers/hdmi/hdmi.c
-    drivers/vga/test_pins.c
-    drivers/vga/vga_hw.c
-    drivers/vga/vga_osd.c
-    drivers/vga/font8x16.c
-)
-target_include_directories(video_driver PUBLIC drivers/vga drivers/hdmi src)
-target_compile_definitions(video_driver PRIVATE
-    BOARD_${BOARD}
-    RP2350_BUILD=1
-)
-target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
+if(BOARD STREQUAL "M2")
+    # M2: Use HSTX-based pico_hdmi driver (native HDMI with audio)
+    set(PICO_HDMI_RUNTIME_MODES ON CACHE BOOL "" FORCE)
+    add_subdirectory(drivers/pico_hdmi)
+
+    add_library(video_driver
+        drivers/vga/vga_osd.c
+        drivers/vga/font8x16.c
+    )
+    target_include_directories(video_driver PUBLIC drivers/vga src)
+    target_compile_definitions(video_driver PUBLIC
+        BOARD_${BOARD}
+        RP2350_BUILD=1
+        USE_HSTX_VIDEO=1
+    )
+    target_link_libraries(video_driver pico_stdlib pico_hdmi)
+else()
+    # M1/PC/Z2: Use PIO-based HDMI driver
+    add_library(video_driver
+        drivers/hdmi/hdmi.c
+        drivers/vga/test_pins.c
+        drivers/vga/vga_hw.c
+        drivers/vga/vga_osd.c
+        drivers/vga/font8x16.c
+    )
+    target_include_directories(video_driver PUBLIC drivers/vga drivers/hdmi src)
+    target_compile_definitions(video_driver PRIVATE
+        BOARD_${BOARD}
+        RP2350_BUILD=1
+    )
+    target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
+endif()
 
 #=============================================================================
 # I2S Audio Driver
@@ -274,6 +293,7 @@ target_include_directories(${BUILD_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/vga
     ${CMAKE_CURRENT_LIST_DIR}/drivers/hdmi
     ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
+    ${CMAKE_CURRENT_LIST_DIR}/drivers/pico_hdmi/include
 )
 # Only include usbhid directory when USB HID is enabled (to avoid tusb_config.h conflicts)
 if(USB_HID_ENABLED)
@@ -291,6 +311,11 @@ endif()
 if(EMM)
     target_compile_definitions(${BUILD_NAME} PRIVATE EMULATE_LTEMS=1)
 endif()
+# HSTX video flag for M2
+if(BOARD STREQUAL "M2")
+    target_compile_definitions(${BUILD_NAME} PRIVATE USE_HSTX_VIDEO=1)
+endif()
+
 target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
     MURM386_VERSION_MAJOR=${MURM386_VERSION_MAJOR}

@@ -24,7 +24,9 @@
 
 #include "board_config.h"
 #include "psram_init.h"
+#ifndef USE_HSTX_VIDEO
 #include "vga_hw.h"
+#endif
 #include "vga.h"
 #include "ps2kbd_wrapper.h"
 #include "ps2mouse.h"
@@ -46,6 +48,12 @@
 
 #if FEATURE_AUDIO_PWM
 #include <hardware/pwm.h>
+#endif
+
+#ifdef USE_HSTX_VIDEO
+#include "pico_hdmi/video_output_rt.h"
+#include "pico_hdmi/hstx_data_island_queue.h"
+#include "pico_hdmi/hstx_packet.h"
 #endif
 
 //=============================================================================
@@ -566,6 +574,7 @@ static void configure_clocks(void) {
     DBG_PRINT("System clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
 
+#ifndef USE_HSTX_VIDEO
 /**
  * Get voltage for CPU frequency
  */
@@ -831,6 +840,98 @@ static bool init_emulator(void) {
 
     return true;
 }
+#endif // !USE_HSTX_VIDEO
+
+#ifdef USE_HSTX_VIDEO
+//=============================================================================
+// HSTX Video - Test Pattern (M2 platform)
+//=============================================================================
+
+// RGB565 color bar values
+#define TP_WHITE   0xFFFF
+#define TP_YELLOW  0xFFE0
+#define TP_CYAN    0x07FF
+#define TP_GREEN   0x07E0
+#define TP_MAGENTA 0xF81F
+#define TP_RED     0xF800
+#define TP_BLUE    0x001F
+#define TP_BLACK   0x0000
+
+static const uint16_t test_colors[8] = {
+    TP_WHITE, TP_YELLOW, TP_CYAN, TP_GREEN,
+    TP_MAGENTA, TP_RED, TP_BLUE, TP_BLACK
+};
+
+static void __scratch_x("") hstx_scanline_callback(uint32_t v_scanline, uint32_t active_line, uint32_t *dst) {
+    (void)v_scanline;
+
+    const video_mode_t *mode = video_output_active_mode;
+    uint16_t h_pixels = mode->h_active_pixels;
+    uint16_t v_lines  = mode->v_active_lines;
+
+    // 8 color bars across the width
+    uint16_t bar_width = h_pixels / 8;
+
+    for (int bar = 0; bar < 8; bar++) {
+        uint16_t color = test_colors[bar];
+
+        // Bottom 25%: gradient ramp per bar
+        if (active_line >= (v_lines * 3 / 4)) {
+            uint8_t intensity = (uint8_t)(bar * 255 / 7);
+            // RGB565: R5 G6 B5
+            color = ((intensity >> 3) << 11) | ((intensity >> 2) << 5) | (intensity >> 3);
+        }
+
+        uint32_t packed = (uint32_t)color | ((uint32_t)color << 16);
+        int start = bar * bar_width / 2;
+        int end = (bar + 1) * bar_width / 2;
+        for (int i = start; i < end; i++) {
+            dst[i] = packed;
+        }
+    }
+}
+
+// Custom 480p mode with hstx_clk_div computed for the actual sys_clk.
+// The HSTX pixel clock = sys_clk / hstx_clk_div / hstx_csr_clkdiv.
+// Target: 25.2 MHz pixel clock.  csr_clkdiv = 5.
+// hstx_clk_div = sys_clk / (25.2 MHz * 5) = sys_clk / 126 MHz.
+static video_mode_t hstx_mode_480p;
+
+static void __not_in_flash_func(core1_entry)(void) {
+    DBG_PRINT("[Core 1] Initializing HSTX video (M2)...\n");
+
+    // Build mode from the standard 480p template
+    hstx_mode_480p = video_mode_480_p;
+
+    // Compute hstx_clk_div for the actual sys_clk
+    uint32_t sys_mhz = clock_get_hz(clk_sys) / 1000000;
+    uint32_t target_hstx_mhz = 126;  // 25.2 MHz * csr_clkdiv(5)
+    hstx_mode_480p.hstx_clk_div = sys_mhz / target_hstx_mhz;
+    if (hstx_mode_480p.hstx_clk_div < 1) hstx_mode_480p.hstx_clk_div = 1;
+
+    DBG_PRINT("  sys_clk=%lu MHz, hstx_clk_div=%d, pixel_clk=%.1f MHz\n",
+              sys_mhz, hstx_mode_480p.hstx_clk_div,
+              (float)sys_mhz / hstx_mode_480p.hstx_clk_div / 5.0f);
+
+    // Initialize HSTX video in 640x480 mode
+    hstx_di_queue_init();
+    video_output_set_mode(&hstx_mode_480p);
+    video_output_init(640, 480);
+    video_output_set_dvi_mode(true);  // DVI mode for now (no audio yet)
+    video_output_set_scanline_callback(hstx_scanline_callback);
+
+    vga_initialized = true;
+    __dmb();
+
+    // This never returns - runs HSTX DMA engine on Core 1
+    video_output_core1_run();
+    __unreachable();
+}
+
+#else
+//=============================================================================
+// PIO Video - Original M1/PC/Z2 path
+//=============================================================================
 
 bool timer_callback(repeating_timer_t *rt);
 void vga_hw_process_deferred(void);
@@ -871,6 +972,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     }
     __unreachable();
 }
+#endif // USE_HSTX_VIDEO
 
 //=============================================================================
 // Welcome Screen
@@ -933,6 +1035,51 @@ static void show_welcome_screen(void) {
 // Main Entry Point
 //=============================================================================
 
+#ifdef USE_HSTX_VIDEO
+//=============================================================================
+// Main Entry Point - HSTX Test Pattern Mode (M2)
+//=============================================================================
+int main(void) {
+    stdio_init_all();
+
+    printf("\n\n");
+    printf("============================================\n");
+    printf("  murm386 - HSTX Test Pattern (M2)\n");
+    printf("  Version %d.%02d\n", MURM386_VERSION_MAJOR, MURM386_VERSION_MINOR);
+    printf("============================================\n\n");
+
+    // Configure clocks - HSTX needs sys_clk to be a multiple of 25.2 MHz
+    // 126 MHz = 25.2 MHz * 5 (pixel clock with clkdiv=5)
+    // For overclocked builds (e.g. 504 MHz = 25.2 * 20), HSTX clk_div handles it
+    configure_clocks();
+
+    printf("System clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
+
+    // Launch Core 1 for HSTX video output
+    multicore_launch_core1(core1_entry);
+
+    // Wait for video to initialize
+    while (!vga_initialized) {
+        sleep_ms(1);
+        __dmb();
+    }
+
+    printf("HSTX video initialized - test pattern active\n");
+    printf("Core 0 idle (emulation disabled)\n");
+
+    // Core 0: idle loop - no emulation
+    while (true) {
+        sleep_ms(100);
+    }
+
+    __unreachable();
+    return 0;
+}
+
+#else
+//=============================================================================
+// Main Entry Point - Original (M1/PC/Z2)
+//=============================================================================
 int main(void) {
     // Initialize stdio (USB Serial or UART depending on USB HID mode)
     stdio_init_all();
@@ -1090,3 +1237,4 @@ int main(void) {
     __unreachable();
     return 0;
 }
+#endif // USE_HSTX_VIDEO
