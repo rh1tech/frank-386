@@ -8,6 +8,8 @@
 #include <pico/multicore.h>
 #include <hardware/clocks.h>
 #include "hardware/structs/bus_ctrl.h"
+#include <arm_acle.h>
+
 #include "vga.h"
 #include "vga_osd.h"
 #include "hdmi.h"
@@ -254,14 +256,19 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
             uint16_t cell = text_row[col];
             uint8_t ch   = (uint8_t)(cell & 0xFF);
             uint8_t attr = (uint8_t)(cell >> 8);
-            register uint8_t glyph = font_8x16[ch * 16 + glyph_line];
+            register uint8_t glyph;
             if (cursor_blink_state && col == cursor_x &&
                 char_row == (uint32_t)cursor_y &&
                 glyph_line >= (uint32_t)cursor_start &&
                 glyph_line <= (uint32_t)cursor_end) {
                 glyph = 0xFF;
             } else {
-                glyph = font_8x16[ch * 16 + glyph_line];
+                const uint8_t *fp = vga_get_font_ptr(vga_state, ch, (attr >> 3) & 1);
+                if (fp) {
+                    glyph = __rbit(fp[glyph_line * 4]) >> 24;
+                } else {
+                    glyph = font_8x16[ch * 16 + glyph_line];
+                }
             }
            // uint8_t blink_or_highlite_bg = attr & 0b10000000; // TODO: use it?
             register uint8_t fg_color0 = attr & 0b00001111;

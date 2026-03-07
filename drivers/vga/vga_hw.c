@@ -29,6 +29,7 @@
 #include "hardware/timer.h"
 #include "hardware/vreg.h"
 #include "pico/time.h"
+#include <arm_acle.h>
 #include "../../drivers/psram/psram_init.h"
 
 bool SELECT_VGA = false;
@@ -658,7 +659,16 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             uint16_t cell = text_row[col];
             uint8_t ch   = (uint8_t)(cell & 0xFF);
             uint8_t attr = (uint8_t)(cell >> 8);
-            uint8_t glyph = font_8x16[ch * 16 + glyph_line];
+            /* Use font from VGA plane 2 (supports loaded fonts via SR3).
+             * Stride between rows is 4 bytes (interleaved planes).
+             * Fall back to built-in font8x16 if vga_state is unavailable. */
+            register uint32_t glyph;
+            const uint8_t *fp = vga_get_font_ptr(vga_state, ch, (attr >> 3) & 1);
+            if (fp) {
+                glyph = __rbit(fp[glyph_line * 4]) >> 24;
+            } else {
+                glyph = font_8x16[ch * 16 + glyph_line];
+            }
             uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
 
             if (cursor_blink_state && col == cursor_x &&

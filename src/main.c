@@ -557,7 +557,7 @@ static void configure_clocks(void) {
     sleep_ms(100);  // Stabilization delay
 
     // Configure flash timing BEFORE changing clock
-    set_flash_timings(CPU_CLOCK_MHZ);
+    set_flash_timings(CPU_CLOCK_MHZ, FLASH_MAX_FREQ_MHZ);
 #endif
 
     // Set system clock
@@ -857,6 +857,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     audio_init();
     audio_set_volume(config_get_volume());
     audio_set_enabled(true);
+    config_clear_changes();
     while(!initialized) {
         sleep_ms(1);
         __dmb();

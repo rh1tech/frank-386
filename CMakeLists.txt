@@ -31,7 +31,7 @@ endif()
 
 # CPU overclock configuration (252, 378, 504 MHz)
 # 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
-set(CPU_SPEED "252" CACHE STRING "CPU clock in MHz: 378, 504")
+set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
 set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
@@ -43,7 +43,7 @@ set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 option(EMM "Enable LTEMM support" OFF)
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
-option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" OFF)
+option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
 
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)

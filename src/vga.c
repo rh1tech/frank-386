@@ -2569,3 +2569,23 @@ int __time_critical_func(vga_get_char_height)(VGAState *s)
     if (cheight <= 0) cheight = 16;
     return cheight;
 }
+
+/* Get pointer to font data for character `ch` in font bank A (SR3 bits 1:0,5:4).
+ * Returns a pointer into vga_ram plane 2, stride = 4 bytes between rows.
+ * `cheight` rows are valid starting from the returned pointer.
+ * Returns NULL if vga_state is NULL.
+ */
+const uint8_t * __time_critical_func(vga_get_font_ptr)(VGAState *s, uint8_t ch, int attr_bit3)
+{
+    if (!s) return NULL;
+    /* SR3 font select: same decode as vga_text_refresh */
+    uint32_t v = s->sr[0x3];
+    int bank = attr_bit3 & 1;
+    uint32_t slot;
+    if (bank == 0)
+        slot = (((v >> 4) & 1) | ((v << 1) & 6));   /* font A */
+    else
+        slot = (((v >> 5) & 1) | ((v >> 1) & 6));   /* font B */
+    /* Each slot is 8192 uint32_t words = 8192*4 bytes. Plane 2 byte = offset+2. */
+    return s->vga_ram + slot * 8192 * 4 + 2 + (uint32_t)ch * 32 * 4;
+}
