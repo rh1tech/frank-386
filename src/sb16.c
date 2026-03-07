@@ -967,6 +967,12 @@ void sb16_dsp_write(void *opaque, uint32_t nport, uint32_t val)
 /*         if (s->highspeed) */
 /*             break; */
 
+        /* Simulate DSP busy after receiving a byte.  On real hardware
+         * the DSP briefly goes busy (port 0x22C bit 7=1) while it
+         * processes each written byte.  Games poll for this busy→ready
+         * transition before writing the next byte. */
+        s->can_write = 0;
+
         if (s->needed_bytes == 0) {
             command (s, val);
 #if 0
@@ -1025,8 +1031,13 @@ uint32_t sb16_dsp_read(void *opaque, uint32_t nport)
         }
         break;
 
-    case 0x0c:                  /* 0 can write */
+    case 0x0c:                  /* 0 can write / write-buffer status */
+        /* Bit 7: DSP busy.  Brief pulse when DMA block completes.
+         * Auto-clears after one read so the two-phase poll pattern
+         * (wait-busy then wait-ready) works even with CLI. */
         retval = s->can_write ? 0 : 0x80;
+        if (!s->can_write)
+            s->can_write = 1;
         break;
 
     case 0x0d:                  /* timer interrupt clear */
@@ -1035,7 +1046,11 @@ uint32_t sb16_dsp_read(void *opaque, uint32_t nport)
         break;
 
     case 0x0e:                  /* data available status | irq 8 ack */
-        retval = (!s->out_data_len || s->highspeed) ? 0 : 0x80;
+        /* Bit 7: on real SB hardware this indicates an 8-bit IRQ is
+         * pending.  Games poll this port to detect DMA completion.
+         * Also set when DSP has output data available. */
+        retval = (s->mixer_regs[0x82] & 1) ? 0x80
+               : (!s->out_data_len || s->highspeed) ? 0 : 0x80;
         if (s->mixer_regs[0x82] & 1) {
             ack = 1;
             s->mixer_regs[0x82] &= ~1;
@@ -1288,6 +1303,8 @@ static int SB_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
     if (s->left_till_irq <= 0) {
         s->mixer_regs[0x82] |= (nchan & 4) ? 2 : 1;
         s->set_irq(s->pic, s->irq, 1);
+        /* Signal DSP busy on port 0x22C so polling loops detect the
+         * block completion.  Cleared on next read of port 0x22C. */
         if (s->dma_auto == 0) {
             control (s, 0);
             speaker (s, 0);
