@@ -37,6 +37,7 @@ static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
 static int cfg_flash_freq = FLASH_MAX_FREQ_MHZ;
 static int cfg_volume = 15;
+static int cfg_voltage = -1;  /* -1 = auto (by cpu_freq) */
 static bool cfg_hw_changed = false;
 
 extern PC *pc;
@@ -194,6 +195,14 @@ void config_set_volume(int vol) {
         cfg_changed = true;
     }
 }
+int config_get_voltage(void) { return cfg_voltage; }
+void config_set_voltage(int v) {
+    if (cfg_voltage != v) {
+        cfg_voltage = v;
+        cfg_changed = true;
+        cfg_hw_changed = true;
+    }
+}
 
 bool config_hw_changed(void) { return cfg_hw_changed; }
 bool config_has_changes(void) { return cfg_changed; }
@@ -290,6 +299,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "volume=%d\n", cfg_volume);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "voltage=%d\n", cfg_voltage);
+    write_line(&fp, line);
 
     f_close(&fp);
     cfg_changed = false;
@@ -333,6 +344,8 @@ int parse_murm386_ini(void* user, const char* section,
         cfg_flash_freq = atoi(value);
     } else if (strcmp(name, "volume") == 0) {
         cfg_volume = atoi(value);
+    } else if (strcmp(name, "voltage") == 0) {
+        cfg_voltage = atoi(value);
     }
 
     return 1;  // Success

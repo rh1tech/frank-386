@@ -40,6 +40,7 @@ typedef enum {
     SETTING_DSS,
     SETTING_MOUSE,
     SETTING_CPU_FREQ,
+    SETTING_VOLTAGE,
     SETTING_PSRAM_FREQ,
     SETTING_FLASH_FREQ,
     SETTING_COUNT
@@ -68,6 +69,21 @@ static const int psram_freq_option_count = 5;
 static const int flash_freq_options[] = { 166, 133, 100, 84, 66 };
 static const int flash_freq_option_count = 5;
 
+/* Voltage options: -1 = Auto, then vreg_voltage enum values.
+ * Only values meaningful for RP2350 overclocking are listed.
+ * Mapping: enum value -> mV label shown in UI.
+ *   -1           -> "Auto"
+ *   0b01111 = 15 -> 1.30V
+ *   0b10000 = 16 -> 1.35V
+ *   0b10001 = 17 -> 1.40V
+ *   0b10010 = 18 -> 1.50V
+ *   0b10011 = 19 -> 1.60V
+ *   0b10100 = 20 -> 1.65V
+ */
+static const int voltage_options[]      = { -1,     15,       16,       17,       18,       19,       20 };
+static const char *voltage_labels[]     = { "Auto", "1.30V",  "1.35V",  "1.40V",  "1.50V",  "1.60V",  "1.65V" };
+static const int voltage_option_count   = 7;
+
 // State
 static SettingsState settings_state = SETTINGS_CLOSED;
 static int selected_item = 0;
@@ -78,18 +94,19 @@ static int plasma_frame = 0;  // Animation frame counter
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_fill_cmos;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_mpu401;
-static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume;
+static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage;
 
 // UI dimensions
 #define MENU_X      10
 #define MENU_Y      1
 #define MENU_W      60
 #define MENU_H      23
-#define VISIBLE_ITEMS 16
+#define VISIBLE_ITEMS 17
 
 // Forward declarations
 static void draw_settings_menu(void);
 static void draw_confirm_dialog(void);
+static void draw_confirm_dialog2(void);
 static int find_option_index(const int *options, int count, int value);
 static void cycle_option(int direction);
 
@@ -118,6 +135,7 @@ void settingsui_open(void) {
     orig_psram_freq = config_get_psram_freq();
     orig_flash_freq = config_get_flash_freq();
     orig_volume = audio_get_volume();
+    orig_voltage = config_get_voltage();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
@@ -137,6 +155,7 @@ void settingsui_close(void) {
         config_set_cpu_freq(orig_cpu_freq);
         config_set_psram_freq(orig_psram_freq);
         config_set_flash_freq(orig_flash_freq);
+        config_set_voltage(orig_voltage);
         audio_set_volume(orig_volume);
         config_clear_changes();
     }
@@ -241,6 +260,14 @@ static void cycle_option(int direction) {
             config_set_cpu_freq(options[idx]);
             break;
 
+        case SETTING_VOLTAGE:
+            options = voltage_options;
+            count = voltage_option_count;
+            idx = find_option_index(options, count, config_get_voltage());
+            idx = (idx + direction + count) % count;
+            config_set_voltage(options[idx]);
+            break;
+
         case SETTING_PSRAM_FREQ:
             options = psram_freq_options;
             count = psram_freq_option_count;
@@ -284,6 +311,7 @@ static void draw_settings_menu(void) {
         "Disney Sound Source:",
         "Mouse:",
         "RP2350 Freq:",
+        "CPU Voltage:",
         "PSRAM Freq:",
         "Flash Freq:"
     };
@@ -343,6 +371,11 @@ static void draw_settings_menu(void) {
             case SETTING_CPU_FREQ:
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
                 break;
+            case SETTING_VOLTAGE: {
+                int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
+                snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);
+                break;
+            }
             case SETTING_PSRAM_FREQ:
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_psram_freq());
                 break;
@@ -480,9 +513,7 @@ bool settingsui_handle_key(int keycode, bool is_down) {
 
 void settingsui_animate(void) {
     if (settings_state == SETTINGS_CLOSED) return;
-
     plasma_frame++;
-
     // Only update plasma background, not the window content
     osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
 }
