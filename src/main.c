@@ -851,6 +851,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
            I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
     audio_init();
+    audio_set_volume(config_get_volume());
     while(!initialized) {
         sleep_ms(1);
         __dmb();

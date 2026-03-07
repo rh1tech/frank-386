@@ -36,6 +36,7 @@ static int cfg_mouse = 1;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
 static int cfg_flash_freq = FLASH_MAX_FREQ_MHZ;
+static int cfg_volume = 15;
 static bool cfg_hw_changed = false;
 
 extern PC *pc;
@@ -186,6 +187,13 @@ void config_set_flash_freq(int mhz) {
         cfg_hw_changed = true;
     }
 }
+int config_get_volume(void) { return cfg_volume; }
+void config_set_volume(int vol) {
+    if (cfg_volume != vol) {
+        cfg_volume = vol;
+        cfg_changed = true;
+    }
+}
 
 bool config_hw_changed(void) { return cfg_hw_changed; }
 bool config_has_changes(void) { return cfg_changed; }
@@ -280,6 +288,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "flash_freq=%d\n", cfg_flash_freq);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "volume=%d\n", cfg_volume);
+    write_line(&fp, line);
 
     f_close(&fp);
     cfg_changed = false;
@@ -321,6 +331,8 @@ int parse_murm386_ini(void* user, const char* section,
         cfg_psram_freq = atoi(value);
     } else if (strcmp(name, "flash_freq") == 0) {
         cfg_flash_freq = atoi(value);
+    } else if (strcmp(name, "volume") == 0) {
+        cfg_volume = atoi(value);
     }
 
     return 1;  // Success

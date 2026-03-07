@@ -179,34 +179,16 @@ void audio_set_enabled(bool v) {
         volume = prev;
     } else {
         prev = volume;
-#if FEATURE_AUDIO_PWM
-        volume = 12;
-#else
         volume = 16;
-#endif
     }
 }
 
 void audio_set_volume(uint8_t vol) {
-#if FEATURE_AUDIO_I2S
     prev = 16 - vol;
-#elif FEATURE_AUDIO_PWM
-    prev = 12 - vol;
-#elif FEATURE_AUDIO_HW
-// TODO: ?
-    prev = 12 - vol;
-#endif
 }
 
 uint8_t audio_get_volume(void) {
-#if FEATURE_AUDIO_I2S
     return 16 - prev;
-#elif FEATURE_AUDIO_PWM
-    return 12 - prev;
-#elif FEATURE_AUDIO_HW
-// TODO: ?
-    return 12 - prev;
-#endif
 }
 
 

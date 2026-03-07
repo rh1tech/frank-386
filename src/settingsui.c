@@ -20,7 +20,8 @@
 typedef enum {
     SETTINGS_CLOSED,
     SETTINGS_MAIN,
-    SETTINGS_CONFIRM
+    SETTINGS_CONFIRM_SAVE_RESTART,
+    SETTINGS_CONFIRM_SAVE
 } SettingsState;
 
 // Setting items
@@ -45,13 +46,8 @@ typedef enum {
 } SettingItem;
 
 // Option values
-#if FEATURE_AUDIO_I2S
 static const int vol_options[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 static const int vol_option_count = 17;
-#else
-static const int vol_options[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 };
-static const int vol_option_count = 13;
-#endif
 
 #if EMULATE_LTEMS
 static const int mem_options[] = { 1, 2, 4, 6 };
@@ -63,8 +59,8 @@ static const int mem_option_count = 4;
 static const int cpu_options[] = { 3, 4, 5 };
 static const int cpu_option_count = 3;
 
-static const int cpu_freq_options[] = { 504, 378, 252 };
-static const int cpu_freq_option_count = 3;
+static const int cpu_freq_options[] = { 524, 504, 378, 252 };
+static const int cpu_freq_option_count = 4;
 
 static const int psram_freq_options[] = { 166, 133, 100, 84, 66 };
 static const int psram_freq_option_count = 5;
@@ -82,7 +78,7 @@ static int plasma_frame = 0;  // Animation frame counter
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_fill_cmos;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_mpu401;
-static int orig_cpu_freq, orig_psram_freq, orig_flash_freq;
+static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume;
 
 // UI dimensions
 #define MENU_X      10
@@ -121,6 +117,7 @@ void settingsui_open(void) {
     orig_cpu_freq = config_get_cpu_freq();
     orig_psram_freq = config_get_psram_freq();
     orig_flash_freq = config_get_flash_freq();
+    orig_volume = audio_get_volume();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
@@ -140,6 +137,7 @@ void settingsui_close(void) {
         config_set_cpu_freq(orig_cpu_freq);
         config_set_psram_freq(orig_psram_freq);
         config_set_flash_freq(orig_flash_freq);
+        audio_set_volume(orig_volume);
         config_clear_changes();
     }
     settings_state = SETTINGS_CLOSED;
@@ -176,6 +174,7 @@ static void cycle_option(int direction) {
             idx = find_option_index(options, count, audio_get_volume());
             idx = (idx + direction + count) % count;
             audio_set_volume(options[idx]);
+            config_set_volume(options[idx]);
             break;
 
         case SETTING_MEM:
@@ -365,12 +364,20 @@ static void draw_settings_menu(void) {
 
 static void draw_confirm_dialog(void) {
     int dx = 20, dy = 10, dw = 40, dh = 5;
-
     // Draw dialog box with red background (no shadow)
     uint8_t dialog_attr = OSD_ATTR(OSD_WHITE, OSD_RED);
     osd_draw_box(dx, dy, dw, dh, dialog_attr);
     osd_fill(dx + 1, dy + 1, dw - 2, dh - 2, ' ', dialog_attr);
     osd_print(dx + 3, dy + 2, "Save settings and restart? (Y/N)", dialog_attr);
+}
+
+static void draw_confirm_dialog2(void) {
+    int dx = 20, dy = 10, dw = 40, dh = 5;
+    // Draw dialog box with red background (no shadow)
+    uint8_t dialog_attr = OSD_ATTR(OSD_WHITE, OSD_RED);
+    osd_draw_box(dx, dy, dw, dh, dialog_attr);
+    osd_fill(dx + 1, dy + 1, dw - 2, dh - 2, ' ', dialog_attr);
+    osd_print(dx + 3, dy + 2, "Save settings no-restart? (Y/N)", dialog_attr);
 }
 
 bool settingsui_handle_key(int keycode, bool is_down) {
@@ -422,7 +429,7 @@ bool settingsui_handle_key(int keycode, bool is_down) {
 
                 case KEY_ENTER:
                     if (config_has_changes()) {
-                        settings_state = SETTINGS_CONFIRM;
+                        settings_state = SETTINGS_CONFIRM_SAVE_RESTART;
                         draw_confirm_dialog();
                     } else {
                         settingsui_close();
@@ -430,12 +437,17 @@ bool settingsui_handle_key(int keycode, bool is_down) {
                     break;
 
                 case KEY_ESC:
-                    settingsui_close();
+                    if (config_has_changes()) {
+                        settings_state = SETTINGS_CONFIRM_SAVE;
+                        draw_confirm_dialog2();
+                    } else {
+                        settingsui_close();
+                    }
                     break;
             }
             break;
 
-        case SETTINGS_CONFIRM:
+        case SETTINGS_CONFIRM_SAVE_RESTART:
             // Y = 21, N = 49
             if (keycode == 21) {  // Y
                 config_save_all();
@@ -445,6 +457,17 @@ bool settingsui_handle_key(int keycode, bool is_down) {
             } else if (keycode == 49 || keycode == KEY_ESC) {  // N or Escape
                 settings_state = SETTINGS_MAIN;
                 draw_settings_menu();
+            }
+            break;
+
+        case SETTINGS_CONFIRM_SAVE:
+            // Y = 21, N = 49
+            if (keycode == 21) {  // Y
+                config_save_all();
+                settings_state = SETTINGS_CLOSED;
+                osd_hide();
+            } else if (keycode == 49 || keycode == KEY_ESC) {  // N or Escape
+                settingsui_close();
             }
             break;
 

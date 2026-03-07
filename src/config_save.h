@@ -68,6 +68,8 @@ int config_get_psram_freq(void);
 void config_set_psram_freq(int mhz);
 int config_get_flash_freq(void);
 void config_set_flash_freq(int mhz);
+int config_get_volume(void);
+void config_set_volume(int vol);
 
 // Check if hardware settings changed (requires reboot)
 bool config_hw_changed(void);
