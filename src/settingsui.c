@@ -62,11 +62,11 @@ static const int mem_option_count = 4;
 static const int cpu_options[] = { 3, 4, 5 };
 static const int cpu_option_count = 3;
 
-static const int cpu_freq_options[] = { 504, 378 };
-static const int cpu_freq_option_count = 2;
+static const int cpu_freq_options[] = { 504, 378, 252 };
+static const int cpu_freq_option_count = 3;
 
-static const int psram_freq_options[] = { 166, 133 };
-static const int psram_freq_option_count = 2;
+static const int psram_freq_options[] = { 166, 133, 100, 84, 66 };
+static const int psram_freq_option_count = 5;
 
 // State
 static SettingsState settings_state = SETTINGS_CLOSED;
@@ -82,10 +82,10 @@ static int orig_cpu_freq, orig_psram_freq;
 
 // UI dimensions
 #define MENU_X      10
-#define MENU_Y      3
+#define MENU_Y      1
 #define MENU_W      60
 #define MENU_H      21
-#define VISIBLE_ITEMS 14
+#define VISIBLE_ITEMS 15
 
 // Forward declarations
 static void draw_settings_menu(void);
