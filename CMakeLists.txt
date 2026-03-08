@@ -225,6 +225,7 @@ set(EMU_CORE_SOURCES
     # Devices
     src/vga.c        # VGA emulation
     src/disk.c       # INT 13h disk handler (from pico-286)
+    src/ide.c
     src/pci.c        # PCI bus
     src/misc.c       # Serial, RTC, CMOS
 

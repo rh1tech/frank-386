@@ -3,11 +3,18 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <stdarg.h>
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+/* forward declaration: function defined later in this file */
+static void refresh_flags(CPUI386 *cpu);
+#endif
 
 #ifdef RP2350_BUILD
 #include "pico/stdlib.h"
 #include "platform_rp2350.h"
 #include "i386_arm.h"  /* ARM assembly optimizations */
+#include "ff.h"        /* FatFs - for debug logging */
 #else
 #include <unistd.h>
 #endif
@@ -46,6 +53,66 @@
 #define dolog(...)
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+static FIL g_pm_exc_log;
+static FIL g_pm_esp_log;
+static FIL g_pm_trace_log;
+static bool g_pm_exc_log_open = false;
+static bool g_pm_esp_log_open = false;
+static bool g_pm_trace_log_open = false;
+static bool g_pm_logs_inited = false;
+
+static void pm_exc_debug_init_logs(void)
+{
+	if (g_pm_logs_inited)
+		return;
+	g_pm_logs_inited = true;
+	g_pm_exc_log_open = (f_open(&g_pm_exc_log, "exc.log",
+		FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);
+	g_pm_esp_log_open = (f_open(&g_pm_esp_log, "esp.log",
+		FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);
+	g_pm_trace_log_open = (f_open(&g_pm_trace_log, "pmtrace.log",
+		FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);
+}
+
+static void pm_exc_debug_write(FIL *logf, bool log_open, const char *fmt, ...)
+{
+	if (!log_open)
+		return;
+	char buf[256];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (n <= 0)
+		return;
+	if (n >= (int)sizeof(buf))
+		n = sizeof(buf) - 1;
+	UINT bw;
+	f_write(logf, buf, n, &bw);
+	f_sync(logf);
+}
+
+static void pm_exc_debug_trace(CPUI386 *cpu, const char *tag,
+		int no, bool pusherr, uword old_sp, uword new_sp,
+		uword old_ss, uword new_ss, uword target_cs, uword target_ip)
+{
+	if (!(cpu->cr0 & 1))
+		return;
+	if (no >= 32 && !pusherr)
+		return;
+	refresh_flags(cpu);
+	pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
+		"%s no=%02x err=%08lx old=%04lx:%08lx new=%04lx:%08lx cs=%04lx ip=%08lx fl=%08lx cpl=%d%s\n",
+		tag, no, (unsigned long)cpu->excerr,
+		(unsigned long)old_ss, (unsigned long)old_sp,
+		(unsigned long)new_ss, (unsigned long)new_sp,
+		(unsigned long)target_cs, (unsigned long)target_ip,
+		(unsigned long)cpu->flags, cpu->cpl,
+		(cpu->flags & 0x20000) ? " V86" : "");
+}
+#endif
 
 /* Profiling support - enable with -DI386_PROFILE */
 #ifdef I386_PROFILE
@@ -477,6 +544,18 @@ static int __not_in_flash_func(get_AF)(CPUI386 *cpu)
 	return 0;
 }
 
+static inline uword make_pf_err(bool present, int rwm, int cpl)
+{
+	uword err = 0;
+	if (present)
+		err |= 1;          /* P: protection violation */
+	if (rwm & 2)
+		err |= 2;          /* W/R: write access */
+	if (cpl)
+		err |= 4;          /* U/S: user mode */
+	return err;
+}
+
 static int __always_inline get_ZF(CPUI386 *cpu)
 {
 	if (likely(!(cpu->cc.mask & ZF))) {
@@ -626,22 +705,14 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 		if (!tlb_refill(cpu, ent, lpgno)) {
 			cpu->cr2 = laddr;
 			cpu->excno = EX_PF;
-			cpu->excerr = 0;
-			if (rwm & 2)
-				cpu->excerr |= 2;
-			if (cpl)
-				cpu->excerr |= 4;
+			cpu->excerr = make_pf_err(false, rwm, cpl);
 			return false;
 		}
 	}
 	if (unlikely(ent->pte_lookup[cpl > 0][rwm > 1])) {
 		cpu->cr2 = laddr;
 		cpu->excno = EX_PF;
-		cpu->excerr = 1;
-		if (rwm & 2)
-			cpu->excerr |= 2;
-		if (cpl)
-			cpu->excerr |= 4;
+		cpu->excerr = make_pf_err(false, rwm, cpl);
 		ent->lpgno = -1;
 		return false;
 	}
@@ -664,7 +735,7 @@ static bool IRAM_ATTR translate_laddr(CPUI386 *cpu, OptAddr *res, int rwm, uword
 		res->addr1 = paddr;
 		if ((laddr & 0xfff) > 0x1000 - size) {
 			lpgno++;
-			TRY(translate_lpgno(cpu, rwm, lpgno, lpgno << 12, cpl, &paddr));
+			TRY(translate_lpgno(cpu, rwm, lpgno, (laddr & ~0xfff) + 0x1000, cpl, &paddr));
 			res->res = ADDR_OK2;
 			res->addr2 = paddr;
 		}
@@ -723,7 +794,7 @@ static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword add
 			if (!tlb_refill(cpu, ent, lpgno)) {
 				cpu->cr2 = laddr;
 				cpu->excno = EX_PF;
-				cpu->excerr = 0;
+				cpu->excerr = make_pf_err(false, 1, cpu->cpl);
 				if (cpu->cpl)
 					cpu->excerr |= 4;
 				return false;
@@ -732,9 +803,7 @@ static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword add
 		if (ent->pte_lookup[cpu->cpl > 0][0]) {
 			cpu->cr2 = laddr;
 			cpu->excno = EX_PF;
-			cpu->excerr = 1;
-			if (cpu->cpl)
-				cpu->excerr |= 4;
+			cpu->excerr = make_pf_err(false, 1, cpu->cpl);
 			ent->lpgno = -1;
 			return false;
 		}
@@ -2436,6 +2505,68 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define POP() if (opsz16) { POP_helper(16) } else { POP_helper(32) }
 
+#define EFLAGS_MASK_386 0x37fd7
+#define EFLAGS_MASK_486 0x77fd7
+#define EFLAGS_MASK_586 0x277fd7
+#define EFLAGS_MASK (cpu->flags_mask)
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+
+#define PUSHF() \
+    if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
+    if (opsz16) { \
+        uword sp = lreg32(4); \
+        TRY(translate16(cpu, &meml, 2, SEG_SS, (sp - 2) & sp_mask)); \
+        refresh_flags(cpu); \
+        cpu->cc.mask = 0; \
+        set_sp(sp - 2, sp_mask); \
+        saddr16(&meml, cpu->flags); \
+    } else { \
+        uword sp = lreg32(4); \
+        TRY(translate32(cpu, &meml, 2, SEG_SS, (sp - 4) & sp_mask)); \
+        refresh_flags(cpu); \
+        cpu->cc.mask = 0; \
+        if (!(cpu->cr0 & 1)) \
+            pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open, \
+                "pushfd-rm cs=%04lx ip=%08lx fl=%08lx sp=%08lx\n", \
+                (unsigned long)cpu->seg[SEG_CS].sel, \
+                (unsigned long)cpu->ip, \
+                (unsigned long)cpu->flags, \
+                (unsigned long)lreg32(4)); \
+        set_sp(sp - 4, sp_mask); \
+        saddr32(&meml, cpu->flags & ~(RF | VM)); \
+    }
+
+#define POPF() \
+    if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
+    uword mask = VM; \
+    if (cpu->cr0 & 1) { \
+        if (cpu->cpl > 0) mask |= IOPL; \
+        if (get_IOPL(cpu) < cpu->cpl) mask |= IF; \
+    } \
+    if (opsz16) { \
+        uword sp = lreg32(4); \
+        TRY(translate16(cpu, &meml, 1, SEG_SS, sp & sp_mask)); \
+        set_sp(sp + 2, sp_mask); \
+        cpu->flags = (cpu->flags & (0xffff0000 | mask)) | (laddr16(&meml) & ~mask); \
+    } else { \
+        uword sp = lreg32(4); \
+        TRY(translate32(cpu, &meml, 1, SEG_SS, sp & sp_mask)); \
+        if (!(cpu->cr0 & 1)) \
+            pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open, \
+                "popfd-rm cs=%04lx ip=%08lx in=%08lx old=%08lx\n", \
+                (unsigned long)cpu->seg[SEG_CS].sel, \
+                (unsigned long)cpu->ip, \
+                (unsigned long)laddr32(&meml), \
+                (unsigned long)cpu->flags); \
+        set_sp(sp + 4, sp_mask); \
+        cpu->flags = (cpu->flags & mask) | (laddr32(&meml) & ~mask); \
+    } \
+    cpu->flags &= EFLAGS_MASK; \
+    cpu->flags |= 0x2; \
+    cpu->cc.mask = 0;
+
+#else
 #define PUSHF() \
 	if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
 	if (opsz16) { \
@@ -2453,11 +2584,6 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		set_sp(sp - 4, sp_mask); \
 		saddr32(&meml, cpu->flags & ~(RF | VM)); \
 	}
-
-#define EFLAGS_MASK_386 0x37fd7
-#define EFLAGS_MASK_486 0x77fd7
-#define EFLAGS_MASK_586 0x277fd7
-#define EFLAGS_MASK (cpu->flags_mask)
 
 #define POPF() \
 	if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
@@ -2481,6 +2607,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	cpu->flags |= 0x2; \
 	cpu->cc.mask = 0; \
 	if (cpu->intr && (cpu->flags & IF)) return true;
+
+#endif
 
 #define PUSHSeg(seg) \
 	if (opsz16) { \
@@ -7260,6 +7388,10 @@ static int __call_isr_check_cs(CPUI386 *cpu, int sel, int ext, int *csdpl)
 
 static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 {
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+    uword dbg_old_sp = lreg32(4);
+    uword dbg_old_ss = cpu->seg[SEG_SS].sel;
+#endif
 	/* INT 13h disk handler hook - intercept in real mode */
 	if (no == 0x13 && cpu->int13_handler && !(cpu->cr0 & 1)) {
 		cpu->int13_handler(cpu, cpu->int13_opaque);
@@ -7362,7 +7494,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			saddr16(&meml2, cpu->seg[SEG_CS].sel);
 			saddr16(&meml3, cpu->ip);
 			if (pusherr) {
-				saddr32(&meml4, cpu->excerr);
+				saddr16(&meml4, cpu->excerr);
 				set_sp(sp - 2 * 4, sp_mask);
 			} else {
 				set_sp(sp - 2 * 3, sp_mask);
@@ -7448,13 +7580,14 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			if (pusherr) {
 				TRY(translate(cpu, &meml6, 2, SEG_SS, (sp - 4 * 6) & sp_mask, 4, 0));
 			}
+			/* old stack */
 			saddr32(&meml1, oldss);
 			saddr32(&meml2, oldsp);
-
+			/* flags */
 			refresh_flags(cpu);
 			cpu->cc.mask = 0;
 			saddr32(&meml3, cpu->flags);
-
+			/* return address */
 			saddr32(&meml4, cpu->seg[SEG_CS].sel);
 			saddr32(&meml5, cpu->ip);
 			if (pusherr) {
@@ -7511,6 +7644,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		saddr32(&memlf, cpu->seg[SEG_FS].sel);
 		saddr32(&memld, cpu->seg[SEG_DS].sel);
 		saddr32(&memle, cpu->seg[SEG_ES].sel);
+
 		saddr32(&meml1, oldss);
 		saddr32(&meml2, oldsp);
 
@@ -7520,6 +7654,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 
 		saddr32(&meml4, cpu->seg[SEG_CS].sel);
 		saddr32(&meml5, cpu->ip);
+
 		if (pusherr) {
 			saddr32(&meml6, cpu->excerr);
 			set_sp(sp - 4 * 10, sp_mask);
@@ -7538,6 +7673,11 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		cpu->ip = newip;
 		if (gt == 0x6 || gt == 0xe)
 			cpu->flags &= ~IF;
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+		pm_exc_debug_trace(cpu, "isr (#1)", no, pusherr,
+			dbg_old_sp, lreg32(4), dbg_old_ss, cpu->seg[SEG_SS].sel,
+			newcs, newip);
+#endif
 		return true;
 	}
 	default: assert(false);
@@ -7548,6 +7688,11 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	cpu->flags &= ~(TF | RF | NT);
 	if (gt == 0x6 || gt == 0xe)
 		cpu->flags &= ~IF;
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+	pm_exc_debug_trace(cpu, "isr (#2)", no, pusherr,
+		dbg_old_sp, lreg32(4), dbg_old_ss, cpu->seg[SEG_SS].sel,
+		newcs, newip);
+#endif
 	return true;
 }
 
@@ -7638,9 +7783,26 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 	uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
 	uword sp = lreg32(4);
 	uword oldflags = cpu->flags;
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+    uword dbg_old_sp = sp;
+    uword dbg_old_ss = cpu->seg[SEG_SS].sel;
+#endif
 	uword newip;
 	int newcs;
 	uword newflags = 0; // make the compiler happy
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+    /* trace head of pmret */
+    if (isiret) {
+        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
+            "pmret-enter opsz16=%d sp=%08lx off=%d cpl=%d ss=%04lx\n",
+            opsz16 ? 1 : 0,
+            (unsigned long)sp,
+            off,
+            cpu->cpl,
+            (unsigned long)cpu->seg[SEG_SS].sel);
+    }
+#endif
 	if (opsz16) {
 		/* ip */ TRY(translate(cpu, &meml1, 1, SEG_SS, sp & sp_mask, 2, 0));
 		/* cs */ TRY(translate(cpu, &meml2, 1, SEG_SS, (sp + 2) & sp_mask, 2, 0));
@@ -7670,11 +7832,24 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 		newflags |= 0x2;
 	}
 
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+    if (isiret) {
+        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
+            "pmret-head newip=%08lx newcs=%04x newflags=%08lx\n",
+            (unsigned long)newip,
+            newcs & 0xffff,
+            (unsigned long)newflags);
+    }
+#endif
+	
 	if (isiret && (newflags & VM)) {
 		if (cpu->cpl != 0) cpu_abort(cpu, -208);
 		// return to v8086
 //		dolog("pmiret PVL %d => %d (vm) %04x:%08x\n", cpu->cpl, 3, newcs, newip);
 		OptAddr meml_vmes, meml_vmds, meml_vmfs, meml_vmgs;
+		uword vm_esp, vm_ss, vm_es, vm_ds, vm_fs, vm_gs;
+
 		if (opsz16) cpu_abort(cpu, -209);
 		TRY(translate(cpu, &meml4, 1, SEG_SS, (sp + 12) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml5, 1, SEG_SS, (sp + 16) & sp_mask, 4, 0));
@@ -7682,16 +7857,34 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 		TRY(translate(cpu, &meml_vmds, 1, SEG_SS, (sp + 24) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml_vmfs, 1, SEG_SS, (sp + 28) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml_vmgs, 1, SEG_SS, (sp + 32) & sp_mask, 4, 0));
-		cpu->flags = newflags;
-		TRY1(set_seg(cpu, SEG_CS, newcs));
-		set_sp(sp + 12, sp_mask);
-		cpu->next_ip = newip;
-		TRY1(set_seg(cpu, SEG_SS, laddr32(&meml5)));
-		TRY1(set_seg(cpu, SEG_ES, laddr32(&meml_vmes)));
-		TRY1(set_seg(cpu, SEG_DS, laddr32(&meml_vmds)));
-		TRY1(set_seg(cpu, SEG_FS, laddr32(&meml_vmfs)));
-		TRY(set_seg(cpu, SEG_GS, laddr32(&meml_vmgs)));
-		set_sp(laddr32(&meml4), 0xffffffff);
+        vm_esp = laddr32(&meml4);
+        vm_ss  = laddr32(&meml5);
+        vm_es  = laddr32(&meml_vmes);
+        vm_ds  = laddr32(&meml_vmds);
+        vm_fs  = laddr32(&meml_vmfs);
+        vm_gs  = laddr32(&meml_vmgs);
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
+            "pmret-vm esp=%08lx ss=%04lx es=%04lx ds=%04lx fs=%04lx gs=%04lx\n",
+            (unsigned long)vm_esp,
+            (unsigned)(vm_ss & 0xffff),
+            (unsigned)(vm_es & 0xffff),
+            (unsigned)(vm_ds & 0xffff),
+            (unsigned)(vm_fs & 0xffff),
+            (unsigned)(vm_gs & 0xffff));
+#endif
+
+        cpu->flags = newflags;
+        TRY1(set_seg(cpu, SEG_CS, newcs));
+        set_sp(sp + 12, sp_mask);
+        cpu->next_ip = newip;
+        TRY1(set_seg(cpu, SEG_SS, vm_ss));
+        TRY1(set_seg(cpu, SEG_ES, vm_es));
+        TRY1(set_seg(cpu, SEG_DS, vm_ds));
+        TRY1(set_seg(cpu, SEG_FS, vm_fs));
+        TRY(set_seg(cpu, SEG_GS, vm_gs));
+        set_sp(vm_esp, 0xffffffff);
 	} else {
 		int rpl = newcs & 3;
 		if (rpl < cpu->cpl) THROW(EX_GP, newcs & ~0x3);
@@ -7739,26 +7932,96 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 	}
 	if (isiret)
 		cpu->cc.mask = 0;
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+	if (isiret) {
+		pm_exc_debug_trace(cpu, "iret", off, false,
+			dbg_old_sp, lreg32(4), dbg_old_ss, cpu->seg[SEG_SS].sel,
+			cpu->seg[SEG_CS].sel, cpu->next_ip);
+	}
+#endif
 	return true;
 }
 
 void __not_in_flash_func(cpui386_step)(CPUI386 *cpu, int stepcount)
 {
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+	pm_exc_debug_init_logs();
+	/* Periodically log ESP when in ring-0 to track stack growth */
+	if ((cpu->cr0 & 1) && cpu->cpl == 0 && !(cpu->flags & VM)) {
+		static uint32_t step_counter = 0;
+		static uint32_t last_esp = 0;
+		step_counter++;
+		if ((step_counter & 0x03FF) == 0) {  /* every ~1K steps */
+				uint32_t esp = REGi(4);
+			if (g_pm_esp_log_open && (esp != last_esp || (step_counter & 0x3FFF) == 0)) {
+				last_esp = esp;
+				pm_exc_debug_write(&g_pm_esp_log, g_pm_esp_log_open,
+					"step=%08lx ESP=%08lx SS=%04lx IP=%08lx\n",
+					(unsigned long)step_counter,
+					(unsigned long)esp,
+					(unsigned long)cpu->seg[SEG_SS].sel,
+					(unsigned long)cpu->ip);
+			}
+		}
+	}
+#endif
 	if ((cpu->flags & IF) && cpu->intr) {
 		cpu->intr = false;
 		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
-
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+		pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
+			"irq no=%02x cs=%04lx ip=%08lx next=%08lx ss=%04lx esp=%08lx fl=%08lx\n",
+			no & 0xff,
+			(unsigned long)cpu->seg[SEG_CS].sel,
+			(unsigned long)cpu->ip,
+			(unsigned long)cpu->next_ip,
+			(unsigned long)cpu->seg[SEG_SS].sel,
+			(unsigned long)REGi(4),
+			(unsigned long)cpu->flags);
+#endif
 		cpu->ip = cpu->next_ip;
 		TRY1(call_isr(cpu, no, false, 1));
 	}
 
 	if (cpu->halt) {
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
+            "HLT cs=%04lx ip=%08lx intr=%d fl=%08lx\n",
+            (unsigned long)cpu->seg[SEG_CS].sel,
+            (unsigned long)cpu->ip,
+            cpu->intr ? 1 : 0,
+            (unsigned long)cpu->flags);
+#endif
 #if !defined(RP2350_BUILD) && !defined(BUILD_ESP32)
 		usleep(1);
 #endif
 		return;
 	}
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+	{
+		static uword last_cs = 0xffff;
+		static uword last_ip = 0xffffffffu;
+		static uint32_t same_eip_count = 0;
+		if (cpu->seg[SEG_CS].sel == last_cs && cpu->ip == last_ip) {
+			same_eip_count++;
+			if (same_eip_count == 100000) {
+				pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
+					"hang cs=%04lx ip=%08lx ss=%04lx esp=%08lx fl=%08lx\n",
+					(unsigned long)cpu->seg[SEG_CS].sel,
+					(unsigned long)cpu->ip,
+					(unsigned long)cpu->seg[SEG_SS].sel,
+					(unsigned long)REGi(4),
+					(unsigned long)cpu->flags);
+			}
+		} else {
+			last_cs = cpu->seg[SEG_CS].sel;
+			last_ip = cpu->ip;
+			same_eip_count = 0;
+		}
+	}
+#endif
 
 	if (!cpu_exec1(cpu, stepcount)) {
 		bool pusherr = false;
@@ -7768,6 +8031,41 @@ void __not_in_flash_func(cpui386_step)(CPUI386 *cpu, int stepcount)
 			pusherr = true;
 		}
 		cpu->next_ip = cpu->ip;
+
+#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
+		/* Log PM exceptions to exc.log on SD card */
+		{
+			static int exc_count = 0;
+			refresh_flags(cpu);
+			bool is_v86 = !!(cpu->flags & VM);
+			bool do_log = g_pm_exc_log_open && exc_count < 2048;
+			if (do_log) {
+				exc_count++;
+				pm_exc_debug_write(&g_pm_exc_log, g_pm_exc_log_open,
+					"#%02d err=%08lx IP=%08lx CS=%04lx SS=%04lx ESP=%08lx FL=%08lx CR0=%08lx CR2=%08lx CPL=%d%s%s\n",
+					cpu->excno, (unsigned long)cpu->excerr,
+					(unsigned long)cpu->ip,
+					(unsigned long)cpu->seg[SEG_CS].sel,
+					(unsigned long)cpu->seg[SEG_SS].sel,
+					(unsigned long)REGi(4),
+					(unsigned long)cpu->flags,
+					(unsigned long)cpu->cr0,
+					(unsigned long)cpu->cr2,
+					cpu->cpl,
+					is_v86 ? " V86" : "",
+					(cpu->cr0 & 1) ? "" : " RM");
+				{
+						pm_exc_debug_write(&g_pm_exc_log, g_pm_exc_log_open,
+						"  EAX=%08lx EBX=%08lx ECX=%08lx EDX=%08lx ESI=%08lx EDI=%08lx EBP=%08lx NEXT=%08lx\n",
+						(unsigned long)REGi(0),(unsigned long)REGi(3),
+						(unsigned long)REGi(1),(unsigned long)REGi(2),
+						(unsigned long)REGi(6),(unsigned long)REGi(7),
+						(unsigned long)REGi(5),
+						(unsigned long)cpu->next_ip);
+				}
+			}
+		}
+#endif
 
 		TRY1(call_isr(cpu, cpu->excno, pusherr, 1));
 	}
@@ -8007,6 +8305,15 @@ static void cpu_debug(CPUI386 *cpu)
 	cpu->cr2 = cr2;
 	cpu->excno = excno;
 	cpu->excerr = excerr;
+
+#if defined(DEBUG_PM_EXC)
+    dolog("PF: addr=%08x err=%x cs=%04x ip=%08x cpl=%d\n",
+          laddr, err,
+          cpu->seg[SEG_CS].sel,
+          cpu->ip,
+          cpu->cpl);
+#endif
+
 	nest--;
 }
 

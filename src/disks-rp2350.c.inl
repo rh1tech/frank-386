@@ -619,3 +619,8 @@ uint8_t disk_is_cdrom(uint8_t drivenum) {
 uint16_t disk_get_cyls(uint8_t drivenum)  { return drivenum < 5 ? disk[drivenum].cyls  : 0; }
 uint16_t disk_get_heads(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].heads : 0; }
 uint16_t disk_get_sects(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].sects : 0; }
+
+// Get FIL pointer for IDE backend (avoids double-open)
+FIL* disk_get_fil(uint8_t drivenum)  { return drivenum < 5 && disk[drivenum].inserted ? &disk[drivenum].diskfile : NULL; }
+UINT disk_get_filesize(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].filesize : 0; }
+UINT disk_get_data_offset(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].data_offset : 0; }

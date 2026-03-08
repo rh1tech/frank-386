@@ -38,4 +38,12 @@ uint16_t disk_get_cyls(uint8_t drivenum);
 uint16_t disk_get_heads(uint8_t drivenum);
 uint16_t disk_get_sects(uint8_t drivenum);
 
+// For IDE backend - get already-open FIL* to avoid double-open
+#ifdef RP2350_BUILD
+#include "ff.h"
+FIL* disk_get_fil(uint8_t drivenum);
+UINT disk_get_filesize(uint8_t drivenum);
+UINT disk_get_data_offset(uint8_t drivenum);
+#endif
+
 #endif /* DISK_H */

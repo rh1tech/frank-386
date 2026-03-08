@@ -17,6 +17,7 @@
 #include "sb16.h"
 #include "pcspk.h"
 #include "pci.h"
+#include "ide.h"
 #include "ini.h"
 #include "sn76489.h"
 
@@ -70,6 +71,10 @@ typedef struct {
 	int mpu401_enabled;
 	int dss_enabled;
 	int mouse_enabled;
+
+	IDEIFState *ide;
+	IDEIFState *ide2;
+	PCIDevice *pci_ide;
 
 	I440FXState *i440fx;
 	PCIBus *pcibus;

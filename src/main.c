@@ -415,9 +415,9 @@ static void load_default_config(void) {
 
     // Default memory configuration
 #if EMULATE_LTEMS
-    config.mem_size = EMU_MEM_SIZE_MB * 1024 * 1024;
-#else
     config.mem_size = (EMU_MEM_SIZE_MB - 2) * 1024 * 1024;
+#else
+    config.mem_size = EMU_MEM_SIZE_MB * 1024 * 1024;
 #endif
     config.vga_mem_size = EMU_VGA_MEM_SIZE_KB * 1024;
 

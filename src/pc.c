@@ -53,13 +53,16 @@ static u8 pc_io_read(void *o, int addr)
 	case 0x70: case 0x71:
 		val = cmos_ioport_read(pc->cmos, addr);
 		return val;
-	/* IDE ports removed - using INT 13h disk handler instead */
-	case 0x1f0: case 0x1f1: case 0x1f2: case 0x1f3:
+	case 0x1f1: case 0x1f2: case 0x1f3:
 	case 0x1f4: case 0x1f5: case 0x1f6: case 0x1f7:
-	case 0x170: case 0x171: case 0x172: case 0x173:
+		return ide_ioport_read(pc->ide, addr - 0x1f0);
+	case 0x171: case 0x172: case 0x173:
 	case 0x174: case 0x175: case 0x176: case 0x177:
-	case 0x3f6: case 0x376:
-		return 0xff;
+		return ide_ioport_read(pc->ide2, addr - 0x170);
+	case 0x3f6:
+		return ide_status_read(pc->ide);
+	case 0x376:
+		return ide_status_read(pc->ide2);
 	case 0x3c0: case 0x3c1: case 0x3c2: case 0x3c3:
 	case 0x3c4: case 0x3c5: case 0x3c6: case 0x3c7:
 	case 0x3c8: case 0x3c9: case 0x3ca: case 0x3cb:
@@ -188,9 +191,11 @@ static u16 pc_io_read16(void *o, int addr)
 	case 0x1ce: case 0x1cf:
 		val = vbe_read(pc->vga, addr - 0x1ce);
 		return val;
-	/* IDE ports removed - using INT 13h disk handler instead */
-	case 0x1f0: case 0x170:
-		return 0xffff;
+	/* IDE ports */
+	case 0x1f0:
+		return ide_data_readw(pc->ide);
+	case 0x170:
+		return ide_data_readw(pc->ide2);
 	case 0xcf8:
 		val = i440fx_read_addr(pc->i440fx, 0, 1);
 		return val;
@@ -215,9 +220,11 @@ static u32 pc_io_read32(void *o, int addr)
 	PC *pc = o;
 	u32 val;
 	switch(addr) {
-	/* IDE ports removed - using INT 13h disk handler instead */
-	case 0x1f0: case 0x170:
-		return 0xffffffff;
+	/* IDE ports */
+	case 0x1f0:
+		return ide_data_readl(pc->ide);
+	case 0x170:
+		return ide_data_readl(pc->ide2);
 	case 0x3cc:
 		return (get_uticks() - pc->boot_start_time) / 1000;
 	case 0xcf8:
@@ -237,12 +244,13 @@ static u32 pc_io_read32(void *o, int addr)
 
 static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int count)
 {
-	(void)o;
-	/* IDE and Emulink removed - using INT 13h disk handler instead */
-	(void)addr;
-	(void)buf;
-	(void)size;
-	(void)count;
+	PC *pc = o;
+	switch(addr) {
+	case 0x1f0:
+		return ide_data_read_string(pc->ide, buf, size, count);
+	case 0x170:
+		return ide_data_read_string(pc->ide2, buf, size, count);
+	}
 	return 0;
 }
 
@@ -286,12 +294,20 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x70: case 0x71:
 		cmos_ioport_write(pc->cmos, addr, val);
 		return;
-	/* IDE ports removed - using INT 13h disk handler instead */
-	case 0x1f0: case 0x1f1: case 0x1f2: case 0x1f3:
+	/* IDE ports */
+	case 0x1f1: case 0x1f2: case 0x1f3:
 	case 0x1f4: case 0x1f5: case 0x1f6: case 0x1f7:
-	case 0x170: case 0x171: case 0x172: case 0x173:
+		ide_ioport_write(pc->ide, addr - 0x1f0, val);
+		return;
+	case 0x171: case 0x172: case 0x173:
 	case 0x174: case 0x175: case 0x176: case 0x177:
-	case 0x3f6: case 0x376:
+		ide_ioport_write(pc->ide2, addr - 0x170, val);
+		return;
+	case 0x3f6:
+		ide_cmd_write(pc->ide, val);
+		return;
+	case 0x376:
+		ide_cmd_write(pc->ide2, val);
 		return;
 	case 0x3c0: case 0x3c1: case 0x3c2: case 0x3c3:
 	case 0x3c4: case 0x3c5: case 0x3c6: case 0x3c7:
@@ -440,8 +456,12 @@ static void pc_io_write16(void *o, int addr, u16 val)
 {
 	PC *pc = o;
 	switch(addr) {
-	/* IDE ports removed - using INT 13h disk handler instead */
-	case 0x1f0: case 0x170:
+	/* IDE ports */
+	case 0x1f0:
+		ide_data_writew(pc->ide, val);
+		return;
+	case 0x170:
+		ide_data_writew(pc->ide2, val);
 		return;
     case 0x260: case 0x261: case 0x262: case 0x263:
 		pc_io_write(o, addr, (uint8_t) val);
@@ -477,8 +497,12 @@ static void pc_io_write32(void *o, int addr, u32 val)
 {
 	PC *pc = o;
 	switch(addr) {
-	/* IDE ports removed - using INT 13h disk handler instead */
-	case 0x1f0: case 0x170:
+	/* IDE ports */
+	case 0x1f0:
+		ide_data_writel(pc->ide, val);
+		return;
+	case 0x170:
+		ide_data_writel(pc->ide2, val);
 		return;
 	case 0xcf8:
 		i440fx_write_addr(pc->i440fx, 0, val, 2);
@@ -501,8 +525,13 @@ static void pc_io_write32(void *o, int addr, u32 val)
 
 static int pc_io_write_string(void *o, int addr, uint8_t *buf, int size, int count)
 {
-	(void)o; (void)addr; (void)buf; (void)size; (void)count;
-	/* IDE and emulink removed - using INT 13h disk handler instead */
+	PC *pc = o;
+	switch(addr) {
+	case 0x1f0:
+		return ide_data_write_string(pc->ide, buf, size, count);
+	case 0x170:
+		return ide_data_write_string(pc->ide2, buf, size, count);
+	}
 	return 0;
 }
 
@@ -756,74 +785,63 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->cmos = cmos_init(conf->mem_size, 8, pc->pic, set_irq);
 	_pc_cmos_for_floppy = pc->cmos;
 
-	/* Set up INT 13h disk handler */
+	/* Set up INT 13h disk handler (real mode - DOS) */
 	disk_set_cpu(pc->cpu);
 	cpu_set_int13_handler(pc->cpu, diskhandler_wrapper, NULL);
 	disk_set_cmos_callback(cmos_floppy_update);
 	netredirect_init(pc->cpu);
 
-	/* Attach hard disks using INT 13h disk handler */
+	/* Set up IDE emulation (protected mode - Win95) */
+	pc->ide  = ide_allocate(14, pc->pic, set_irq);
+	pc->ide2 = ide_allocate(15, pc->pic, set_irq);
+
+	/* Attach hard disks: INT 13h handler (real mode) + IDE emulation (protected mode) */
 	const char **disks = conf->disks;
 	for (int i = 0; i < 4; i++) {
 		if (!disks[i] || disks[i][0] == 0)
 			continue;
-		/* Map disk index: 0,1 -> hard drives 0x80,0x81 (drivenum 2,3) */
-		/* Note: pico-286 disk handler uses drivenum 2,3 for hard disks */
 		uint8_t drivenum = (i < 2) ? (0x80 + i) : (0x80 + i);
 		insertdisk(drivenum, disks[i]);
+		/* Attach to IDE using the already-open FIL* (avoids FatFs double-open) */
+#ifdef RP2350_BUILD
+		/* drivenum mapping: disk[] index 2 = first HDD, 3 = second HDD */
+		uint8_t didx = (i < 2) ? (2 + i) : (2 + i);
+		FIL *fil = disk_get_fil(didx);
+		if (fil && !conf->iscd[i]) {
+			ide_attach_fil(i < 2 ? pc->ide : pc->ide2,
+			               i < 2 ? i : i - 2,
+			               fil,
+			               disk_get_filesize(didx),
+			               disk_get_data_offset(didx),
+			               disk_get_cyls(didx),
+			               disk_get_heads(didx),
+			               disk_get_sects(didx));
+		} else if (conf->iscd[i]) {
+			/* CD-ROM: safe to open separately (read-only, no write conflict) */
+			if (i < 2)
+				ide_attach_cd(pc->ide, i, disks[i]);
+			else
+				ide_attach_cd(pc->ide2, i - 2, disks[i]);
+		}
+#else
+		if (i < 2) {
+			if (conf->iscd[i])
+				ide_attach_cd(pc->ide, i, disks[i]);
+			else
+				ide_attach(pc->ide, i, disks[i]);
+		} else {
+			if (conf->iscd[i])
+				ide_attach_cd(pc->ide2, i - 2, disks[i]);
+			else
+				ide_attach(pc->ide2, i - 2, disks[i]);
+		}
+#endif
 	}
 
-	/* Tell SeaBIOS about hard drives via CMOS so it sets up INT 13h
-	 * and BDA 0x475.  Without this the BIOS never probes our INT 13h
-	 * handler and DOS sees zero hard drives.
-	 *
-	 * CMOS 0x12: high nibble = drive 0 type, low nibble = drive 1 type
-	 *            0xF means "type 47" (user-defined geometry)
-	 * CMOS 0x19/0x1A: extended type for drive 0/1 (47 = user-defined)
-	 */
-	{
-		uint8_t cmos12 = 0;
-		/* drivenum 2 = C:, drivenum 3 = D: */
-		if (hdcount >= 1) {
-			cmos12 |= 0xF0;
-			cmos_set(pc->cmos, 0x19, 47);  /* type 47 = user-defined */
-			/* CMOS 0x1B-0x23: Type 47 geometry for drive C: */
-			uint16_t cyls  = disk_get_cyls(2);
-			uint8_t  heads = disk_get_heads(2);
-			uint8_t  sects = disk_get_sects(2);
-			uint8_t  ctrl  = (heads > 8) ? 0x08 : 0x00;
-			cmos_set(pc->cmos, 0x1B, cyls & 0xFF);
-			cmos_set(pc->cmos, 0x1C, cyls >> 8);
-			cmos_set(pc->cmos, 0x1D, heads);
-			cmos_set(pc->cmos, 0x1E, cyls & 0xFF);  /* write precomp = cyls */
-			cmos_set(pc->cmos, 0x1F, cyls >> 8);
-			cmos_set(pc->cmos, 0x20, ctrl);
-			cmos_set(pc->cmos, 0x21, cyls & 0xFF);  /* landing zone = cyls */
-			cmos_set(pc->cmos, 0x22, cyls >> 8);
-			cmos_set(pc->cmos, 0x23, sects);
-		}
-		if (hdcount >= 2) {
-			cmos12 |= 0x0F;
-			cmos_set(pc->cmos, 0x1A, 47);  /* type 47 = user-defined */
-			/* CMOS 0x24-0x2C: Type 47 geometry for drive D: */
-			uint16_t cyls  = disk_get_cyls(3);
-			uint8_t  heads = disk_get_heads(3);
-			uint8_t  sects = disk_get_sects(3);
-			uint8_t  ctrl  = (heads > 8) ? 0x08 : 0x00;
-			cmos_set(pc->cmos, 0x24, cyls & 0xFF);
-			cmos_set(pc->cmos, 0x25, cyls >> 8);
-			cmos_set(pc->cmos, 0x26, heads);
-			cmos_set(pc->cmos, 0x27, cyls & 0xFF);
-			cmos_set(pc->cmos, 0x28, cyls >> 8);
-			cmos_set(pc->cmos, 0x29, ctrl);
-			cmos_set(pc->cmos, 0x2A, cyls & 0xFF);
-			cmos_set(pc->cmos, 0x2B, cyls >> 8);
-			cmos_set(pc->cmos, 0x2C, sects);
-		}
-		if (cmos12)
-			cmos_set(pc->cmos, 0x12, cmos12);
-		mem[0x475] = hdcount;
-	}
+	/* Fill CMOS with hard drive geometry from IDE (replaces manual block) */
+	ide_fill_cmos(pc->ide, pc->cmos, cmos_set);
+	mem[0x475] = hdcount;
+
 	/* we have emulation for 2 FDDs (CMOS 0x10):
 		биты 7-4 = тип A:
 		биты 3-0 = тип B:
@@ -836,7 +854,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	int piix3_devfn;
 	pc->i440fx = i440fx_init(&pc->pcibus, &piix3_devfn);
-	/* PCI IDE removed - using INT 13h disk handler instead */
+	pc->pci_ide = piix3_ide_init(pc->pcibus, piix3_devfn + 1);
 
 	pc->phys_mem = mem;
 	pc->phys_mem_size = conf->mem_size;
