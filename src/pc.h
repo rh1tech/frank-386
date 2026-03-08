@@ -20,6 +20,7 @@
 #include "ide.h"
 #include "ini.h"
 #include "sn76489.h"
+#include "fdd.h"
 
 /// Platform HAL
 uint32_t get_uticks();
@@ -56,6 +57,7 @@ typedef struct {
 	PS2MouseState *mouse;
 	AdlibState *adlib;
 	I8257State *isa_dma, *isa_hdma;
+	FDCState   *fdc;
 	SB16State *sb16;
 	PCSpkState *pcspk;
 

@@ -17,8 +17,7 @@
 #include "pc.h"
 
 // Current configuration values (minimal storage)
-static int cfg_mem_mb = 4;
-static int cfg_vga_kb = 128;
+static int cfg_mem_mb = 8;
 static int cfg_cpu_gen = 4;
 static int cfg_fpu = 0;
 static int cfg_fill_cmos = 1;
@@ -54,14 +53,6 @@ int config_get_mem_size_mb(void) { return cfg_mem_mb; }
 void config_set_mem_size_mb(int mb) {
     if (cfg_mem_mb != mb) {
         cfg_mem_mb = mb;
-        cfg_changed = true;
-    }
-}
-
-int config_get_vga_mem_kb(void) { return cfg_vga_kb; }
-void config_set_vga_mem_kb(int kb) {
-    if (cfg_vga_kb != kb) {
-        cfg_vga_kb = kb;
         cfg_changed = true;
     }
 }
@@ -230,8 +221,8 @@ bool config_save_all(void) {
     snprintf(line, sizeof(line), "mem=%dM\n", cfg_mem_mb);
     write_line(&fp, line);
 
-    snprintf(line, sizeof(line), "vga_mem=%dK\n", cfg_vga_kb);
-    write_line(&fp, line);
+//    snprintf(line, sizeof(line), "vga_mem=%dK\n", cfg_vga_kb);
+//    write_line(&fp, line);
 
     // CPU
     snprintf(line, sizeof(line), "cpu=%d\n", cfg_cpu_gen);

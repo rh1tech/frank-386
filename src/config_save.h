@@ -24,9 +24,6 @@ bool config_save_disks(void);
 int config_get_mem_size_mb(void);
 void config_set_mem_size_mb(int mb);
 
-int config_get_vga_mem_kb(void);
-void config_set_vga_mem_kb(int kb);
-
 int config_get_cpu_gen(void);
 void config_set_cpu_gen(int gen);
 

@@ -63,6 +63,13 @@ static u8 pc_io_read(void *o, int addr)
 		return ide_status_read(pc->ide);
 	case 0x376:
 		return ide_status_read(pc->ide2);
+	/* FDC ports 0x3F0-0x3F5, 0x3F7 (0x3F6 = IDE alt-status, handled above) */
+	case 0x3f0: case 0x3f1: case 0x3f2: case 0x3f3:
+	case 0x3f4: case 0x3f5:
+	case 0x3f7:
+		if (pc->fdc)
+			return fdc_ioport_read(pc->fdc, addr);
+		return 0xff;
 	case 0x3c0: case 0x3c1: case 0x3c2: case 0x3c3:
 	case 0x3c4: case 0x3c5: case 0x3c6: case 0x3c7:
 	case 0x3c8: case 0x3c9: case 0x3ca: case 0x3cb:
@@ -308,6 +315,13 @@ static void pc_io_write(void *o, int addr, u8 val)
 		return;
 	case 0x376:
 		ide_cmd_write(pc->ide2, val);
+		return;
+	/* FDC ports 0x3F0-0x3F5, 0x3F7 */
+	case 0x3f0: case 0x3f1: case 0x3f2: case 0x3f3:
+	case 0x3f4: case 0x3f5:
+	case 0x3f7:
+		if (pc->fdc)
+			fdc_ioport_write(pc->fdc, addr, val);
 		return;
 	case 0x3c0: case 0x3c1: case 0x3c2: case 0x3c3:
 	case 0x3c4: case 0x3c5: case 0x3c6: case 0x3c7:
@@ -562,6 +576,7 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	kbd_step(pc->i8042);
 	i8257_dma_run(pc->isa_dma);
 	i8257_dma_run(pc->isa_hdma);
+	if (pc->fdc) fdc_tick(pc->fdc);
 #if !defined(BUILD_ESP32) && !defined(RP2350_BUILD)
 	pc->poll(pc->redraw_data);
 	if (refresh) {
@@ -743,6 +758,12 @@ static void cmos_floppy_update(uint8_t ta, uint8_t tb) {
     cmos_set_floppy_types(_pc_cmos_for_floppy, ta, tb);
 }
 
+static PC *_pc_for_fdc = NULL;
+static void fdc_mediachange_notify(int drive) {
+    if (_pc_for_fdc && _pc_for_fdc->fdc)
+        fdc_media_changed(_pc_for_fdc->fdc, drive);
+}
+
 PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
@@ -918,6 +939,12 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 				0x00, 0x80, 0x480, 0);
 	pc->isa_hdma = i8257_new(pc->phys_mem, pc->phys_mem_size,
 				 0xc0, 0x88, 0x488, 1);
+	/* FDC (Intel 8272A/82077AA) – port I/O 0x3F0-0x3F7, DMA ch2, IRQ 6.
+	 * Created after isa_dma/pic, and floppy images already inserted above,
+	 * so fdc_media_changed fires correctly on subsequent insert/eject. */
+	pc->fdc = fdc_new(pc->pic, pc->isa_dma);
+	_pc_for_fdc = pc;
+	disk_set_fdc_mediachange_callback(fdc_mediachange_notify);
 	pc->sb16 = sb16_new(0x220, 5,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
@@ -1024,8 +1051,6 @@ int parse_conf_ini(void* user, const char* section,
 			conf->vga_bios = strdup(value);
 		} else if (NAME("mem_size") || NAME("mem")) {
 			conf->mem_size = parse_mem_size(value);
-		} else if (NAME("vga_mem_size") || NAME("vga_mem")) {
-			conf->vga_mem_size = parse_mem_size(value);
 		} else if (NAME("cpu")) {
 			conf->cpu_gen = atoi(value);
 		} else if (NAME("hda")) {

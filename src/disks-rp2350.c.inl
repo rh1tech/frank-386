@@ -64,6 +64,9 @@ static inline void disk_copy_from_guest(uint8_t *phys_mem, uint32_t guest,
 static void (*disk_cmos_update_cb)(uint8_t type_a, uint8_t type_b) = NULL;
 void disk_set_cmos_callback(void (*cb)(uint8_t, uint8_t)) { disk_cmos_update_cb = cb; }
 
+static void (*disk_fdc_mediachange_cb)(int drive) = NULL;
+void disk_set_fdc_mediachange_callback(void (*cb)(int drive)) { disk_fdc_mediachange_cb = cb; }
+
 /* Установить FDPT (Fixed Disk Parameter Table) и INT 41h/46h векторы.
  * Вызывается при каждом INT 13h для HDD — перезаписывает то что мог
  * поставить SeaBIOS во время boot.
@@ -133,6 +136,8 @@ static inline void ejectdisk(uint8_t drivenum) {
         disk[drivenum].inserted = 0;
         disk_set_filename(drivenum, NULL);
         if (drivenum < 2) update_floppy_cmos();
+        if (drivenum < 2 && disk_fdc_mediachange_cb)
+            disk_fdc_mediachange_cb(drivenum);
         if (drivenum >= 2)
             hdcount--;
         else
@@ -251,6 +256,8 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
 
     // Update CMOS floppy type if floppy
     if (drivenum < 2) update_floppy_cmos();
+    if (drivenum < 2 && disk_fdc_mediachange_cb)
+        disk_fdc_mediachange_cb(drivenum);
     // Track filename for disk UI
     disk_set_filename(drivenum, pathname);
 /*

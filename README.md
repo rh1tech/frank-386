@@ -103,7 +103,6 @@ Create `386/config.ini`:
 ```ini
 [pc]
 mem=2M
-vga_mem=128K
 bios=bios.bin
 vga_bios=vgabios.bin
 
