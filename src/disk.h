@@ -31,12 +31,13 @@ void disk_set_vga(struct VGAState *vga);
 uint8_t disk_is_cdrom(uint8_t drivenum);
 
 // INT 13h handler wrapper for CPU hook (matches int13_handler_t signature)
+/*
 static inline void diskhandler_wrapper(CPUI386 *cpu, void *opaque)
 {
 	(void)opaque;
 	diskhandler(cpu);
 }
-
+*/
 uint16_t disk_get_cyls(uint8_t drivenum);
 uint16_t disk_get_heads(uint8_t drivenum);
 uint16_t disk_get_sects(uint8_t drivenum);

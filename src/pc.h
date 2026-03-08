@@ -58,6 +58,15 @@ typedef struct {
 	AdlibState *adlib;
 	I8257State *isa_dma, *isa_hdma;
 	FDCState   *fdc;
+
+	/* Emulink FDD – simple virtual floppy protocol on ports 0xF1F0/0xF1F4 */
+	struct {
+		uint32_t status;   /* read via 0xF1F0 */
+		uint32_t cmd;      /* written via 0xF1F0 */
+		uint32_t args[4];
+		int      argi;
+		int      dataleft;
+	} emulink;
 	SB16State *sb16;
 	PCSpkState *pcspk;
 

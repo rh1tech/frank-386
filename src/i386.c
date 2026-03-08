@@ -7393,10 +7393,10 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
     uword dbg_old_ss = cpu->seg[SEG_SS].sel;
 #endif
 	/* INT 13h disk handler hook - intercept in real mode */
-	if (no == 0x13 && cpu->int13_handler && !(cpu->cr0 & 1)) {
-		cpu->int13_handler(cpu, cpu->int13_opaque);
-		return true;
-	}
+//	if (no == 0x13 && cpu->int13_handler && !(cpu->cr0 & 1)) {
+//		cpu->int13_handler(cpu, cpu->int13_opaque);
+//		return true;
+//	}
 	if (no == 0x2F && cpu->int2f_handler && !(cpu->cr0 & 1)) {
 		cpu->int2f_handler(cpu, cpu->int2f_opaque);
 		if (cpu_get_cf(cpu) == 0) return true; /* handled */
@@ -8375,13 +8375,13 @@ int cpu_get_cf(CPUI386 *cpu)
 
 u8 *cpu_get_phys_mem(CPUI386 *cpu) { return cpu->phys_mem; }
 long cpu_get_phys_mem_size(CPUI386 *cpu) { return cpu->phys_mem_size; }
-
+/*
 void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque)
 {
 	cpu->int13_handler = handler;
 	cpu->int13_opaque = opaque;
 }
-
+*/
 void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque)
 {
 	cpu->int2f_handler = handler;

@@ -161,6 +161,10 @@ struct FDCState {
     uint8_t  pending_st0;    /* ST0 saved at seek/cmd end               */
     uint8_t  pending_pcn;    /* PCN saved at seek end                   */
     int      int_result_valid; /* sense-interrupt has data waiting      */
+    /* Post-reset SENSEI queue: real 82077AA returns ST0_IC_RDYCHG|drive
+     * for each of 4 logical drives in turn.  SeaBIOS calls SENSEI 4 times
+     * and expects 0xC0 each time; on the 5th call it gets 0x80 and stops. */
+    int      reset_sensei;   /* number of queued reset SENSEI responses  */
 
     /* DMA transfer state */
     int      dma_active;     /* DMA transfer in progress                */
@@ -325,10 +329,16 @@ static void fdc_reset(FDCState *s, int software_reset)
      * On power-on we do NOT fire IRQ: the BIOS has not set up its ISR yet,
      * and the PIC may not be initialised. */
     if (software_reset && (s->dor & DOR_DMAEN)) {
-        s->int_result_valid = 1;
-        s->pending_st0      = ST0_IC_RDYCHG;
-        s->pending_pcn      = 0;
-        fdc_schedule_irq(s, ST0_IC_RDYCHG, 0);
+        /* Real 82077AA: after reset, SENSEI must be called once per logical
+         * drive (up to 4).  Each call returns ST0=0xC0|drive, PCN=0.
+         * The 5th SENSEI returns ST0=0x80 (IC=invalid) to end the loop.
+         * We do NOT use int_result_valid here — that is reserved for
+         * SEEK/RECALIBRATE results.  reset_sensei is a separate counter. */
+        s->reset_sensei  = 4;
+        s->irq_pending   = 1;
+        s->irq_delay     = FDC_IRQ_DELAY_MS;
+    } else {
+        s->reset_sensei = 0;
     }
 }
 
@@ -554,13 +564,34 @@ static void fdc_execute_command(FDCState *s)
 
     /* ---- SENSE INTERRUPT STATUS (08h) ---------------------------- */
     case 0x08:
-        if (s->int_result_valid) {
+        if (s->reset_sensei > 0) {
+            /* Post-reset queue: return ST0=0xC0|drive for each of 4 drives.
+             * Drives are returned in order 0,1,2,3 so SeaBIOS gets the right
+             * drive number in ST0 bits [1:0] for its internal bookkeeping. */
+            int idx = 4 - s->reset_sensei;          /* 0,1,2,3            */
+            s->reset_sensei--;
+            uint8_t res[2] = {
+                (uint8_t)(ST0_IC_RDYCHG | (idx & 0x03)),
+                s->drive[idx & 0x01].track
+            };
+            fdc_set_result(s, res, 2);
+            /* Keep IRQ asserted until queue drained.
+             * Use irq_pending directly — NOT fdc_schedule_irq, which would
+             * corrupt int_result_valid used by SEEK/RECALIBRATE. */
+            if (s->reset_sensei > 0) {
+                s->irq_pending = 1;
+                s->irq_delay   = FDC_IRQ_DELAY_MS;
+            } else {
+                fdc_lower_irq(s);
+            }
+        } else if (s->int_result_valid) {
+            /* Normal post-seek/recalibrate interrupt */
             uint8_t res[2] = { s->pending_st0, s->pending_pcn };
             s->int_result_valid = 0;
             fdc_set_result(s, res, 2);
             fdc_lower_irq(s);
         } else {
-            /* No interrupt pending */
+            /* No interrupt pending — IC=invalid terminates SENSEI loop */
             uint8_t res[2] = { ST0_IC_INVAL, 0 };
             fdc_set_result(s, res, 2);
         }

@@ -132,8 +132,8 @@ struct CPUI386 {
 	} sysenter;
 
 	/* INT 13h disk handler hook */
-	void (*int13_handler)(struct CPUI386 *cpu, void *opaque);
-	void *int13_opaque;
+//	void (*int13_handler)(struct CPUI386 *cpu, void *opaque);
+//	void *int13_opaque;
 	void (*int2f_handler)(struct CPUI386 *cpu, void *opaque);
 	void *int2f_opaque;
 
@@ -210,8 +210,8 @@ void cpu_set_a20(CPUI386 *cpu, int enabled);
 int cpu_get_a20(CPUI386 *cpu);
 
 // INT 13h disk handler callback
-typedef void (*int13_handler_t)(CPUI386 *cpu, void *opaque);
-void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque);
+//typedef void (*int13_handler_t)(CPUI386 *cpu, void *opaque);
+//void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque);
 
 typedef void (*int2f_handler_t)(CPUI386 *cpu, void *opaque);
 void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque);

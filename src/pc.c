@@ -20,6 +20,143 @@ void netredirect_init(CPUI386 *cpu);
 #define cpu_get_cycle cpui386_get_cycle
 #endif
 
+/* ---- Emulink FDD: simple virtual floppy on ports 0xF1F0/0xF1F4 ----------
+ * Protocol (matches tiny386 / this BIOS):
+ *   OUT 0xF1F0, cmd    – set command (resets argi to 0)
+ *   OUT 0xF1F4, arg    – push argument (up to 4); executes after 3rd arg
+ *   IN  0xF1F0         – read 32-bit status / result
+ *   REP INSB  0xF1F4   – bulk read data (cmd 0x101)
+ *   REP OUTSB 0xF1F4   – bulk write data (cmd 0x102)
+ *
+ * Commands:
+ *   0x000 – identify: status = 0xAA55FF00
+ *   0x100 – probe drives: status bit6=drv0 present, bit2=drv1 present
+ *   0x101 – read sectors:  args[0]=drive, args[1]=CHS(c<<16|h<<8|s), args[2]=count
+ *   0x102 – write sectors: same args, then REP OUTSB
+ * -------------------------------------------------------------------------*/
+
+static void emulink_exec(PC *pc)
+{
+	switch (pc->emulink.cmd) {
+	case 0x000:
+		pc->emulink.status = 0xaa55ff00;
+		pc->emulink.cmd    = -1;
+		break;
+	case 0x100:
+		pc->emulink.status = 0;
+		if (disk_is_inserted(0)) pc->emulink.status |= 0x40;
+		if (disk_is_inserted(1)) pc->emulink.status |= 0x04;
+		pc->emulink.cmd = -1;
+		break;
+	case 0x101: /* read */
+	case 0x102: /* write */
+		if (pc->emulink.argi == 3) {
+			uint8_t  drv  = (uint8_t)pc->emulink.args[0];
+			uint32_t chs  = pc->emulink.args[1];
+			uint32_t cnt  = pc->emulink.args[2];
+			if (drv >= 2 || !disk_is_inserted(drv)) {
+				pc->emulink.status = 0x80; /* error */
+				pc->emulink.cmd    = -1;
+				break;
+			}
+			int c = (int)(chs >> 16);
+			int h = (int)((chs >> 8) & 0xff);
+			int s = (int)(chs & 0xff);
+			uint16_t heads = disk_get_heads(drv);
+			uint16_t sects = disk_get_sects(drv);
+			if (heads == 0 || sects == 0) {
+				pc->emulink.status = 0x80;
+				pc->emulink.cmd    = -1;
+				break;
+			}
+			uint32_t lba = (uint32_t)(c * heads + h) * sects + (uint32_t)(s - 1);
+			FIL *fil = disk_get_fil(drv);
+			FRESULT fr = f_lseek(fil, lba * 512u);
+			if (fr != FR_OK) {
+				pc->emulink.status = 0x80;
+				pc->emulink.cmd    = -1;
+			} else {
+				pc->emulink.status    = 0;
+				pc->emulink.dataleft  = (int)(cnt * 512u);
+			}
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+static uint32_t emulink_read32(PC *pc)
+{
+	return pc->emulink.status;
+}
+
+static void emulink_cmd_write(PC *pc, uint32_t val)
+{
+	pc->emulink.cmd  = (int)val;
+	pc->emulink.argi = 0;
+	emulink_exec(pc);
+}
+
+static void emulink_arg_write(PC *pc, uint32_t val)
+{
+	if (pc->emulink.argi < 4)
+		pc->emulink.args[pc->emulink.argi++] = val;
+	emulink_exec(pc);
+}
+
+/* bulk read: called from pc_io_read_string for port 0xF1F4 */
+static int emulink_data_read(PC *pc, uint8_t *buf, int size, int count)
+{
+	if (pc->emulink.cmd == 0x101 && pc->emulink.argi == 3) {
+		uint8_t drv = (uint8_t)pc->emulink.args[0];
+		if (!disk_is_inserted(drv)) goto err;
+		int len = size * count;
+		if (len > pc->emulink.dataleft) goto err;
+		FIL *fil = disk_get_fil(drv);
+		UINT br = 0;
+		FRESULT fr = f_read(fil, buf, (UINT)len, &br);
+		if (fr != FR_OK || (int)br != len) goto err;
+		pc->emulink.dataleft -= len;
+		if (pc->emulink.dataleft == 0) {
+			pc->emulink.cmd    = -1;
+			pc->emulink.status = 0;
+		}
+		return count;
+	}
+err:
+	pc->emulink.cmd    = -1;
+	pc->emulink.status = 0x80;
+	return count;
+}
+
+/* bulk write: called from pc_io_write_string for port 0xF1F4 */
+static int emulink_data_write(PC *pc, uint8_t *buf, int size, int count)
+{
+	if (pc->emulink.cmd == 0x102 && pc->emulink.argi == 3) {
+		uint8_t drv = (uint8_t)pc->emulink.args[0];
+		if (!disk_is_inserted(drv)) goto err;
+		int len = size * count;
+		if (len > pc->emulink.dataleft) goto err;
+		FIL *fil = disk_get_fil(drv);
+		UINT bw = 0;
+		FRESULT fr = f_write(fil, buf, (UINT)len, &bw);
+		if (fr != FR_OK || (int)bw != len) goto err;
+		pc->emulink.dataleft -= len;
+		if (pc->emulink.dataleft == 0) {
+			pc->emulink.cmd    = -1;
+			pc->emulink.status = 0;
+		}
+		return count;
+	}
+err:
+	pc->emulink.cmd    = -1;
+	pc->emulink.status = 0x80;
+	return count;
+}
+
+/* --------------------------------------------------------------------------*/
+
 static u8 pc_io_read(void *o, int addr)
 {
 	PC *pc = o;
@@ -111,9 +248,11 @@ static u8 pc_io_read(void *o, int addr)
 	case 0x04: case 0x05: case 0x06: case 0x07:
 		val = i8257_read_chan(pc->isa_dma, addr - 0x00, 1);
 		return val;
-	/* Emulink ports removed - using INT 13h disk handler instead */
-	case 0xf1f4:
-		return 0xff;
+	case 0xf1f4: {
+		/* emulink: single-byte read (BIOS probes this way too) */
+		uint32_t v32 = emulink_read32(pc);
+		return (u8)(v32 & 0xff);
+	}
 	case 0x08: case 0x09: case 0x0a: case 0x0b:
 	case 0x0c: case 0x0d: case 0x0e: case 0x0f:
 		val = i8257_read_cont(pc->isa_dma, addr - 0x08, 1);
@@ -240,9 +379,9 @@ static u32 pc_io_read32(void *o, int addr)
 	case 0xcfc:
 		val = i440fx_read_data(pc->i440fx, 0, 2);
 		return val;
-	/* Emulink removed - using INT 13h disk handler instead */
+	/* Emulink FDD status port */
 	case 0xf1f0:
-		return 0xffffffff;
+		return emulink_read32(pc);
 	default:
 		fprintf(stderr, "ind 0x%x <= 0x%x\n", addr, 0xffffffff);
 	}
@@ -257,6 +396,8 @@ static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int coun
 		return ide_data_read_string(pc->ide, buf, size, count);
 	case 0x170:
 		return ide_data_read_string(pc->ide2, buf, size, count);
+	case 0xf1f4:
+		return emulink_data_read(pc, buf, size, count);
 	}
 	return 0;
 }
@@ -524,8 +665,12 @@ static void pc_io_write32(void *o, int addr, u32 val)
 	case 0xcfc:
 		i440fx_write_data(pc->i440fx, 0, val, 2);
 		return;
-	/* Emulink removed - using INT 13h disk handler instead */
-	case 0xf1f0: case 0xf1f4:
+	/* Emulink FDD command/data ports */
+	case 0xf1f0:
+		emulink_cmd_write(pc, val);
+		return;
+	case 0xf1f4:
+		emulink_arg_write(pc, val);
 		return;
     case 0x260: case 0x261: case 0x262: case 0x263:
 		pc_io_write16(o, addr, (uint16_t) val);
@@ -545,6 +690,8 @@ static int pc_io_write_string(void *o, int addr, uint8_t *buf, int size, int cou
 		return ide_data_write_string(pc->ide, buf, size, count);
 	case 0x170:
 		return ide_data_write_string(pc->ide2, buf, size, count);
+	case 0xf1f4:
+		return emulink_data_write(pc, buf, size, count);
 	}
 	return 0;
 }
@@ -808,7 +955,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	/* Set up INT 13h disk handler (real mode - DOS) */
 	disk_set_cpu(pc->cpu);
-	cpu_set_int13_handler(pc->cpu, diskhandler_wrapper, NULL);
+//	cpu_set_int13_handler(pc->cpu, diskhandler_wrapper, NULL);
 	disk_set_cmos_callback(cmos_floppy_update);
 	netredirect_init(pc->cpu);
 
@@ -939,6 +1086,10 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 				0x00, 0x80, 0x480, 0);
 	pc->isa_hdma = i8257_new(pc->phys_mem, pc->phys_mem_size,
 				 0xc0, 0x88, 0x488, 1);
+	/* Emulink FDD – virtual floppy on ports 0xF1F0/0xF1F4 (required by BIOS) */
+	memset(&pc->emulink, 0, sizeof(pc->emulink));
+	pc->emulink.cmd = -1;
+
 	/* FDC (Intel 8272A/82077AA) – port I/O 0x3F0-0x3F7, DMA ch2, IRQ 6.
 	 * Created after isa_dma/pic, and floppy images already inserted above,
 	 * so fdc_media_changed fires correctly on subsequent insert/eject. */
