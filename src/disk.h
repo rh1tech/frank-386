@@ -8,7 +8,7 @@
 #include "i386.h"
 
 // External variables
-extern int hdcount, fdcount;
+extern int hdcount;
 
 // Disk management functions
 uint8_t insertdisk(uint8_t drivenum, const char *pathname);
@@ -29,18 +29,10 @@ void disk_set_fdc_mediachange_callback(void (*cb)(int drive));
 struct VGAState;
 void disk_set_vga(struct VGAState *vga);
 uint8_t disk_is_cdrom(uint8_t drivenum);
-
-// INT 13h handler wrapper for CPU hook (matches int13_handler_t signature)
-/*
-static inline void diskhandler_wrapper(CPUI386 *cpu, void *opaque)
-{
-	(void)opaque;
-	diskhandler(cpu);
-}
-*/
 uint16_t disk_get_cyls(uint8_t drivenum);
 uint16_t disk_get_heads(uint8_t drivenum);
 uint16_t disk_get_sects(uint8_t drivenum);
+uint32_t fdds_types();
 
 // For IDE backend - get already-open FIL* to avoid double-open
 #ifdef RP2350_BUILD

@@ -12,7 +12,7 @@
 
 extern FATFS fs;
 
-int hdcount = 0, fdcount = 0;
+int hdcount = 0;
 
 static uint8_t sectorbuffer[512];
 
@@ -134,14 +134,19 @@ static inline void ejectdisk(uint8_t drivenum) {
     if (disk[drivenum].inserted) {
         f_close(&disk[drivenum].diskfile);
         disk[drivenum].inserted = 0;
+        if (drivenum < 2) {
+            /* Empty floppy drive must fall back to default 1.44M type */
+            disk[drivenum].drive_type = 4;
+            disk[drivenum].cyls = 80;
+            disk[drivenum].heads = 2;
+            disk[drivenum].sects = 18;
+        }
         disk_set_filename(drivenum, NULL);
         if (drivenum < 2) update_floppy_cmos();
         if (drivenum < 2 && disk_fdc_mediachange_cb)
             disk_fdc_mediachange_cb(drivenum);
         if (drivenum >= 2)
             hdcount--;
-        else
-            fdcount--;
     }
 }
 
@@ -250,8 +255,6 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     // Update drive counts
     if (drivenum >= 2) {
         hdcount++;
-    } else {
-        fdcount++;
     }
 
     // Update CMOS floppy type if floppy
@@ -435,139 +438,6 @@ static void writedisk(uint8_t drivenum,
     cpu_set_ah(disk_cpu, 0);
 }
 
-
-void diskhandler(CPUI386 *cpu) {
-    static uint8_t lastdiskah[5] = { 0 }, lastdiskcf[5] = { 0 };
-
-    disk_cpu = cpu;
-    disk_mem = cpu_get_phys_mem(cpu);
-
-    // Keep BDA hard drive count in sync.  SeaBIOS discovers drives via
-    // ATA port probing (which we don't implement), so BDA 0x475 stays 0.
-    // Patching it here ensures DOS sees the correct count before it ever
-    // tries to access drive C:.
-    disk_mem[0x475] = hdcount;
-
-    uint8_t dl_orig  = cpu_get_dl(cpu);
-    uint8_t drivenum = (dl_orig & 0x80) ? (uint8_t)(2u + (dl_orig & 0x7Fu)) : dl_orig;
-    uint8_t ah = cpu_get_ah(cpu);
-
-// TODO:    if (dl_orig & 0x80) install_fdpt();
-    // HDD drivenum 4+ не существует (4 = CD-ROM слот, 5+ = OOB)
-    if ((dl_orig & 0x80) && drivenum >= 4) {
-        cpu_set_ah(cpu, 0x01);  // invalid drive
-        cpu_set_cf(cpu, 1);
-        return;
-    }
-
-    // Handle the interrupt service based on the function requested in AH
-    switch (ah) {
-        case 0x00:  // Reset disk system
-            if (disk[drivenum].inserted) {
-                cpu_set_ah(cpu, 0);
-                cpu_set_cf(cpu, 0);  // Successful reset (no-op in emulator)
-            } else {
-                cpu_set_cf(cpu, 1);  // Disk not inserted
-            }
-            break;
-
-        case 0x01:  // Return last status
-            cpu_set_ah(cpu, lastdiskah[drivenum]);
-            cpu_set_cf(cpu, lastdiskcf[drivenum]);
-            return;
-
-        case 0x02:  // Read sector(s) into memory
-            readdisk(drivenum, cpu_get_es(cpu), cpu_get_bx(cpu),
-                     ((uint16_t)cpu_get_ch(cpu) | (((uint16_t)cpu_get_cl(cpu) & 0xC0u) << 2)),  // Cylinder
-                     cpu_get_cl(cpu) & 63,                            // Sector
-                     cpu_get_dh(cpu),                                 // Head
-                     cpu_get_al(cpu),                                 // Sector count
-                     0);                                              // Read operation
-            break;
-
-        case 0x03:  // Write sector(s) from memory
-            writedisk(drivenum, cpu_get_es(cpu), cpu_get_bx(cpu),
-                      ((uint16_t)cpu_get_ch(cpu) | (((uint16_t)cpu_get_cl(cpu) & 0xC0u) << 2)),  // Cylinder
-                      cpu_get_cl(cpu) & 63,                            // Sector
-                      cpu_get_dh(cpu),                                 // Head
-                      cpu_get_al(cpu));                                // Sector count
-            break;
-
-        case 0x04:  // Verify sectors
-            readdisk(drivenum, cpu_get_es(cpu), cpu_get_bx(cpu),
-                     ((uint16_t)cpu_get_ch(cpu) | (((uint16_t)cpu_get_cl(cpu) & 0xC0u) << 2)),   // Cylinder
-                     cpu_get_cl(cpu) & 63,                             // Sector
-                     cpu_get_dh(cpu),                                  // Head
-                     cpu_get_al(cpu),                                  // Sector count
-                     1);                                               // Verify operation
-            break;
-
-        case 0x05:  // Format track
-            cpu_set_cf(cpu, 0);  // Success (no-op for emulator)
-            cpu_set_ah(cpu, 0);
-            break;
-
-        case 0x08: {  // Get drive parameters
-            if (dl_orig & 0x80) {
-                // HDD
-                if (!disk[drivenum].inserted) {
-                    cpu_set_cf(cpu, 1); cpu_set_ah(cpu, 0x07); break;
-                }
-                uint16_t mc = disk[drivenum].cyls - 1u;
-                uint8_t  ch = (uint8_t)(mc & 0xFFu);
-                uint8_t  cl = (uint8_t)((disk[drivenum].sects & 0x3Fu) | (((mc >> 8) & 0x03u) << 6));
-                uint8_t  dh = disk[drivenum].heads - 1u;
-                cpu_set_cf(cpu, 0); cpu_set_ah(cpu, 0);
-                cpu_set_ch(cpu, ch); cpu_set_cl(cpu, cl);
-                cpu_set_dh(cpu, dh); cpu_set_dl(cpu, hdcount);
-            } else {
-                // Флоппи — отвечаем всегда; drive_type инициализирован в 4 (1.44M)
-                // и обновляется при mount, но не сбрасывается при unmount.
-                static const uint8_t fd_geom[6][3] = {
-                    {80,2,18},{40,2,9},{80,2,15},{80,2,9},{80,2,18},{80,2,36}
-                };
-                uint8_t dt = disk[drivenum].drive_type;
-                if (dt > 5) dt = 4;
-                uint16_t cyls  = disk[drivenum].inserted ? disk[drivenum].cyls  : fd_geom[dt][0];
-                uint8_t  heads = disk[drivenum].inserted ? disk[drivenum].heads : fd_geom[dt][1];
-                uint8_t  sects = disk[drivenum].inserted ? disk[drivenum].sects : fd_geom[dt][2];
-                uint16_t mc = cyls - 1u;
-                cpu_set_cf(cpu, 0); cpu_set_ah(cpu, 0);
-                cpu_set_ch(cpu, (uint8_t)(mc & 0xFFu));
-                cpu_set_cl(cpu, (uint8_t)((sects & 0x3Fu) | (((mc >> 8) & 0x03u) << 6)));
-                cpu_set_dh(cpu, heads - 1);
-                cpu_set_bl(cpu, dt);
-                cpu_set_dl(cpu, fdcount);
-            }
-            break;
-        }
-/* TODO:
-        case 0x41:  // Check Extensions Present
-            if (drivenum >= 2) {
-                cpu_set_ah(cpu, 0x30);  // version 3.0
-                cpu_set_bx(cpu, 0xAA55);
-                cpu_set_cx(cpu, 0x0007);  // поддерживаем функции 1,2,3
-                cpu_set_cf(cpu, 0);
-            } else {
-                cpu_set_cf(cpu, 1);
-            }
-            break;
-*/
-        default:  // Unknown function requested
-            cpu_set_cf(cpu, 1);  // Error
-            break;
-    }
-
-    // Update last disk status
-    lastdiskah[drivenum] = cpu_get_ah(cpu);
-    lastdiskcf[drivenum] = cpu_get_cf(cpu);
-
-    // Set the last status in BIOS Data Area (for hard drives)
-    if (dl_orig & 0x80) {
-        disk_mem[0x474] = cpu_get_ah(cpu);
-    }
-}
-
 //=============================================================================
 // Public API for Disk UI
 //=============================================================================
@@ -626,6 +496,7 @@ uint8_t disk_is_cdrom(uint8_t drivenum) {
 uint16_t disk_get_cyls(uint8_t drivenum)  { return drivenum < 5 ? disk[drivenum].cyls  : 0; }
 uint16_t disk_get_heads(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].heads : 0; }
 uint16_t disk_get_sects(uint8_t drivenum) { return drivenum < 5 ? disk[drivenum].sects : 0; }
+uint32_t fdds_types() { return ((disk[1].drive_type & 0xF) << 4) | (disk[0].drive_type & 0xF); }
 
 // Get FIL pointer for IDE backend (avoids double-open)
 FIL* disk_get_fil(uint8_t drivenum)  { return drivenum < 5 && disk[drivenum].inserted ? &disk[drivenum].diskfile : NULL; }

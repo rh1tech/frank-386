@@ -8375,13 +8375,6 @@ int cpu_get_cf(CPUI386 *cpu)
 
 u8 *cpu_get_phys_mem(CPUI386 *cpu) { return cpu->phys_mem; }
 long cpu_get_phys_mem_size(CPUI386 *cpu) { return cpu->phys_mem_size; }
-/*
-void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque)
-{
-	cpu->int13_handler = handler;
-	cpu->int13_opaque = opaque;
-}
-*/
 void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque)
 {
 	cpu->int2f_handler = handler;

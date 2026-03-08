@@ -43,9 +43,7 @@ static void emulink_exec(PC *pc)
 		pc->emulink.cmd    = -1;
 		break;
 	case 0x100:
-		pc->emulink.status = 0;
-		if (disk_is_inserted(0)) pc->emulink.status |= 0x40;
-		if (disk_is_inserted(1)) pc->emulink.status |= 0x04;
+		pc->emulink.status = fdds_types(); 
 		pc->emulink.cmd = -1;
 		break;
 	case 0x101: /* read */
@@ -899,10 +897,11 @@ static void pc_reset_request(void *p)
 
 extern uint8_t gfx_buffer[256ul << 10];
 
-
 static CMOS *_pc_cmos_for_floppy = NULL;
 static void cmos_floppy_update(uint8_t ta, uint8_t tb) {
     cmos_set_floppy_types(_pc_cmos_for_floppy, ta, tb);
+    cmos_set(_pc_cmos_for_floppy, 0x14, 0x41); // 0x14 <= 0x41 (2 fdds)
+    cmos_update_checksum(_pc_cmos_for_floppy);
 }
 
 static PC *_pc_for_fdc = NULL;
@@ -955,7 +954,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	/* Set up INT 13h disk handler (real mode - DOS) */
 	disk_set_cpu(pc->cpu);
-//	cpu_set_int13_handler(pc->cpu, diskhandler_wrapper, NULL);
 	disk_set_cmos_callback(cmos_floppy_update);
 	netredirect_init(pc->cpu);
 

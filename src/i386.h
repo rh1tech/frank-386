@@ -209,10 +209,6 @@ long cpu_get_phys_mem_size(CPUI386 *cpu);
 void cpu_set_a20(CPUI386 *cpu, int enabled);
 int cpu_get_a20(CPUI386 *cpu);
 
-// INT 13h disk handler callback
-//typedef void (*int13_handler_t)(CPUI386 *cpu, void *opaque);
-//void cpu_set_int13_handler(CPUI386 *cpu, int13_handler_t handler, void *opaque);
-
 typedef void (*int2f_handler_t)(CPUI386 *cpu, void *opaque);
 void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque);
 
