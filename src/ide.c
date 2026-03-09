@@ -2046,18 +2046,25 @@ static void block_device_reinit(BlockDevice *bs, const char *filename)
 
 #ifdef RP2350_BUILD
     if (bf->f_open) { f_close(&bf->f); bf->f_open = 0; }
-    if (f_open(&bf->f, filename, FA_READ) == FR_OK) {
-        bf->f_open = 1;
-        bf->nb_sectors = (int64_t)f_size(&bf->f) / SECTOR_SIZE;
-        bf->start_offset = 0;
+    bf->nb_sectors = 0;
+    /* filename == NULL or "" means disc ejected — leave drive empty */
+    if (filename && filename[0] != '\0') {
+        if (f_open(&bf->f, filename, FA_READ) == FR_OK) {
+            bf->f_open = 1;
+            bf->nb_sectors = (int64_t)f_size(&bf->f) / SECTOR_SIZE;
+            bf->start_offset = 0;
+        }
     }
 #else
-    if (bf->f) fclose(bf->f);
-    bf->f = fopen(filename, "rb");
-    if (bf->f) {
-        fseeko(bf->f, 0, SEEK_END);
-        bf->nb_sectors = ftello(bf->f) / SECTOR_SIZE;
-        bf->start_offset = 0;
+    if (bf->f) { fclose(bf->f); bf->f = NULL; }
+    bf->nb_sectors = 0;
+    if (filename && filename[0] != '\0') {
+        bf->f = fopen(filename, "rb");
+        if (bf->f) {
+            fseeko(bf->f, 0, SEEK_END);
+            bf->nb_sectors = ftello(bf->f) / SECTOR_SIZE;
+            bf->start_offset = 0;
+        }
     }
 #endif
 }
@@ -2118,8 +2125,24 @@ int ide_attach_fil(IDEIFState *s, int drive, FIL *f, size_t filesize, size_t dat
 int ide_attach_cd(IDEIFState *s, int drive, const char *filename)
 {
     assert(MAX_MULT_SECTORS >= 4);
-    BlockDevice *bs = block_device_init(filename, BF_MODE_RO);
-    if (!bs) return -1;
+    BlockDevice *bs;
+    if (filename && filename[0] != '\0') {
+        bs = block_device_init(filename, BF_MODE_RO);
+        if (!bs) return -1;
+    } else {
+        /* Empty CD-ROM tray: allocate a zero-sector block device */
+        bs = malloc(sizeof(*bs));
+        BlockDeviceFile *bf = malloc(sizeof(*bf));
+        if (!bs || !bf) { free(bs); free(bf); return -1; }
+        memset(bs, 0, sizeof(*bs));
+        memset(bf, 0, sizeof(*bf));
+        bf->mode       = BF_MODE_RO;
+        bf->nb_sectors = 0;
+        bs->opaque           = bf;
+        bs->get_sector_count = bf_get_sector_count;
+        bs->read_async       = bf_read_async;
+        bs->write_async      = bf_write_async;
+    }
     s->drives[drive] = ide_cddrive_init(s, bs);
     return 0;
 }

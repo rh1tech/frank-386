@@ -249,7 +249,9 @@ bool config_save_all(void) {
         const char *fname = disk_get_filename(i);
         if (fname && fname[0]) {
             if (disk_is_cdrom(i)) {
-                snprintf(line, sizeof(line), "cd%c=%s\n", 'a' + (i - 2), fname);
+                /* drives 2,3,4 → 'a','b','e' (skip 'c','d' which are HDD letters) */
+                char cd_letter = (i == 4) ? 'e' : ('a' + (i - 2));
+                snprintf(line, sizeof(line), "cd%c=%s\n", cd_letter, fname);
             } else {
                 snprintf(line, sizeof(line), "hd%c=%s\n", 'a' + (i - 2), fname);
             }

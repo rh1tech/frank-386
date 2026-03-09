@@ -953,6 +953,28 @@ static void fdc_mediachange_notify(int drive) {
         fdc_media_changed(_pc_for_fdc->fdc, drive);
 }
 
+/* CD-ROM media change callback: called by disk layer when a CD-ROM drive
+ * is inserted (filename != NULL) or ejected (filename == NULL).
+ *
+ * disk[] index → IDE mapping (mirrors the pc_new() loop):
+ *   disk[2] = secondary master  → ide2, drive 0
+ *   disk[3] = secondary slave   → ide2, drive 1
+ *   disk[4] = DRIVE_CDROM_E     → ide2, drive 1  (runtime-only, diskui)
+ */
+static PC *_pc_for_cdrom = NULL;
+static void cdrom_change_notify(int drivenum, const char *filename) {
+    if (!_pc_for_cdrom) return;
+    IDEIFState *ide = _pc_for_cdrom->ide2;
+    int ide_drive;
+    switch (drivenum) {
+        case 2: ide_drive = 0; break;          /* secondary master */
+        case 3: ide_drive = 1; break;          /* secondary slave */
+        case 4: ide_drive = 1; break;          /* diskui CDROM E: → secondary slave */
+        default: return;
+    }
+    ide_change_cd(ide, ide_drive, filename ? filename : "");
+}
+
 PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
@@ -1050,6 +1072,22 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 #endif
 	}
 
+#ifdef RP2350_BUILD
+	/* Drive 4 = CD-ROM E: (diskui runtime slot, secondary slave on ide2).
+	 * Pre-attach an empty ATAPI drive so the OS detects the hardware at boot.
+	 * The disc will be inserted later via diskui → cdrom_change_notify. */
+	{
+		const char *cd4 = disk_get_filename(4);
+		if (cd4 && cd4[0]) {
+			/* A disc image was saved in the config — attach it directly */
+			ide_attach_cd(pc->ide2, 1, cd4);
+		} else {
+			/* Attach an empty CD-ROM drive (no disc inserted yet) */
+			ide_attach_cd(pc->ide2, 1, "");
+		}
+	}
+#endif
+
 	/* Fill CMOS with hard drive geometry from IDE (replaces manual block) */
 	ide_fill_cmos(pc->ide, pc->cmos, cmos_set);
 	mem[0x475] = hdcount;
@@ -1140,6 +1178,8 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->fdc = fdc_new(pc->pic, pc->isa_dma);
 	_pc_for_fdc = pc;
 	disk_set_fdc_mediachange_callback(fdc_mediachange_notify);
+	_pc_for_cdrom = pc;
+	disk_set_cdrom_change_callback(cdrom_change_notify);
 	pc->sb16 = sb16_new(0x220, 5,
 			    pc->isa_dma, pc->isa_hdma,
 			    pc->pic, set_irq);
@@ -1272,6 +1312,10 @@ int parse_conf_ini(void* user, const char* section,
 		} else if (NAME("cdd")) {
 			conf->disks[3] = strdup(value);
 			conf->iscd[3] = 1;
+		} else if (NAME("cde")) {
+			/* CD-ROM E: = diskui runtime drive 4 (secondary slave, ide2/drive1) */
+			disk_set_filename(4, value);
+			disk_set_cdrom(4, 1);
 		} else if (NAME("fda")) {
 			conf->fdd[0] = strdup(value);
 		} else if (NAME("fdb")) {
