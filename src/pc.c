@@ -154,8 +154,28 @@ err:
 }
 
 /* --------------------------------------------------------------------------*/
+#if TRACE_PORTS
+static FIL ports_log;
+#include <stdarg.h>
+void debug_write(const char *fmt, ...) {
+	char buf[256];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (n <= 0)
+		return;
+	if (n >= (int)sizeof(buf))
+		n = sizeof(buf) - 1;
+	UINT bw;
+	f_write(&ports_log, buf, n, &bw);
+	f_sync(&ports_log);
+}
+#else
+#define debug_write(...) (void)0
+#endif
 
-static u8 pc_io_read(void *o, int addr)
+static __always_inline u8 _pc_io_read(void *o, int addr)
 {
 	PC *pc = o;
 	u8 val;
@@ -326,7 +346,13 @@ static u8 pc_io_read(void *o, int addr)
 	}
 }
 
-static u16 pc_io_read16(void *o, int addr)
+static u8 pc_io_read(void *o, int addr) {
+	u8 r = _pc_io_read(o, addr);
+	debug_write("R8: %ph <- %02Xh\n", addr, r);
+	return r;
+}
+
+static __always_inline u16 _pc_io_read16(void *o, int addr)
 {
 	PC *pc = o;
 	u16 val;
@@ -359,7 +385,13 @@ static u16 pc_io_read16(void *o, int addr)
 	}
 }
 
-static u32 pc_io_read32(void *o, int addr)
+static u16 pc_io_read16(void *o, int addr) {
+	u16 r = _pc_io_read16(o, addr);
+	debug_write("R16: %ph <- %04Xh\n", addr, r);
+	return r;
+}
+
+static __always_inline u32 _pc_io_read32(void *o, int addr)
 {
 	PC *pc = o;
 	u32 val;
@@ -386,8 +418,15 @@ static u32 pc_io_read32(void *o, int addr)
 	return 0xffffffff;
 }
 
+static u32 pc_io_read32(void *o, int addr) {
+	u32 r = _pc_io_read32(o, addr);
+	debug_write("R32: %ph <- %08Xh\n", addr, r);
+	return r;
+}
+
 static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int count)
 {
+	debug_write("RS: %ph [%d / %d]\n", addr, size, count);
 	PC *pc = o;
 	switch(addr) {
 	case 0x1f0:
@@ -410,6 +449,7 @@ inline static void out_ems(const uint16_t port, const uint8_t data) {
 
 static void pc_io_write(void *o, int addr, u8 val)
 {
+	debug_write("W8: %ph -> %02Xh\n", addr, val);
 	PC *pc = o;
 	switch(addr) {
 	case 0x80: case 0xed:
@@ -607,6 +647,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 
 static void pc_io_write16(void *o, int addr, u16 val)
 {
+	debug_write("W16: %ph -> %04Xh\n", addr, val);
 	PC *pc = o;
 	switch(addr) {
 	/* IDE ports */
@@ -648,6 +689,7 @@ static void pc_io_write16(void *o, int addr, u16 val)
 
 static void pc_io_write32(void *o, int addr, u32 val)
 {
+	debug_write("W32: %ph -> %08Xh\n", addr, val);
 	PC *pc = o;
 	switch(addr) {
 	/* IDE ports */
@@ -682,6 +724,7 @@ static void pc_io_write32(void *o, int addr, u32 val)
 
 static int pc_io_write_string(void *o, int addr, uint8_t *buf, int size, int count)
 {
+	debug_write("WS: %ph [%d / %d]\n", addr, size, count);
 	PC *pc = o;
 	switch(addr) {
 	case 0x1f0:
@@ -714,6 +757,7 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	}
 #endif
 	int refresh = vga_step(pc->vga);
+    fdc_tick(pc->fdc);
 	i8254_update_irq(pc->pit);
 	cmos_update_irq(pc->cmos);
 	if (pc->enable_serial)
@@ -913,6 +957,9 @@ static void fdc_mediachange_notify(int drive) {
 PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	   u8 *fb, PCConfig *conf)
 {
+#if TRACE_PORTS
+	f_open(&ports_log, "ports.log", FA_WRITE | FA_CREATE_ALWAYS);
+#endif
 	PC *pc = malloc(sizeof(PC));
     char *mem = (uint8_t*)0x11000000;
 	CPU_CB *cb = NULL;

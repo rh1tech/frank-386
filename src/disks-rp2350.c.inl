@@ -185,12 +185,11 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
     }
 
     // Determine geometry (cyls, heads, sects)
-    uint16_t cyls = 0, heads = 0, sects = 0;
+    uint16_t cyls = 0, heads = 0, sects = 0, drive_type = 47;
 
     if (drivenum >= 2) {  // Hard disk
         sects = 63;
         heads = 16;
-
         // Try to detect geometry from MBR partition table.
         // The end-CHS of the last partition entry encodes the heads
         // and sectors-per-track the image was created with.
@@ -212,37 +211,41 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
 
         cyls = usable_size / ((size_t)sects * heads * 512);
     } else {  // Floppy disk
-        cyls = 80;
-        sects = 18;
-        heads = 2;
+        switch (size) {
+            case 163840:  cyls=40; heads=1; sects=8;  drive_type=1; break; //160K
+            case 184320:  cyls=40; heads=1; sects=9;  drive_type=1; break; //180K
+            case 327680:  cyls=40; heads=2; sects=8;  drive_type=1; break; //320K
+            case 368640:  cyls=40; heads=2; sects=9;  drive_type=1; break; //360K
 
-        /* Floppy geometry by image size:
-         * 360K  = 40 cyl, 2 head,  9 sect (5.25" DD)
-         * 720K  = 80 cyl, 2 head,  9 sect (3.5" DD)
-         * 1.2M  = 80 cyl, 2 head, 15 sect (5.25" HD)
-         * 1.44M = 80 cyl, 2 head, 18 sect (3.5" HD)  <-- default
-         * 2.88M = 80 cyl, 2 head, 36 sect (3.5" ED) */
-        if (size <= 368640) {        // 360K
-            cyls = 40; sects = 9; heads = 2;
-            disk[drivenum].drive_type = 1;
-        } else if (size <= 737280) { // 720K
-            cyls = 80; sects = 9; heads = 2;
-            disk[drivenum].drive_type = 3;
-        } else if (size <= 1228800) { // 1.2M
-            cyls = 80; sects = 15; heads = 2;
-            disk[drivenum].drive_type = 2;
-        } else if (size <= 1474560) { // 1.44M
-            cyls = 80; sects = 18; heads = 2;
-            disk[drivenum].drive_type = 4;
-        } else {                      // 2.88M
-            cyls = 80; sects = 36; heads = 2;
-            disk[drivenum].drive_type = 5;
+            case 655360:  cyls=80; heads=2; sects=8;  drive_type=3; break; //640K
+            case 737280:  cyls=80; heads=2; sects=9;  drive_type=3; break; //720K
+
+            case 1228800: cyls=80; heads=2; sects=15; drive_type=2; break; //1.2M
+
+            case 1474560: cyls=80; heads=2; sects=18; drive_type=4; break; //1.44M
+
+            case 1556480: cyls=80; heads=2; sects=19; drive_type=4; break; //1.49M
+            case 1638400: cyls=80; heads=2; sects=20; drive_type=4; break; //1.60M
+            case 1720320: cyls=80; heads=2; sects=21; drive_type=4; break; //DMF
+            case 1763328: cyls=82; heads=2; sects=21; drive_type=4; break; //tomsrtbt
+
+            case 1802240: cyls=80; heads=2; sects=22; drive_type=4; break;
+            case 1884160: cyls=80; heads=2; sects=23; drive_type=4; break;
+            case 1966080: cyls=80; heads=2; sects=24; drive_type=4; break;
+            case 2048000: cyls=80; heads=2; sects=25; drive_type=4; break;
+            case 2129920: cyls=80; heads=2; sects=26; drive_type=4; break;
+            case 2211840: cyls=80; heads=2; sects=27; drive_type=4; break;
+            case 2293760: cyls=80; heads=2; sects=28; drive_type=4; break;
+            case 2375680: cyls=80; heads=2; sects=29; drive_type=4; break;
+            case 2457600: cyls=80; heads=2; sects=30; drive_type=4; break;
+            case 2949120: cyls=80; heads=2; sects=36; drive_type=5; break; //2.88M
+            default: cyls=80; heads=2; sects=18; drive_type=4;
         }
     }
 
     // Eject any existing disk and insert the new one
     ejectdisk(drivenum);
-
+    disk[drivenum].drive_type = drive_type;
     disk[drivenum].diskfile = file;
     disk[drivenum].filesize = usable_size;
     disk[drivenum].data_offset = 0;   // fixed VHD has no header, only footer

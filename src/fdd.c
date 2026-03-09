@@ -205,7 +205,7 @@ static int  fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len);
 
 static inline int fdc_selected_drive(FDCState *s)
 {
-    return s->dor & DOR_DSEL;   /* 0 or 1                               */
+    return (s->dor & DOR_DSEL) % FDC_MAX_DRIVES;   /* 0 or 1 */
 }
 
 /* Map logical drive (0/1) to disk[] array index (always same here) */
@@ -241,13 +241,23 @@ static int fdc_chs_valid(int drivenum, int cyl, int head, int sect)
             (uint16_t)head < heads);
 }
 
+#if TRACE_PORTS
+#include <stdarg.h>
+void debug_write(const char *fmt, ...);
+#else
+#define debug_write(...) (void)0
+#endif
+
 /* ------------------------------------------------------------------ */
 /*  IRQ                                                                 */
 /* ------------------------------------------------------------------ */
 static void fdc_raise_irq(FDCState *s)
 {
-    if (s->dor & DOR_DMAEN)
+    debug_write("IRQ 6? %x\n", s->dor);
+    if (s->dor & DOR_DMAEN) {
+        debug_write("IRQ 6!\n");
         i8259_set_irq(s->pic, FDC_IRQ, 1);
+    }
 }
 
 static void fdc_lower_irq(FDCState *s)
@@ -546,6 +556,7 @@ static void fdc_execute_command(FDCState *s)
                     | ST3_TS            /* always two-sided              */
                     | (fdc_drive_ready(dn) ? ST3_RY : 0)
                     | (s->drive[dn].track == 0 ? ST3_T0 : 0);
+        s->drive[dn].media_changed = 0;
         uint8_t res[1] = { st3 };
         fdc_set_result(s, res, 1);
         break;
@@ -817,7 +828,7 @@ uint8_t fdc_ioport_read(FDCState *s, uint32_t addr)
         /* Bit 7 = INT (interrupt pending), bit 6 = DMA, rest = drive status */
         return (uint8_t)((s->irq_pending ? 0x80 : 0x00) |
                          (s->dor & DOR_DMAEN ? 0x20 : 0x00) |
-                         (fdc_drive_ready(0) ? 0x04 : 0x00));
+                         (fdc_drive_ready(fdc_selected_drive(s)) ? 0x04 : 0x00));
 
     case 0x3F1: /* SRB – Status Register B (PS/2) */
         return 0x00;   /* all motor off, no activity */
@@ -834,8 +845,7 @@ uint8_t fdc_ioport_read(FDCState *s, uint32_t addr)
 
         if (s->phase == PHASE_EXEC) {
             /* DMA transfer in progress – not ready for CMD/RESULT     */
-            msr = 0;             /* RQM=0, CB=1 implied                 */
-            msr |= MSR_CB;
+            msr = MSR_CB;       /* RQM=0, CB=1 implied                 */
         } else if (s->phase == PHASE_RESULT) {
             /* Result bytes ready: RQM=1, DIO=1, CB=1                  */
             msr = MSR_RQM | MSR_DIO | MSR_CB;
@@ -872,7 +882,7 @@ uint8_t fdc_ioport_read(FDCState *s, uint32_t addr)
         if (d < FDC_MAX_DRIVES && s->drive[d].media_changed)
             dir |= 0x80;
         /* Bit 0: high-density selected (1 = HD) */
-        return dir | 0x7F;
+        return dir | 0x20;  // READY
     }
 
     default:
@@ -974,6 +984,7 @@ void fdc_tick(FDCState *s)
 {
     if (s->irq_pending) {
         if (s->irq_delay > 0) {
+            debug_write("IRQ 6 pending %d\n", s->irq_delay);
             s->irq_delay--;
         } else {
             s->irq_pending = 0;
