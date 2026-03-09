@@ -216,19 +216,14 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
             case 184320:  cyls=40; heads=1; sects=9;  drive_type=1; break; //180K
             case 327680:  cyls=40; heads=2; sects=8;  drive_type=1; break; //320K
             case 368640:  cyls=40; heads=2; sects=9;  drive_type=1; break; //360K
-
             case 655360:  cyls=80; heads=2; sects=8;  drive_type=3; break; //640K
             case 737280:  cyls=80; heads=2; sects=9;  drive_type=3; break; //720K
-
             case 1228800: cyls=80; heads=2; sects=15; drive_type=2; break; //1.2M
-
             case 1474560: cyls=80; heads=2; sects=18; drive_type=4; break; //1.44M
-
             case 1556480: cyls=80; heads=2; sects=19; drive_type=4; break; //1.49M
             case 1638400: cyls=80; heads=2; sects=20; drive_type=4; break; //1.60M
             case 1720320: cyls=80; heads=2; sects=21; drive_type=4; break; //DMF
             case 1763328: cyls=82; heads=2; sects=21; drive_type=4; break; //tomsrtbt
-
             case 1802240: cyls=80; heads=2; sects=22; drive_type=4; break;
             case 1884160: cyls=80; heads=2; sects=23; drive_type=4; break;
             case 1966080: cyls=80; heads=2; sects=24; drive_type=4; break;

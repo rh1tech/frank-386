@@ -712,7 +712,7 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 	if (unlikely(ent->pte_lookup[cpl > 0][rwm > 1])) {
 		cpu->cr2 = laddr;
 		cpu->excno = EX_PF;
-		cpu->excerr = make_pf_err(false, rwm, cpl);
+		cpu->excerr = make_pf_err(true, rwm, cpl);  /* page present, protection violation */
 		ent->lpgno = -1;
 		return false;
 	}
@@ -803,7 +803,7 @@ static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword add
 		if (ent->pte_lookup[cpu->cpl > 0][0]) {
 			cpu->cr2 = laddr;
 			cpu->excno = EX_PF;
-			cpu->excerr = make_pf_err(false, 1, cpu->cpl);
+			cpu->excerr = make_pf_err(true, 1, cpu->cpl);  /* page present, protection violation */
 			ent->lpgno = -1;
 			return false;
 		}
