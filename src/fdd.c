@@ -26,6 +26,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pico.h>
 
 #include "fdd.h"
 #include "disk.h"       /* disk[], chs2ofs helpers, FatFS FIL         */
@@ -251,7 +252,7 @@ void debug_write(const char *fmt, ...);
 /* ------------------------------------------------------------------ */
 /*  IRQ                                                                 */
 /* ------------------------------------------------------------------ */
-static void fdc_raise_irq(FDCState *s)
+static void __not_in_flash_func(fdc_raise_irq)(FDCState *s)
 {
     debug_write("IRQ 6? %x\n", s->dor);
     if (s->dor & DOR_DMAEN) {
@@ -355,8 +356,13 @@ static void fdc_reset(FDCState *s, int software_reset)
 /* ------------------------------------------------------------------ */
 /*  DMA transfer handler                                                */
 /*  Called by i8257 DMA engine.  dma_pos = bytes transferred so far.   */
-/*  dma_len = total bytes for this DMA request.                         */
-/*  Returns number of bytes consumed (== dma_len on success).           */
+/*  dma_len = total bytes for this DMA request (= DMA terminal count).  */
+/*  Returns total bytes handled (== dma_len when done).                 */
+/*                                                                       */
+/*  IMPORTANT: the real 8272A stops a multi-sector command when the     */
+/*  DMA controller asserts TC (terminal count), regardless of EOT.      */
+/*  So we must complete the command when dma_len bytes are consumed,    */
+/*  not when a pre-computed sector count reaches zero.                  */
 /* ------------------------------------------------------------------ */
 static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
 {
@@ -367,14 +373,12 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
         return dma_len;   /* tell DMA engine: done, nothing to transfer */
 
     int drivenum = s->dma_drivenum;
-
-    /* We transfer one sector at a time.  dma_pos tracks bytes done. */
     int transferred = 0;
+    int bytes_remaining = dma_len - dma_pos;  /* bytes still needed by DMA */
 
-    while (s->dma_sectors_todo > 0 && transferred < dma_len) {
-        /* Load sector from image if buffer empty */
+    while (bytes_remaining > 0) {
+        /* Load next sector into buffer when current one is exhausted */
         if (s->sector_buf_pos >= s->sector_buf_len) {
-            /* Read/write sector via FatFS */
             uint32_t off = fdc_chs_to_offset(drivenum,
                                               s->cur_cyl,
                                               s->cur_head,
@@ -382,7 +386,7 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
             if (off == (uint32_t)-1) goto dma_error;
 
             if (!s->dma_write) {
-                /* READ: load sector from image into buffer */
+                /* READ: load sector from disk image into buffer */
                 FIL *fil = disk_get_fil((uint8_t)drivenum);
                 if (!fil) goto dma_error;
                 UINT br;
@@ -391,7 +395,7 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
                 fr = f_read(fil, s->sector_buf, FDC_SECTOR_SIZE, &br);
                 if (fr != FR_OK || br != FDC_SECTOR_SIZE) goto dma_error;
             } else {
-                /* WRITE: buffer will be filled by DMA write, flush after */
+                /* WRITE: buffer will be filled by DMA reads below */
                 memset(s->sector_buf, 0, FDC_SECTOR_SIZE);
             }
             s->sector_buf_pos = 0;
@@ -399,17 +403,17 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
             s->dma_file_off   = off;
         }
 
-        int chunk = s->sector_buf_len - s->sector_buf_pos;
-        int remaining_dma = dma_len - transferred;
-        if (chunk > remaining_dma) chunk = remaining_dma;
+        /* How many bytes can we move this call? */
+        int in_buf   = s->sector_buf_len - s->sector_buf_pos;
+        int chunk    = in_buf < bytes_remaining ? in_buf : bytes_remaining;
 
         if (!s->dma_write) {
-            /* READ from disk → write to guest memory via DMA */
+            /* READ: disk → guest RAM */
             i8257_dma_write_memory((IsaDma *)s->dma, FDC_DMA_CHAN,
                                    s->sector_buf + s->sector_buf_pos,
                                    dma_pos + transferred, chunk);
         } else {
-            /* WRITE: read from guest memory via DMA → into buffer */
+            /* WRITE: guest RAM → disk buffer */
             i8257_dma_read_memory((IsaDma *)s->dma, FDC_DMA_CHAN,
                                   s->sector_buf + s->sector_buf_pos,
                                   dma_pos + transferred, chunk);
@@ -417,11 +421,12 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
 
         s->sector_buf_pos += chunk;
         transferred       += chunk;
+        bytes_remaining   -= chunk;
 
-        /* Sector complete? */
+        /* Sector fully consumed? */
         if (s->sector_buf_pos >= FDC_SECTOR_SIZE) {
             if (s->dma_write) {
-                /* Flush buffer to image */
+                /* Flush sector to disk image */
                 FIL *fil = disk_get_fil((uint8_t)drivenum);
                 if (!fil) goto dma_error;
                 UINT bw;
@@ -431,14 +436,10 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
                 if (fr != FR_OK || bw != FDC_SECTOR_SIZE) goto dma_error;
             }
 
-            s->dma_sectors_todo--;
-            s->sector_buf_pos = s->sector_buf_len; /* mark empty */
-
-            /* Advance CHS */
+            /* Advance CHS to next sector */
             s->cur_sector++;
             uint16_t spt = disk_get_sects((uint8_t)drivenum);
             if (s->cur_sector > spt || s->cur_sector > s->eot) {
-                /* End of track or EOT reached */
                 s->cur_sector = 1;
                 s->cur_head ^= 1;
                 if (s->cur_head == 0)
@@ -447,17 +448,15 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
         }
     }
 
-    if (s->dma_sectors_todo == 0) {
-        /* Transfer complete */
-        s->dma_active = 0;
-        i8257_dma_release_DREQ((IsaDma *)s->dma, FDC_DMA_CHAN);
-
+    /* DMA terminal count reached: command complete */
+    s->dma_active = 0;
+    i8257_dma_release_DREQ((IsaDma *)s->dma, FDC_DMA_CHAN);
+    {
         uint8_t st0 = (s->cur_head ? ST0_HD : 0) | (uint8_t)(drivenum & ST0_DS);
         fdc_finish_rw(s, st0, 0, 0,
                       s->cur_cyl, s->cur_head, s->cur_sector, 2 /*N=512*/);
     }
-
-    return dma_pos + transferred;
+    return dma_len;   /* signal TC to DMA engine */
 
 dma_error:
     s->dma_active = 0;
@@ -468,7 +467,7 @@ dma_error:
         fdc_finish_rw(s, st0, st1, 0,
                       s->cur_cyl, s->cur_head, s->cur_sector, 2);
     }
-    return dma_pos + transferred;
+    return dma_len;
 }
 
 /* ------------------------------------------------------------------ */
@@ -484,8 +483,8 @@ static void fdc_start_dma(FDCState *s, int drivenum, int write_to_disk,
     s->cur_head         = head;
     s->cur_sector       = sect;
     s->eot              = eot;
-    s->dma_sectors_todo = sector_count;
-    s->sector_buf_pos   = FDC_SECTOR_SIZE; /* empty */
+    s->dma_sectors_todo = sector_count; /* kept for reference, not used for TC */
+    s->sector_buf_pos   = FDC_SECTOR_SIZE; /* mark buffer empty */
     s->sector_buf_len   = FDC_SECTOR_SIZE;
     s->dma_active       = 1;
     s->phase            = PHASE_EXEC;
@@ -866,10 +865,14 @@ uint8_t fdc_ioport_read(FDCState *s, uint32_t addr)
         if (s->phase == PHASE_RESULT && s->fifo_pos < s->fifo_len) {
             uint8_t val = s->fifo[s->fifo_pos++];
             if (s->fifo_pos >= s->fifo_len) {
-                /* All result bytes consumed – back to command phase   */
+                /* All result bytes consumed – back to command phase.
+                 * Lower IRQ line so the edge detector in i8259 resets;
+                 * without this, the next fdc_raise_irq() won't produce
+                 * a new rising edge and Linux never gets the next IRQ6. */
                 s->phase    = PHASE_CMD;
                 s->fifo_pos = 0;
                 s->fifo_len = 0;
+                fdc_lower_irq(s);
             }
             return val;
         }
@@ -980,7 +983,7 @@ void fdc_media_changed(FDCState *s, int drive)
 /* ------------------------------------------------------------------ */
 /*  Periodic tick (call ~1 ms from pc_step)                             */
 /* ------------------------------------------------------------------ */
-void fdc_tick(FDCState *s)
+void __not_in_flash_func(fdc_tick)(FDCState *s)
 {
     if (s->irq_pending) {
         if (s->irq_delay > 0) {

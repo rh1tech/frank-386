@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <pico.h>
 #include "i8259.h"
 
 typedef struct PicState {
@@ -81,7 +82,7 @@ static inline int get_priority(PicState *s, int mask)
 }
 
 /* return the pic wanted interrupt. return -1 if none */
-static int pic_get_irq(PicState *s)
+static int __not_in_flash_func(pic_get_irq)(PicState *s)
 {
 	int mask, cur_priority, priority;
 
@@ -108,7 +109,7 @@ static int pic_get_irq(PicState *s)
 
 /* raise irq to CPU if necessary. must be called every time the active
    irq may change */
-static void pic_update_irq(PicState2 *s)
+static void __not_in_flash_func(pic_update_irq)(PicState2 *s)
 {
 	int irq2, irq;
 
@@ -126,7 +127,7 @@ static void pic_update_irq(PicState2 *s)
 	}
 }
 
-void i8259_set_irq(PicState2 *s, int irq, int level)
+void __not_in_flash_func(i8259_set_irq)(PicState2 *s, int irq, int level)
 {
 	pic_set_irq1(&s->pics[irq >> 3], irq & 7, level);
 	pic_update_irq(s);

@@ -757,7 +757,6 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	}
 #endif
 	int refresh = vga_step(pc->vga);
-    fdc_tick(pc->fdc);
 	i8254_update_irq(pc->pit);
 	cmos_update_irq(pc->cmos);
 	if (pc->enable_serial)
