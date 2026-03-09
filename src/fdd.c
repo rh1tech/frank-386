@@ -865,6 +865,10 @@ uint8_t fdc_ioport_read(FDCState *s, uint32_t addr)
         if (s->phase == PHASE_RESULT && s->fifo_pos < s->fifo_len) {
             uint8_t val = s->fifo[s->fifo_pos++];
             if (s->fifo_pos >= s->fifo_len) {
+                /* Result phase finished.
+                   Cancel deferred IRQ if it hasn't fired yet. */
+                s->irq_pending = 0;
+                s->irq_delay   = 0;
                 /* All result bytes consumed – back to command phase.
                  * Lower IRQ line so the edge detector in i8259 resets;
                  * without this, the next fdc_raise_irq() won't produce
