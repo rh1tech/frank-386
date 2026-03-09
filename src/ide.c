@@ -1163,11 +1163,21 @@ static void ide_atapi_cmd(IDEState *s)
     switch(s->io_buffer[0]) {
     case GPCMD_TEST_UNIT_READY:
         if (!s->cdrom_changed) {
-            ide_atapi_cmd_ok(s);
+            /* No recent media event — check if a disc is actually present */
+            if (s->bs && s->bs->get_sector_count(s->bs) > 0)
+                ide_atapi_cmd_ok(s);
+            else
+                ide_atapi_cmd_error(s, SENSE_NOT_READY, ASC_MEDIUM_NOT_PRESENT);
         } else {
             s->cdrom_changed = 0;
-            ide_atapi_cmd_error(s, SENSE_NOT_READY,
-                                ASC_MEDIUM_NOT_PRESENT);
+            if (s->bs && s->bs->get_sector_count(s->bs) > 0) {
+                /* Disc was inserted/changed — signal UA so the host re-reads TOC */
+                ide_atapi_cmd_error(s, SENSE_UNIT_ATTENTION,
+                                    ASC_MEDIUM_MAY_HAVE_CHANGED);
+            } else {
+                /* Tray is empty */
+                ide_atapi_cmd_error(s, SENSE_NOT_READY, ASC_MEDIUM_NOT_PRESENT);
+            }
         }
         break;
     case GPCMD_MODE_SENSE_6:

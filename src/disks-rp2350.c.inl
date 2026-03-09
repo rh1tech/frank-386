@@ -195,7 +195,12 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
      * Skip geometry/size validation for CD-ROMs. */
     if (disk[drivenum].iscdrom) {
         size_t iso_sectors = size / 512;  /* nb_sectors for block layer */
-        ejectdisk(drivenum);
+        /* Eject without firing cdrom_change_cb — insert below will fire it once */
+        if (disk[drivenum].inserted) {
+            f_close(&disk[drivenum].diskfile);
+            disk[drivenum].inserted = 0;
+        }
+        disk_set_filename(drivenum, NULL);
         disk[drivenum].diskfile   = file;
         disk[drivenum].filesize   = size;
         disk[drivenum].data_offset = 0;
@@ -206,6 +211,7 @@ uint8_t insertdisk(uint8_t drivenum, const char *pathname) {
         disk[drivenum].heads      = 0;
         disk[drivenum].sects      = 0;
         disk_set_filename(drivenum, pathname);
+        /* Single notification: disc is now present */
         if (disk_cdrom_change_cb)
             disk_cdrom_change_cb(drivenum, path);
         return 1;
