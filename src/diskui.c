@@ -275,9 +275,10 @@ static void select_file(void) {
 
 static void eject_disk(void) {
     if (selected_drive < 2) {
-        ejectdisk(selected_drive, false);
+        ejectdisk(selected_drive, false);                   // floppy: not atapi
     } else {
-        ejectdisk(selected_drive - 2, true);
+        bool is_cd = (selected_drive == DRIVE_CDROM_E);
+        ejectdisk(selected_drive - 2, is_cd);               // HDD: atapi=false, CD: atapi=true
     }
     // Save disk configuration to INI file
     config_save_disks();

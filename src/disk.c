@@ -147,6 +147,8 @@ void ejectdisk(uint8_t drivenum, bool atapi) {
         /* Notify IDE about CD tray empty */
         if (ata[drivenum].iscdrom && disk_cdrom_change_cb)
             disk_cdrom_change_cb(drivenum, NULL);
+        else if (!ata[drivenum].iscdrom)
+            hdcount--;
     }
     else if (drivenum < 2 && fdd[drivenum].name) {
         f_close(&fdd[drivenum].fil);
@@ -160,8 +162,6 @@ void ejectdisk(uint8_t drivenum, bool atapi) {
         update_floppy_cmos();
         if (disk_fdc_mediachange_cb)
             disk_fdc_mediachange_cb(drivenum);
-        if (drivenum >= 2)
-            hdcount--;
     }
 }
 
@@ -175,10 +175,9 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
     BYTE fmode = is_cd ? FA_READ : (FA_READ | FA_WRITE);
     FIL* pf = is_fdd ? &fdd[drivenum].fil : &ata[drivenum].fil;
     if (pf->obj.fs) {
-        if (is_cd || is_fdd)
-            ejectdisk(drivenum, is_cd);
-        else
-            return 0;
+        /* Always eject current image before inserting a new one,
+         * regardless of drive type (floppy, HDD, or CD-ROM). */
+        ejectdisk(drivenum, is_cd || !is_fdd);
     }
     FRESULT fres = f_open(pf, path, fmode);
     if (FR_OK != fres) {

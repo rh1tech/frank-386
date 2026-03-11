@@ -34,12 +34,13 @@
 #include <stdio.h>
 #include <hardware/timer.h>
 
+//#define DEBUG_IDE_ATAPI
+#if DEBUG_IDE_ATAPI
 /* ---- ATAPI trace ---- */
 static FIL _atapi_tf;
 static int _atapi_tf_open = 0;
 
-//#define DEBUG_IDE_ATAPI
-static void atapi_tlog(const char *fmt, ...)
+void atapi_tlog(const char *fmt, ...)
 {
     if (!_atapi_tf_open) {
         _atapi_tf_open = (f_open(&_atapi_tf, "386/atapi2.txt",
@@ -65,8 +66,9 @@ static void atapi_tlog(const char *fmt, ...)
     f_write(&_atapi_tf, buf, len, &bw);
     f_sync(&_atapi_tf);
 }
-
-//#define DEBUG_IDE
+#else
+#define atapi_tlog(...) (void)0
+#endif
 
 #define MAX_MULT_SECTORS 4
 
@@ -437,8 +439,14 @@ static void stw(uint16_t *buf, int v) { *buf = v; }
 static void ide_set_irq(IDEState *s)
 {
     struct IDEIFState *ide_if = s->ide_if;
-    if (!(ide_if->cmd & IDE_CMD_DISABLE_IRQ))
+    if (!(ide_if->cmd & IDE_CMD_DISABLE_IRQ)) {
+        atapi_tlog("[%d]  irq: st=%02x ns=%02x er=%02x\r\n",
+            time_us_32(), s->status, s->nsector, s->error);
         ide_if->set_irq(ide_if->pic, ide_if->irq, 1);
+    } else {
+        atapi_tlog("[%d]  irq SUPPRESSED (nIEN): st=%02x ns=%02x\r\n",
+            time_us_32(), s->status, s->nsector);
+    }
 }
 
 static void ide_abort_command(IDEState *s)
@@ -482,8 +490,6 @@ static void ide_transfer_stop(IDEState *s)
 static void ide_atapi_cmd_ok(IDEState *s)
 {
     s->error     = 0;
-    s->sense_key = SENSE_NONE;
-    s->asc       = 0;
     s->status    = READY_STAT | SEEK_STAT;
     s->nsector   = (s->nsector & ~7) | ATAPI_INT_REASON_IO | ATAPI_INT_REASON_CD;
     atapi_tlog("[%d]  -> OK\r\n", time_us_32());
@@ -922,14 +928,6 @@ static void ide_atapi_cmd(IDEState *s)
     atapi_tlog_cmd(packet, s->sense_key, s->fp ? 1 : 0,
                    (long)ide_cd_total_sectors(s));
 
-    if (s->sense_key == SENSE_UNIT_ATTENTION &&
-        packet[0] != GPCMD_REQUEST_SENSE &&
-        packet[0] != GPCMD_INQUIRY) {
-        ide_atapi_cmd_check_status(s);
-    atapi_tlog("[%d]  -> r1\r\n", time_us_32());
-        return;
-    }
-
     switch (packet[0]) {
     case GPCMD_TEST_UNIT_READY:
         if (!s->cdrom_changed) {
@@ -974,7 +972,7 @@ static void ide_atapi_cmd(IDEState *s)
                     buf[2] = 0x70; buf[3] = 0; buf[4] = 0; buf[5] = 0; buf[6] = 0; buf[7] = 0;
                     buf[8] = 0x2a; buf[9] = 0x12;
                     buf[10] = 0x00; buf[11] = 0x00;
-                    buf[12] = 0x70; buf[13] = 0x00;
+                    buf[12] = 0x71; buf[13] = 3 << 5;
                     buf[14] = 0x29; buf[15] = 0x00;
                     cpu_to_ube16(buf+16, 706);
                     buf[18] = 0; buf[19] = 2;
@@ -1005,12 +1003,15 @@ static void ide_atapi_cmd(IDEState *s)
         buf[2] = s->sense_key;
         buf[7] = 10;
         buf[12] = s->asc;
+        atapi_tlog("[%d]  -> b GPCMD_REQUEST_SENSE (sk=%d asc=%02x)\r\n",
+            time_us_32(), buf[2], buf[12]);
+        /* only consume UA — other sense codes (e.g. ILLEGAL_REQUEST) persist */
+        if (s->sense_key == SENSE_UNIT_ATTENTION) {
+            s->sense_key     = SENSE_NONE;
+            s->asc           = 0;
+            s->cdrom_changed = 0;
+        }
         ide_atapi_reply_start(s, 18, max_len);
-        /* consume the sense — next command sees clean state */
-        s->sense_key = SENSE_NONE;
-        s->asc       = 0;
-        s->cdrom_changed = 0;
-    atapi_tlog("[%d]  -> b GPCMD_REQUEST_SENSE\r\n", time_us_32());
         break;
 
     case GPCMD_PREVENT_ALLOW_MEDIUM_REMOVAL:
@@ -1032,12 +1033,12 @@ static void ide_atapi_cmd(IDEState *s)
             else
                 nb_sectors = ube32_to_cpu(packet + 6);
             lba = ube32_to_cpu(packet + 2);
-            if (nb_sectors == 0) {
-                /* Some drivers send nb=0 as a prefetch/seek but expect
-                 * data-phase completion. Read 1 sector to satisfy them. */
-                nb_sectors = 1;
-            }
             atapi_tlog("[%d]   READ lba=%d n=%d\r\n", time_us_32(), lba, nb_sectors);
+            if (nb_sectors == 0) {
+                ide_atapi_cmd_ok(s);
+    atapi_tlog("[%d]  -> b! GPCMD_READ_10/12 (nb_sectors == 0)\r\n", time_us_32());
+                break;
+            }
             ide_atapi_cmd_read(s, lba, nb_sectors, CD_SECTOR_SIZE);
         }
     atapi_tlog("[%d]  -> b1 GPCMD_READ_10/12\r\n", time_us_32());
@@ -1102,8 +1103,7 @@ static void ide_atapi_cmd(IDEState *s)
                 break;
             }
             max_len     = ube16_to_cpu(packet + 7);
-            //?format      = packet[9] >> 6;
-            format      = packet[9] & 0x0f;
+            format      = packet[9] >> 6;
             msf         = (packet[1] >> 1) & 1;
             start_track = packet[6];
             switch (format) {
@@ -1139,38 +1139,10 @@ static void ide_atapi_cmd(IDEState *s)
         break;
 
     case GPCMD_READ_SUBCHANNEL:
-        /* byte[2] bit1 = SubQ, byte[3] = format (01=curr pos, 02=MCN, 03=ISRC)
-         * OAKCDROM asks format=01 (current position).
-         * Return: audio not playing, position 0. */
-        {
-            max_len = ube16_to_cpu(packet + 7);
-            int subq  = (packet[2] >> 6) & 1;  /* actually bit6 = SubQ enable? No: p1=02 means MSF */
-            int fmt   = packet[3];              /* sub-channel data format */
-            memset(buf, 0, 16);
-            buf[0] = 0x00;  /* reserved */
-            buf[1] = 0x15;  /* audio status: no audio, no error (0x15 = not supported → use 0x00) */
-            /* For format 01 (current position), header = 4 bytes, data = 12 bytes */
-            if (fmt == 0x01) {
-                buf[1] = 0x00;       /* audio status: not supported / not playing */
-                buf[2] = 0x00;       /* data length MSB */
-                buf[3] = 0x0c;       /* data length LSB = 12 */
-                buf[4] = 0x01;       /* sub-channel data format code */
-                buf[5] = 0x10 | 0x04; /* ADR=1, control=4 (data track) */
-                buf[6] = 0x01;       /* track number */
-                buf[7] = 0x00;       /* index */
-                /* absolute address = 0 (MSF or LBA depending on p1 bit1) */
-                ide_atapi_reply_start(s, 16, max_len);
-            } else {
-                /* other formats: just return minimal header, no data */
-                buf[1] = 0x00;
-                buf[2] = 0x00;
-                buf[3] = 0x00;
-                ide_atapi_reply_start(s, 4, max_len);
-            }
-        }
-    atapi_tlog("[%d]  -> b GPCMD_READ_SUBCHANNEL\r\n", time_us_32());
+        ide_atapi_cmd_error(s, SENSE_ILLEGAL_REQUEST,
+                            ASC_ILLEGAL_OPCODE);
+        atapi_tlog("[%d]  -> UNKNOWN CMD 42\r\n", time_us_32());
         break;
-
     case GPCMD_READ_CDVD_CAPACITY:
         {
             int64_t total_sectors = ide_cd_total_sectors(s);
@@ -1424,6 +1396,9 @@ uint32_t ide_ioport_read(void *opaque, uint32_t addr)
     default:
     case 7:
         ret = s->status;
+        if (s->drive_kind == IDE_CD)
+            atapi_tlog("[%d]  rd_st=%02x ns=%02x er=%02x\r\n",
+                time_us_32(), ret, s->nsector, s->error);
         s1->set_irq(s1->pic, s1->irq, 0);
         break;
     }
@@ -1440,6 +1415,8 @@ uint32_t ide_status_read(void *opaque)
 void ide_cmd_write(void *opaque, uint32_t val)
 {
     IDEIFState *s1 = opaque;
+    atapi_tlog("[%d]  devctrl=0x%02x (nIEN=%d SRST=%d)\r\n",
+        time_us_32(), (unsigned)val, (val>>1)&1, (val>>2)&1);
     if (!(s1->cmd & IDE_CMD_RESET) && (val & IDE_CMD_RESET)) {
         for (int i = 0; i < 2; i++) {
             IDEState *s = s1->drives[i];
@@ -1529,6 +1506,26 @@ static void xfer_advance(IDEState *s, int n)
         EndTransferFunc *fn = s->xfer_done;
         ide_transfer_stop(s);
         if (fn && fn != ide_transfer_stop) fn(s);
+    } else if (s->drive_kind == IDE_CD && !s->xfer_is_write
+               && s->cd_sector_size > 0
+               && (s->xfer_left % s->cd_sector_size) == 0) {
+        /* Host has consumed exactly one CD sector.
+         * Advance the logical LBA counter and re-arm DRQ so the host
+         * knows the next sector is ready to be read.
+         * Without this, xfer_left silently counts down but no new IRQ is
+         * ever raised, causing the host to time out on any n > 1 read. */
+        s->cd_lba++;
+        int byte_count_limit = s->lcyl | (s->hcyl << 8);
+        if (byte_count_limit == 0 || byte_count_limit > s->cd_sector_size)
+            byte_count_limit = s->cd_sector_size;
+        if (byte_count_limit & 1) byte_count_limit--;
+        s->lcyl    = byte_count_limit & 0xff;
+        s->hcyl    = byte_count_limit >> 8;
+        s->nsector = (s->nsector & ~7) | ATAPI_INT_REASON_IO; /* Data-In, DRQ */
+        s->status  = READY_STAT | SEEK_STAT | DRQ_STAT;
+        atapi_tlog("[%d]  xfer_sector_done lba=%d remaining=%d\r\n",
+            time_us_32(), s->cd_lba, s->xfer_left);
+        ide_set_irq(s);
     }
 }
 
@@ -1763,6 +1760,7 @@ void ide_change_cd(IDEIFState *sif, int drive, FIL *f)
     atapi_tlog("ide_change_cd: drive=%d s=%s f=%s\r\n", drive, s?"ok":"NULL", f?"ok":"NULL");
     if (!s || s->drive_kind != IDE_CD) return;
 
+    int was_present = (s->fp != NULL);
     s->fp = f;
 
     if (f) {
@@ -1770,15 +1768,27 @@ void ide_change_cd(IDEIFState *sif, int drive, FIL *f)
             (unsigned long)f_size(f),
             (long)(f_size(f) / 512),
             (long)(f_size(f) / 2048));
-        /* insert/swap: signal UA so driver knows medium arrived */
-        s->sense_key     = SENSE_UNIT_ATTENTION;
-        s->asc           = ASC_MEDIUM_MAY_HAVE_CHANGED;
-        s->cdrom_changed = 1;
+        if (was_present) {
+            /* disc swap: signal UA so driver re-reads TOC */
+            s->sense_key     = SENSE_UNIT_ATTENTION;
+            s->asc           = ASC_MEDIUM_MAY_HAVE_CHANGED;
+            s->cdrom_changed = 1;
+            atapi_tlog("  swap -> UA\r\n");
+        } else {
+            /* boot/initial insert: drive was empty, no UA needed.
+             * SeaBIOS does not issue TUR for ATAPI before loading DOS,
+             * so skip UA to avoid confusing OAKCDROM into polling mode. */
+            s->sense_key     = SENSE_NONE;
+            s->asc           = 0;
+            s->cdrom_changed = 0;
+            atapi_tlog("  initial insert -> no UA\r\n");
+        }
     } else {
         /* eject */
         s->sense_key     = SENSE_UNIT_ATTENTION;
         s->asc           = ASC_MEDIUM_MAY_HAVE_CHANGED;
         s->cdrom_changed = 1;
+        atapi_tlog("  eject -> UA\r\n");
     }
     ide_set_irq(s);
 }
