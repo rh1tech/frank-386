@@ -1,161 +1,37 @@
 #include "i386.h"
+#include <pico.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#include <string.h>
-#include <stdarg.h>
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-/* forward declaration: function defined later in this file */
-static void refresh_flags(CPUI386 *cpu);
-#endif
-
-#ifdef RP2350_BUILD
-#include "pico/stdlib.h"
-#include "platform_rp2350.h"
-#include "i386_arm.h"  /* ARM assembly optimizations */
-#include "ff.h"        /* FatFs - for debug logging */
-#else
 #include <unistd.h>
-#endif
+#include <string.h>
 
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
-#elif defined(RP2350_BUILD)
-// RP2350: Place critical functions in RAM for faster execution
-// __time_critical_func places code in RAM section
-#define IRAM_ATTR __time_critical_func()
-#define IRAM_ATTR_CPU_EXEC1 __time_critical_func()
-#define DRAM_ATTR
 #else
-#define IRAM_ATTR
-#define IRAM_ATTR_CPU_EXEC1
-#define DRAM_ATTR
+#define IRAM_ATTR __not_in_flash()
+#define IRAM_ATTR_CPU_EXEC1 __not_in_flash()
 #endif
 
 #define I386_OPT1
 #ifndef __wasm__
 #define I386_OPT2
 #endif
-#define I386_ENABLE_FPU
 
+#define I386_ENABLE_FPU 1
 #ifdef I386_ENABLE_FPU
 #include "fpu.h"
 #else
 #define fpu_new(...) NULL
 #define fpu_exec1(...) false
 #define fpu_exec2(...) false
+#define fpu_delete(...)
+typedef void FPU;
 #endif
 
-/* Note: CPUI386 struct is defined in i386.h */
-
-//#define dolog(...) fprintf(stderr, __VA_ARGS__)
-#define dolog(...)
+#define dolog(...) fprintf(stderr, __VA_ARGS__)
 #define likely(x) __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-static FIL g_pm_exc_log;
-static FIL g_pm_esp_log;
-static FIL g_pm_trace_log;
-static bool g_pm_exc_log_open = false;
-static bool g_pm_esp_log_open = false;
-static bool g_pm_trace_log_open = false;
-static bool g_pm_logs_inited = false;
-
-static void pm_exc_debug_init_logs(void)
-{
-	if (g_pm_logs_inited)
-		return;
-	g_pm_logs_inited = true;
-	g_pm_exc_log_open = (f_open(&g_pm_exc_log, "exc.log",
-		FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);
-	g_pm_esp_log_open = (f_open(&g_pm_esp_log, "esp.log",
-		FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);
-	g_pm_trace_log_open = (f_open(&g_pm_trace_log, "pmtrace.log",
-		FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);
-}
-
-static void pm_exc_debug_write(FIL *logf, bool log_open, const char *fmt, ...)
-{
-	if (!log_open)
-		return;
-	char buf[256];
-	va_list ap;
-	va_start(ap, fmt);
-	int n = vsnprintf(buf, sizeof(buf), fmt, ap);
-	va_end(ap);
-	if (n <= 0)
-		return;
-	if (n >= (int)sizeof(buf))
-		n = sizeof(buf) - 1;
-	UINT bw;
-	f_write(logf, buf, n, &bw);
-	f_sync(logf);
-}
-
-static void pm_exc_debug_trace(CPUI386 *cpu, const char *tag,
-		int no, bool pusherr, uword old_sp, uword new_sp,
-		uword old_ss, uword new_ss, uword target_cs, uword target_ip)
-{
-	if (!(cpu->cr0 & 1))
-		return;
-	if (no >= 32 && !pusherr)
-		return;
-	refresh_flags(cpu);
-	pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
-		"%s no=%02x err=%08lx old=%04lx:%08lx new=%04lx:%08lx cs=%04lx ip=%08lx fl=%08lx cpl=%d%s\n",
-		tag, no, (unsigned long)cpu->excerr,
-		(unsigned long)old_ss, (unsigned long)old_sp,
-		(unsigned long)new_ss, (unsigned long)new_sp,
-		(unsigned long)target_cs, (unsigned long)target_ip,
-		(unsigned long)cpu->flags, cpu->cpl,
-		(cpu->flags & 0x20000) ? " V86" : "");
-}
-#endif
-
-/* Profiling support - enable with -DI386_PROFILE */
-#ifdef I386_PROFILE
-static uint32_t prof_opcode[512];  /* 0-255: primary, 256-511: 0F xx */
-static uint32_t prof_total;
-static uint8_t prof_current_op;    /* Current opcode being executed */
-#define PROF_OP(op) do { prof_opcode[op]++; prof_current_op = (op); } while(0)
-#define PROF_OP2(op) prof_opcode[256 + (op)]++
-#define PROF_TOTAL() prof_total++
-#define PROF_SAVE_OP(op) prof_current_op = (op)
-
-void i386_profile_dump(void) {
-    printf("\n=== i386 Instruction Profile (%u total) ===\n", prof_total);
-    /* Find and print top 20 opcodes */
-    for (int rank = 0; rank < 20; rank++) {
-        uint32_t max = 0;
-        int max_idx = -1;
-        for (int i = 0; i < 512; i++) {
-            if (prof_opcode[i] > max) {
-                max = prof_opcode[i];
-                max_idx = i;
-            }
-        }
-        if (max_idx < 0 || max == 0) break;
-        if (max_idx < 256) {
-            printf("%2d. 0x%02X: %u (%.1f%%)\n", rank+1, max_idx, max, 100.0f * max / prof_total);
-        } else {
-            printf("%2d. 0F %02X: %u (%.1f%%)\n", rank+1, max_idx - 256, max, 100.0f * max / prof_total);
-        }
-        prof_opcode[max_idx] = 0;  /* Clear so we find next highest */
-    }
-    printf("==========================================\n");
-}
-
-void i386_profile_reset(void) {
-    memset(prof_opcode, 0, sizeof(prof_opcode));
-    prof_total = 0;
-}
-#else
-#define PROF_OP(op)
-#define PROF_OP2(op)
-#define PROF_TOTAL()
-#endif
 #define wordmask ((uword) ((sword) -1))
 #define TRY(f) if(!(f)) { return false; }
 #define TRYL(f) if(unlikely(!(f))) { return false; }
@@ -238,116 +114,23 @@ void cpu_abort(CPUI386 *cpu, int code)
 	abort();
 }
 
-/* Sign extension functions - ARM has native SXTB/SXTH instructions */
-#if defined(RP2350_BUILD) && defined(__arm__)
 static inline uword sext8(u8 a)
-{
-	return SEXT8_INLINE(a);
-}
-
-static inline uword sext16(u16 a)
-{
-	return SEXT16_INLINE(a);
-}
-#else
-static uword sext8(u8 a)
 {
 	return (sword) (s8) a;
 }
 
-static uword sext16(u16 a)
+static inline uword sext16(u16 a)
 {
 	return (sword) (s16) a;
 }
-#endif
 
-inline static uword sext32(u32 a)
+static inline uword sext32(u32 a)
 {
 	return (sword) (s32) a;
 }
 
-#if EMULATE_LTEMS
-#include "ems.c.inl"
-// Guard macro: evaluates condition only when EMS is active, always true otherwise.
-// Used in fast-path string ops to skip the bulk memcpy shortcut when source/dest
-// falls inside the EMS window (0xD0000-0xDFFFF) — those addresses must be
-// redirected through ems_read/write, not accessed as raw phys_mem.
-#define IF_EMULATE_LTEMS(cond) (cond)
-#else
-#define IF_EMULATE_LTEMS(cond) 1
-#endif
-
 #ifdef I386_OPT1
 /* only works on hosts that are little-endian and support unaligned access */
-#if defined(RP2350_BUILD) && defined(__arm__)
-/* ARM Cortex-M33 optimized versions using inline assembly macros */
-static inline u8 pload8(CPUI386 *cpu, uword addr)
-{
-	addr &= cpu->a20_mask;
-#if EMULATE_LTEMS
-	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
-		return ems_read(addr - EMS_START);
-	}
-#endif
-	return PLOAD8_INLINE(cpu->phys_mem, addr);
-}
-
-static inline u16 pload16(CPUI386 *cpu, uword addr)
-{
-	addr &= cpu->a20_mask;
-#if EMULATE_LTEMS
-	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
-		return ems_readw(addr - EMS_START);
-	}
-#endif
-	return PLOAD16_INLINE(cpu->phys_mem, addr);
-}
-
-static inline u32 pload32(CPUI386 *cpu, uword addr)
-{
-	addr &= cpu->a20_mask;
-#if EMULATE_LTEMS
-	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
-		return ems_readdw(addr - EMS_START);
-	}
-#endif
-	return PLOAD32_INLINE(cpu->phys_mem, addr);
-}
-
-static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
-{
-	addr &= cpu->a20_mask;
-#if EMULATE_LTEMS
-	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
-		return ems_write(addr - EMS_START, val);
-	}
-#endif
-	PSTORE8_INLINE(cpu->phys_mem, addr, val);
-}
-
-static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
-{
-	addr &= cpu->a20_mask;
-#if EMULATE_LTEMS
-	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
-		return ems_writew(addr - EMS_START, val);
-	}
-#endif
-	PSTORE16_INLINE(cpu->phys_mem, addr, val);
-}
-
-static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
-{
-	addr &= cpu->a20_mask;
-#if EMULATE_LTEMS
-	if (__builtin_expect(addr - EMS_START < (EMS_END - EMS_START), 0)) {
-		return ems_writedw(addr - EMS_START, val);
-	}
-#endif
-	PSTORE32_INLINE(cpu->phys_mem, addr, val);
-}
-#else
-/* Standard C implementation for non-ARM builds */
 static inline u8 pload8(CPUI386 *cpu, uword addr)
 {
 	return cpu->phys_mem[addr];
@@ -377,7 +160,6 @@ static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
 {
 	*(u32 *)&(cpu->phys_mem[addr]) = val;
 }
-#endif
 #else
 static inline u8 pload8(CPUI386 *cpu, uword addr)
 {
@@ -429,57 +211,55 @@ enum {
 	CC_AND, CC_OR, CC_XOR,
 };
 
-static int __not_in_flash_func(get_CF)(CPUI386 *cpu)
+static inline int get_CF(CPUI386 *cpu)
 {
-	/* Fast path: CF not lazy - just return from flags */
-	if (likely(!(cpu->cc.mask & CF))) {
+	if (cpu->cc.mask & CF) {
+		switch(cpu->cc.op) {
+		case CC_ADC:
+			return cpu->cc.dst <= cpu->cc.src2;
+		case CC_ADD:
+			return cpu->cc.dst < cpu->cc.src2;
+		case CC_SBB:
+			return cpu->cc.src1 <= cpu->cc.src2;
+		case CC_SUB:
+			return cpu->cc.src1 < cpu->cc.src2;
+		case CC_NEG8: case CC_NEG16: case CC_NEG32:
+			return cpu->cc.dst != 0;
+		case CC_DEC8: case CC_DEC16: case CC_DEC32:
+		case CC_INC8: case CC_INC16: case CC_INC32:
+			assert(false); // should not happen
+		case CC_IMUL8:
+			return sext8(cpu->cc.dst) != cpu->cc.dst;
+		case CC_IMUL16:
+			return sext16(cpu->cc.dst) != cpu->cc.dst;
+		case CC_IMUL32:
+			return (((s32) cpu->cc.dst) >> 31) != cpu->cc.dst2;
+		case CC_MUL8:
+			return (cpu->cc.dst >> 8) != 0;
+		case CC_MUL16:
+			return (cpu->cc.dst >> 16) != 0;
+		case CC_MUL32:
+			return (cpu->cc.dst2) != 0;
+		case CC_SHL:
+		case CC_SHR:
+		case CC_SAR:
+			return cpu->cc.dst2 & 1;
+		case CC_SHLD:
+			return cpu->cc.dst2 >> 31;
+		case CC_SHRD:
+			return cpu->cc.dst2 & 1;
+		case CC_BSF:
+		case CC_BSR:
+			return 0;
+		case CC_AND:
+		case CC_OR:
+		case CC_XOR:
+			return 0;
+		}
+	} else {
 		return !!(cpu->flags & CF);
 	}
-	/* Lazy CF computation */
-	switch(cpu->cc.op) {
-	case CC_ADC:
-		return cpu->cc.dst <= cpu->cc.src2;
-	case CC_ADD:
-		return cpu->cc.dst < cpu->cc.src2;
-	case CC_SBB:
-		return cpu->cc.src1 <= cpu->cc.src2;
-	case CC_SUB:
-		return cpu->cc.src1 < cpu->cc.src2;
-	case CC_NEG8: case CC_NEG16: case CC_NEG32:
-		return cpu->cc.dst != 0;
-	case CC_DEC8: case CC_DEC16: case CC_DEC32:
-	case CC_INC8: case CC_INC16: case CC_INC32:
-		assert(false); // should not happen
-	case CC_IMUL8:
-		return sext8(cpu->cc.dst) != cpu->cc.dst;
-	case CC_IMUL16:
-		return sext16(cpu->cc.dst) != cpu->cc.dst;
-	case CC_IMUL32:
-		return (((s32) cpu->cc.dst) >> 31) != cpu->cc.dst2;
-	case CC_MUL8:
-		return (cpu->cc.dst >> 8) != 0;
-	case CC_MUL16:
-		return (cpu->cc.dst >> 16) != 0;
-	case CC_MUL32:
-		return (cpu->cc.dst2) != 0;
-	case CC_SHL:
-	case CC_SHR:
-	case CC_SAR:
-		return cpu->cc.dst2 & 1;
-	case CC_SHLD:
-		return cpu->cc.dst2 >> 31;
-	case CC_SHRD:
-		return cpu->cc.dst2 & 1;
-	case CC_BSF:
-	case CC_BSR:
-		return 0;
-	case CC_AND:
-	case CC_OR:
-	case CC_XOR:
-		return 0;
-	}
 	assert(false);
-	return 0;
 }
 
 const static u8 parity_tab[256] __not_in_flash("parity_tab") = {
@@ -501,122 +281,116 @@ const static u8 parity_tab[256] __not_in_flash("parity_tab") = {
   1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1
 };
 
-static int __always_inline get_PF(CPUI386 *cpu)
+static inline int get_PF(CPUI386 *cpu)
 {
-	if (likely(!(cpu->cc.mask & PF))) {
+	if (cpu->cc.mask & PF) {
+		return parity_tab[cpu->cc.dst & 0xff];
+	} else {
 		return !!(cpu->flags & PF);
 	}
-	return parity_tab[cpu->cc.dst & 0xff];
 }
 
-static int __not_in_flash_func(get_AF)(CPUI386 *cpu)
+static inline int get_AF(CPUI386 *cpu)
 {
-	if (likely(!(cpu->cc.mask & AF))) {
+	if (cpu->cc.mask & AF) {
+		switch(cpu->cc.op) {
+		case CC_ADC:
+		case CC_ADD:
+		case CC_SBB:
+		case CC_SUB:
+			return ((cpu->cc.src1 ^ cpu->cc.src2 ^ cpu->cc.dst) >> 4) & 1;
+		case CC_NEG8: case CC_NEG16: case CC_NEG32:
+			return (cpu->cc.dst & 0xf) != 0;
+		case CC_DEC8: case CC_DEC16: case CC_DEC32:
+			return (cpu->cc.dst & 0xf) == 0xf;
+		case CC_INC8: case CC_INC16: case CC_INC32:
+			return (cpu->cc.dst & 0xf) == 0;
+		case CC_IMUL8: case CC_IMUL16: case CC_IMUL32:
+		case CC_MUL8: case CC_MUL16: case CC_MUL32:
+			return 0;
+		case CC_SAR:
+		case CC_SHL:
+		case CC_SHR:
+		case CC_SHLD:
+		case CC_SHRD:
+		case CC_BSF:
+		case CC_BSR:
+		case CC_AND:
+		case CC_OR:
+		case CC_XOR:
+			return 0;
+		}
+	} else {
 		return !!(cpu->flags & AF);
 	}
-	switch(cpu->cc.op) {
-	case CC_ADC:
-	case CC_ADD:
-	case CC_SBB:
-	case CC_SUB:
-		return ((cpu->cc.src1 ^ cpu->cc.src2 ^ cpu->cc.dst) >> 4) & 1;
-	case CC_NEG8: case CC_NEG16: case CC_NEG32:
-		return (cpu->cc.dst & 0xf) != 0;
-	case CC_DEC8: case CC_DEC16: case CC_DEC32:
-		return (cpu->cc.dst & 0xf) == 0xf;
-	case CC_INC8: case CC_INC16: case CC_INC32:
-		return (cpu->cc.dst & 0xf) == 0;
-	case CC_IMUL8: case CC_IMUL16: case CC_IMUL32:
-	case CC_MUL8: case CC_MUL16: case CC_MUL32:
-	case CC_SAR:
-	case CC_SHL:
-	case CC_SHR:
-	case CC_SHLD:
-	case CC_SHRD:
-	case CC_BSF:
-	case CC_BSR:
-	case CC_AND:
-	case CC_OR:
-	case CC_XOR:
-		return 0;
-	}
 	assert(false);
-	return 0;
 }
 
-static inline uword make_pf_err(bool present, int rwm, int cpl)
+static int IRAM_ATTR get_ZF(CPUI386 *cpu)
 {
-	uword err = 0;
-	if (present)
-		err |= 1;          /* P: protection violation */
-	if (rwm & 2)
-		err |= 2;          /* W/R: write access */
-	if (cpl)
-		err |= 4;          /* U/S: user mode */
-	return err;
-}
-
-static int __always_inline get_ZF(CPUI386 *cpu)
-{
-	if (likely(!(cpu->cc.mask & ZF))) {
+	if (cpu->cc.mask & ZF) {
+		return cpu->cc.dst == 0;
+	} else {
 		return !!(cpu->flags & ZF);
 	}
-	return cpu->cc.dst == 0;
 }
 
-static int __always_inline get_SF(CPUI386 *cpu)
+static int IRAM_ATTR get_SF(CPUI386 *cpu)
 {
-	if (likely(!(cpu->cc.mask & SF))) {
+	if (cpu->cc.mask & SF) {
+		return cpu->cc.dst >> (sizeof(uword) * 8 - 1);
+	} else {
 		return !!(cpu->flags & SF);
 	}
-	return cpu->cc.dst >> (sizeof(uword) * 8 - 1);
 }
 
-static int __not_in_flash_func(get_OF)(CPUI386 *cpu)
+static int get_OF(CPUI386 *cpu)
 {
-	if (likely(!(cpu->cc.mask & OF))) {
+	if (cpu->cc.mask & OF) {
+		switch(cpu->cc.op) {
+		case CC_ADC:
+		case CC_ADD:
+			return (~(cpu->cc.src1 ^ cpu->cc.src2) & (cpu->cc.dst ^ cpu->cc.src2)) >> (sizeof(uword) * 8 - 1);
+		case CC_SBB:
+		case CC_SUB:
+			return ((cpu->cc.src1 ^ cpu->cc.src2) & (cpu->cc.dst ^ cpu->cc.src1)) >> (sizeof(uword) * 8 - 1);
+		case CC_DEC8:
+			return cpu->cc.dst == sext8((u8) ~(1u << 7));
+		case CC_DEC16:
+			return cpu->cc.dst == sext16((u16) ~(1u << 15));
+		case CC_DEC32:
+			return cpu->cc.dst == sext32((u32) ~(1u << 31));
+		case CC_INC8: case CC_NEG8:
+			return cpu->cc.dst == sext8(1u << 7);
+		case CC_INC16: case CC_NEG16:
+			return cpu->cc.dst == sext16(1u << 15);
+		case CC_INC32: case CC_NEG32:
+			return cpu->cc.dst == sext32(1u << 31);
+		case CC_IMUL8: case CC_IMUL16: case CC_IMUL32:
+		case CC_MUL8: case CC_MUL16: case CC_MUL32:
+			return get_CF(cpu);
+		case CC_SAR:
+			return 0;
+		case CC_SHL:
+			return (cpu->cc.dst >> (sizeof(uword) * 8 - 1)) ^ (cpu->cc.dst2 & 1);
+		case CC_SHR:
+			return (cpu->cc.src1 >> (sizeof(uword) * 8 - 1));
+		case CC_SHLD:
+		case CC_SHRD:
+			return (cpu->cc.src1 ^ cpu->cc.dst) >> (sizeof(uword) * 8 - 1);
+		case CC_BSF:
+		case CC_BSR:
+			return 0;
+		case CC_AND:
+		case CC_OR:
+		case CC_XOR:
+			return 0;
+		}
+		assert(false);
+	} else {
 		return !!(cpu->flags & OF);
 	}
-	switch(cpu->cc.op) {
-	case CC_ADC:
-	case CC_ADD:
-		return (~(cpu->cc.src1 ^ cpu->cc.src2) & (cpu->cc.dst ^ cpu->cc.src2)) >> (sizeof(uword) * 8 - 1);
-	case CC_SBB:
-	case CC_SUB:
-		return ((cpu->cc.src1 ^ cpu->cc.src2) & (cpu->cc.dst ^ cpu->cc.src1)) >> (sizeof(uword) * 8 - 1);
-	case CC_DEC8:
-		return cpu->cc.dst == sext8((u8) ~(1u << 7));
-	case CC_DEC16:
-		return cpu->cc.dst == sext16((u16) ~(1u << 15));
-	case CC_DEC32:
-		return cpu->cc.dst == sext32((u32) ~(1u << 31));
-	case CC_INC8: case CC_NEG8:
-		return cpu->cc.dst == sext8(1u << 7);
-	case CC_INC16: case CC_NEG16:
-		return cpu->cc.dst == sext16(1u << 15);
-	case CC_INC32: case CC_NEG32:
-		return cpu->cc.dst == sext32(1u << 31);
-	case CC_IMUL8: case CC_IMUL16: case CC_IMUL32:
-	case CC_MUL8: case CC_MUL16: case CC_MUL32:
-		return get_CF(cpu);
-	case CC_SAR:
-		return 0;
-	case CC_SHL:
-		return (cpu->cc.dst >> (sizeof(uword) * 8 - 1)) ^ (cpu->cc.dst2 & 1);
-	case CC_SHR:
-		return (cpu->cc.src1 >> (sizeof(uword) * 8 - 1));
-	case CC_SHLD:
-	case CC_SHRD:
-		return (cpu->cc.src1 ^ cpu->cc.dst) >> (sizeof(uword) * 8 - 1);
-	case CC_BSF:
-	case CC_BSR:
-	case CC_AND:
-	case CC_OR:
-	case CC_XOR:
-		return 0;
-	}
 	assert(false);
-	return 0;
 }
 
 static void refresh_flags(CPUI386 *cpu)
@@ -637,7 +411,11 @@ static inline int get_IOPL(CPUI386 *cpu)
 /* MMU */
 #define CR0_PG (1<<31)
 #define CR0_WP (0x10000)
+#ifdef BUILD_ESP32
+#define tlb_size 256
+#else
 #define tlb_size 512
+#endif
 typedef struct {
 	enum {
 		ADDR_OK1,
@@ -701,18 +479,26 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword laddr, int cpl, uword *paddr)
 {
 	struct tlb_entry *ent = &(cpu->tlb.tab[lpgno % tlb_size]);
-	if (unlikely(ent->lpgno != lpgno)) {
+	if (ent->lpgno != lpgno) {
 		if (!tlb_refill(cpu, ent, lpgno)) {
 			cpu->cr2 = laddr;
 			cpu->excno = EX_PF;
-			cpu->excerr = make_pf_err(false, rwm, cpl);
+			cpu->excerr = 0;
+			if (rwm & 2)
+				cpu->excerr |= 2;
+			if (cpl)
+				cpu->excerr |= 4;
 			return false;
 		}
 	}
-	if (unlikely(ent->pte_lookup[cpl > 0][rwm > 1])) {
+	if (ent->pte_lookup[cpl > 0][rwm > 1]) {
 		cpu->cr2 = laddr;
 		cpu->excno = EX_PF;
-		cpu->excerr = make_pf_err(true, rwm, cpl);  /* page present, protection violation */
+		cpu->excerr = 1;
+		if (rwm & 2)
+			cpu->excerr |= 2;
+		if (cpl)
+			cpu->excerr |= 4;
 		ent->lpgno = -1;
 		return false;
 	}
@@ -735,7 +521,7 @@ static bool IRAM_ATTR translate_laddr(CPUI386 *cpu, OptAddr *res, int rwm, uword
 		res->addr1 = paddr;
 		if ((laddr & 0xfff) > 0x1000 - size) {
 			lpgno++;
-			TRY(translate_lpgno(cpu, rwm, lpgno, (laddr & ~0xfff) + 0x1000, cpl, &paddr));
+			TRY(translate_lpgno(cpu, rwm, lpgno, lpgno << 12, cpl, &paddr));
 			res->res = ADDR_OK2;
 			res->addr2 = paddr;
 		}
@@ -794,7 +580,7 @@ static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword add
 			if (!tlb_refill(cpu, ent, lpgno)) {
 				cpu->cr2 = laddr;
 				cpu->excno = EX_PF;
-				cpu->excerr = make_pf_err(false, 1, cpu->cpl);
+				cpu->excerr = 0;
 				if (cpu->cpl)
 					cpu->excerr |= 4;
 				return false;
@@ -803,7 +589,9 @@ static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword add
 		if (ent->pte_lookup[cpu->cpl > 0][0]) {
 			cpu->cr2 = laddr;
 			cpu->excno = EX_PF;
-			cpu->excerr = make_pf_err(true, 1, cpu->cpl);  /* page present, protection violation */
+			cpu->excerr = 1;
+			if (cpu->cpl)
+				cpu->excerr |= 4;
 			ent->lpgno = -1;
 			return false;
 		}
@@ -840,7 +628,7 @@ static inline bool in_iomem(uword addr)
 static u8 IRAM_ATTR load8(CPUI386 *cpu, OptAddr *res)
 {
 	uword addr = res->addr1;
-	if (unlikely(in_iomem(addr)) && cpu->cb.iomem_read8)
+	if (in_iomem(addr) && cpu->cb.iomem_read8)
 		return cpu->cb.iomem_read8(cpu->cb.iomem, addr);
 	if (unlikely(addr >= cpu->phys_mem_size)) {
 		return 0;
@@ -850,7 +638,7 @@ static u8 IRAM_ATTR load8(CPUI386 *cpu, OptAddr *res)
 
 static u16 IRAM_ATTR load16(CPUI386 *cpu, OptAddr *res)
 {
-	if (unlikely(in_iomem(res->addr1)) && cpu->cb.iomem_read16)
+	if (in_iomem(res->addr1) && cpu->cb.iomem_read16)
 		return cpu->cb.iomem_read16(cpu->cb.iomem, res->addr1);
 	if (unlikely(res->addr1 >= cpu->phys_mem_size)) {
 		return 0;
@@ -863,7 +651,7 @@ static u16 IRAM_ATTR load16(CPUI386 *cpu, OptAddr *res)
 
 static u32 IRAM_ATTR load32(CPUI386 *cpu, OptAddr *res)
 {
-	if (unlikely(in_iomem(res->addr1)) && cpu->cb.iomem_read32)
+	if (in_iomem(res->addr1) && cpu->cb.iomem_read32)
 		return cpu->cb.iomem_read32(cpu->cb.iomem, res->addr1);
 	if (unlikely(res->addr1 >= cpu->phys_mem_size)) {
 		return 0;
@@ -888,7 +676,7 @@ static u32 IRAM_ATTR load32(CPUI386 *cpu, OptAddr *res)
 static void IRAM_ATTR store8(CPUI386 *cpu, OptAddr *res, u8 val)
 {
 	uword addr = res->addr1;
-	if (unlikely(in_iomem(addr)) && cpu->cb.iomem_write8) {
+	if (in_iomem(addr) && cpu->cb.iomem_write8) {
 		cpu->cb.iomem_write8(cpu->cb.iomem, addr, val);
 		return;
 	}
@@ -900,7 +688,7 @@ static void IRAM_ATTR store8(CPUI386 *cpu, OptAddr *res, u8 val)
 
 static void IRAM_ATTR store16(CPUI386 *cpu, OptAddr *res, u16 val)
 {
-	if (unlikely(in_iomem(res->addr1)) && cpu->cb.iomem_write16) {
+	if (in_iomem(res->addr1) && cpu->cb.iomem_write16) {
 		cpu->cb.iomem_write16(cpu->cb.iomem, res->addr1, val);
 		return;
 	}
@@ -917,7 +705,7 @@ static void IRAM_ATTR store16(CPUI386 *cpu, OptAddr *res, u16 val)
 
 static void IRAM_ATTR store32(CPUI386 *cpu, OptAddr *res, u32 val)
 {
-	if (unlikely(in_iomem(res->addr1)) && cpu->cb.iomem_write32) {
+	if (in_iomem(res->addr1) && cpu->cb.iomem_write32) {
 		cpu->cb.iomem_write32(cpu->cb.iomem, res->addr1, val);
 		return;
 	}
@@ -972,13 +760,13 @@ static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
 		*val = pload8(cpu, cpu->ifetch.xaddr ^ laddr);
-	} else {
-		OptAddr res;
-		TRY(translate8r(cpu, &res, SEG_CS, cpu->next_ip));
-		*val = load8(cpu, &res);
-		cpu->ifetch.laddr = laddr & (~4095ul);
-		cpu->ifetch.xaddr = res.addr1 ^ laddr;
+		return true;
 	}
+	OptAddr res;
+	TRY(translate8r(cpu, &res, SEG_CS, cpu->next_ip));
+	*val = load8(cpu, &res);
+	cpu->ifetch.laddr = laddr & (~4095ul);
+	cpu->ifetch.xaddr = res.addr1 ^ laddr;
 	return true;
 }
 
@@ -2166,36 +1954,6 @@ static inline void clear_segs(CPUI386 *cpu)
 #define BTCw(...) BTX_helper(16, ^, __VA_ARGS__)
 #define BTCd(...) BTX_helper(32, ^, __VA_ARGS__)
 
-/*
- * BSF/BSR - Bit Scan Forward/Reverse
- * On ARM, we use CLZ (Count Leading Zeros) for efficient implementation.
- * BSF(x) finds lowest set bit: use RBIT+CLZ or isolate lowest bit with x & -x
- * BSR(x) finds highest set bit: use 31 - CLZ(x)
- */
-#if defined(RP2350_BUILD) && defined(__arm__)
-/* ARM optimized BSF using RBIT + CLZ */
-#define BSF_helper(BIT, a, b, la, sa, lb, sb) \
-	u ## BIT src = lb(b); \
-	cpu->cc.mask = 0; \
-	if (src == 0) { \
-		cpu->flags |= ZF; \
-	} else { \
-		cpu->flags &= ~ZF; \
-		sa(a, BSF32_INLINE(src)); \
-	}
-
-/* ARM optimized BSR using CLZ */
-#define BSR_helper(BIT, a, b, la, sa, lb, sb) \
-	u ## BIT src = lb(b); \
-	cpu->cc.mask = 0; \
-	if (src == 0) { \
-		cpu->flags |= ZF; \
-	} else { \
-		cpu->flags &= ~ZF; \
-		sa(a, BSR32_INLINE(src)); \
-	}
-#else
-/* Fallback loop-based implementation */
 #define BSF_helper(BIT, a, b, la, sa, lb, sb) \
 	u ## BIT src = lb(b); \
 	u ## BIT temp = 0; \
@@ -2211,6 +1969,9 @@ static inline void clear_segs(CPUI386 *cpu)
 		sa(a, temp); \
 	}
 
+#define BSFw(...) BSF_helper(16, __VA_ARGS__)
+#define BSFd(...) BSF_helper(32, __VA_ARGS__)
+
 #define BSR_helper(BIT, a, b, la, sa, lb, sb) \
 	s ## BIT src = lb(b); \
 	u ## BIT temp = BIT - 1; \
@@ -2225,10 +1986,7 @@ static inline void clear_segs(CPUI386 *cpu)
 		} \
 		sa(a, temp); \
 	}
-#endif
 
-#define BSFw(...) BSF_helper(16, __VA_ARGS__)
-#define BSFd(...) BSF_helper(32, __VA_ARGS__)
 #define BSRw(...) BSR_helper(16, __VA_ARGS__)
 #define BSRd(...) BSR_helper(32, __VA_ARGS__)
 
@@ -2329,6 +2087,7 @@ static inline void clear_segs(CPUI386 *cpu)
 static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define INT(i, li, _) \
+	/*dolog("int %02x %08x %04x:%08x\n", li(i), REGi[0], SEGi(SEG_CS), cpu->ip);*/ \
 	if ((cpu->flags & VM)) { \
 		if(get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
 	} \
@@ -2505,68 +2264,6 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define POP() if (opsz16) { POP_helper(16) } else { POP_helper(32) }
 
-#define EFLAGS_MASK_386 0x37fd7
-#define EFLAGS_MASK_486 0x77fd7
-#define EFLAGS_MASK_586 0x277fd7
-#define EFLAGS_MASK (cpu->flags_mask)
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-
-#define PUSHF() \
-    if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
-    if (opsz16) { \
-        uword sp = lreg32(4); \
-        TRY(translate16(cpu, &meml, 2, SEG_SS, (sp - 2) & sp_mask)); \
-        refresh_flags(cpu); \
-        cpu->cc.mask = 0; \
-        set_sp(sp - 2, sp_mask); \
-        saddr16(&meml, cpu->flags); \
-    } else { \
-        uword sp = lreg32(4); \
-        TRY(translate32(cpu, &meml, 2, SEG_SS, (sp - 4) & sp_mask)); \
-        refresh_flags(cpu); \
-        cpu->cc.mask = 0; \
-        if (!(cpu->cr0 & 1)) \
-            pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open, \
-                "pushfd-rm cs=%04lx ip=%08lx fl=%08lx sp=%08lx\n", \
-                (unsigned long)cpu->seg[SEG_CS].sel, \
-                (unsigned long)cpu->ip, \
-                (unsigned long)cpu->flags, \
-                (unsigned long)lreg32(4)); \
-        set_sp(sp - 4, sp_mask); \
-        saddr32(&meml, cpu->flags & ~(RF | VM)); \
-    }
-
-#define POPF() \
-    if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
-    uword mask = VM; \
-    if (cpu->cr0 & 1) { \
-        if (cpu->cpl > 0) mask |= IOPL; \
-        if (get_IOPL(cpu) < cpu->cpl) mask |= IF; \
-    } \
-    if (opsz16) { \
-        uword sp = lreg32(4); \
-        TRY(translate16(cpu, &meml, 1, SEG_SS, sp & sp_mask)); \
-        set_sp(sp + 2, sp_mask); \
-        cpu->flags = (cpu->flags & (0xffff0000 | mask)) | (laddr16(&meml) & ~mask); \
-    } else { \
-        uword sp = lreg32(4); \
-        TRY(translate32(cpu, &meml, 1, SEG_SS, sp & sp_mask)); \
-        if (!(cpu->cr0 & 1)) \
-            pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open, \
-                "popfd-rm cs=%04lx ip=%08lx in=%08lx old=%08lx\n", \
-                (unsigned long)cpu->seg[SEG_CS].sel, \
-                (unsigned long)cpu->ip, \
-                (unsigned long)laddr32(&meml), \
-                (unsigned long)cpu->flags); \
-        set_sp(sp + 4, sp_mask); \
-        cpu->flags = (cpu->flags & mask) | (laddr32(&meml) & ~mask); \
-    } \
-    cpu->flags &= EFLAGS_MASK; \
-    cpu->flags |= 0x2; \
-    cpu->cc.mask = 0;
-
-#else
 #define PUSHF() \
 	if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
 	if (opsz16) { \
@@ -2584,6 +2281,11 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		set_sp(sp - 4, sp_mask); \
 		saddr32(&meml, cpu->flags & ~(RF | VM)); \
 	}
+
+#define EFLAGS_MASK_386 0x37fd7
+#define EFLAGS_MASK_486 0x77fd7
+#define EFLAGS_MASK_586 0x277fd7
+#define EFLAGS_MASK (cpu->flags_mask)
 
 #define POPF() \
 	if ((cpu->flags & VM) && get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
@@ -2607,8 +2309,6 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	cpu->flags |= 0x2; \
 	cpu->cc.mask = 0; \
 	if (cpu->intr && (cpu->flags & IF)) return true;
-
-#endif
 
 #define PUSHSeg(seg) \
 	if (opsz16) { \
@@ -2765,29 +2465,6 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		if (adsz16) { STOS_helper2(BIT, 16) } else { STOS_helper2(BIT, 32) } \
 	}
 
-/* Batched LODS helper - page-aware optimization similar to STOS_helper2 */
-#define LODS_helper2(BIT, ABIT) \
-	OptAddr memls; \
-	uword cx = lreg ## ABIT(1); \
-	u ## BIT ax = 0; \
-	while (cx) { \
-		TRY(translate ## BIT(cpu, &memls, 1, curr_seg, lreg ## ABIT(6))); \
-		uword count = cx; \
-		int countd; \
-		if (dir > 0) countd = (4096 - (memls.addr1 & 4095)) / (BIT / 8); \
-		else countd = 1 + (memls.addr1 & 4095) / (BIT / 8); \
-		if (countd < count) \
-			count = countd; \
-		for (uword i = 0; i < count; i++) { \
-			ax = laddr ## BIT(&memls); \
-			memls.addr1 += dir; \
-		} \
-		sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \
-		sreg ## ABIT(1, cx - count); \
-		cx = lreg ## ABIT(1); \
-	} \
-	sreg ## BIT(0, ax); /* Only last value matters for AL/AX/EAX */
-
 #define LODS_helper(BIT) \
 	if (curr_seg == -1) curr_seg = SEG_DS; \
 	xdir ## BIT \
@@ -2796,7 +2473,19 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		if (adsz16) { ldsi(BIT, 16) } else { ldsi(BIT, 32) } \
 		sreg ## BIT(0, ax); \
 	} else { \
-		if (adsz16) { LODS_helper2(BIT, 16) } else { LODS_helper2(BIT, 32) } \
+		if (adsz16) { \
+			while (lreg16(1)) { \
+				ldsi(BIT, 16) \
+				sreg ## BIT(0, ax); \
+				sreg16(1, lreg16(1) - 1); \
+			} \
+		} else { \
+			while (lreg32(1)) { \
+				ldsi(BIT, 32) \
+				sreg ## BIT(0, ax); \
+				sreg32(1, lreg32(1) - 1); \
+			} \
+		} \
 	}
 
 #define SCAS_helper(BIT) \
@@ -2869,8 +2558,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		if (cpu->cb.iomem_write_string && in_iomem(memld.addr1) && \
 		    dir > 0  && in_iomem(memld.addr1 + count - 1) && \
 		    (memls.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095) && \
-		    IF_EMULATE_LTEMS(!(memls.addr1 - EMS_START < (EMS_END - EMS_START)))) { \
+		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
 			if (cpu->cb.iomem_write_string( \
 				    cpu->cb.iomem, memld.addr1, \
 				    cpu->phys_mem + memls.addr1, count * dir)) { \
@@ -2979,8 +2667,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			count = countd; \
 		if (cpu->cb.io_read_string && dir > 0 && \
 		    (memld.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | 4095) && \
-		    IF_EMULATE_LTEMS(!(memld.addr1 - EMS_START < (EMS_END - EMS_START)))) { \
+		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | 4095)) { \
 			int count1 = cpu->cb.io_read_string( \
 				cpu->cb.io, lreg16(2), \
 				cpu->phys_mem + memld.addr1, dir, count); \
@@ -3009,7 +2696,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if (rep == 0) { \
 		if (adsz16) { indxstdi(BIT, 16) } else { indxstdi(BIT, 32) } \
 	} else { \
-		/* Accept both REP (F3) and REPNE (F2) prefixes - REPNE is treated as REP for INS */ \
+		if (rep != 1) THROW0(EX_UD); \
 		if (adsz16) { INS_helper2(BIT, 16) } else { INS_helper2(BIT, 32) } \
 	}
 
@@ -3043,8 +2730,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			count = counts; \
 		if (cpu->cb.io_write_string && dir > 0 && \
 		    (memls.addr1 | 4095) < cpu->phys_mem_size && \
-		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095) && \
-		    IF_EMULATE_LTEMS(!(memls.addr1 - EMS_START < (EMS_END - EMS_START)))) { \
+		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
 			int count1 = cpu->cb.io_write_string( \
 				cpu->cb.io, lreg16(2), \
 				cpu->phys_mem + memls.addr1, dir, count); \
@@ -3074,7 +2760,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if (rep == 0) { \
 		if (adsz16) { ldsioutdx(BIT, 16) } else { ldsioutdx(BIT, 32) } \
 	} else { \
-		/* Accept both REP (F3) and REPNE (F2) prefixes - REPNE is treated as REP for OUTS */ \
+		if (rep != 1) THROW0(EX_UD); \
 		if (adsz16) { \
 			OUTS_helper2(BIT, 16) \
 		} else { \
@@ -3834,7 +3520,16 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 // 586 and later...
 #define UD0() THROW0(EX_UD);
 
-#ifdef I386_ENABLE_MMX
+#if defined(I386_ENABLE_SSE3)
+#define CPUID_SIMD_FEATURE2 0x1
+#else
+#define CPUID_SIMD_FEATURE2 0x0
+#endif
+#if defined(I386_ENABLE_SSE2)
+#define CPUID_SIMD_FEATURE 0x7800000
+#elif defined(I386_ENABLE_SSE)
+#define CPUID_SIMD_FEATURE 0x3800000
+#elif defined(I386_ENABLE_MMX)
 #define CPUID_SIMD_FEATURE 0x800000
 #else
 #define CPUID_SIMD_FEATURE 0x0
@@ -3852,10 +3547,13 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 		REGi(0) = 0 | (0 << 4) | (cpu->gen << 8); \
 		REGi(3) = 0; \
 		REGi(2) = 0x100; \
+		REGi(1) = 0; \
 		if (cpu->fpu) REGi(2) |= 1; \
 		if (cpu->gen > 5) REGi(2) |= 0x8820; \
-		if (cpu->gen > 5 && cpu->fpu) REGi(2) |= CPUID_SIMD_FEATURE; \
-		REGi(1) = 0; \
+		if (cpu->gen > 5 && cpu->fpu) { \
+			REGi(2) |= CPUID_SIMD_FEATURE; \
+			REGi(1) |= CPUID_SIMD_FEATURE2; \
+		} \
 		break; \
 	default: \
 		REGi(0) = 0; \
@@ -3865,17 +3563,9 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 		break; \
 	}
 
-#include <time.h>
-static uint64_t get_nticks()
-{
-	struct timespec ts;
-	clock_gettime(CLOCK_MONOTONIC, &ts);
-	return ((uint64_t) ts.tv_sec * 1000000000ull +
-		(uint64_t) ts.tv_nsec);
-}
-
+#include <hardware/timer.h>
 #define RDTSC() \
-	uint64_t tsc = get_nticks(); \
+	uint64_t tsc = time_us_64(); \
 	REGi(0) = tsc; \
 	REGi(2) = tsc >> 32;
 
@@ -3951,10 +3641,10 @@ static void __sysenter(CPUI386 *cpu, int pl, int cs)
 	REGi(4) = REGi(1); \
 	cpu->next_ip = REGi(2);
 
-#ifdef I386_ENABLE_MMX
-#define MMX_i386_c
+#if defined(I386_ENABLE_MMX) || defined(I386_ENABLE_SSE)
+#define SIMD_i386_c
 #include "simd.inc"
-#undef MMX_i386_c
+#undef SIMD_i386_c
 #endif
 
 static bool pmcall(CPUI386 *cpu, bool opsz16, uword addr, int sel, bool isjmp);
@@ -4052,46 +3742,44 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 	}
 #else
 	static const void *pfxlabel[] __not_in_flash("pfxlabel") = {
-/* 0x00 */	&&f0x00_fast, &&f0x01_fast, &&f0x02_fast, &&f0x03_fast, &&f0x04_fast, &&f0x05_fast, &&f0x06, &&f0x07,
-/* 0x08 */	&&f0x08_fast, &&f0x09_fast, &&f0x0a_fast, &&f0x0b_fast, &&f0x0c_fast, &&f0x0d_fast, &&f0x0e, &&f0x0f,
+/* 0x00 */	&&f0x00, &&f0x01, &&f0x02, &&f0x03, &&f0x04, &&f0x05, &&f0x06, &&f0x07,
+/* 0x08 */	&&f0x08, &&f0x09, &&f0x0a, &&f0x0b, &&f0x0c, &&f0x0d, &&f0x0e, &&f0x0f,
 /* 0x10 */	&&f0x10, &&f0x11, &&f0x12, &&f0x13, &&f0x14, &&f0x15, &&f0x16, &&f0x17,
 /* 0x18 */	&&f0x18, &&f0x19, &&f0x1a, &&f0x1b, &&f0x1c, &&f0x1d, &&f0x1e, &&f0x1f,
-/* 0x20 */	&&f0x20_fast, &&f0x21_fast, &&f0x22_fast, &&f0x23_fast, &&f0x24_fast, &&f0x25_fast, &&pfx26, &&f0x27,
-/* 0x28 */	&&f0x28_fast, &&f0x29_fast, &&f0x2a_fast, &&f0x2b_fast, &&f0x2c_fast, &&f0x2d_fast, &&pfx2e, &&f0x2f,
-/* 0x30 */	&&f0x30_fast, &&f0x31_fast, &&f0x32_fast, &&f0x33_fast, &&f0x34_fast, &&f0x35_fast, &&pfx36, &&f0x37,
-/* 0x38 */	&&f0x38_fast, &&f0x39_fast, &&f0x3a_fast, &&f0x3b_fast, &&f0x3c_fast, &&f0x3d_fast, &&pfx3e, &&f0x3f,
-/* 0x40 */	&&f0x40_fast, &&f0x41_fast, &&f0x42_fast, &&f0x43_fast, &&f0x44_fast, &&f0x45_fast, &&f0x46_fast, &&f0x47_fast,
-/* 0x48 */	&&f0x48_fast, &&f0x49_fast, &&f0x4a_fast, &&f0x4b_fast, &&f0x4c_fast, &&f0x4d_fast, &&f0x4e_fast, &&f0x4f_fast,
-/* 0x50 */	&&f0x50_fast, &&f0x51_fast, &&f0x52_fast, &&f0x53_fast, &&f0x54_fast, &&f0x55_fast, &&f0x56_fast, &&f0x57_fast,
-/* 0x58 */	&&f0x58_fast, &&f0x59_fast, &&f0x5a_fast, &&f0x5b_fast, &&f0x5c_fast, &&f0x5d_fast, &&f0x5e_fast, &&f0x5f_fast,
+/* 0x20 */	&&f0x20, &&f0x21, &&f0x22, &&f0x23, &&f0x24, &&f0x25, &&pfx26, &&f0x27,
+/* 0x28 */	&&f0x28, &&f0x29, &&f0x2a, &&f0x2b, &&f0x2c, &&f0x2d, &&pfx2e, &&f0x2f,
+/* 0x30 */	&&f0x30, &&f0x31, &&f0x32, &&f0x33, &&f0x34, &&f0x35, &&pfx36, &&f0x37,
+/* 0x38 */	&&f0x38, &&f0x39, &&f0x3a, &&f0x3b, &&f0x3c, &&f0x3d, &&pfx3e, &&f0x3f,
+/* 0x40 */	&&f0x40, &&f0x41, &&f0x42, &&f0x43, &&f0x44, &&f0x45, &&f0x46, &&f0x47,
+/* 0x48 */	&&f0x48, &&f0x49, &&f0x4a, &&f0x4b, &&f0x4c, &&f0x4d, &&f0x4e, &&f0x4f,
+/* 0x50 */	&&f0x50, &&f0x51, &&f0x52, &&f0x53, &&f0x54, &&f0x55, &&f0x56, &&f0x57,
+/* 0x58 */	&&f0x58, &&f0x59, &&f0x5a, &&f0x5b, &&f0x5c, &&f0x5d, &&f0x5e, &&f0x5f,
 /* 0x60 */	&&f0x60, &&f0x61, &&f0x62, &&f0x63, &&pfx64, &&pfx65, &&pfx66, &&pfx67,
-/* 0x68 */	&&f0x68_fast, &&f0x69, &&f0x6a_fast, &&f0x6b, &&f0x6c, &&f0x6d, &&f0x6e, &&f0x6f,
-/* 0x70 */	&&f0x70_fast, &&f0x71_fast, &&f0x72_fast, &&f0x73_fast, &&f0x74_fast, &&f0x75_fast, &&f0x76_fast, &&f0x77_fast,
-/* 0x78 */	&&f0x78_fast, &&f0x79_fast, &&f0x7a_fast, &&f0x7b_fast, &&f0x7c_fast, &&f0x7d_fast, &&f0x7e_fast, &&f0x7f_fast,
-/* 0x80 */	&&f0x80, &&f0x81, &&f0x82, &&f0x83, &&f0x84_fast, &&f0x85_fast, &&f0x86, &&f0x87,
-/* 0x88 */	&&f0x88_fast, &&f0x89_fast, &&f0x8a_fast, &&f0x8b_fast, &&f0x8c, &&f0x8d_fast, &&f0x8e, &&f0x8f,
-/* 0x90 */	&&f0x90_fast, &&f0x91_fast, &&f0x92_fast, &&f0x93_fast, &&f0x94_fast, &&f0x95_fast, &&f0x96_fast, &&f0x97_fast,
-/* 0x98 */	&&f0x98_fast, &&f0x99_fast, &&f0x9a, &&f0x9b, &&f0x9c, &&f0x9d, &&f0x9e, &&f0x9f,
+/* 0x68 */	&&f0x68, &&f0x69, &&f0x6a, &&f0x6b, &&f0x6c, &&f0x6d, &&f0x6e, &&f0x6f,
+/* 0x70 */	&&f0x70, &&f0x71, &&f0x72, &&f0x73, &&f0x74, &&f0x75, &&f0x76, &&f0x77,
+/* 0x78 */	&&f0x78, &&f0x79, &&f0x7a, &&f0x7b, &&f0x7c, &&f0x7d, &&f0x7e, &&f0x7f,
+/* 0x80 */	&&f0x80, &&f0x81, &&f0x82, &&f0x83, &&f0x84, &&f0x85, &&f0x86, &&f0x87,
+/* 0x88 */	&&f0x88, &&f0x89, &&f0x8a, &&f0x8b, &&f0x8c, &&f0x8d, &&f0x8e, &&f0x8f,
+/* 0x90 */	&&f0x90, &&f0x91, &&f0x92, &&f0x93, &&f0x94, &&f0x95, &&f0x96, &&f0x97,
+/* 0x98 */	&&f0x98, &&f0x99, &&f0x9a, &&f0x9b, &&f0x9c, &&f0x9d, &&f0x9e, &&f0x9f,
 /* 0xa0 */	&&f0xa0, &&f0xa1, &&f0xa2, &&f0xa3, &&f0xa4, &&f0xa5, &&f0xa6, &&f0xa7,
-/* 0xa8 */	&&f0xa8_fast, &&f0xa9_fast, &&f0xaa, &&f0xab, &&f0xac, &&f0xad, &&f0xae, &&f0xaf,
-/* 0xb0 */	&&f0xb0_fast, &&f0xb1_fast, &&f0xb2_fast, &&f0xb3_fast, &&f0xb4_fast, &&f0xb5_fast, &&f0xb6_fast, &&f0xb7_fast,
-/* 0xb8 */	&&f0xb8_fast, &&f0xb9_fast, &&f0xba_fast, &&f0xbb_fast, &&f0xbc_fast, &&f0xbd_fast, &&f0xbe_fast, &&f0xbf_fast,
-/* 0xc0 */	&&f0xc0, &&f0xc1_fast, &&f0xc2_fast, &&f0xc3_fast, &&f0xc4, &&f0xc5, &&f0xc6, &&f0xc7,
-/* 0xc8 */	&&f0xc8, &&f0xc9_fast, &&f0xca, &&f0xcb, &&f0xcc, &&f0xcd, &&f0xce, &&f0xcf,
-/* 0xd0 */	&&f0xd0, &&f0xd1_fast, &&f0xd2, &&f0xd3_fast, &&f0xd4, &&f0xd5, &&f0xd6, &&f0xd7,
+/* 0xa8 */	&&f0xa8, &&f0xa9, &&f0xaa, &&f0xab, &&f0xac, &&f0xad, &&f0xae, &&f0xaf,
+/* 0xb0 */	&&f0xb0, &&f0xb1, &&f0xb2, &&f0xb3, &&f0xb4, &&f0xb5, &&f0xb6, &&f0xb7,
+/* 0xb8 */	&&f0xb8, &&f0xb9, &&f0xba, &&f0xbb, &&f0xbc, &&f0xbd, &&f0xbe, &&f0xbf,
+/* 0xc0 */	&&f0xc0, &&f0xc1, &&f0xc2, &&f0xc3, &&f0xc4, &&f0xc5, &&f0xc6, &&f0xc7,
+/* 0xc8 */	&&f0xc8, &&f0xc9, &&f0xca, &&f0xcb, &&f0xcc, &&f0xcd, &&f0xce, &&f0xcf,
+/* 0xd0 */	&&f0xd0, &&f0xd1, &&f0xd2, &&f0xd3, &&f0xd4, &&f0xd5, &&f0xd6, &&f0xd7,
 /* 0xd8 */	&&f0xd8, &&f0xd9, &&f0xda, &&f0xdb, &&f0xdc, &&f0xdd, &&f0xde, &&f0xdf,
-/* 0xe0 */	&&f0xe0_fast, &&f0xe1_fast, &&f0xe2_fast, &&f0xe3_fast, &&f0xe4, &&f0xe5, &&f0xe6, &&f0xe7,
-/* 0xe8 */	&&f0xe8_fast, &&f0xe9_fast, &&f0xea, &&f0xeb_fast, &&f0xec, &&f0xed, &&f0xee, &&f0xef,
-/* 0xf0 */	&&pfxf0, &&f0xf1, &&pfxf2, &&pfxf3, &&f0xf4, &&f0xf5, &&f0xf6, &&f0xf7_fast,
+/* 0xe0 */	&&f0xe0, &&f0xe1, &&f0xe2, &&f0xe3, &&f0xe4, &&f0xe5, &&f0xe6, &&f0xe7,
+/* 0xe8 */	&&f0xe8, &&f0xe9, &&f0xea, &&f0xeb, &&f0xec, &&f0xed, &&f0xee, &&f0xef,
+/* 0xf0 */	&&pfxf0, &&f0xf1, &&pfxf2, &&pfxf3, &&f0xf4, &&f0xf5, &&f0xf6, &&f0xf7,
 /* 0xf8 */	&&f0xf8, &&f0xf9, &&f0xfa, &&f0xfb, &&f0xfc, &&f0xfd, &&f0xfe, &&f0xff,
 	};
-	PROF_OP(b1);
 	goto *pfxlabel[b1];
 #define HANDLE_PREFIX(C, STMT) \
 		pfx ## C: { \
 			STMT; \
 			TRY(fetch8(cpu, &b1)); \
-			PROF_OP(b1); \
 			goto *pfxlabel[b1]; \
 		}
 		HANDLE_PREFIX(26, curr_seg = SEG_ES)
@@ -4106,2236 +3794,9 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 		HANDLE_PREFIX(f2, rep = 2) // REPNE
 		HANDLE_PREFIX(f0, /*lock = true*/)
 #undef HANDLE_PREFIX
-
-	/*
-	 * Fast paths for hottest instructions (0x89, 0x8B = ~20% of all ops)
-	 * These bypass the macro machinery when mod==3 (register-to-register)
-	 */
-	f0x89_fast: { // MOV r/m, r - optimized path
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			// mod==3: register-to-register (most common case)
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) cpu->gprx[rm].r16 = cpu->gprx[reg].r16;
-			else cpu->gprx[rm].r32 = cpu->gprx[reg].r32;
-			ebreak;
-		}
-		// Memory operand path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 2, curr_seg, addr));
-				saddr16(&meml, cpu->gprx[reg].r16);
-			} else {
-				TRY(translate32(cpu, &meml, 2, curr_seg, addr));
-				saddr32(&meml, cpu->gprx[reg].r32);
-			}
-		}
-		ebreak;
-	}
-
-	f0x8b_fast: { // MOV r, r/m - optimized path
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			// mod==3: register-to-register (most common case)
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) cpu->gprx[reg].r16 = cpu->gprx[rm].r16;
-			else cpu->gprx[reg].r32 = cpu->gprx[rm].r32;
-			ebreak;
-		}
-		// Memory operand path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->gprx[reg].r16 = laddr16(&meml);
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->gprx[reg].r32 = laddr32(&meml);
-			}
-		}
-		ebreak;
-	}
-
-	f0xeb_fast: { // JMP short - optimized path (very simple instruction)
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0xe9_fast: { // JMP near - 16/32-bit displacement
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 disp16;
-			TRY(fetch16(cpu, &disp16));
-			cpu->next_ip += (sword)(s16)disp16;
-		} else {
-			u32 disp32;
-			TRY(fetch32(cpu, &disp32));
-			cpu->next_ip += (sword)(s32)disp32;
-		}
-		ebreak;
-	}
-
-	f0xe0_fast: { // LOOPNE/LOOPNZ - decrement CX, jump if CX!=0 and ZF=0
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		uword cx;
-		if (adsz16) {
-			cx = --cpu->gprx[1].r16;
-		} else {
-			cx = --cpu->gprx[1].r32;
-		}
-		int zf = likely(!(cpu->cc.mask & ZF)) ? !!(cpu->flags & ZF) : (cpu->cc.dst == 0);
-		if (cx != 0 && !zf) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0xe1_fast: { // LOOPE/LOOPZ - decrement CX, jump if CX!=0 and ZF=1
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		uword cx;
-		if (adsz16) {
-			cx = --cpu->gprx[1].r16;
-		} else {
-			cx = --cpu->gprx[1].r32;
-		}
-		int zf = likely(!(cpu->cc.mask & ZF)) ? !!(cpu->flags & ZF) : (cpu->cc.dst == 0);
-		if (cx != 0 && zf) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0xe2_fast: { // LOOP - decrement CX, jump if CX!=0
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		uword cx;
-		if (adsz16) {
-			cx = --cpu->gprx[1].r16;
-		} else {
-			cx = --cpu->gprx[1].r32;
-		}
-		if (cx != 0) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0xe3_fast: { // JCXZ/JECXZ - jump if CX/ECX is zero
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		uword cx = adsz16 ? cpu->gprx[1].r16 : cpu->gprx[1].r32;
-		if (cx == 0) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x74_fast: { // JE/JZ - optimized path (check ZF directly)
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		int zf;
-		if (likely(!(cpu->cc.mask & ZF))) {
-			zf = !!(cpu->flags & ZF);
-		} else {
-			zf = (cpu->cc.dst == 0);
-		}
-		if (zf) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x75_fast: { // JNE/JNZ - optimized path (check ZF directly)
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		int zf;
-		if (likely(!(cpu->cc.mask & ZF))) {
-			zf = !!(cpu->flags & ZF);
-		} else {
-			zf = (cpu->cc.dst == 0);
-		}
-		if (!zf) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x72_fast: { // JB/JC/JNAE - jump if CF=1
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (get_CF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x73_fast: { // JNB/JNC/JAE - jump if CF=0
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (!get_CF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x76_fast: { // JBE/JNA - jump if CF=1 or ZF=1
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		int zf;
-		if (likely(!(cpu->cc.mask & ZF))) {
-			zf = !!(cpu->flags & ZF);
-		} else {
-			zf = (cpu->cc.dst == 0);
-		}
-		if (get_CF(cpu) || zf) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x77_fast: { // JA/JNBE - jump if CF=0 and ZF=0
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		int zf;
-		if (likely(!(cpu->cc.mask & ZF))) {
-			zf = !!(cpu->flags & ZF);
-		} else {
-			zf = (cpu->cc.dst == 0);
-		}
-		if (!get_CF(cpu) && !zf) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x7c_fast: { // JL/JNGE - jump if SF != OF
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x7d_fast: { // JGE/JNL - jump if SF = OF
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x7e_fast: { // JLE/JNG - jump if ZF=1 or SF != OF
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		int zf;
-		if (likely(!(cpu->cc.mask & ZF))) {
-			zf = !!(cpu->flags & ZF);
-		} else {
-			zf = (cpu->cc.dst == 0);
-		}
-		if (zf || get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x70_fast: { // JO - jump if OF=1
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x71_fast: { // JNO - jump if OF=0
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (!get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x78_fast: { // JS - jump if SF=1
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (get_SF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x79_fast: { // JNS - jump if SF=0
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (!get_SF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x7a_fast: { // JP/JPE - jump if PF=1
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (get_PF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x7b_fast: { // JNP/JPO - jump if PF=0
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		if (!get_PF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x7f_fast: { // JG/JNLE - jump if ZF=0 and SF = OF
-		PROF_TOTAL();
-		u8 disp8;
-		TRY(fetch8(cpu, &disp8));
-		int zf;
-		if (likely(!(cpu->cc.mask & ZF))) {
-			zf = !!(cpu->flags & ZF);
-		} else {
-			zf = (cpu->cc.dst == 0);
-		}
-		if (!zf && get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s8)disp8;
-		ebreak;
-	}
-
-	f0x31_fast: { // XOR r/m, r - optimized for reg-to-reg and zeroing
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			// mod==3: register-to-register
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (reg == rm) {
-				// XOR reg, reg = zero (very common idiom)
-				if (opsz16) cpu->gprx[rm].r16 = 0;
-				else cpu->gprx[rm].r32 = 0;
-				// Flags: ZF=1, SF=0, PF=1, CF=0, OF=0
-				cpu->cc.dst = 0;
-				cpu->cc.op = CC_XOR;
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-			} else {
-				// Normal XOR
-				if (opsz16) {
-					cpu->cc.dst = sext16(cpu->gprx[rm].r16 ^ cpu->gprx[reg].r16);
-					cpu->gprx[rm].r16 = cpu->cc.dst;
-				} else {
-					cpu->cc.dst = sext32(cpu->gprx[rm].r32 ^ cpu->gprx[reg].r32);
-					cpu->gprx[rm].r32 = cpu->cc.dst;
-				}
-				cpu->cc.op = CC_XOR;
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-			}
-			ebreak;
-		}
-		// Memory operand - use standard path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.dst = sext16(laddr16(&meml) ^ cpu->gprx[reg].r16);
-				saddr16(&meml, cpu->cc.dst);
-			} else {
-				TRY(translate32(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.dst = sext32(laddr32(&meml) ^ cpu->gprx[reg].r32);
-				saddr32(&meml, cpu->cc.dst);
-			}
-			cpu->cc.op = CC_XOR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x33_fast: { // XOR r, r/m - optimized for reg-to-reg and zeroing
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			// mod==3: register-to-register
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (reg == rm) {
-				// XOR reg, reg = zero (very common idiom)
-				if (opsz16) cpu->gprx[reg].r16 = 0;
-				else cpu->gprx[reg].r32 = 0;
-				cpu->cc.dst = 0;
-				cpu->cc.op = CC_XOR;
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-			} else {
-				// Normal XOR
-				if (opsz16) {
-					cpu->cc.dst = sext16(cpu->gprx[reg].r16 ^ cpu->gprx[rm].r16);
-					cpu->gprx[reg].r16 = cpu->cc.dst;
-				} else {
-					cpu->cc.dst = sext32(cpu->gprx[reg].r32 ^ cpu->gprx[rm].r32);
-					cpu->gprx[reg].r32 = cpu->cc.dst;
-				}
-				cpu->cc.op = CC_XOR;
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-			}
-			ebreak;
-		}
-		// Memory operand - use standard path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext16(cpu->gprx[reg].r16 ^ laddr16(&meml));
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext32(cpu->gprx[reg].r32 ^ laddr32(&meml));
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_XOR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x01_fast: { // ADD r/m, r - optimized for reg-to-reg
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 + cpu->cc.src2);
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 + cpu->cc.src2);
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.src1 = sext16(laddr16(&meml));
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 + cpu->cc.src2);
-				saddr16(&meml, cpu->cc.dst);
-			} else {
-				TRY(translate32(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.src1 = sext32(laddr32(&meml));
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 + cpu->cc.src2);
-				saddr32(&meml, cpu->cc.dst);
-			}
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x03_fast: { // ADD r, r/m - optimized for reg-to-reg
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 + cpu->cc.src2);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 + cpu->cc.src2);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(laddr16(&meml));
-				cpu->cc.dst = sext16(cpu->cc.src1 + cpu->cc.src2);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(laddr32(&meml));
-				cpu->cc.dst = sext32(cpu->cc.src1 + cpu->cc.src2);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x39_fast: { // CMP r/m, r - optimized for reg-to-reg
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext16(laddr16(&meml));
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext32(laddr32(&meml));
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x3b_fast: { // CMP r, r/m - optimized for reg-to-reg
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(laddr16(&meml));
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(laddr32(&meml));
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x29_fast: { // SUB r/m, r - optimized for reg-to-reg
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.src1 = sext16(laddr16(&meml));
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-				saddr16(&meml, cpu->cc.dst);
-			} else {
-				TRY(translate32(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.src1 = sext32(laddr32(&meml));
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-				saddr32(&meml, cpu->cc.dst);
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x2b_fast: { // SUB r, r/m - optimized for reg-to-reg
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(laddr16(&meml));
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(laddr32(&meml));
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	// INC/DEC reg - inline fast paths (macros don't work with hex like 4e/4f)
-#define DO_INC_FAST(reg_idx) \
-	{ \
-		PROF_TOTAL(); \
-		int cf = get_CF(cpu); \
-		if (opsz16) { \
-			cpu->cc.src1 = sext16(cpu->gprx[reg_idx].r16); \
-			cpu->cc.dst = sext16(cpu->cc.src1 + 1); \
-			cpu->gprx[reg_idx].r16 = cpu->cc.dst; \
-			cpu->cc.op = CC_INC16; \
-		} else { \
-			cpu->cc.src1 = sext32(cpu->gprx[reg_idx].r32); \
-			cpu->cc.dst = sext32(cpu->cc.src1 + 1); \
-			cpu->gprx[reg_idx].r32 = cpu->cc.dst; \
-			cpu->cc.op = CC_INC32; \
-		} \
-		cpu->cc.mask = PF | AF | ZF | SF | OF; \
-		SET_BIT(cpu->flags, cf, CF); \
-		ebreak; \
-	}
-#define DO_DEC_FAST(reg_idx) \
-	{ \
-		PROF_TOTAL(); \
-		int cf = get_CF(cpu); \
-		if (opsz16) { \
-			cpu->cc.src1 = sext16(cpu->gprx[reg_idx].r16); \
-			cpu->cc.dst = sext16(cpu->cc.src1 - 1); \
-			cpu->gprx[reg_idx].r16 = cpu->cc.dst; \
-			cpu->cc.op = CC_DEC16; \
-		} else { \
-			cpu->cc.src1 = sext32(cpu->gprx[reg_idx].r32); \
-			cpu->cc.dst = sext32(cpu->cc.src1 - 1); \
-			cpu->gprx[reg_idx].r32 = cpu->cc.dst; \
-			cpu->cc.op = CC_DEC32; \
-		} \
-		cpu->cc.mask = PF | AF | ZF | SF | OF; \
-		SET_BIT(cpu->flags, cf, CF); \
-		ebreak; \
-	}
-	f0x40_fast: DO_INC_FAST(0)  // INC EAX
-	f0x41_fast: DO_INC_FAST(1)  // INC ECX
-	f0x42_fast: DO_INC_FAST(2)  // INC EDX
-	f0x43_fast: DO_INC_FAST(3)  // INC EBX
-	f0x44_fast: DO_INC_FAST(4)  // INC ESP
-	f0x45_fast: DO_INC_FAST(5)  // INC EBP
-	f0x46_fast: DO_INC_FAST(6)  // INC ESI
-	f0x47_fast: DO_INC_FAST(7)  // INC EDI
-	f0x48_fast: DO_DEC_FAST(0)  // DEC EAX
-	f0x49_fast: DO_DEC_FAST(1)  // DEC ECX
-	f0x4a_fast: DO_DEC_FAST(2)  // DEC EDX
-	f0x4b_fast: DO_DEC_FAST(3)  // DEC EBX
-	f0x4c_fast: DO_DEC_FAST(4)  // DEC ESP
-	f0x4d_fast: DO_DEC_FAST(5)  // DEC EBP
-	f0x4e_fast: DO_DEC_FAST(6)  // DEC ESI
-	f0x4f_fast: DO_DEC_FAST(7)  // DEC EDI
-#undef DO_INC_FAST
-#undef DO_DEC_FAST
-
-	f0x85_fast: { // TEST r/m, r - optimized for reg-to-reg
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.dst = sext16(cpu->gprx[rm].r16 & cpu->gprx[reg].r16);
-			} else {
-				cpu->cc.dst = sext32(cpu->gprx[rm].r32 & cpu->gprx[reg].r32);
-			}
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext16(laddr16(&meml) & cpu->gprx[reg].r16);
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext32(laddr32(&meml) & cpu->gprx[reg].r32);
-			}
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x8d_fast: { // LEA r, m - no flags, just address calculation
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		int reg = (modrm >> 3) & 7;
-		int mod = modrm >> 6;
-		int rm = modrm & 7;
-		if (mod == 3) {
-			// LEA with register operand - same as MOV
-			if (opsz16) cpu->gprx[reg].r16 = cpu->gprx[rm].r16;
-			else cpu->gprx[reg].r32 = cpu->gprx[rm].r32;
-		} else {
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) cpu->gprx[reg].r16 = addr;
-			else cpu->gprx[reg].r32 = addr;
-		}
-		ebreak;
-	}
-
-	f0x09_fast: { // OR r/m, r
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.dst = sext16(cpu->gprx[rm].r16 | cpu->gprx[reg].r16);
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.dst = sext32(cpu->gprx[rm].r32 | cpu->gprx[reg].r32);
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.dst = sext16(laddr16(&meml) | cpu->gprx[reg].r16);
-				saddr16(&meml, cpu->cc.dst);
-			} else {
-				TRY(translate32(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.dst = sext32(laddr32(&meml) | cpu->gprx[reg].r32);
-				saddr32(&meml, cpu->cc.dst);
-			}
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x0b_fast: { // OR r, r/m
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.dst = sext16(cpu->gprx[reg].r16 | cpu->gprx[rm].r16);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.dst = sext32(cpu->gprx[reg].r32 | cpu->gprx[rm].r32);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext16(cpu->gprx[reg].r16 | laddr16(&meml));
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext32(cpu->gprx[reg].r32 | laddr32(&meml));
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x21_fast: { // AND r/m, r
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.dst = sext16(cpu->gprx[rm].r16 & cpu->gprx[reg].r16);
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.dst = sext32(cpu->gprx[rm].r32 & cpu->gprx[reg].r32);
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.dst = sext16(laddr16(&meml) & cpu->gprx[reg].r16);
-				saddr16(&meml, cpu->cc.dst);
-			} else {
-				TRY(translate32(cpu, &meml, 3, curr_seg, addr));
-				cpu->cc.dst = sext32(laddr32(&meml) & cpu->gprx[reg].r32);
-				saddr32(&meml, cpu->cc.dst);
-			}
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x23_fast: { // AND r, r/m
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				cpu->cc.dst = sext16(cpu->gprx[reg].r16 & cpu->gprx[rm].r16);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.dst = sext32(cpu->gprx[reg].r32 & cpu->gprx[rm].r32);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory path
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			if (opsz16) {
-				TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext16(cpu->gprx[reg].r16 & laddr16(&meml));
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-				cpu->cc.dst = sext32(cpu->gprx[reg].r32 & laddr32(&meml));
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	// PUSH reg fast paths
-#define DO_PUSH_FAST(reg_idx) \
-	{ \
-		PROF_TOTAL(); \
-		OptAddr meml1; \
-		uword sp = cpu->gprx[4].r32; \
-		if (opsz16) { \
-			TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask)); \
-			set_sp(sp - 2, sp_mask); \
-			saddr16(&meml1, cpu->gprx[reg_idx].r16); \
-		} else { \
-			TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask)); \
-			set_sp(sp - 4, sp_mask); \
-			saddr32(&meml1, cpu->gprx[reg_idx].r32); \
-		} \
-		ebreak; \
-	}
-	f0x50_fast: DO_PUSH_FAST(0)  // PUSH EAX
-	f0x51_fast: DO_PUSH_FAST(1)  // PUSH ECX
-	f0x52_fast: DO_PUSH_FAST(2)  // PUSH EDX
-	f0x53_fast: DO_PUSH_FAST(3)  // PUSH EBX
-	f0x54_fast: DO_PUSH_FAST(4)  // PUSH ESP
-	f0x55_fast: DO_PUSH_FAST(5)  // PUSH EBP
-	f0x56_fast: DO_PUSH_FAST(6)  // PUSH ESI
-	f0x57_fast: DO_PUSH_FAST(7)  // PUSH EDI
-#undef DO_PUSH_FAST
-
-	// POP reg fast paths
-#define DO_POP_FAST(reg_idx) \
-	{ \
-		PROF_TOTAL(); \
-		OptAddr meml1; \
-		uword sp = cpu->gprx[4].r32; \
-		if (opsz16) { \
-			TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
-			cpu->gprx[reg_idx].r16 = laddr16(&meml1); \
-			set_sp(sp + 2, sp_mask); \
-		} else { \
-			TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
-			cpu->gprx[reg_idx].r32 = laddr32(&meml1); \
-			set_sp(sp + 4, sp_mask); \
-		} \
-		ebreak; \
-	}
-	f0x58_fast: DO_POP_FAST(0)  // POP EAX
-	f0x59_fast: DO_POP_FAST(1)  // POP ECX
-	f0x5a_fast: DO_POP_FAST(2)  // POP EDX
-	f0x5b_fast: DO_POP_FAST(3)  // POP EBX
-	f0x5c_fast: DO_POP_FAST(4)  // POP ESP
-	f0x5d_fast: DO_POP_FAST(5)  // POP EBP
-	f0x5e_fast: DO_POP_FAST(6)  // POP ESI
-	f0x5f_fast: DO_POP_FAST(7)  // POP EDI
-#undef DO_POP_FAST
-
-	f0x98_fast: { // CBW/CWDE - sign extend AL to AX or AX to EAX
-		PROF_TOTAL();
-		if (opsz16) {
-			cpu->gprx[0].r16 = (s16)(s8)cpu->gprx[0].r8[0];
-		} else {
-			cpu->gprx[0].r32 = (s32)(s16)cpu->gprx[0].r16;
-		}
-		ebreak;
-	}
-
-	f0x99_fast: { // CWD/CDQ - sign extend AX to DX:AX or EAX to EDX:EAX
-		PROF_TOTAL();
-		if (opsz16) {
-			cpu->gprx[2].r16 = (s16)cpu->gprx[0].r16 >> 15;
-		} else {
-			cpu->gprx[2].r32 = (s32)cpu->gprx[0].r32 >> 31;
-		}
-		ebreak;
-	}
-
-// XCHG EAX, reg fast paths (0x91-0x97)
-#define DO_XCHG_EAX_FAST(reg_idx) \
-	{ \
-		PROF_TOTAL(); \
-		if (opsz16) { \
-			u16 tmp = cpu->gprx[0].r16; \
-			cpu->gprx[0].r16 = cpu->gprx[reg_idx].r16; \
-			cpu->gprx[reg_idx].r16 = tmp; \
-		} else { \
-			u32 tmp = cpu->gprx[0].r32; \
-			cpu->gprx[0].r32 = cpu->gprx[reg_idx].r32; \
-			cpu->gprx[reg_idx].r32 = tmp; \
-		} \
-		ebreak; \
-	}
-	f0x91_fast: DO_XCHG_EAX_FAST(1)  // XCHG EAX, ECX
-	f0x92_fast: DO_XCHG_EAX_FAST(2)  // XCHG EAX, EDX
-	f0x93_fast: DO_XCHG_EAX_FAST(3)  // XCHG EAX, EBX
-	f0x94_fast: DO_XCHG_EAX_FAST(4)  // XCHG EAX, ESP
-	f0x95_fast: DO_XCHG_EAX_FAST(5)  // XCHG EAX, EBP
-	f0x96_fast: DO_XCHG_EAX_FAST(6)  // XCHG EAX, ESI
-	f0x97_fast: DO_XCHG_EAX_FAST(7)  // XCHG EAX, EDI
-#undef DO_XCHG_EAX_FAST
-
-// MOV r8, imm8 fast paths (0xB0-0xB7)
-#define DO_MOV_R8_IMM_FAST(reg_idx) \
-	{ \
-		PROF_TOTAL(); \
-		u8 imm; \
-		TRY(fetch8(cpu, &imm)); \
-		if (reg_idx > 3) { \
-			cpu->gprx[reg_idx - 4].r8[1] = imm; \
-		} else { \
-			cpu->gprx[reg_idx].r8[0] = imm; \
-		} \
-		ebreak; \
-	}
-	f0xb0_fast: DO_MOV_R8_IMM_FAST(0)  // MOV AL, imm8
-	f0xb1_fast: DO_MOV_R8_IMM_FAST(1)  // MOV CL, imm8
-	f0xb2_fast: DO_MOV_R8_IMM_FAST(2)  // MOV DL, imm8
-	f0xb3_fast: DO_MOV_R8_IMM_FAST(3)  // MOV BL, imm8
-	f0xb4_fast: DO_MOV_R8_IMM_FAST(4)  // MOV AH, imm8
-	f0xb5_fast: DO_MOV_R8_IMM_FAST(5)  // MOV CH, imm8
-	f0xb6_fast: DO_MOV_R8_IMM_FAST(6)  // MOV DH, imm8
-	f0xb7_fast: DO_MOV_R8_IMM_FAST(7)  // MOV BH, imm8
-#undef DO_MOV_R8_IMM_FAST
-
-	f0xc3_fast: { // RET near
-		PROF_TOTAL();
-		OptAddr meml1;
-		uword sp = cpu->gprx[4].r32;
-		if (opsz16) {
-			TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
-			set_sp(sp + 2, sp_mask);
-			cpu->next_ip = laddr16(&meml1);
-		} else {
-			TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
-			set_sp(sp + 4, sp_mask);
-			cpu->next_ip = laddr32(&meml1);
-		}
-		ebreak;
-	}
-
-	f0xc9_fast: { // LEAVE - set SP to BP, then pop BP
-		PROF_TOTAL();
-		OptAddr meml1;
-		uword sp = cpu->gprx[5].r32;  // EBP
-		if (opsz16) {
-			TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
-			set_sp(sp + 2, sp_mask);
-			cpu->gprx[5].r16 = laddr16(&meml1);
-		} else {
-			TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
-			set_sp(sp + 4, sp_mask);
-			cpu->gprx[5].r32 = laddr32(&meml1);
-		}
-		ebreak;
-	}
-
-	f0xc1_fast: { // Group 2 Ev,Ib - shift/rotate by imm8 (SHL/SHR/SAR register only)
-		PROF_TOTAL();
-		u8 peek_modrm;
-		TRY(peek8(cpu, &peek_modrm));
-		int group = (peek_modrm >> 3) & 7;
-		int mod = peek_modrm >> 6;
-
-		// Only fast-path register SHL/SHR/SAR
-		if (likely(mod == 3 && (group == 4 || group == 5 || group == 7))) {
-			cpu->next_ip++; // consume modrm
-			int rm = peek_modrm & 7;
-			u8 shift_imm;
-			TRY(fetch8(cpu, &shift_imm));
-			uword shift = shift_imm & 0x1f;
-			if (shift == 0) {
-				ebreak; // No change to flags or value
-			}
-			if (opsz16) {
-				u16 val = cpu->gprx[rm].r16;
-				if (group == 4) { // SHL
-					cpu->cc.dst = sext16(val << shift);
-					cpu->cc.dst2 = (val >> (16 - shift)) & 1;
-					cpu->cc.op = CC_SHL;
-				} else if (group == 5) { // SHR
-					cpu->cc.dst = sext16(val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SHR;
-					cpu->cc.src1 = sext16(val);
-				} else { // SAR
-					cpu->cc.dst = sext16((s16)val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SAR;
-				}
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				u32 val = cpu->gprx[rm].r32;
-				if (group == 4) { // SHL
-					cpu->cc.dst = sext32(val << shift);
-					cpu->cc.dst2 = (val >> (32 - shift)) & 1;
-					cpu->cc.op = CC_SHL;
-				} else if (group == 5) { // SHR
-					cpu->cc.dst = sext32(val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SHR;
-					cpu->cc.src1 = sext32(val);
-				} else { // SAR
-					cpu->cc.dst = sext32((s32)val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SAR;
-				}
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			ebreak;
-		}
-		// For ROL/ROR/RCL/RCR and memory ops, use original handler
-		goto f0xc1;
-	}
-
-	f0xc2_fast: { // RET imm16 - return and pop imm16 bytes
-		PROF_TOTAL();
-		u16 imm16;
-		TRY(fetch16(cpu, &imm16));
-		OptAddr meml1;
-		uword sp = cpu->gprx[4].r32;
-		if (opsz16) {
-			TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
-			cpu->next_ip = laddr16(&meml1);
-			set_sp(sp + 2 + imm16, sp_mask);
-		} else {
-			TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask));
-			cpu->next_ip = laddr32(&meml1);
-			set_sp(sp + 4 + imm16, sp_mask);
-		}
-		ebreak;
-	}
-
-	f0x84_fast: { // TEST r/m8, r8 - register only fast path
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			u8 val1 = lreg8(rm);
-			u8 val2 = lreg8(reg);
-			cpu->cc.dst = sext8(val1 & val2);
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory operand - fallback
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.dst = sext8(laddr8(&meml) & lreg8(reg));
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x88_fast: { // MOV r/m8, r8 - register only fast path
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			sreg8(rm, lreg8(reg));
-			ebreak;
-		}
-		// Memory operand - fallback
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 2, curr_seg, addr));
-			saddr8(&meml, lreg8(reg));
-		}
-		ebreak;
-	}
-
-	f0x8a_fast: { // MOV r8, r/m8 - register only fast path
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			sreg8(reg, lreg8(rm));
-			ebreak;
-		}
-		// Memory operand - fallback
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			sreg8(reg, laddr8(&meml));
-		}
-		ebreak;
-	}
-
-	f0x30_fast: { // XOR r/m8, r8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.dst = sext8(lreg8(rm) ^ lreg8(reg));
-			sreg8(rm, cpu->cc.dst);
-			cpu->cc.op = CC_XOR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 3, curr_seg, addr));
-			cpu->cc.dst = sext8(laddr8(&meml) ^ lreg8(reg));
-			saddr8(&meml, cpu->cc.dst);
-			cpu->cc.op = CC_XOR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x32_fast: { // XOR r8, r/m8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.dst = sext8(lreg8(reg) ^ lreg8(rm));
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_XOR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.dst = sext8(lreg8(reg) ^ laddr8(&meml));
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_XOR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x38_fast: { // CMP r/m8, r8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.src1 = sext8(lreg8(rm));
-			cpu->cc.src2 = sext8(lreg8(reg));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.src1 = sext8(laddr8(&meml));
-			cpu->cc.src2 = sext8(lreg8(reg));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x3a_fast: { // CMP r8, r/m8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.src1 = sext8(lreg8(reg));
-			cpu->cc.src2 = sext8(lreg8(rm));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.src1 = sext8(lreg8(reg));
-			cpu->cc.src2 = sext8(laddr8(&meml));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x68_fast: { // PUSH imm16/32
-		PROF_TOTAL();
-		OptAddr meml1;
-		uword sp = cpu->gprx[4].r32;
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask));
-			set_sp(sp - 2, sp_mask);
-			saddr16(&meml1, imm);
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask));
-			set_sp(sp - 4, sp_mask);
-			saddr32(&meml1, imm);
-		}
-		ebreak;
-	}
-
-	f0x6a_fast: { // PUSH imm8 (sign-extended)
-		PROF_TOTAL();
-		u8 imm8;
-		TRY(fetch8(cpu, &imm8));
-		OptAddr meml1;
-		uword sp = cpu->gprx[4].r32;
-		if (opsz16) {
-			TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask));
-			set_sp(sp - 2, sp_mask);
-			saddr16(&meml1, (s16)(s8)imm8);
-		} else {
-			TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask));
-			set_sp(sp - 4, sp_mask);
-			saddr32(&meml1, (s32)(s8)imm8);
-		}
-		ebreak;
-	}
-
-	f0x00_fast: { // ADD r/m8, r8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.src1 = sext8(lreg8(rm));
-			cpu->cc.src2 = sext8(lreg8(reg));
-			cpu->cc.dst = cpu->cc.src1 + cpu->cc.src2;
-			sreg8(rm, cpu->cc.dst);
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 3, curr_seg, addr));
-			cpu->cc.src1 = sext8(laddr8(&meml));
-			cpu->cc.src2 = sext8(lreg8(reg));
-			cpu->cc.dst = cpu->cc.src1 + cpu->cc.src2;
-			saddr8(&meml, cpu->cc.dst);
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x02_fast: { // ADD r8, r/m8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.src1 = sext8(lreg8(reg));
-			cpu->cc.src2 = sext8(lreg8(rm));
-			cpu->cc.dst = cpu->cc.src1 + cpu->cc.src2;
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.src1 = sext8(lreg8(reg));
-			cpu->cc.src2 = sext8(laddr8(&meml));
-			cpu->cc.dst = cpu->cc.src1 + cpu->cc.src2;
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x08_fast: { // OR r/m8, r8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.dst = sext8(lreg8(rm) | lreg8(reg));
-			sreg8(rm, cpu->cc.dst);
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 3, curr_seg, addr));
-			cpu->cc.dst = sext8(laddr8(&meml) | lreg8(reg));
-			saddr8(&meml, cpu->cc.dst);
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x0a_fast: { // OR r8, r/m8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.dst = sext8(lreg8(reg) | lreg8(rm));
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.dst = sext8(lreg8(reg) | laddr8(&meml));
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_OR;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x20_fast: { // AND r/m8, r8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.dst = sext8(lreg8(rm) & lreg8(reg));
-			sreg8(rm, cpu->cc.dst);
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 3, curr_seg, addr));
-			cpu->cc.dst = sext8(laddr8(&meml) & lreg8(reg));
-			saddr8(&meml, cpu->cc.dst);
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x22_fast: { // AND r8, r/m8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.dst = sext8(lreg8(reg) & lreg8(rm));
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.dst = sext8(lreg8(reg) & laddr8(&meml));
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_AND;
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x28_fast: { // SUB r/m8, r8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.src1 = sext8(lreg8(rm));
-			cpu->cc.src2 = sext8(lreg8(reg));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			sreg8(rm, cpu->cc.dst);
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 3, curr_seg, addr));
-			cpu->cc.src1 = sext8(laddr8(&meml));
-			cpu->cc.src2 = sext8(lreg8(reg));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			saddr8(&meml, cpu->cc.dst);
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x2a_fast: { // SUB r8, r/m8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			cpu->cc.src1 = sext8(lreg8(reg));
-			cpu->cc.src2 = sext8(lreg8(rm));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		// Memory - inline
-		{
-			int reg = (modrm >> 3) & 7;
-			int mod = modrm >> 6;
-			int rm = modrm & 7;
-			TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-			TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-			cpu->cc.src1 = sext8(lreg8(reg));
-			cpu->cc.src2 = sext8(laddr8(&meml));
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			sreg8(reg, cpu->cc.dst);
-			cpu->cc.op = CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		}
-		ebreak;
-	}
-
-	f0x11_fast: { // ADC r/m32, r32
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			int cf = get_CF(cpu);
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 + cpu->cc.src2 + cf);
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 + cpu->cc.src2 + cf);
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = cf ? CC_ADC : CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		goto f0x11;
-	}
-
-	f0x13_fast: { // ADC r32, r/m32
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			int cf = get_CF(cpu);
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 + cpu->cc.src2 + cf);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 + cpu->cc.src2 + cf);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = cf ? CC_ADC : CC_ADD;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		goto f0x13;
-	}
-
-	f0x19_fast: { // SBB r/m32, r32
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			int cf = get_CF(cpu);
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2 - cf);
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2 - cf);
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = cf ? CC_SBB : CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		goto f0x19;
-	}
-
-	f0x1b_fast: { // SBB r32, r/m32
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			int cf = get_CF(cpu);
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-				cpu->cc.src2 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.dst = sext16(cpu->cc.src1 - cpu->cc.src2 - cf);
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-				cpu->cc.src2 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.dst = sext32(cpu->cc.src1 - cpu->cc.src2 - cf);
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			cpu->cc.op = cf ? CC_SBB : CC_SUB;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			ebreak;
-		}
-		goto f0x1b;
-	}
-
-	f0x86_fast: { // XCHG r/m8, r8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			u8 tmp = lreg8(rm);
-			sreg8(rm, lreg8(reg));
-			sreg8(reg, tmp);
-			ebreak;
-		}
-		goto f0x86;
-	}
-
-	f0x87_fast: { // XCHG r/m16/32, r16/32
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				u16 tmp = cpu->gprx[rm].r16;
-				cpu->gprx[rm].r16 = cpu->gprx[reg].r16;
-				cpu->gprx[reg].r16 = tmp;
-			} else {
-				u32 tmp = cpu->gprx[rm].r32;
-				cpu->gprx[rm].r32 = cpu->gprx[reg].r32;
-				cpu->gprx[reg].r32 = tmp;
-			}
-			ebreak;
-		}
-		goto f0x87;
-	}
-
-	f0x69_fast: { // IMUL r16/32, r/m16/32, imm16/32
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			if (opsz16) {
-				u16 imm;
-				TRY(fetch16(cpu, &imm));
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = sext16(imm);
-				cpu->cc.dst = cpu->cc.src1 * cpu->cc.src2;
-				cpu->cc.op = CC_IMUL16;
-				cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				u32 imm;
-				TRY(fetch32(cpu, &imm));
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = sext32(imm);
-				int64_t res = (int64_t)(s32)cpu->cc.src1 * (int64_t)(s32)cpu->cc.src2;
-				cpu->cc.dst = res;
-				cpu->cc.dst2 = res >> 32;
-				cpu->cc.op = CC_IMUL32;
-				cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			ebreak;
-		}
-		goto f0x69;
-	}
-
-	f0x6b_fast: { // IMUL r16/32, r/m16/32, imm8
-		PROF_TOTAL();
-		TRY(fetch8(cpu, &modrm));
-		if (likely((modrm & 0xC0) == 0xC0)) {
-			int reg = (modrm >> 3) & 7;
-			int rm = modrm & 7;
-			u8 imm8;
-			TRY(fetch8(cpu, &imm8));
-			if (opsz16) {
-				cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-				cpu->cc.src2 = sext8(imm8);
-				cpu->cc.dst = cpu->cc.src1 * cpu->cc.src2;
-				cpu->cc.op = CC_IMUL16;
-				cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-				cpu->gprx[reg].r16 = cpu->cc.dst;
-			} else {
-				cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-				cpu->cc.src2 = sext8(imm8);
-				int64_t res = (int64_t)(s32)cpu->cc.src1 * (int64_t)(s32)cpu->cc.src2;
-				cpu->cc.dst = res;
-				cpu->cc.dst2 = res >> 32;
-				cpu->cc.op = CC_IMUL32;
-				cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-				cpu->gprx[reg].r32 = cpu->cc.dst;
-			}
-			ebreak;
-		}
-		goto f0x6b;
-	}
-
-	f0x04_fast: { // ADD AL, imm8
-		PROF_TOTAL();
-		u8 imm;
-		TRY(fetch8(cpu, &imm));
-		cpu->cc.src1 = sext8(cpu->gprx[0].r8[0]);
-		cpu->cc.src2 = sext8(imm);
-		cpu->cc.dst = cpu->cc.src1 + cpu->cc.src2;
-		cpu->cc.op = CC_ADD;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		cpu->gprx[0].r8[0] = cpu->cc.dst;
-		ebreak;
-	}
-
-	f0x0c_fast: { // OR AL, imm8
-		PROF_TOTAL();
-		u8 imm;
-		TRY(fetch8(cpu, &imm));
-		cpu->cc.dst = sext8(cpu->gprx[0].r8[0] | imm);
-		cpu->cc.op = CC_OR;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		cpu->gprx[0].r8[0] = cpu->cc.dst;
-		ebreak;
-	}
-
-	f0x0d_fast: { // OR AX/EAX, imm16/32
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			cpu->cc.dst = sext16(cpu->gprx[0].r16 | imm);
-			cpu->gprx[0].r16 = cpu->cc.dst;
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			cpu->cc.dst = sext32(cpu->gprx[0].r32 | imm);
-			cpu->gprx[0].r32 = cpu->cc.dst;
-		}
-		cpu->cc.op = CC_OR;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0x24_fast: { // AND AL, imm8
-		PROF_TOTAL();
-		u8 imm;
-		TRY(fetch8(cpu, &imm));
-		cpu->cc.dst = sext8(cpu->gprx[0].r8[0] & imm);
-		cpu->cc.op = CC_AND;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		cpu->gprx[0].r8[0] = cpu->cc.dst;
-		ebreak;
-	}
-
-	f0x25_fast: { // AND AX/EAX, imm16/32
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			cpu->cc.dst = sext16(cpu->gprx[0].r16 & imm);
-			cpu->gprx[0].r16 = cpu->cc.dst;
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			cpu->cc.dst = sext32(cpu->gprx[0].r32 & imm);
-			cpu->gprx[0].r32 = cpu->cc.dst;
-		}
-		cpu->cc.op = CC_AND;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0x34_fast: { // XOR AL, imm8
-		PROF_TOTAL();
-		u8 imm;
-		TRY(fetch8(cpu, &imm));
-		cpu->cc.dst = sext8(cpu->gprx[0].r8[0] ^ imm);
-		cpu->cc.op = CC_XOR;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		cpu->gprx[0].r8[0] = cpu->cc.dst;
-		ebreak;
-	}
-
-	f0x35_fast: { // XOR AX/EAX, imm16/32
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			cpu->cc.dst = sext16(cpu->gprx[0].r16 ^ imm);
-			cpu->gprx[0].r16 = cpu->cc.dst;
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			cpu->cc.dst = sext32(cpu->gprx[0].r32 ^ imm);
-			cpu->gprx[0].r32 = cpu->cc.dst;
-		}
-		cpu->cc.op = CC_XOR;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0x05_fast: { // ADD AX/EAX, imm16/32
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			cpu->cc.src1 = sext16(cpu->gprx[0].r16);
-			cpu->cc.src2 = sext16(imm);
-			cpu->cc.dst = cpu->cc.src1 + cpu->cc.src2;
-			cpu->gprx[0].r16 = cpu->cc.dst;
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			cpu->cc.src1 = sext32(cpu->gprx[0].r32);
-			cpu->cc.src2 = sext32(imm);
-			cpu->cc.dst = cpu->cc.src1 + cpu->cc.src2;
-			cpu->gprx[0].r32 = cpu->cc.dst;
-		}
-		cpu->cc.op = CC_ADD;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0x2c_fast: { // SUB AL, imm8
-		PROF_TOTAL();
-		u8 imm;
-		TRY(fetch8(cpu, &imm));
-		cpu->cc.src1 = sext8(cpu->gprx[0].r8[0]);
-		cpu->cc.src2 = sext8(imm);
-		cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-		cpu->cc.op = CC_SUB;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		cpu->gprx[0].r8[0] = cpu->cc.dst;
-		ebreak;
-	}
-
-	f0x2d_fast: { // SUB AX/EAX, imm16/32
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			cpu->cc.src1 = sext16(cpu->gprx[0].r16);
-			cpu->cc.src2 = sext16(imm);
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			cpu->gprx[0].r16 = cpu->cc.dst;
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			cpu->cc.src1 = sext32(cpu->gprx[0].r32);
-			cpu->cc.src2 = sext32(imm);
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-			cpu->gprx[0].r32 = cpu->cc.dst;
-		}
-		cpu->cc.op = CC_SUB;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0x3c_fast: { // CMP AL, imm8
-		PROF_TOTAL();
-		u8 imm;
-		TRY(fetch8(cpu, &imm));
-		cpu->cc.src1 = sext8(cpu->gprx[0].r8[0]);
-		cpu->cc.src2 = sext8(imm);
-		cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-		cpu->cc.op = CC_SUB;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0x3d_fast: { // CMP AX/EAX, imm16/32
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			cpu->cc.src1 = sext16(cpu->gprx[0].r16);
-			cpu->cc.src2 = sext16(imm);
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			cpu->cc.src1 = sext32(cpu->gprx[0].r32);
-			cpu->cc.src2 = sext32(imm);
-			cpu->cc.dst = cpu->cc.src1 - cpu->cc.src2;
-		}
-		cpu->cc.op = CC_SUB;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0xa8_fast: { // TEST AL, imm8
-		PROF_TOTAL();
-		u8 imm;
-		TRY(fetch8(cpu, &imm));
-		cpu->cc.dst = sext8(cpu->gprx[0].r8[0] & imm);
-		cpu->cc.op = CC_AND;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		ebreak;
-	}
-
-	f0xa9_fast: { // TEST AX/EAX, imm16/32
-		PROF_TOTAL();
-		if (opsz16) {
-			u16 imm;
-			TRY(fetch16(cpu, &imm));
-			cpu->cc.dst = sext16(cpu->gprx[0].r16 & imm);
-		} else {
-			u32 imm;
-			TRY(fetch32(cpu, &imm));
-			cpu->cc.dst = sext32(cpu->gprx[0].r32 & imm);
-		}
-		cpu->cc.op = CC_AND;
-		cpu->cc.mask = CF | PF | ZF | SF | OF;
-		ebreak;
-	}
-
-// MOV reg, imm fast paths (0xB8-0xBF)
-#define DO_MOV_REG_IMM_FAST(reg_idx) \
-	{ \
-		PROF_TOTAL(); \
-		if (opsz16) { \
-			u16 imm; \
-			TRY(fetch16(cpu, &imm)); \
-			cpu->gprx[reg_idx].r16 = imm; \
-		} else { \
-			u32 imm; \
-			TRY(fetch32(cpu, &imm)); \
-			cpu->gprx[reg_idx].r32 = imm; \
-		} \
-		ebreak; \
-	}
-	f0xb8_fast: DO_MOV_REG_IMM_FAST(0)  // MOV EAX, imm
-	f0xb9_fast: DO_MOV_REG_IMM_FAST(1)  // MOV ECX, imm
-	f0xba_fast: DO_MOV_REG_IMM_FAST(2)  // MOV EDX, imm
-	f0xbb_fast: DO_MOV_REG_IMM_FAST(3)  // MOV EBX, imm
-	f0xbc_fast: DO_MOV_REG_IMM_FAST(4)  // MOV ESP, imm
-	f0xbd_fast: DO_MOV_REG_IMM_FAST(5)  // MOV EBP, imm
-	f0xbe_fast: DO_MOV_REG_IMM_FAST(6)  // MOV ESI, imm
-	f0xbf_fast: DO_MOV_REG_IMM_FAST(7)  // MOV EDI, imm
-#undef DO_MOV_REG_IMM_FAST
-
-	f0xe8_fast: { // CALL near relative
-		PROF_TOTAL();
-		OptAddr meml1;
-		uword sp = cpu->gprx[4].r32;
-		if (opsz16) {
-			s16 disp;
-			TRY(fetch16(cpu, (u16*)&disp));
-			TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask));
-			set_sp(sp - 2, sp_mask);
-			saddr16(&meml1, cpu->next_ip);
-			cpu->next_ip += disp;
-		} else {
-			s32 disp;
-			TRY(fetch32(cpu, (u32*)&disp));
-			TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask));
-			set_sp(sp - 4, sp_mask);
-			saddr32(&meml1, cpu->next_ip);
-			cpu->next_ip += disp;
-		}
-		ebreak;
-	}
-
-	f0x90_fast: { // NOP
-		PROF_TOTAL();
-		ebreak;
-	}
-
-	f0xd1_fast: { // Group 2 Ev,1 - shift/rotate by 1 (SHL/SHR/SAR register only)
-		PROF_TOTAL();
-		u8 peek_modrm;
-		TRY(peek8(cpu, &peek_modrm));
-		int group = (peek_modrm >> 3) & 7;
-		int mod = peek_modrm >> 6;
-
-		// Only fast-path register SHL/SHR/SAR
-		if (likely(mod == 3 && (group == 4 || group == 5 || group == 7))) {
-			cpu->next_ip++; // consume modrm
-			int rm = peek_modrm & 7;
-			if (opsz16) {
-				u16 val = cpu->gprx[rm].r16;
-				if (group == 4) { // SHL
-					cpu->cc.dst = sext16(val << 1);
-					cpu->cc.dst2 = (val >> 15) & 1;
-					cpu->cc.op = CC_SHL;
-				} else if (group == 5) { // SHR
-					cpu->cc.dst = sext16(val >> 1);
-					cpu->cc.dst2 = val & 1;
-					cpu->cc.op = CC_SHR;
-					cpu->cc.src1 = sext16(val);
-				} else { // SAR
-					cpu->cc.dst = sext16((s16)val >> 1);
-					cpu->cc.dst2 = val & 1;
-					cpu->cc.op = CC_SAR;
-				}
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				u32 val = cpu->gprx[rm].r32;
-				if (group == 4) { // SHL
-					cpu->cc.dst = sext32(val << 1);
-					cpu->cc.dst2 = (val >> 31) & 1;
-					cpu->cc.op = CC_SHL;
-				} else if (group == 5) { // SHR
-					cpu->cc.dst = sext32(val >> 1);
-					cpu->cc.dst2 = val & 1;
-					cpu->cc.op = CC_SHR;
-					cpu->cc.src1 = sext32(val);
-				} else { // SAR
-					cpu->cc.dst = sext32((s32)val >> 1);
-					cpu->cc.dst2 = val & 1;
-					cpu->cc.op = CC_SAR;
-				}
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			cpu->cc.mask = CF | PF | ZF | SF | OF;
-			ebreak;
-		}
-		// For ROL/ROR/RCL/RCR and memory ops, use original handler
-		goto f0xd1;
-	}
-
-	f0xd3_fast: { // Group 2 Ev,CL - shift/rotate by CL (SHL/SHR/SAR register only)
-		PROF_TOTAL();
-		u8 peek_modrm;
-		TRY(peek8(cpu, &peek_modrm));
-		int group = (peek_modrm >> 3) & 7;
-		int mod = peek_modrm >> 6;
-
-		// Only fast-path register SHL/SHR/SAR
-		if (likely(mod == 3 && (group == 4 || group == 5 || group == 7))) {
-			cpu->next_ip++; // consume modrm
-			int rm = peek_modrm & 7;
-			uword shift = cpu->gprx[1].r8[0] & 0x1f; // CL masked to 5 bits
-			if (shift == 0) {
-				ebreak; // No change to flags or value
-			}
-			if (opsz16) {
-				u16 val = cpu->gprx[rm].r16;
-				if (group == 4) { // SHL
-					cpu->cc.dst = sext16(val << shift);
-					cpu->cc.dst2 = (val >> (16 - shift)) & 1;
-					cpu->cc.op = CC_SHL;
-				} else if (group == 5) { // SHR
-					cpu->cc.dst = sext16(val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SHR;
-					cpu->cc.src1 = sext16(val);
-				} else { // SAR
-					cpu->cc.dst = sext16((s16)val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SAR;
-				}
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-				cpu->gprx[rm].r16 = cpu->cc.dst;
-			} else {
-				u32 val = cpu->gprx[rm].r32;
-				if (group == 4) { // SHL
-					cpu->cc.dst = sext32(val << shift);
-					cpu->cc.dst2 = (val >> (32 - shift)) & 1;
-					cpu->cc.op = CC_SHL;
-				} else if (group == 5) { // SHR
-					cpu->cc.dst = sext32(val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SHR;
-					cpu->cc.src1 = sext32(val);
-				} else { // SAR
-					cpu->cc.dst = sext32((s32)val >> shift);
-					cpu->cc.dst2 = (val >> (shift - 1)) & 1;
-					cpu->cc.op = CC_SAR;
-				}
-				cpu->cc.mask = CF | PF | ZF | SF | OF;
-				cpu->gprx[rm].r32 = cpu->cc.dst;
-			}
-			ebreak;
-		}
-		// For ROL/ROR/RCL/RCR and memory ops, use original handler
-		goto f0xd3;
-	}
-
-	f0xf7_fast: { // Group 3 Ev - TEST/NOT/NEG/MUL/IMUL/DIV/IDIV (NOT/NEG register only)
-		PROF_TOTAL();
-		u8 peek_modrm;
-		TRY(peek8(cpu, &peek_modrm));
-		int group = (peek_modrm >> 3) & 7;
-		int mod = peek_modrm >> 6;
-
-		// Only fast-path register NOT (group 2) and NEG (group 3)
-		if (likely(mod == 3 && (group == 2 || group == 3))) {
-			cpu->next_ip++; // consume modrm
-			int rm = peek_modrm & 7;
-			if (group == 2) { // NOT
-				if (opsz16) {
-					cpu->gprx[rm].r16 = ~cpu->gprx[rm].r16;
-				} else {
-					cpu->gprx[rm].r32 = ~cpu->gprx[rm].r32;
-				}
-			} else { // NEG
-				if (opsz16) {
-					cpu->cc.src1 = sext16(cpu->gprx[rm].r16);
-					cpu->cc.dst = sext16(-cpu->cc.src1);
-					cpu->cc.op = CC_NEG16;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					cpu->gprx[rm].r16 = cpu->cc.dst;
-				} else {
-					cpu->cc.src1 = sext32(cpu->gprx[rm].r32);
-					cpu->cc.dst = sext32(-cpu->cc.src1);
-					cpu->cc.op = CC_NEG32;
-					cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-					cpu->gprx[rm].r32 = cpu->cc.dst;
-				}
-			}
-			ebreak;
-		}
-		// For TEST/MUL/IMUL/DIV/IDIV and memory ops, use original handler
-		goto f0xf7;
-	}
-
 #endif
 	eswitch(b1) {
-#ifdef I386_PROFILE
-#define I(_case, _rm, _rwm, _op) _case { PROF_TOTAL(); _rm(_rwm, _op); ebreak; }
-#else
 #define I(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#endif
 #include "i386ins.def"
 #undef I
 
@@ -6451,541 +3912,6 @@ GRPEND
 
 	ecase(0x0f): { // two byte
 		TRY(fetch8(cpu, &b1));
-#ifdef I386_OPT2
-		// Computed goto dispatch for 0x0f two-byte opcodes
-		// Note: MMX opcodes (0x60-0x7f, 0xd1-0xdf, 0xe1-0xef, 0xf1-0xfe) included when I386_ENABLE_MMX
-		static const void *pfxlabel_0f[] __not_in_flash("pfxlabel_0f") = {
-/* 0x00 */	&&f0f_0x00, &&f0f_0x01, &&f0f_0x02, &&f0f_0x03, &&f0f_ud, &&f0f_ud, &&f0f_0x06, &&f0f_ud,
-/* 0x08 */	&&f0f_ud, &&f0f_0x09, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x10 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x18 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x20 */	&&f0f_0x20, &&f0f_0x21, &&f0f_0x22, &&f0f_0x23, &&f0f_0x24, &&f0f_ud, &&f0f_0x26, &&f0f_ud,
-/* 0x28 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x30 */	&&f0f_0x30, &&f0f_0x31, &&f0f_0x32, &&f0f_ud, &&f0f_0x34, &&f0f_0x35, &&f0f_ud, &&f0f_ud,
-/* 0x38 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x40 */	&&f0f_0x40, &&f0f_0x41, &&f0f_0x42, &&f0f_0x43, &&f0f_0x44, &&f0f_0x45, &&f0f_0x46, &&f0f_0x47,
-/* 0x48 */	&&f0f_0x48, &&f0f_0x49, &&f0f_0x4a, &&f0f_0x4b, &&f0f_0x4c, &&f0f_0x4d, &&f0f_0x4e, &&f0f_0x4f,
-/* 0x50 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x58 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-#ifdef I386_ENABLE_MMX
-/* 0x60 */	&&f0f_0x60, &&f0f_0x61, &&f0f_0x62, &&f0f_0x63, &&f0f_0x64, &&f0f_0x65, &&f0f_0x66, &&f0f_0x67,
-/* 0x68 */	&&f0f_0x68, &&f0f_0x69, &&f0f_0x6a, &&f0f_0x6b, &&f0f_ud, &&f0f_ud, &&f0f_0x6e, &&f0f_0x6f,
-/* 0x70 */	&&f0f_ud, &&f0f_0x71, &&f0f_0x72, &&f0f_0x73, &&f0f_0x74, &&f0f_0x75, &&f0f_0x76, &&f0f_0x77,
-/* 0x78 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_0x7e, &&f0f_0x7f,
-#else
-/* 0x60 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x68 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x70 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0x78 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-#endif
-/* 0x80 */	&&f0f_0x80_fast, &&f0f_0x81_fast, &&f0f_0x82_fast, &&f0f_0x83_fast, &&f0f_0x84_fast, &&f0f_0x85_fast, &&f0f_0x86_fast, &&f0f_0x87_fast,
-/* 0x88 */	&&f0f_0x88_fast, &&f0f_0x89_fast, &&f0f_0x8a_fast, &&f0f_0x8b_fast, &&f0f_0x8c_fast, &&f0f_0x8d_fast, &&f0f_0x8e_fast, &&f0f_0x8f_fast,
-/* 0x90 */	&&f0f_0x90_fast, &&f0f_0x91_fast, &&f0f_0x92_fast, &&f0f_0x93_fast, &&f0f_0x94_fast, &&f0f_0x95_fast, &&f0f_0x96_fast, &&f0f_0x97_fast,
-/* 0x98 */	&&f0f_0x98_fast, &&f0f_0x99_fast, &&f0f_0x9a_fast, &&f0f_0x9b_fast, &&f0f_0x9c_fast, &&f0f_0x9d_fast, &&f0f_0x9e_fast, &&f0f_0x9f_fast,
-/* 0xa0 */	&&f0f_0xa0, &&f0f_0xa1, &&f0f_0xa2, &&f0f_0xa3, &&f0f_0xa4, &&f0f_0xa5, &&f0f_ud, &&f0f_ud,
-/* 0xa8 */	&&f0f_0xa8, &&f0f_0xa9, &&f0f_ud, &&f0f_0xab, &&f0f_0xac, &&f0f_0xad, &&f0f_ud, &&f0f_0xaf_fast,
-/* 0xb0 */	&&f0f_0xb0, &&f0f_0xb1, &&f0f_0xb2, &&f0f_0xb3, &&f0f_0xb4, &&f0f_0xb5, &&f0f_0xb6_fast, &&f0f_0xb7_fast,
-/* 0xb8 */	&&f0f_ud, &&f0f_ud, &&f0f_0xba, &&f0f_0xbb, &&f0f_0xbc, &&f0f_0xbd, &&f0f_0xbe_fast, &&f0f_0xbf_fast,
-/* 0xc0 */	&&f0f_0xc0, &&f0f_0xc1, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_0xc7,
-/* 0xc8 */	&&f0f_0xc8, &&f0f_0xc9, &&f0f_0xca, &&f0f_0xcb, &&f0f_0xcc, &&f0f_0xcd, &&f0f_0xce, &&f0f_0xcf,
-#ifdef I386_ENABLE_MMX
-/* 0xd0 */	&&f0f_ud, &&f0f_0xd1, &&f0f_0xd2, &&f0f_0xd3, &&f0f_ud, &&f0f_0xd5, &&f0f_ud, &&f0f_ud,
-/* 0xd8 */	&&f0f_0xd8, &&f0f_0xd9, &&f0f_ud, &&f0f_0xdb, &&f0f_0xdc, &&f0f_0xdd, &&f0f_ud, &&f0f_0xdf,
-/* 0xe0 */	&&f0f_ud, &&f0f_0xe1, &&f0f_0xe2, &&f0f_ud, &&f0f_ud, &&f0f_0xe5, &&f0f_ud, &&f0f_ud,
-/* 0xe8 */	&&f0f_0xe8, &&f0f_0xe9, &&f0f_ud, &&f0f_0xeb, &&f0f_0xec, &&f0f_0xed, &&f0f_ud, &&f0f_0xef,
-/* 0xf0 */	&&f0f_ud, &&f0f_0xf1, &&f0f_0xf2, &&f0f_0xf3, &&f0f_ud, &&f0f_0xf5, &&f0f_ud, &&f0f_ud,
-/* 0xf8 */	&&f0f_0xf8, &&f0f_0xf9, &&f0f_0xfa, &&f0f_ud, &&f0f_0xfc, &&f0f_0xfd, &&f0f_0xfe, &&f0f_0xff,
-#else
-/* 0xd0 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0xd8 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0xe0 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0xe8 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0xf0 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud,
-/* 0xf8 */	&&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_ud, &&f0f_0xff,
-#endif
-		};
-		PROF_OP2(b1);
-		goto *pfxlabel_0f[b1];
-
-// Redefine CX for 0x0f opcode labels
-#undef CX
-#define CX(_1) f0f_ ## _1:
-#define I2(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
-#include "i386ins.def"
-#undef I2
-
-// MOVZX/MOVSX fast paths - register-to-register with inline memory fallback
-f0f_0xb6_fast: { // MOVZX Gv, Eb - zero-extend byte to word/dword
-	PROF_TOTAL();
-	TRY(fetch8(cpu, &modrm));
-	int dst = (modrm >> 3) & 7;
-	int mod = modrm >> 6;
-	int rm = modrm & 7;
-	if (likely(mod == 3)) {
-		// Register-to-register
-		u8 val = lreg8(rm);
-		if (opsz16) {
-			cpu->gprx[dst].r16 = (u16)val;
-		} else {
-			cpu->gprx[dst].r32 = (u32)val;
-		}
-		ebreak;
-	}
-	// Memory operand - inline path
-	TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-	TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-	u8 val = laddr8(&meml);
-	if (opsz16) {
-		cpu->gprx[dst].r16 = (u16)val;
-	} else {
-		cpu->gprx[dst].r32 = (u32)val;
-	}
-	ebreak;
-}
-
-f0f_0xb7_fast: { // MOVZX Gv, Ew - zero-extend word to dword
-	PROF_TOTAL();
-	TRY(fetch8(cpu, &modrm));
-	int dst = (modrm >> 3) & 7;
-	int mod = modrm >> 6;
-	int rm = modrm & 7;
-	if (likely(mod == 3)) {
-		// Register-to-register
-		u16 val = cpu->gprx[rm].r16;
-		if (opsz16) {
-			cpu->gprx[dst].r16 = val;  // No extension needed
-		} else {
-			cpu->gprx[dst].r32 = (u32)val;
-		}
-		ebreak;
-	}
-	// Memory operand - inline path
-	TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-	TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-	u16 val = laddr16(&meml);
-	if (opsz16) {
-		cpu->gprx[dst].r16 = val;
-	} else {
-		cpu->gprx[dst].r32 = (u32)val;
-	}
-	ebreak;
-}
-
-f0f_0xbe_fast: { // MOVSX Gv, Eb - sign-extend byte to word/dword
-	PROF_TOTAL();
-	TRY(fetch8(cpu, &modrm));
-	int dst = (modrm >> 3) & 7;
-	int mod = modrm >> 6;
-	int rm = modrm & 7;
-	if (likely(mod == 3)) {
-		// Register-to-register
-		s8 val = (s8)lreg8(rm);
-		if (opsz16) {
-			cpu->gprx[dst].r16 = (s16)val;
-		} else {
-			cpu->gprx[dst].r32 = (s32)val;
-		}
-		ebreak;
-	}
-	// Memory operand - inline path
-	TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-	TRY(translate8(cpu, &meml, 1, curr_seg, addr));
-	s8 val = (s8)laddr8(&meml);
-	if (opsz16) {
-		cpu->gprx[dst].r16 = (s16)val;
-	} else {
-		cpu->gprx[dst].r32 = (s32)val;
-	}
-	ebreak;
-}
-
-f0f_0xbf_fast: { // MOVSX Gv, Ew - sign-extend word to dword
-	PROF_TOTAL();
-	TRY(fetch8(cpu, &modrm));
-	int dst = (modrm >> 3) & 7;
-	int mod = modrm >> 6;
-	int rm = modrm & 7;
-	if (likely(mod == 3)) {
-		// Register-to-register
-		s16 val = (s16)cpu->gprx[rm].r16;
-		if (opsz16) {
-			cpu->gprx[dst].r16 = val;  // No extension needed
-		} else {
-			cpu->gprx[dst].r32 = (s32)val;
-		}
-		ebreak;
-	}
-	// Memory operand - inline path
-	TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-	TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-	s16 val = (s16)laddr16(&meml);
-	if (opsz16) {
-		cpu->gprx[dst].r16 = val;
-	} else {
-		cpu->gprx[dst].r32 = (s32)val;
-	}
-	ebreak;
-}
-
-// 2-byte conditional jump fast paths (0x0F 8x) - near jumps with 16/32-bit displacement
-f0f_0x82_fast: { // JB/JC near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (get_CF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (get_CF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x83_fast: { // JNB/JNC/JAE near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (!get_CF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (!get_CF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x84_fast: { // JE/JZ near
-	PROF_TOTAL();
-	int zf;
-	if (likely(!(cpu->cc.mask & ZF))) {
-		zf = !!(cpu->flags & ZF);
-	} else {
-		zf = (cpu->cc.dst == 0);
-	}
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (zf) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (zf) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x85_fast: { // JNE/JNZ near
-	PROF_TOTAL();
-	int zf;
-	if (likely(!(cpu->cc.mask & ZF))) {
-		zf = !!(cpu->flags & ZF);
-	} else {
-		zf = (cpu->cc.dst == 0);
-	}
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (!zf) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (!zf) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x86_fast: { // JBE/JNA near
-	PROF_TOTAL();
-	int zf;
-	if (likely(!(cpu->cc.mask & ZF))) {
-		zf = !!(cpu->flags & ZF);
-	} else {
-		zf = (cpu->cc.dst == 0);
-	}
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (get_CF(cpu) || zf) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (get_CF(cpu) || zf) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x87_fast: { // JA/JNBE near
-	PROF_TOTAL();
-	int zf;
-	if (likely(!(cpu->cc.mask & ZF))) {
-		zf = !!(cpu->flags & ZF);
-	} else {
-		zf = (cpu->cc.dst == 0);
-	}
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (!get_CF(cpu) && !zf) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (!get_CF(cpu) && !zf) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x8c_fast: { // JL/JNGE near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x8d_fast: { // JGE/JNL near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x8e_fast: { // JLE/JNG near
-	PROF_TOTAL();
-	int zf;
-	if (likely(!(cpu->cc.mask & ZF))) {
-		zf = !!(cpu->flags & ZF);
-	} else {
-		zf = (cpu->cc.dst == 0);
-	}
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (zf || get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (zf || get_SF(cpu) != get_OF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x80_fast: { // JO near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (get_OF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (get_OF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x81_fast: { // JNO near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (!get_OF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (!get_OF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x88_fast: { // JS near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (get_SF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (get_SF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x89_fast: { // JNS near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (!get_SF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (!get_SF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x8a_fast: { // JP near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (get_PF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (get_PF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x8b_fast: { // JNP near
-	PROF_TOTAL();
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (!get_PF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (!get_PF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-f0f_0x8f_fast: { // JG/JNLE near
-	PROF_TOTAL();
-	int zf;
-	if (likely(!(cpu->cc.mask & ZF))) {
-		zf = !!(cpu->flags & ZF);
-	} else {
-		zf = (cpu->cc.dst == 0);
-	}
-	if (opsz16) {
-		u16 disp; TRY(fetch16(cpu, &disp));
-		if (!zf && get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s16)disp;
-	} else {
-		u32 disp; TRY(fetch32(cpu, &disp));
-		if (!zf && get_SF(cpu) == get_OF(cpu)) cpu->next_ip += (sword)(s32)disp;
-	}
-	ebreak;
-}
-
-// SETcc fast paths - set byte based on condition (register only)
-#define DO_SETcc_FAST(label, cond) \
-label: { \
-	PROF_TOTAL(); \
-	u8 modrm_byte; \
-	TRY(fetch8(cpu, &modrm_byte)); \
-	if (likely((modrm_byte & 0xC0) == 0xC0)) { \
-		int rm = modrm_byte & 7; \
-		if (rm > 3) { \
-			cpu->gprx[rm - 4].r8[1] = (cond) ? 1 : 0; \
-		} else { \
-			cpu->gprx[rm].r8[0] = (cond) ? 1 : 0; \
-		} \
-		ebreak; \
-	} \
-	goto f0f_0x90; /* fallback for memory */ \
-}
-
-DO_SETcc_FAST(f0f_0x90_fast, get_OF(cpu))           // SETO
-DO_SETcc_FAST(f0f_0x91_fast, !get_OF(cpu))          // SETNO
-DO_SETcc_FAST(f0f_0x92_fast, get_CF(cpu))           // SETB/SETC
-DO_SETcc_FAST(f0f_0x93_fast, !get_CF(cpu))          // SETNB/SETNC/SETAE
-DO_SETcc_FAST(f0f_0x94_fast, (likely(!(cpu->cc.mask & ZF)) ? !!(cpu->flags & ZF) : (cpu->cc.dst == 0)))  // SETE/SETZ
-DO_SETcc_FAST(f0f_0x95_fast, (likely(!(cpu->cc.mask & ZF)) ? !(cpu->flags & ZF) : (cpu->cc.dst != 0)))   // SETNE/SETNZ
-DO_SETcc_FAST(f0f_0x96_fast, get_CF(cpu) || (likely(!(cpu->cc.mask & ZF)) ? !!(cpu->flags & ZF) : (cpu->cc.dst == 0)))  // SETBE/SETNA
-DO_SETcc_FAST(f0f_0x97_fast, !get_CF(cpu) && (likely(!(cpu->cc.mask & ZF)) ? !(cpu->flags & ZF) : (cpu->cc.dst != 0)))  // SETA/SETNBE
-DO_SETcc_FAST(f0f_0x98_fast, get_SF(cpu))           // SETS
-DO_SETcc_FAST(f0f_0x99_fast, !get_SF(cpu))          // SETNS
-DO_SETcc_FAST(f0f_0x9a_fast, get_PF(cpu))           // SETP/SETPE
-DO_SETcc_FAST(f0f_0x9b_fast, !get_PF(cpu))          // SETNP/SETPO
-DO_SETcc_FAST(f0f_0x9c_fast, get_SF(cpu) != get_OF(cpu))  // SETL/SETNGE
-DO_SETcc_FAST(f0f_0x9d_fast, get_SF(cpu) == get_OF(cpu))  // SETGE/SETNL
-DO_SETcc_FAST(f0f_0x9e_fast, (likely(!(cpu->cc.mask & ZF)) ? !!(cpu->flags & ZF) : (cpu->cc.dst == 0)) || get_SF(cpu) != get_OF(cpu))  // SETLE/SETNG
-DO_SETcc_FAST(f0f_0x9f_fast, (likely(!(cpu->cc.mask & ZF)) ? !(cpu->flags & ZF) : (cpu->cc.dst != 0)) && get_SF(cpu) == get_OF(cpu))   // SETG/SETNLE
-#undef DO_SETcc_FAST
-
-f0f_0xaf_fast: { // IMUL Gv, Ev - signed multiply reg *= r/m
-	PROF_TOTAL();
-	TRY(fetch8(cpu, &modrm));
-	int reg = (modrm >> 3) & 7;
-	int mod = modrm >> 6;
-	int rm = modrm & 7;
-	if (likely(mod == 3)) {
-		// Register-to-register
-		if (opsz16) {
-			cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-			cpu->cc.src2 = sext16(cpu->gprx[rm].r16);
-			cpu->cc.dst = cpu->cc.src1 * cpu->cc.src2;
-			cpu->cc.op = CC_IMUL16;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			cpu->gprx[reg].r16 = cpu->cc.dst;
-		} else {
-			cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-			cpu->cc.src2 = sext32(cpu->gprx[rm].r32);
-			int64_t res = (int64_t)(s32)cpu->cc.src1 * (int64_t)(s32)cpu->cc.src2;
-			cpu->cc.dst = res;
-			cpu->cc.dst2 = res >> 32;
-			cpu->cc.op = CC_IMUL32;
-			cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-			cpu->gprx[reg].r32 = cpu->cc.dst;
-		}
-		ebreak;
-	}
-	// Memory operand - inline path
-	TRY(modsib(cpu, adsz16, mod, rm, &addr, &curr_seg));
-	if (opsz16) {
-		TRY(translate16(cpu, &meml, 1, curr_seg, addr));
-		cpu->cc.src1 = sext16(cpu->gprx[reg].r16);
-		cpu->cc.src2 = sext16(laddr16(&meml));
-		cpu->cc.dst = cpu->cc.src1 * cpu->cc.src2;
-		cpu->cc.op = CC_IMUL16;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		cpu->gprx[reg].r16 = cpu->cc.dst;
-	} else {
-		TRY(translate32(cpu, &meml, 1, curr_seg, addr));
-		cpu->cc.src1 = sext32(cpu->gprx[reg].r32);
-		cpu->cc.src2 = sext32(laddr32(&meml));
-		int64_t res = (int64_t)(s32)cpu->cc.src1 * (int64_t)(s32)cpu->cc.src2;
-		cpu->cc.dst = res;
-		cpu->cc.dst2 = res >> 32;
-		cpu->cc.op = CC_IMUL32;
-		cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
-		cpu->gprx[reg].r32 = cpu->cc.dst;
-	}
-	ebreak;
-}
-
-// Restore CX to case syntax for group instruction inner switches
-#undef CX
-#define CX(_1) case _1:
-
-f0f_0x00: { // G6
-GRPBEG
-#define IG6 GRPCASE
-#include "i386ins.def"
-#undef IG6
-GRPEND
-}
-
-f0f_0x01: { // G7
-GRPBEG
-#define IG7 GRPCASE
-#include "i386ins.def"
-#undef IG7
-GRPEND
-}
-
-f0f_0xba: { // G8
-GRPBEG
-#define IG8 GRPCASE
-#include "i386ins.def"
-#undef IG8
-GRPEND
-}
-
-f0f_0xc7: { // G9
-GRPBEG
-#define IG9 GRPCASE
-#include "i386ins.def"
-#undef IG9
-GRPEND
-}
-
-f0f_ud: THROW0(EX_UD);
-
-// Restore CX to label syntax for rest of computed goto
-#undef CX
-#define CX(_1) f ## _1:
-
-#else /* !I386_OPT2 - use switch-case */
 		switch(b1) {
 #define I2(_case, _rm, _rwm, _op) _case { _rm(_rwm, _op); ebreak; }
 #include "i386ins.def"
@@ -7024,7 +3950,6 @@ GRPEND
 		}
 		default: default_ud;
 		}
-#endif /* I386_OPT2 */
 		ebreak;
 	}
 
@@ -7388,15 +4313,10 @@ static int __call_isr_check_cs(CPUI386 *cpu, int sel, int ext, int *csdpl)
 
 static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 {
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-    uword dbg_old_sp = lreg32(4);
-    uword dbg_old_ss = cpu->seg[SEG_SS].sel;
-#endif
 	/* INT 2Fh network-attached-drive handler hook - intercept in V86 and real mode */
 	if (no == 0x2F && cpu->int2f_handler && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
 		if (cpu->int2f_handler(cpu, cpu->int2f_opaque)) return true; /* handled */
 	}
-
 	if (!(cpu->cr0 & 1)) {
 		/* REAL-ADDRESS-MODE */
 		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
@@ -7489,7 +4409,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			saddr16(&meml2, cpu->seg[SEG_CS].sel);
 			saddr16(&meml3, cpu->ip);
 			if (pusherr) {
-				saddr16(&meml4, cpu->excerr);
+				saddr32(&meml4, cpu->excerr);
 				set_sp(sp - 2 * 4, sp_mask);
 			} else {
 				set_sp(sp - 2 * 3, sp_mask);
@@ -7575,14 +4495,13 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			if (pusherr) {
 				TRY(translate(cpu, &meml6, 2, SEG_SS, (sp - 4 * 6) & sp_mask, 4, 0));
 			}
-			/* old stack */
 			saddr32(&meml1, oldss);
 			saddr32(&meml2, oldsp);
-			/* flags */
+
 			refresh_flags(cpu);
 			cpu->cc.mask = 0;
 			saddr32(&meml3, cpu->flags);
-			/* return address */
+
 			saddr32(&meml4, cpu->seg[SEG_CS].sel);
 			saddr32(&meml5, cpu->ip);
 			if (pusherr) {
@@ -7639,7 +4558,6 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		saddr32(&memlf, cpu->seg[SEG_FS].sel);
 		saddr32(&memld, cpu->seg[SEG_DS].sel);
 		saddr32(&memle, cpu->seg[SEG_ES].sel);
-
 		saddr32(&meml1, oldss);
 		saddr32(&meml2, oldsp);
 
@@ -7649,7 +4567,6 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 
 		saddr32(&meml4, cpu->seg[SEG_CS].sel);
 		saddr32(&meml5, cpu->ip);
-
 		if (pusherr) {
 			saddr32(&meml6, cpu->excerr);
 			set_sp(sp - 4 * 10, sp_mask);
@@ -7668,11 +4585,6 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		cpu->ip = newip;
 		if (gt == 0x6 || gt == 0xe)
 			cpu->flags &= ~IF;
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-		pm_exc_debug_trace(cpu, "isr (#1)", no, pusherr,
-			dbg_old_sp, lreg32(4), dbg_old_ss, cpu->seg[SEG_SS].sel,
-			newcs, newip);
-#endif
 		return true;
 	}
 	default: assert(false);
@@ -7683,11 +4595,6 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	cpu->flags &= ~(TF | RF | NT);
 	if (gt == 0x6 || gt == 0xe)
 		cpu->flags &= ~IF;
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-	pm_exc_debug_trace(cpu, "isr (#2)", no, pusherr,
-		dbg_old_sp, lreg32(4), dbg_old_ss, cpu->seg[SEG_SS].sel,
-		newcs, newip);
-#endif
 	return true;
 }
 
@@ -7778,26 +4685,9 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 	uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
 	uword sp = lreg32(4);
 	uword oldflags = cpu->flags;
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-    uword dbg_old_sp = sp;
-    uword dbg_old_ss = cpu->seg[SEG_SS].sel;
-#endif
 	uword newip;
 	int newcs;
 	uword newflags = 0; // make the compiler happy
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-    /* trace head of pmret */
-    if (isiret) {
-        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
-            "pmret-enter opsz16=%d sp=%08lx off=%d cpl=%d ss=%04lx\n",
-            opsz16 ? 1 : 0,
-            (unsigned long)sp,
-            off,
-            cpu->cpl,
-            (unsigned long)cpu->seg[SEG_SS].sel);
-    }
-#endif
 	if (opsz16) {
 		/* ip */ TRY(translate(cpu, &meml1, 1, SEG_SS, sp & sp_mask, 2, 0));
 		/* cs */ TRY(translate(cpu, &meml2, 1, SEG_SS, (sp + 2) & sp_mask, 2, 0));
@@ -7827,24 +4717,11 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 		newflags |= 0x2;
 	}
 
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-    if (isiret) {
-        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
-            "pmret-head newip=%08lx newcs=%04x newflags=%08lx\n",
-            (unsigned long)newip,
-            newcs & 0xffff,
-            (unsigned long)newflags);
-    }
-#endif
-	
 	if (isiret && (newflags & VM)) {
 		if (cpu->cpl != 0) cpu_abort(cpu, -208);
 		// return to v8086
 //		dolog("pmiret PVL %d => %d (vm) %04x:%08x\n", cpu->cpl, 3, newcs, newip);
 		OptAddr meml_vmes, meml_vmds, meml_vmfs, meml_vmgs;
-		uword vm_esp, vm_ss, vm_es, vm_ds, vm_fs, vm_gs;
-
 		if (opsz16) cpu_abort(cpu, -209);
 		TRY(translate(cpu, &meml4, 1, SEG_SS, (sp + 12) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml5, 1, SEG_SS, (sp + 16) & sp_mask, 4, 0));
@@ -7852,34 +4729,16 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 		TRY(translate(cpu, &meml_vmds, 1, SEG_SS, (sp + 24) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml_vmfs, 1, SEG_SS, (sp + 28) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml_vmgs, 1, SEG_SS, (sp + 32) & sp_mask, 4, 0));
-        vm_esp = laddr32(&meml4);
-        vm_ss  = laddr32(&meml5);
-        vm_es  = laddr32(&meml_vmes);
-        vm_ds  = laddr32(&meml_vmds);
-        vm_fs  = laddr32(&meml_vmfs);
-        vm_gs  = laddr32(&meml_vmgs);
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
-            "pmret-vm esp=%08lx ss=%04lx es=%04lx ds=%04lx fs=%04lx gs=%04lx\n",
-            (unsigned long)vm_esp,
-            (unsigned)(vm_ss & 0xffff),
-            (unsigned)(vm_es & 0xffff),
-            (unsigned)(vm_ds & 0xffff),
-            (unsigned)(vm_fs & 0xffff),
-            (unsigned)(vm_gs & 0xffff));
-#endif
-
-        cpu->flags = newflags;
-        TRY1(set_seg(cpu, SEG_CS, newcs));
-        set_sp(sp + 12, sp_mask);
-        cpu->next_ip = newip;
-        TRY1(set_seg(cpu, SEG_SS, vm_ss));
-        TRY1(set_seg(cpu, SEG_ES, vm_es));
-        TRY1(set_seg(cpu, SEG_DS, vm_ds));
-        TRY1(set_seg(cpu, SEG_FS, vm_fs));
-        TRY(set_seg(cpu, SEG_GS, vm_gs));
-        set_sp(vm_esp, 0xffffffff);
+		cpu->flags = newflags;
+		TRY1(set_seg(cpu, SEG_CS, newcs));
+		set_sp(sp + 12, sp_mask);
+		cpu->next_ip = newip;
+		TRY1(set_seg(cpu, SEG_SS, laddr32(&meml5)));
+		TRY1(set_seg(cpu, SEG_ES, laddr32(&meml_vmes)));
+		TRY1(set_seg(cpu, SEG_DS, laddr32(&meml_vmds)));
+		TRY1(set_seg(cpu, SEG_FS, laddr32(&meml_vmfs)));
+		TRY(set_seg(cpu, SEG_GS, laddr32(&meml_vmgs)));
+		set_sp(laddr32(&meml4), 0xffffffff);
 	} else {
 		int rpl = newcs & 3;
 		if (rpl < cpu->cpl) THROW(EX_GP, newcs & ~0x3);
@@ -7927,96 +4786,23 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 	}
 	if (isiret)
 		cpu->cc.mask = 0;
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-	if (isiret) {
-		pm_exc_debug_trace(cpu, "iret", off, false,
-			dbg_old_sp, lreg32(4), dbg_old_ss, cpu->seg[SEG_SS].sel,
-			cpu->seg[SEG_CS].sel, cpu->next_ip);
-	}
-#endif
 	return true;
 }
 
-void __not_in_flash_func(cpui386_step)(CPUI386 *cpu, int stepcount)
+void cpui386_step(CPUI386 *cpu, int stepcount)
 {
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-	pm_exc_debug_init_logs();
-	/* Periodically log ESP when in ring-0 to track stack growth */
-	if ((cpu->cr0 & 1) && cpu->cpl == 0 && !(cpu->flags & VM)) {
-		static uint32_t step_counter = 0;
-		static uint32_t last_esp = 0;
-		step_counter++;
-		if ((step_counter & 0x03FF) == 0) {  /* every ~1K steps */
-				uint32_t esp = REGi(4);
-			if (g_pm_esp_log_open && (esp != last_esp || (step_counter & 0x3FFF) == 0)) {
-				last_esp = esp;
-				pm_exc_debug_write(&g_pm_esp_log, g_pm_esp_log_open,
-					"step=%08lx ESP=%08lx SS=%04lx IP=%08lx\n",
-					(unsigned long)step_counter,
-					(unsigned long)esp,
-					(unsigned long)cpu->seg[SEG_SS].sel,
-					(unsigned long)cpu->ip);
-			}
-		}
-	}
-#endif
 	if ((cpu->flags & IF) && cpu->intr) {
 		cpu->intr = false;
 		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-		pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
-			"irq no=%02x cs=%04lx ip=%08lx next=%08lx ss=%04lx esp=%08lx fl=%08lx\n",
-			no & 0xff,
-			(unsigned long)cpu->seg[SEG_CS].sel,
-			(unsigned long)cpu->ip,
-			(unsigned long)cpu->next_ip,
-			(unsigned long)cpu->seg[SEG_SS].sel,
-			(unsigned long)REGi(4),
-			(unsigned long)cpu->flags);
-#endif
 		cpu->ip = cpu->next_ip;
 		TRY1(call_isr(cpu, no, false, 1));
 	}
 
 	if (cpu->halt) {
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-        pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
-            "HLT cs=%04lx ip=%08lx intr=%d fl=%08lx\n",
-            (unsigned long)cpu->seg[SEG_CS].sel,
-            (unsigned long)cpu->ip,
-            cpu->intr ? 1 : 0,
-            (unsigned long)cpu->flags);
-#endif
-#if !defined(RP2350_BUILD) && !defined(BUILD_ESP32)
 		usleep(1);
-#endif
 		return;
 	}
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-	{
-		static uword last_cs = 0xffff;
-		static uword last_ip = 0xffffffffu;
-		static uint32_t same_eip_count = 0;
-		if (cpu->seg[SEG_CS].sel == last_cs && cpu->ip == last_ip) {
-			same_eip_count++;
-			if (same_eip_count == 100000) {
-				pm_exc_debug_write(&g_pm_trace_log, g_pm_trace_log_open,
-					"hang cs=%04lx ip=%08lx ss=%04lx esp=%08lx fl=%08lx\n",
-					(unsigned long)cpu->seg[SEG_CS].sel,
-					(unsigned long)cpu->ip,
-					(unsigned long)cpu->seg[SEG_SS].sel,
-					(unsigned long)REGi(4),
-					(unsigned long)cpu->flags);
-			}
-		} else {
-			last_cs = cpu->seg[SEG_CS].sel;
-			last_ip = cpu->ip;
-			same_eip_count = 0;
-		}
-	}
-#endif
 
 	if (!cpu_exec1(cpu, stepcount)) {
 		bool pusherr = false;
@@ -8026,41 +4812,6 @@ void __not_in_flash_func(cpui386_step)(CPUI386 *cpu, int stepcount)
 			pusherr = true;
 		}
 		cpu->next_ip = cpu->ip;
-
-#if defined(RP2350_BUILD) && defined(DEBUG_PM_EXC)
-		/* Log PM exceptions to exc.log on SD card */
-		{
-			static int exc_count = 0;
-			refresh_flags(cpu);
-			bool is_v86 = !!(cpu->flags & VM);
-			bool do_log = g_pm_exc_log_open && exc_count < 2048;
-			if (do_log) {
-				exc_count++;
-				pm_exc_debug_write(&g_pm_exc_log, g_pm_exc_log_open,
-					"#%02d err=%08lx IP=%08lx CS=%04lx SS=%04lx ESP=%08lx FL=%08lx CR0=%08lx CR2=%08lx CPL=%d%s%s\n",
-					cpu->excno, (unsigned long)cpu->excerr,
-					(unsigned long)cpu->ip,
-					(unsigned long)cpu->seg[SEG_CS].sel,
-					(unsigned long)cpu->seg[SEG_SS].sel,
-					(unsigned long)REGi(4),
-					(unsigned long)cpu->flags,
-					(unsigned long)cpu->cr0,
-					(unsigned long)cpu->cr2,
-					cpu->cpl,
-					is_v86 ? " V86" : "",
-					(cpu->cr0 & 1) ? "" : " RM");
-				{
-						pm_exc_debug_write(&g_pm_exc_log, g_pm_exc_log_open,
-						"  EAX=%08lx EBX=%08lx ECX=%08lx EDX=%08lx ESI=%08lx EDI=%08lx EBP=%08lx NEXT=%08lx\n",
-						(unsigned long)REGi(0),(unsigned long)REGi(3),
-						(unsigned long)REGi(1),(unsigned long)REGi(2),
-						(unsigned long)REGi(6),(unsigned long)REGi(7),
-						(unsigned long)REGi(5),
-						(unsigned long)cpu->next_ip);
-				}
-			}
-		}
-#endif
 
 		TRY1(call_isr(cpu, cpu->excno, pusherr, 1));
 	}
@@ -8182,13 +4933,6 @@ long IRAM_ATTR cpui386_get_cycle(CPUI386 *cpu)
 	return cpu->cycle;
 }
 
-void cpui386_get_state(CPUI386 *cpu, uint32_t *cs, uint32_t *ip, int *halt)
-{
-	*cs = cpu->seg[1].sel;  // SEG_CS = 1
-	*ip = cpu->ip;
-	*halt = cpu->halt ? 1 : 0;
-}
-
 CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 {
 	CPUI386 *cpu = malloc(sizeof(CPUI386));
@@ -8201,11 +4945,20 @@ CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 	cpu->gen = gen;
 
 	cpu->tlb.size = tlb_size;
+#ifdef BUILD_ESP32
+	{
+		extern void *pcmalloc(long size);
+		size_t tlb_bytes = sizeof(struct tlb_entry) * tlb_size;
+		cpu->tlb.tab = malloc(tlb_bytes);
+		if (!cpu->tlb.tab)
+			cpu->tlb.tab = pcmalloc(tlb_bytes);
+	}
+#else
 	cpu->tlb.tab = malloc(sizeof(struct tlb_entry) * tlb_size);
+#endif
 
 	cpu->phys_mem = (u8 *) phys_mem;
 	cpu->phys_mem_size = phys_mem_size;
-	cpu->a20_mask = 0xFFFFFFFFu;  /* A20 enabled at startup */
 
 	cpu->cycle = 0;
 
@@ -8300,17 +5053,28 @@ static void cpu_debug(CPUI386 *cpu)
 	cpu->cr2 = cr2;
 	cpu->excno = excno;
 	cpu->excerr = excerr;
-
-#if defined(DEBUG_PM_EXC)
-    dolog("PF: addr=%08x err=%x cs=%04x ip=%08x cpl=%d\n",
-          laddr, err,
-          cpu->seg[SEG_CS].sel,
-          cpu->ip,
-          cpu->cpl);
-#endif
-
 	nest--;
 }
+
+void cpu_set_a20(CPUI386 *cpu, int enabled)
+{
+	cpu->a20_mask = enabled ? 0xFFFFFFFFu : 0xFFEFFFFFu;
+}
+
+int cpu_get_a20(CPUI386 *cpu)
+{
+	return cpu->a20_mask >> 20 & 1;
+}
+
+void cpui386_get_state(CPUI386 *cpu, uint32_t *cs, uint32_t *ip, int *halt)
+{
+	*cs = cpu->seg[1].sel;  // SEG_CS = 1
+	*ip = cpu->ip;
+	*halt = cpu->halt ? 1 : 0;
+}
+
+u8 *cpu_get_phys_mem(CPUI386 *cpu) { return cpu->phys_mem; }
+
 
 // Register accessors for disk/BIOS emulation
 u8 cpu_get_al(CPUI386 *cpu) { return lreg8(0); }
@@ -8368,20 +5132,8 @@ int cpu_get_cf(CPUI386 *cpu)
 	return (cpu->flags & CF) ? 1 : 0;
 }
 
-u8 *cpu_get_phys_mem(CPUI386 *cpu) { return cpu->phys_mem; }
-long cpu_get_phys_mem_size(CPUI386 *cpu) { return cpu->phys_mem_size; }
 void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque)
 {
 	cpu->int2f_handler = handler;
 	cpu->int2f_opaque  = opaque;
-}
-
-void cpu_set_a20(CPUI386 *cpu, int enabled)
-{
-	cpu->a20_mask = enabled ? 0xFFFFFFFFu : 0xFFEFFFFFu;
-}
-
-int cpu_get_a20(CPUI386 *cpu)
-{
-	return cpu->a20_mask >> 20 & 1;
 }

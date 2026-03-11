@@ -140,27 +140,10 @@ void disk_set_cpu(CPUI386 *cpu) {
 }
 
 void ejectdisk(uint8_t drivenum, bool atapi) {
-    if (drivenum < 4 && atapi && ata[drivenum].name) {
-        f_close(&ata[drivenum].fil);
-        free(ata[drivenum].name);
-        ata[drivenum].name = 0;
-        if (ata[drivenum].iscdrom) {
-            /* Notify IDE about CD tray empty */
-            if (disk_cdrom_change_cb)
-                disk_cdrom_change_cb(drivenum, NULL);
-        } else {
-            /* HDD removed */
-            hdcount--;
-        }
-    }
-    else if (!atapi && drivenum < 4 && ata[drivenum].name && !ata[drivenum].iscdrom) {
-        /* HDD eject via atapi=false path (e.g. from GUI eject_disk) */
-        f_close(&ata[drivenum].fil);
-        free(ata[drivenum].name);
-        ata[drivenum].name = 0;
-        hdcount--;
-    }
-    else if (drivenum < 2 && fdd[drivenum].name) {
+    /* Check floppy FIRST (drivenum < 2) to avoid drivenum aliasing with ata[].
+     * diskui passes atapi=false for both floppy and HDD; the only way to
+     * distinguish them is the atapi flag combined with drivenum range. */
+    if (drivenum < 2 && !atapi && fdd[drivenum].name) {
         f_close(&fdd[drivenum].fil);
         free(fdd[drivenum].name);
         fdd[drivenum].name = 0;
@@ -172,6 +155,25 @@ void ejectdisk(uint8_t drivenum, bool atapi) {
         update_floppy_cmos();
         if (disk_fdc_mediachange_cb)
             disk_fdc_mediachange_cb(drivenum);
+    }
+    else if (drivenum < 4 && atapi && ata[drivenum].name) {
+        /* ATA eject: atapi=true for both HDD and CD (from GUI or insertdisk) */
+        f_close(&ata[drivenum].fil);
+        free(ata[drivenum].name);
+        ata[drivenum].name = 0;
+        if (ata[drivenum].iscdrom) {
+            if (disk_cdrom_change_cb)
+                disk_cdrom_change_cb(drivenum, NULL);
+        } else {
+            hdcount--;
+        }
+    }
+    else if (drivenum < 4 && !atapi && ata[drivenum].name && !ata[drivenum].iscdrom) {
+        /* HDD eject via atapi=false path (e.g. from GUI for HDD drives) */
+        f_close(&ata[drivenum].fil);
+        free(ata[drivenum].name);
+        ata[drivenum].name = 0;
+        hdcount--;
     }
 }
 
