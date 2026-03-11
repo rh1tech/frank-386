@@ -878,7 +878,7 @@ static void __not_in_flash_func(core1_entry)(void) {
 
 static void show_welcome_screen(void) {
     // Welcome screen dimensions
-    int wx = 15, wy = 7, ww = 50, wh = 11;
+    int wx = 14, wy = 7, ww = 51, wh = 11;
 
     osd_clear();
 
@@ -899,7 +899,7 @@ static void show_welcome_screen(void) {
     osd_print_center(wy + 5, "Port by Mikhail Matveev, rh1.tech", OSD_ATTR_NORMAL);
 
     // Hardware info
-    char hw_str[48];
+    char hw_str[50];
     snprintf(hw_str, sizeof(hw_str), "RP2350 @ %d MHz / PSRAM @ %d MHz / FLASH @ %d MHz",
              config_get_cpu_freq(), config_get_psram_freq(), config_get_flash_freq());
     osd_print_center(wy + 7, hw_str, OSD_ATTR(OSD_LIGHTCYAN, OSD_BLUE));
