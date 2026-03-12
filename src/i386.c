@@ -2102,23 +2102,41 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if ((cpu->cr0 & 1) && (!(cpu->flags & VM) || get_IOPL(cpu) < 3)) { \
 		TRY(pmret(cpu, opsz16, 0, true)); \
 	} else { \
-		if (!opsz16) cpu_abort(cpu, -201); \
-		OptAddr meml1, meml2, meml3; \
 		uword sp = lreg32(4); \
-		/* ip */ TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
-		uword newip = laddr16(&meml1); \
-		/* cs */ TRY(translate16(cpu, &meml2, 1, SEG_SS, (sp + 2) & sp_mask)); \
-		int newcs = laddr16(&meml2); \
-		/* flags */ TRY(translate16(cpu, &meml3, 1, SEG_SS, (sp + 4) & sp_mask)); \
-		uword oldflags = cpu->flags; \
-		if (cpu->flags & VM) cpu->flags = (cpu->flags & (0xffff0000 | IOPL)) | (laddr16(&meml3) & ~IOPL); \
-		else cpu->flags = (cpu->flags & 0xffff0000) | laddr16(&meml3); \
-		cpu->flags &= EFLAGS_MASK; \
-		cpu->flags |= 0x2; \
-		if (!set_seg(cpu, SEG_CS, newcs)) { cpu->flags = oldflags; return false; } \
-		cpu->cc.mask = 0; \
-		set_sp(sp + 6, sp_mask); \
-		cpu->next_ip = newip; \
+		if (opsz16) { \
+			OptAddr meml1, meml2, meml3; \
+			/* ip */ TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
+			uword newip = laddr16(&meml1); \
+			/* cs */ TRY(translate16(cpu, &meml2, 1, SEG_SS, (sp + 2) & sp_mask)); \
+			int newcs = laddr16(&meml2); \
+			/* flags */ TRY(translate16(cpu, &meml3, 1, SEG_SS, (sp + 4) & sp_mask)); \
+			uword oldflags = cpu->flags; \
+			if (cpu->flags & VM) cpu->flags = (cpu->flags & (0xffff0000 | IOPL)) | (laddr16(&meml3) & ~IOPL); \
+			else cpu->flags = (cpu->flags & 0xffff0000) | laddr16(&meml3); \
+			cpu->flags &= EFLAGS_MASK; \
+			cpu->flags |= 0x2; \
+			if (!set_seg(cpu, SEG_CS, newcs)) { cpu->flags = oldflags; return false; } \
+			cpu->cc.mask = 0; \
+			set_sp(sp + 6, sp_mask); \
+			cpu->next_ip = newip; \
+		} else { \
+			OptAddr meml1, meml2, meml3; \
+			/* eip */ TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
+			uword newip = laddr32(&meml1); \
+			/* cs (pop as dword, selector is low 16 bits) */ \
+			TRY(translate32(cpu, &meml2, 1, SEG_SS, (sp + 4) & sp_mask)); \
+			int newcs = laddr32(&meml2); \
+			/* eflags */ TRY(translate32(cpu, &meml3, 1, SEG_SS, (sp + 8) & sp_mask)); \
+			uword oldflags = cpu->flags; \
+			if (cpu->flags & VM) cpu->flags = (cpu->flags & IOPL) | (laddr32(&meml3) & ~IOPL); \
+			else cpu->flags = laddr32(&meml3); \
+			cpu->flags &= EFLAGS_MASK; \
+			cpu->flags |= 0x2; \
+			if (!set_seg(cpu, SEG_CS, newcs)) { cpu->flags = oldflags; return false; } \
+			cpu->cc.mask = 0; \
+			set_sp(sp + 12, sp_mask); \
+			cpu->next_ip = newip; \
+		} \
 	} \
 	if (cpu->intr && (cpu->flags & IF)) return true;
 
@@ -2946,22 +2964,28 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define RET() RETw(0, limm, 0)
 
-static bool enter_helper(CPUI386 *cpu, bool opsz16, uword sp_mask,
-			 int level, int allocsz)
-{
+static bool __not_in_flash_func(enter_helper)(
+	CPUI386 *cpu,
+	bool opsz16,
+	uword sp_mask,
+	int level,
+	int allocsz
+) {
 	assert(level != 0);
 	uword temp;
-	OptAddr meml1;
+	OptAddr meml1, memsrc;
 
 	uword sp = lreg32(4);
 	if (opsz16) {
 		TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask));
-		set_sp(sp - 2, sp_mask);
+		sp = (sp - 2) & sp_mask;
+		set_sp(sp, sp_mask);
 		saddr16(&meml1, lreg16(5));
 		temp = lreg16(4);
 	} else {
 		TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask));
-		set_sp(sp - 4, sp_mask);
+		sp = (sp - 4) & sp_mask;
+		set_sp(sp, sp_mask);
 		saddr32(&meml1, lreg32(5));
 		temp = lreg32(4);
 	}
@@ -2973,29 +2997,37 @@ static bool enter_helper(CPUI386 *cpu, bool opsz16, uword sp_mask,
 			} else {
 				sreg32(5, lreg32(5) - 2);
 			}
-			TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask));
-			set_sp(sp - 2, sp_mask);
-			saddr16(&meml1, lreg16(5));
+			/* push word ptr [SS:BP] */
+			TRY(translate16(cpu, &memsrc, 1, SEG_SS, lreg16(5) & sp_mask));
+			sp = (sp - 2) & sp_mask;
+			TRY(translate16(cpu, &meml1, 2, SEG_SS, sp));
+			set_sp(sp, sp_mask);
+			saddr16(&meml1, laddr16(&memsrc));
 		} else {
 			if (sp_mask == 0xffff) {
 				sreg16(5, lreg16(5) - 4);
 			} else {
 				sreg32(5, lreg32(5) - 4);
 			}
-			TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask));
-			set_sp(sp - 4, sp_mask);
-			saddr32(&meml1, lreg32(5));
+			/* push dword ptr [SS:EBP] */
+			TRY(translate32(cpu, &memsrc, 1, SEG_SS, lreg32(5) & sp_mask));
+			sp = (sp - 4) & sp_mask;
+			TRY(translate32(cpu, &meml1, 2, SEG_SS, sp));
+			set_sp(sp, sp_mask);
+			saddr32(&meml1, laddr32(&memsrc));
 		}
 	}
 
 	if (opsz16) {
-		TRY(translate16(cpu, &meml1, 2, SEG_SS, (sp - 2) & sp_mask));
-		set_sp(sp - 2 - allocsz, sp_mask);
+		sp = (sp - 2) & sp_mask;
+		TRY(translate16(cpu, &meml1, 2, SEG_SS, sp));
+		set_sp((sp - allocsz) & sp_mask, sp_mask);
 		saddr16(&meml1, temp);
 		sreg16(5, temp);
 	} else {
-		TRY(translate32(cpu, &meml1, 2, SEG_SS, (sp - 4) & sp_mask));
-		set_sp(sp - 4 - allocsz, sp_mask);
+		sp = (sp - 4) & sp_mask;
+		TRY(translate32(cpu, &meml1, 2, SEG_SS, sp));
+		set_sp((sp - allocsz) & sp_mask, sp_mask);
 		saddr32(&meml1, temp);
 		sreg32(5, temp);
 	}
