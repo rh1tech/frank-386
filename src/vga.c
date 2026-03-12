@@ -52,7 +52,7 @@ void *pcmalloc(long size);
 #define pcmalloc malloc
 #endif
 
-static int after_eq(uint32_t a, uint32_t b)
+inline static int after_eq(uint32_t a, uint32_t b)
 {
     return (a - b) < (1u << 31);
 }
@@ -2550,7 +2550,7 @@ bool __not_in_flash_func(vga_in_retrace)(VGAState *s)
 /* Get cursor blink phase (1 = visible, 0 = hidden during blink)
  * Also updates the blink state based on time for hardware VGA drivers
  * that don't use vga_display_update_text */
-int vga_get_cursor_blink_phase(VGAState *s)
+int __time_critical_func(vga_get_cursor_blink_phase)(VGAState *s)
 {
     uint32_t now = get_uticks();
     if (after_eq(now, s->cursor_blink_time)) {

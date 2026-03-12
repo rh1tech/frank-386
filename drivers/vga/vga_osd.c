@@ -35,7 +35,7 @@ static bool osd_visible = false;
 #define TMPL_LINE 0xC0
 
 // CGA colors (same as vga_hw.c)
-static const uint8_t cga_colors[16] = {
+static const uint8_t cga_colors[16] __not_in_flash("cga_colors") = {
     0x00,  // 0: Black
     0x02,  // 1: Blue
     0x08,  // 2: Green
@@ -55,7 +55,7 @@ static const uint8_t cga_colors[16] = {
 };
 
 // Convert CGA color index to 8-bit VGA output (RRGGBB + sync)
-static uint8_t color_to_output(uint8_t color_idx) {
+static uint8_t __time_critical_func(color_to_output)(uint8_t color_idx) {
     return cga_colors[color_idx & 0x0F] | TMPL_LINE;
 }
 
