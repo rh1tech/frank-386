@@ -532,26 +532,52 @@ static bool IRAM_ATTR translate_laddr(CPUI386 *cpu, OptAddr *res, int rwm, uword
 	return true;
 }
 
-static bool IRAM_ATTR segcheck(CPUI386 *cpu, int rwm, int seg, uword addr, int size)
+static bool __not_in_flash_func(segcheck)(CPUI386 *cpu, int rwm, int seg, uword addr, int size)
 {
 	if (cpu->cr0 & 1) {
 		/* null selector check */
 		if (cpu->seg[seg].limit == 0 && (cpu->seg[seg].sel & ~0x3) == 0) {
-//			dolog("segcheck: seg %d is null %x\n", seg, cpu->seg[seg].sel);
-			THROW(EX_GP, 0);
+			THROW(seg == SEG_SS ? EX_SS : EX_GP, 0);
 		}
-#if 0
 		/* limit check */
-		bool expand_down = (cpu->seg[seg].flags & 0xc) == 0x4;
-		bool over = addr + size - 1 > cpu->seg[seg].limit;
-		if (expand_down)
-			over = addr <= cpu->seg[seg].limit;
-		if (over) {
-			dolog("over: addr %08x size %08x limit %08x\n", addr, size, cpu->seg[seg].limit);
-			THROW(EX_GP, 0);
+		uword flags = cpu->seg[seg].flags;
+		int type = flags & 0xf;
+		bool code = type & 0x8;
+		bool writable = type & 0x2;
+		bool expand_down = !code && ((type & 0x4) != 0);
+		uword limit = cpu->seg[seg].limit;
+		uword last = addr + (uword)size - 1;
+		bool wrap = last < addr;
+		bool over;
+		if (expand_down) {
+			/*
+			 * Valid offsets for expand-down segments are:
+			 *   limit+1 .. max_offset
+			 * where max_offset is 0xffff for 16-bit segments and
+			 * 0xffffffff for big (B-bit) segments.
+			 */
+			uword maxoff = (flags & SEG_B_BIT) ? 0xffffffffu : 0xffffu;
+			over = wrap || addr <= limit || last > maxoff;
+		} else {
+			over = wrap || last > limit;
 		}
-		/* todo: readonly check */
-#endif
+		if (over) {
+			THROW(seg == SEG_SS ? EX_SS : EX_GP, 0);
+		}
+		/*
+		 * Write check.
+		 * For normal data segments, bit1 means writable.
+		 * For code segments, writes are never allowed through the segment.
+		 *
+		 * Keep this conservative: only reject definite writes.
+		 */
+		#if 0 // TODO: win95 failed on this point, so turned off for a while
+		if (rwm > 1 && cpu->cpl != 0 /* check it, but not in ring 0 */) {
+			if (code || !writable) {
+				THROW(seg == SEG_SS ? EX_SS : EX_GP, 0);
+			}
+		}
+		#endif
 	}
 	return true;
 }
