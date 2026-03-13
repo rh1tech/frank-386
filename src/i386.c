@@ -2224,7 +2224,7 @@ static inline void clear_segs(CPUI386 *cpu)
 		u32 new_cr0 = lreg32(rm); \
 		if ((new_cr0 ^ cpu->cr0) & (CR0_PG | CR0_WP | 1)) \
 			tlb_clear(cpu); \
-		if (cpu->fpu) new_cr0 |= 0x10; \
+		if (cpu->fpu) new_cr0 |= 0x12; \
 		cpu->cr0 = new_cr0; \
 	} else if (reg == 2) { \
 		cpu->cr2 = lreg32(rm); \
@@ -4518,6 +4518,11 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	if (no == 0x2F && cpu->int2f_handler && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
 		if (cpu->int2f_handler(cpu, cpu->int2f_opaque)) return true; /* handled */
 	}
+	#if DEBUG_CPU
+	if (cpu->flags & VM && no >= 0x20) {
+		dolog("V86 INT %02xh\n", no);
+	}
+	#endif
 	if (!(cpu->cr0 & 1)) {
 		/* REAL-ADDRESS-MODE */
 		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
