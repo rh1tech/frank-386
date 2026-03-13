@@ -33,6 +33,7 @@ typedef void FPU;
 #ifdef DEBUG_CPU
 #include <stdarg.h>
 #include "ff.h"
+static u8 opcode;
 void dolog(const char *fmt, ...)
 {
 	static FIL _tf;
@@ -59,15 +60,16 @@ void dolog(const char *fmt, ...)
 #define wordmask ((uword) ((sword) -1))
 #define TRY(f) if(!(f)) { return false; }
 #define TRYL(f) if(unlikely(!(f))) { return false; }
-#define TRY1(f) if(unlikely(!(f))) { dolog("@ %s %s %d\n", __FILE__, __FUNCTION__, __LINE__); cpu_abort(cpu, -1); }
+#define TRY1(f) if(unlikely(!(f))) { dolog("TRY1 @ %s %d\n", __func__, __LINE__); cpu_abort(cpu, -1); }
 #define THROW(ex, err) do { \
-    dolog("THROW ex=%d err=%x eip=%08x cs=%04x %s:%s\n", \
+    dolog("THROW ex=%d err=%x eip=%08x cs=%04x %s:%d\n", \
           (ex), (unsigned)(err), cpu->ip, cpu->seg[SEG_CS].sel,  __func__, __LINE__); \
     cpu->excno = (ex); cpu->excerr = (err); \
 	return false; \
 } while(0)
 #define THROW0(ex) do { \
-    dolog("THROW0 ex=%d eip=%08x cs=%04x\n", (ex), cpu->ip, cpu->seg[SEG_CS].sel); \
+    dolog("THROW0 ex=%d eip=%08x cs=%04x op=%02x %s:%d\n", (ex), cpu->ip, cpu->seg[SEG_CS].sel, \
+          opcode, __func__, __LINE__); \
 	cpu->excno = (ex); \
 	return false; \
 } while(0)
@@ -3895,6 +3897,9 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 	if (code16) cpu->next_ip &= 0xffff;
 	cpu->ip = cpu->next_ip;
 	TRY(fetch8(cpu, &b1));
+#if DEBUG_CPU
+	opcode = b1;
+#endif
 	cpu->cycle++;
 
 #ifndef I386_OPT1
@@ -4606,6 +4611,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			saddr16(&meml3, cpu->ip);
 			if (pusherr) {
 				saddr16(&meml4, cpu->excerr);
+				dolog("EX intra PVL G16 INT %02xh %04x:%04x err=%04x\n", no, cpu->seg[SEG_CS].sel, cpu->ip, (unsigned)cpu->excerr);
 				set_sp(sp - 2 * 4, sp_mask);
 			} else {
 				set_sp(sp - 2 * 3, sp_mask);
@@ -4626,6 +4632,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			saddr32(&meml3, cpu->ip);
 			if (pusherr) {
 				saddr32(&meml4, cpu->excerr);
+				dolog("EX intra PVL INT %02xh %04x:%08x err=%08x\n", no, cpu->seg[SEG_CS].sel, cpu->ip, (unsigned)cpu->excerr);
 				set_sp(sp - 4 * 4, sp_mask);
 			} else {
 				set_sp(sp - 4 * 3, sp_mask);
@@ -4678,6 +4685,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			saddr16(&meml5, cpu->ip);
 			if (pusherr) {
 				saddr16(&meml6, cpu->excerr);
+				dolog("EX inter PVL G16 INT %02xh %04x:%04x err=%04x\n", no, cpu->seg[SEG_CS].sel, cpu->ip, (unsigned)cpu->excerr);
 				set_sp(sp - 2 * 6, sp_mask);
 			} else {
 				set_sp(sp - 2 * 5, sp_mask);
@@ -4702,6 +4710,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 			saddr32(&meml5, cpu->ip);
 			if (pusherr) {
 				saddr32(&meml6, cpu->excerr);
+				dolog("EX inter PVL INT %02xh %04x:%08x err=%08x\n", no, cpu->seg[SEG_CS].sel, cpu->ip, (unsigned)cpu->excerr);
 				sreg32(4, sp - 4 * 6);
 			} else {
 				sreg32(4, sp - 4 * 5);
@@ -4765,6 +4774,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		saddr32(&meml5, cpu->ip);
 		if (pusherr) {
 			saddr32(&meml6, cpu->excerr);
+			dolog("EX v8086 INT %02xh %04x:%08x err=%08x\n", no, cpu->seg[SEG_CS].sel, cpu->ip, (unsigned)cpu->excerr);
 			set_sp(sp - 4 * 10, sp_mask);
 		} else {
 			set_sp(sp - 4 * 9, sp_mask);
@@ -4929,9 +4939,13 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 		TRY(translate(cpu, &meml_vmds, 1, SEG_SS, (sp + 24) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml_vmfs, 1, SEG_SS, (sp + 28) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml_vmgs, 1, SEG_SS, (sp + 32) & sp_mask, 4, 0));
+		dolog("IRET->V86 raw: eip=%08x cs=%08x fl=%08x esp=%08x ss=%08x, sp=%08x eip=%08x cs=%04x fl=%08x v86esp=%08x v86ss=%04x\n",
+		      laddr32(&meml1), laddr32(&meml2), laddr32(&meml3),
+		      laddr32(&meml4), laddr32(&meml5),
+			  sp, newip, newcs, newflags,
+              laddr32(&meml4), laddr32(&meml5));
 		cpu->flags = newflags;
 		TRY1(set_seg(cpu, SEG_CS, newcs));
-		set_sp(sp + 12, sp_mask);
 		cpu->next_ip = newip;
 		TRY1(set_seg(cpu, SEG_SS, laddr32(&meml5)));
 		TRY1(set_seg(cpu, SEG_ES, laddr32(&meml_vmes)));
