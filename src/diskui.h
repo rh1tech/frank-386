@@ -16,20 +16,20 @@
 
 // Drive types
 typedef enum {
-    DRIVE_FDD_A = 0,    // Floppy A:
-    DRIVE_FDD_B = 1,    // Floppy B:
-    DRIVE_HDD_C = 2,    // Hard Disk C:
-    DRIVE_HDD_D = 3,    // Hard Disk D:
-    DRIVE_CDROM_E = 4,  // CD-ROM E:
-    DRIVE_COUNT = 5
+    DRIVE_FDD0 = 0,    // Floppy A:
+    DRIVE_FDD1 = 1,    // Floppy B:
+    // Hard Disks or CD-ROM
+    DRIVE_ATA0_0 = 2,  
+    DRIVE_ATA0_1 = 3,
+    DRIVE_ATA1_0 = 4,
+    DRIVE_ATA1_1 = 5,
+    DRIVE_TOTAL = 6
 } DiskUIDrive;
 
 // Drive info for UI display
 typedef struct {
     const char *label;       // "A:", "B:", etc.
     const char *type_name;   // "Floppy", "Hard Disk", "CD-ROM"
-    bool is_floppy;
-    bool is_cdrom;
 } DriveInfo;
 
 // Initialize disk UI system
@@ -70,5 +70,6 @@ void diskui_animate(void);
 #define KEY_C       46
 #define KEY_D       32
 #define KEY_E       18
+#define KEY_F       33
 
 #endif // DISKUI_H
