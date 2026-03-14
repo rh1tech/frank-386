@@ -2224,7 +2224,7 @@ static inline void clear_segs(CPUI386 *cpu)
 		u32 new_cr0 = lreg32(rm); \
 		if ((new_cr0 ^ cpu->cr0) & (CR0_PG | CR0_WP | 1)) \
 			tlb_clear(cpu); \
-		if (cpu->fpu) new_cr0 |= 0x12; \
+		if (cpu->fpu) new_cr0 |= 0x10; \
 		cpu->cr0 = new_cr0; \
 	} else if (reg == 2) { \
 		cpu->cr2 = lreg32(rm); \
