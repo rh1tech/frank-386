@@ -58,6 +58,9 @@ void config_set_mpu401(int enabled);
 int config_get_mouse(void);
 void config_set_mouse(int enabled);
 
+int config_get_nes_mouse(void);
+void config_set_nes_mouse(int enabled);
+
 int config_get_cpu_freq(void);
 void config_set_cpu_freq(int mhz);
 

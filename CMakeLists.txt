@@ -151,6 +151,18 @@ target_compile_definitions(ps2mouse PRIVATE
 target_link_libraries(ps2mouse pico_stdlib hardware_gpio)
 
 #=============================================================================
+# NES/SNES Gamepad Driver
+#=============================================================================
+add_library(nespad
+    drivers/nespad/nespad.c
+)
+target_include_directories(nespad PUBLIC drivers/nespad src)
+target_compile_definitions(nespad PRIVATE
+    BOARD_${BOARD}
+)
+target_link_libraries(nespad pico_stdlib hardware_pio hardware_gpio)
+
+#=============================================================================
 # PSRAM Driver
 #=============================================================================
 add_library(psram
@@ -279,6 +291,7 @@ target_include_directories(${BUILD_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/vga
     ${CMAKE_CURRENT_LIST_DIR}/drivers/hdmi
     ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
+    ${CMAKE_CURRENT_LIST_DIR}/drivers/nespad
 )
 # Only include usbhid directory when USB HID is enabled (to avoid tusb_config.h conflicts)
 if(USB_HID_ENABLED)
@@ -391,6 +404,7 @@ target_link_libraries(${BUILD_NAME}
     psram
     video_driver
     audio_driver
+    nespad
     usbhid
 )
 

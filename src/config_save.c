@@ -32,6 +32,7 @@ static int cfg_covox = 1;
 static int cfg_mpu401 = 1;
 static int cfg_dss = 0;
 static int cfg_mouse = 1;
+static int cfg_nes_mouse = 0;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
 static int cfg_flash_freq = FLASH_MAX_FREQ_MHZ;
@@ -152,6 +153,16 @@ void config_set_mouse(int enabled) {
         cfg_mouse = enabled;
         cfg_changed = true;
     }
+}
+
+int config_get_nes_mouse(void) { return cfg_nes_mouse; }
+void config_set_nes_mouse(int enabled) {
+    if (cfg_nes_mouse != enabled) {
+        cfg_nes_mouse = enabled;
+        cfg_changed = true;
+    }
+    /* NES mouse still needs the emulated i8042 mouse port active */
+    if (enabled) pc->mouse_enabled = 1;
 }
 
 int config_get_cpu_freq(void) { return cfg_cpu_freq; }
@@ -282,6 +293,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "mouse=%d\n", cfg_mouse);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "nes_mouse=%d\n", cfg_nes_mouse);
+    write_line(&fp, line);
     snprintf(line, sizeof(line), "cpu_freq=%d\n", cfg_cpu_freq);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "psram_freq=%d\n", cfg_psram_freq);
@@ -328,6 +341,8 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_dss = atoi(value);
     } else if (strcmp(name, "mouse") == 0) {
         cfg_mouse = atoi(value);
+    } else if (strcmp(name, "nes_mouse") == 0) {
+        cfg_nes_mouse = atoi(value);
     } else if (strcmp(name, "cpu_freq") == 0) {
         cfg_cpu_freq = atoi(value);
     } else if (strcmp(name, "psram_freq") == 0) {

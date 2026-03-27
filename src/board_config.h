@@ -146,6 +146,11 @@ static inline uint get_psram_pin(void) {
 #define PS2_MOUSE_CLK  14
 #define PS2_MOUSE_DATA 15
 
+// NES/SNES Gamepad Pins (directly after HDMI pins)
+#define NESPAD_GPIO_CLK   14
+#define NESPAD_GPIO_DATA  16
+#define NESPAD_GPIO_LATCH 15
+
 // I2S Audio Pins
 #define I2S_DATA_PIN       26
 #define I2S_CLOCK_PIN_BASE 27
@@ -202,6 +207,11 @@ static inline uint get_psram_pin(void) {
 // PS/2 Mouse Pins
 #define PS2_MOUSE_CLK  0
 #define PS2_MOUSE_DATA 1
+
+// NES/SNES Gamepad Pins
+#define NESPAD_GPIO_CLK   20
+#define NESPAD_GPIO_DATA  26
+#define NESPAD_GPIO_LATCH 21
 
 // I2S Audio Pins
 #define I2S_DATA_PIN       9

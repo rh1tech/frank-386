@@ -39,6 +39,7 @@ typedef enum {
     SETTING_COVOX,
     SETTING_DSS,
     SETTING_MOUSE,
+    SETTING_NES_MOUSE,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
     SETTING_PSRAM_FREQ,
@@ -93,15 +94,15 @@ static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_redirector;
-static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_mpu401;
+static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage;
 
 // UI dimensions
 #define MENU_X      10
 #define MENU_Y      1
 #define MENU_W      60
-#define MENU_H      23
-#define VISIBLE_ITEMS 17
+#define MENU_H      24
+#define VISIBLE_ITEMS 18
 
 // Forward declarations
 static void draw_settings_menu(void);
@@ -131,6 +132,7 @@ void settingsui_open(void) {
     orig_covox = config_get_covox();
     orig_dss = config_get_dss();
     orig_mouse = config_get_mouse();
+    orig_nes_mouse = config_get_nes_mouse();
     orig_cpu_freq = config_get_cpu_freq();
     orig_psram_freq = config_get_psram_freq();
     orig_flash_freq = config_get_flash_freq();
@@ -250,6 +252,12 @@ static void cycle_option(int direction) {
 
         case SETTING_MOUSE:
             config_set_mouse(config_get_mouse() ? 0 : 1);
+            if (config_get_mouse()) config_set_nes_mouse(0);
+            break;
+
+        case SETTING_NES_MOUSE:
+            config_set_nes_mouse(config_get_nes_mouse() ? 0 : 1);
+            if (config_get_nes_mouse()) config_set_mouse(0);
             break;
 
         case SETTING_CPU_FREQ:
@@ -309,7 +317,8 @@ static void draw_settings_menu(void) {
         "Tandy Sound:",
         "Covox (LPT2):",
         "Disney Sound Source:",
-        "Mouse:",
+        "PS/2 or USB Mouse:",
+        "NES Mouse:",
         "RP2350 Freq:",
         "CPU Voltage:",
         "PSRAM Freq:",
@@ -367,6 +376,9 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_MOUSE:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_NES_MOUSE:
+                snprintf(value, sizeof(value), "< %s >", config_get_nes_mouse() ? "Enabled" : "Disabled");
                 break;
             case SETTING_CPU_FREQ:
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());

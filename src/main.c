@@ -32,6 +32,9 @@
 #include "usbkbd_wrapper.h"
 #include "usbmouse_wrapper.h"
 #endif
+#ifdef NESPAD_GPIO_CLK
+#include "nespad.h"
+#endif
 #include "sdcard.h"
 #include "ff.h"
 #include "audio.h"
@@ -358,8 +361,8 @@ static void poll_keyboard(void) {
         }
     }
 
-    // Poll PS/2 mouse (only if enabled and not paused)
-    if (pc && pc->mouse_enabled && !pc->paused) {
+    // Poll PS/2 mouse (only if PS/2/USB mouse enabled, not NES mouse)
+    if (pc && config_get_mouse() && !pc->paused) {
         int16_t dx, dy;
         int8_t dz;
         uint8_t buttons;
@@ -382,8 +385,8 @@ static void poll_keyboard(void) {
         }
     }
 
-    // Poll USB mouse (only if enabled and not paused)
-    if (pc && pc->mouse_enabled && !pc->paused) {
+    // Poll USB mouse (only if PS/2/USB mouse enabled, not NES mouse)
+    if (pc && config_get_mouse() && !pc->paused) {
         int16_t dx, dy;
         int8_t dz;
         uint8_t buttons;
@@ -392,6 +395,31 @@ static void poll_keyboard(void) {
                 ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
             }
         }
+    }
+#endif
+
+    // NES gamepad -> mouse emulation (if enabled and gamepad pins defined)
+#ifdef NESPAD_GPIO_CLK
+    if (pc && pc->mouse && !pc->paused && config_get_nes_mouse()) {
+        static uint8_t prev_buttons = 0;
+        nespad_read();
+        uint32_t pad = nespad_state;
+        int16_t dx = 0, dy = 0;
+        uint8_t buttons = 0;
+        // D-pad -> mouse movement (2 pixels per poll)
+        // Note: ps2_mouse_event negates dy, so positive = screen up
+        if (pad & DPAD_LEFT)  dx = -1;
+        if (pad & DPAD_RIGHT) dx =  1;
+        if (pad & DPAD_UP)    dy = -1;
+        if (pad & DPAD_DOWN)  dy =  1;
+        // B = left button, A = right button
+        if (pad & DPAD_B) buttons |= 0x01;  // left
+        if (pad & DPAD_A) buttons |= 0x02;  // right
+        // Send event if there's movement, button press, or button release
+        if (dx || dy || buttons || prev_buttons) {
+            ps2_mouse_event(pc->mouse, dx, dy, 0, buttons);
+        }
+        prev_buttons = buttons;
     }
 #endif
 }
@@ -725,6 +753,20 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing USB HID keyboard...\n");
     usbkbd_init();
 #endif
+
+    // Initialize NES/SNES gamepad (if pins defined for this board)
+#ifdef NESPAD_GPIO_CLK
+    DBG_PRINT("Initializing NES gamepad...\n");
+    DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d, LATCH: GPIO%d\n",
+              NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH);
+    if (nespad_begin(clock_get_hz(clk_sys) / 1000,
+                     NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH)) {
+        DBG_PRINT("  NES gamepad initialized\n");
+    } else {
+        DBG_PRINT("  NES gamepad init failed (PIO unavailable)\n");
+    }
+#endif
+
     return true;
 }
 
@@ -803,7 +845,7 @@ static bool init_emulator(void) {
     pc->covox_enabled = config_get_covox();
     pc->mpu401_enabled = config_get_mpu401();
     pc->dss_enabled = config_get_dss();
-    pc->mouse_enabled = config_get_mouse();
+    pc->mouse_enabled = config_get_mouse() || config_get_nes_mouse();
     DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, MPU401=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
               pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mpu401_enabled,
               pc->tandy_enabled, pc->covox_enabled, pc->dss_enabled, pc->mouse_enabled);
