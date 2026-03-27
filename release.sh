@@ -173,7 +173,7 @@ for BOARD in "${BOARDS[@]}"; do
 done
 
 # ============================================================================
-# Clean up and create ZIP archive
+# Clean up
 # ============================================================================
 rm -rf build
 
@@ -181,26 +181,8 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo -e "${GREEN}Release build complete!${NC}"
 echo ""
-
-echo -e "${CYAN}=== Creating ZIP archive ===${NC}"
+echo "Release files in: $RELEASE_DIR/"
 echo ""
-
-cd "$RELEASE_DIR"
-
-ZIP_UF2="frank-386_${VERSION}.zip"
-zip -q "$ZIP_UF2" frank-386_*_${VERSION}.uf2 2>/dev/null && \
-    echo -e "  ${GREEN}✓${NC} $ZIP_UF2" || echo -e "  ${YELLOW}⚠ No UF2 files${NC}"
-
-# Remove individual files after zipping (keep only ZIPs)
-rm -f frank-386_*.uf2 2>/dev/null
-
-cd "$SCRIPT_DIR"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "Release archives in: $RELEASE_DIR/"
-echo ""
-ls -la "$RELEASE_DIR"/*.zip 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
+ls -la "$RELEASE_DIR"/frank-386_*_${VERSION}.uf2 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
 echo ""
 echo -e "Version: ${CYAN}${MAJOR}.$(printf '%02d' $MINOR)${NC}"
