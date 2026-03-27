@@ -1096,8 +1096,11 @@ void graphics_init_hdmi() {
 
     hdmi_init();
 
-    // Set high priority on all 4 video DMA channels AFTER hdmi_init
-    // (dma_channel_configure overwrites ctrl, so we must set priority here)
+    // DMA starts at normal priority to avoid starving SD/PSRAM during init.
+    // Call hdmi_set_dma_high_priority() after BIOS loading is complete.
+}
+
+void hdmi_set_dma_high_priority(void) {
     hw_set_bits(&dma_hw->ch[dma_chan].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
     hw_set_bits(&dma_hw->ch[dma_chan_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
     hw_set_bits(&dma_hw->ch[dma_chan_pal_conv].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);

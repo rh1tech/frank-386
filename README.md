@@ -1,4 +1,4 @@
-# murm386
+# FRANK 386
 
 i386 PC Emulator for RP2350 (Raspberry Pi Pico 2) with VGA output, SD card storage, PS/2 and USB keyboard, and audio output.
 
@@ -106,7 +106,7 @@ mem=2M
 bios=bios.bin
 vga_bios=vgabios.bin
 
-[murm386]
+[frank-386]
 cpu_freq=504
 psram_freq=166
 ```
@@ -183,8 +183,8 @@ Manage disk images without restarting:
 
 ```bash
 # Clone the repository
-git clone https://github.com/user/murm386.git
-cd murm386
+git clone https://github.com/rh1tech/frank-386.git
+cd frank-386
 
 # Build with default settings (M1 board, 378MHz, PS/2 keyboard)
 ./build.sh
@@ -236,16 +236,16 @@ To build all firmware variants:
 ```
 
 This creates firmware files in the `release/` directory:
-- `murm386_m1_*.uf2` - M1 board, standard UF2 format
-- `murm386_m2_*.uf2` - M2 board, standard UF2 format
-- `murm386_m1_*.m1p2` - M1 board, Murmulator OS 2 format
-- `murm386_m2_*.m2p2` - M2 board, Murmulator OS 2 format
+- `frank-386_m1_*.uf2` - M1 board, standard UF2 format
+- `frank-386_m2_*.uf2` - M2 board, standard UF2 format
+- `frank-386_m1_*.m1p2` - M1 board, Murmulator OS 2 format
+- `frank-386_m2_*.m2p2` - M2 board, Murmulator OS 2 format
 
 ### Flashing
 
 ```bash
 # With device in BOOTSEL mode:
-picotool load build/murm386.uf2
+picotool load build/frank-386.uf2
 
 # Or use the flash script:
 ./flash.sh
@@ -277,9 +277,9 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## Authors & Contributors
 
-**Mikhail Matveev** <<xtreme@rh1.tech>>
-- murm386 port and development (2026)
-- Website: [https://rh1.tech](https://rh1.tech)
+**Mikhail Matveev & DnCraptor**
+- frank-386 port and development (2026)
+- Repository: [https://github.com/rh1tech/frank-386](https://github.com/rh1tech/frank-386)
 
 ## Acknowledgments
 

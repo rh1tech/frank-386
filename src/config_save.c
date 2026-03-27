@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Configuration Save - writes configuration to INI file on SD card.
  *
@@ -264,8 +264,8 @@ bool config_save_all(void) {
     snprintf(line, sizeof(line), "fpu=%d\n", cfg_fpu);
     write_line(&fp, line);
 
-    // Hardware settings (murm386-specific)
-    write_line(&fp, "\n[murm386]\n");
+    // Hardware settings (frank-386-specific)
+    write_line(&fp, "\n[frank-386]\n");
     snprintf(line, sizeof(line), "pcspeaker=%d\n", cfg_pcspeaker);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "adlib=%d\n", cfg_adlib);
@@ -304,12 +304,13 @@ bool config_save_disks(void) {
     return config_save_all();
 }
 
-// INI parser callback for [murm386] section
-int parse_murm386_ini(void* user, const char* section,
+// INI parser callback for [frank-386] section
+int parse_frank_386_ini(void* user, const char* section,
                       const char* name, const char* value) {
     (void)user;
 
-    if (strcmp(section, "murm386") != 0) return 1;  // Not our section
+    // Accept both new and legacy section names
+    if (strcmp(section, "frank-386") != 0 && strcmp(section, "murm386") != 0) return 1;
 
     if (strcmp(name, "pcspeaker") == 0) {
         cfg_pcspeaker = atoi(value);

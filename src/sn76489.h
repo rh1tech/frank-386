@@ -1,8 +1,8 @@
 /**
- * murm386 - SN76489 (Tandy 3-Voice Sound) emulator
+ * frank-386 - SN76489 (Tandy 3-Voice Sound) emulator
  *
  * Based on emu76489.c by Mitsutaka Okazaki 2001-2016
- * Adapted for murm386 by Mikhail Matveev, 2026
+ * Adapted for frank-386 by Mikhail Matveev, 2026
  *
  * SPDX-License-Identifier: MIT
  */

@@ -34,6 +34,8 @@ extern "C" {
 #endif
 #endif
 
+void hdmi_set_dma_high_priority(void);
+
 #define TEXTMODE_COLS 53
 #define TEXTMODE_ROWS 30
 

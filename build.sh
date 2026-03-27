@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build murm386 - 386 Emulator for RP2350
+# Build frank-386 - 386 Emulator for RP2350
 #
 # Usage: ./build.sh [OPTIONS]
 #   -b, --board      Board variant: M1 or M2 (default: M2)
@@ -21,6 +21,7 @@ PSRAM="133"
 CPU="378"
 MOS2="OFF"
 USB_HID="OFF"
+HDMI="OFF"
 DEBUG="ON"
 PROFILE="OFF"
 CLEAN=0
@@ -66,6 +67,10 @@ while [[ $# -gt 0 ]]; do
             USB_HID="ON"
             shift
             ;;
+        --hdmi)
+            HDMI="ON"
+            shift
+            ;;
         --debug)
             DEBUG="ON"
             shift
@@ -109,12 +114,17 @@ if [[ "$PROFILE" == "ON" ]]; then
     CMAKE_ARGS="$CMAKE_ARGS -DPROFILE_ENABLED=ON"
 fi
 
-echo "Building murm386:"
+if [[ "$HDMI" == "ON" ]]; then
+    CMAKE_ARGS="$CMAKE_ARGS -DFORCE_HDMI=ON"
+fi
+
+echo "Building frank-386:"
 echo "  Board: $BOARD"
 echo "  CPU: $CPU MHz"
 echo "  PSRAM: $PSRAM MHz"
 echo "  MOS2: $MOS2"
 echo "  USB HID: $USB_HID"
+echo "  HDMI: $HDMI"
 echo "  Debug: $DEBUG"
 echo "  Profile: $PROFILE"
 echo ""

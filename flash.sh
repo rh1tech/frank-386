@@ -1,5 +1,5 @@
 #!/bin/bash
-# Flash murm386 to connected Pico device
+# Flash frank-386 to connected Pico device
 
 if [ -n "$1" ]; then
     FIRMWARE="$1"

@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Settings UI - on-screen settings manager for changing emulator
  * configuration at runtime. Triggered by Win+F11 hotkey.

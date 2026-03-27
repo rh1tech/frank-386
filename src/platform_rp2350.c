@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Platform Integration Layer - provides POSIX-like compatibility functions
  * and platform-specific implementations for RP2350 (Pico 2).

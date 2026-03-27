@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Disk UI - on-screen disk manager for inserting/ejecting disk images
  * at runtime. Triggered by Win+F12 hotkey.

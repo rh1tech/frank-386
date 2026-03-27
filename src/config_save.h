@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Configuration Save - writes configuration to INI file on SD card.
  *
@@ -33,7 +33,7 @@ void config_set_fpu(int enabled);
 int config_get_redirector(void);
 void config_set_redirector(int enabled);
 
-// Hardware settings (saved in [murm386] section)
+// Hardware settings (saved in [frank-386] section)
 int config_get_pcspeaker(void);
 void config_set_pcspeaker(int enabled);
 
@@ -82,8 +82,8 @@ void config_clear_changes(void);
 // Initialize config from current PCConfig
 void config_init_from_current(void);
 
-// INI parser callback for [murm386] section
-int parse_murm386_ini(void* user, const char* section,
+// INI parser callback for [frank-386] section
+int parse_frank_386_ini(void* user, const char* section,
                       const char* name, const char* value);
 
 #endif // CONFIG_SAVE_H

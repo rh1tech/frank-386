@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Board Configuration - supports M1 and M2 board variants with
  * different GPIO layouts for VGA, SD card, PS/2, and I2S audio.

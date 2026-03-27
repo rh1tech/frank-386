@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * VGA Driver - based on pico-286's vga-nextgen by xrip.
  * Reads directly from emulator VRAM and renders text/graphics on-the-fly.

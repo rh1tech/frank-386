@@ -1,5 +1,5 @@
 /**
- * USB Keyboard wrapper for murm386
+ * USB Keyboard wrapper for frank-386
  * Converts HID keycodes to Linux input keycodes for ps2_put_keycode()
  *
  * Same interface as ps2kbd_wrapper for easy integration

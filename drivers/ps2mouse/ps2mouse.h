@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * PS/2 Mouse Driver - GPIO interrupt-based PS/2 mouse interface
  * Based on DnCraptor's implementation from murmdoom

@@ -1,5 +1,5 @@
 /*
- * murm386 JIT Compiler - ARM Thumb-2 Code Emission
+ * frank-386 JIT Compiler - ARM Thumb-2 Code Emission
  *
  * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * MIT License

@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * VGA Driver - based on pico-286's vga-nextgen by xrip.
  * Reads directly from emulator VRAM and renders text/graphics on-the-fly.
@@ -1085,12 +1085,17 @@ void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
         spread8_lut[i] = spread8(i);
     }
-    uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);
-    #if defined(BOARD_Z0) || defined(BOARD_Z2) || defined(BOARD_DV)
-        SELECT_VGA = linkVGA01 == 0x1F;
+    #ifdef FORCE_HDMI
+        SELECT_VGA = false;
     #else
-        SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
+        uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);
+        #if defined(BOARD_Z0) || defined(BOARD_Z2) || defined(BOARD_DV)
+            SELECT_VGA = linkVGA01 == 0x1F;
+        #else
+            SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
+        #endif
     #endif
+    DBG_PRINT("  Video output: %s\n", SELECT_VGA ? "VGA" : "HDMI");
     if (!SELECT_VGA) {
         hdmi_boost_clock();
         graphics_init_hdmi();

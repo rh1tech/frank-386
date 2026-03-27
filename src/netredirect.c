@@ -1,5 +1,5 @@
 /*
- * Network Redirector (INT 2Fh) for murm386
+ * Network Redirector (INT 2Fh) for frank-386
  * Ported from pico-286/pc_ref network-redirector-rp2350.c.inl
  * Provides SD card filesystem passthrough as DOS drive H:
  */

@@ -1,5 +1,5 @@
 /*
- * USB HID Host Driver Header for murm386
+ * USB HID Host Driver Header for frank-386
  * Provides keyboard input via USB Host
  *
  * SPDX-License-Identifier: MIT

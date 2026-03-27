@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * VGA OSD (On-Screen Display) - text overlay for disk manager and settings UI.
  *

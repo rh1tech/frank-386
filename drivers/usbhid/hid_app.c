@@ -1,5 +1,5 @@
 /*
- * USB HID Host Application Callbacks for murm386
+ * USB HID Host Application Callbacks for frank-386
  * Implements TinyUSB Host callbacks for keyboard
  *
  * Based on TinyUSB HID host example

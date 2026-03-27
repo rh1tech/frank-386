@@ -45,6 +45,9 @@ option(EMM "Enable LTEMM support" OFF)
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
 
+# Force HDMI output (skip VGA/HDMI pin auto-detection)
+option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
+
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
 
@@ -70,7 +73,7 @@ else()
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_50")
 endif()
 
-message(STATUS "murm386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE} ${AUDIO_TYPE}")
+message(STATUS "frank-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE} ${AUDIO_TYPE}")
 
 include(pico_sdk_import.cmake)
 
@@ -85,9 +88,9 @@ set(CMAKE_CXX_STANDARD 17)
 file(READ "${CMAKE_CURRENT_LIST_DIR}/version.txt" VERSION_CONTENT)
 string(STRIP "${VERSION_CONTENT}" VERSION_CONTENT)
 string(REPLACE " " ";" VERSION_LIST "${VERSION_CONTENT}")
-list(GET VERSION_LIST 0 MURM386_VERSION_MAJOR)
-list(GET VERSION_LIST 1 MURM386_VERSION_MINOR)
-message(STATUS "murm386 version: ${MURM386_VERSION_MAJOR}.${MURM386_VERSION_MINOR}")
+list(GET VERSION_LIST 0 FRANK_386_VERSION_MAJOR)
+list(GET VERSION_LIST 1 FRANK_386_VERSION_MINOR)
+message(STATUS "frank-386 version: ${FRANK_386_VERSION_MAJOR}.${FRANK_386_VERSION_MINOR}")
 
 pico_sdk_init()
 
@@ -295,8 +298,8 @@ if(EMM)
 endif()
 target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
-    MURM386_VERSION_MAJOR=${MURM386_VERSION_MAJOR}
-    MURM386_VERSION_MINOR=${MURM386_VERSION_MINOR}
+    FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
+    FRANK_386_VERSION_MINOR=${FRANK_386_VERSION_MINOR}
 
     # Board configuration
     BOARD_${BOARD}
@@ -344,6 +347,12 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 # Add DEBUG_ENABLED if enabled
 if(DEBUG_ENABLED)
     target_compile_definitions(${BUILD_NAME} PRIVATE DEBUG_ENABLED=1)
+endif()
+
+# Force HDMI output
+if(FORCE_HDMI)
+    target_compile_definitions(${BUILD_NAME} PRIVATE FORCE_HDMI=1)
+    target_compile_definitions(video_driver PRIVATE FORCE_HDMI=1)
 endif()
 
 # Add I386_PROFILE if profiling enabled
@@ -400,7 +409,7 @@ endif()
 # Print configuration summary
 #=============================================================================
 message(STATUS "")
-message(STATUS "murm386 Build Configuration:")
+message(STATUS "frank-386 Build Configuration:")
 message(STATUS "  Board Variant:  ${BOARD}")
 message(STATUS "  EMM:            ${EMM}")
 message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Copyright (c) 2025-2026 Mikhail Matveev <xtreme@rh1.tech>
 #
-# release.sh - Build all release variants of murm386
+# release.sh - Build all release variants of frank-386
 #
 # Creates firmware files for each combination:
 #
@@ -11,7 +11,7 @@
 # MOS2 variants (M1, M2) - Murmulator OS:
 #   - m1p2/m2p2 format for MOS2 bootloader
 #
-# Output format: murm386_<board>_<version>.{uf2,m1p2,m2p2}
+# Output format: frank-386_<board>_<version>.{uf2,m1p2,m2p2}
 #
 # Release configuration:
 #   - CPU: 378 MHz (stable overclock)
@@ -50,18 +50,22 @@ if [[ $NEXT_MINOR -ge 100 ]]; then
     NEXT_MINOR=0
 fi
 
-# Interactive version input
 echo ""
 echo -e "${CYAN}┌─────────────────────────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}│                    murm386 Release Builder                      │${NC}"
+echo -e "${CYAN}│                    frank-386 Release Builder                      │${NC}"
 echo -e "${CYAN}└─────────────────────────────────────────────────────────────────┘${NC}"
 echo ""
 echo -e "Last version: ${YELLOW}${LAST_MAJOR}.$(printf '%02d' $LAST_MINOR)${NC}"
 echo ""
 
-DEFAULT_VERSION="${NEXT_MAJOR}.$(printf '%02d' $NEXT_MINOR)"
-read -p "Enter version [default: $DEFAULT_VERSION]: " INPUT_VERSION
-INPUT_VERSION=${INPUT_VERSION:-$DEFAULT_VERSION}
+# Accept version from command line or prompt interactively
+if [[ -n "$1" ]]; then
+    INPUT_VERSION="$1"
+else
+    DEFAULT_VERSION="${NEXT_MAJOR}.$(printf '%02d' $NEXT_MINOR)"
+    read -p "Enter version [default: $DEFAULT_VERSION]: " INPUT_VERSION
+    INPUT_VERSION=${INPUT_VERSION:-$DEFAULT_VERSION}
+fi
 
 # Parse version (handle both "1.00" and "1 00" formats)
 if [[ "$INPUT_VERSION" == *"."* ]]; then
@@ -127,7 +131,7 @@ build_variant() {
         [[ "$BOARD" == "M2" ]] && EXT="m2p2"
     fi
 
-    local OUTPUT_NAME="murm386_${BOARD_LC}_${VERSION}.${EXT}"
+    local OUTPUT_NAME="frank-386_${BOARD_LC}_${VERSION}.${EXT}"
 
     echo ""
     echo -e "${CYAN}[$BUILD_COUNT/$TOTAL_BUILDS] Building: $OUTPUT_NAME${NC}"
@@ -153,7 +157,7 @@ build_variant() {
         # Build
         if make -j8 > /dev/null 2>&1; then
             # Find and copy output file
-            local SRC_FILE="$SCRIPT_DIR/build/murm386.${EXT}"
+            local SRC_FILE="$SCRIPT_DIR/build/frank-386.${EXT}"
 
             if [[ -f "$SRC_FILE" ]]; then
                 cp "$SRC_FILE" "$RELEASE_DIR/$OUTPUT_NAME"
@@ -211,17 +215,17 @@ echo ""
 cd "$RELEASE_DIR"
 
 # UF2 archive
-ZIP_UF2="murm386_${VERSION}.zip"
-zip -q "$ZIP_UF2" murm386_*_${VERSION}.uf2 2>/dev/null && \
+ZIP_UF2="frank-386_${VERSION}.zip"
+zip -q "$ZIP_UF2" frank-386_*_${VERSION}.uf2 2>/dev/null && \
     echo -e "  ${GREEN}✓${NC} $ZIP_UF2" || echo -e "  ${YELLOW}⚠ No UF2 files${NC}"
 
 # MOS2 archive
-ZIP_MOS2="murm386_mos2_${VERSION}.zip"
-zip -q "$ZIP_MOS2" murm386_*_${VERSION}.m?p2 2>/dev/null && \
+ZIP_MOS2="frank-386_mos2_${VERSION}.zip"
+zip -q "$ZIP_MOS2" frank-386_*_${VERSION}.m?p2 2>/dev/null && \
     echo -e "  ${GREEN}✓${NC} $ZIP_MOS2" || echo -e "  ${YELLOW}⚠ No MOS2 files${NC}"
 
 # Remove individual files after zipping (keep only ZIPs)
-rm -f murm386_*.uf2 murm386_*.m?p2 2>/dev/null
+rm -f frank-386_*.uf2 frank-386_*.m?p2 2>/dev/null
 
 cd "$SCRIPT_DIR"
 

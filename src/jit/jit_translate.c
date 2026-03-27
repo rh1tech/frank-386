@@ -1,5 +1,5 @@
 /*
- * murm386 JIT Compiler - i386 to ARM Translation
+ * frank-386 JIT Compiler - i386 to ARM Translation
  *
  * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * MIT License

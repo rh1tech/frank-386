@@ -1,5 +1,5 @@
 /**
- * murm386 - i386 PC Emulator for RP2350
+ * frank-386 - i386 PC Emulator for RP2350
  *
  * Main entry point for the RP2350 platform.
  * Initializes hardware, loads configuration, and starts the emulator.
@@ -53,11 +53,11 @@
 //=============================================================================
 
 // Version is defined in CMakeLists.txt from version.txt
-#ifndef MURM386_VERSION_MAJOR
-#define MURM386_VERSION_MAJOR 1
+#ifndef FRANK_386_VERSION_MAJOR
+#define FRANK_386_VERSION_MAJOR 1
 #endif
-#ifndef MURM386_VERSION_MINOR
-#define MURM386_VERSION_MINOR 0
+#ifndef FRANK_386_VERSION_MINOR
+#define FRANK_386_VERSION_MINOR 0
 #endif
 
 //=============================================================================
@@ -514,8 +514,8 @@ static int load_config_from_sd(const char *filename) {
         return -1;
     }
 
-    // Also parse murm386-specific settings
-    ini_parse_string(content, parse_murm386_ini, NULL);
+    // Also parse frank-386-specific settings
+    ini_parse_string(content, parse_frank_386_ini, NULL);
 
     free(content);
     return 0;
@@ -670,7 +670,7 @@ static bool init_hardware(void) {
     f_closedir(&dir);
     DBG_PRINT("  386/ directory found\n");
 
-    // Load murm386-specific hardware settings from INI
+    // Load frank-386-specific hardware settings from INI
     // This allows cpu_freq and psram_freq to be configured
     {
         FIL fp;
@@ -683,8 +683,8 @@ static bool init_hardware(void) {
                 UINT bytes_read;
                 if (f_read(&fp, content, size, &bytes_read) == FR_OK) {
                     content[bytes_read] = '\0';
-                    // Parse just the [murm386] section
-                    ini_parse_string(content, parse_murm386_ini, NULL);
+                    // Parse just the [frank-386] section
+                    ini_parse_string(content, parse_frank_386_ini, NULL);
                 }
                 free(content);
             }
@@ -786,12 +786,12 @@ static bool init_emulator(void) {
     settingsui_init();
 
     // Initialize config save module with current values from PCConfig
-    // (these override INI values if not present in [murm386] section)
+    // (these override INI values if not present in [frank-386] section)
     config_set_mem_size_mb(config.mem_size / (1024 * 1024));
     config_set_cpu_gen(config.cpu_gen);
     config_set_fpu(config.fpu);
     config_set_redirector(config.redirector);
-    // Hardware settings are loaded from [murm386] section via parse_murm386_ini
+    // Hardware settings are loaded from [frank-386] section via parse_frank_386_ini
     config_clear_changes();
 
     // Apply audio/mouse enable settings from config to PC instance
@@ -843,7 +843,7 @@ static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
 bool repeat_me_often(void);
 static void __not_in_flash_func(core1_entry)(void) {
 
-    DBG_PRINT("[Core 1] Initializing VGA...\n");
+    DBG_PRINT("[Core 1] Initializing video...\n");
     DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
     vga_hw_init();
     sleep_ms(100);
@@ -878,7 +878,7 @@ static void __not_in_flash_func(core1_entry)(void) {
 
 static void show_welcome_screen(void) {
     // Welcome screen dimensions
-    int wx = 14, wy = 7, ww = 51, wh = 11;
+    int wx = 14, wy = 6, ww = 51, wh = 13;
 
     osd_clear();
 
@@ -887,34 +887,35 @@ static void show_welcome_screen(void) {
     osd_fill(wx + 1, wy + 1, ww - 2, wh - 2, ' ', OSD_ATTR_NORMAL);
 
     // Title
-    osd_print_center(wy + 2, "Murm386", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+    osd_print_center(wy + 2, "FRANK 386", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
     // Version
     char version_str[32];
     snprintf(version_str, sizeof(version_str), "Version %d.%02d",
-             MURM386_VERSION_MAJOR, MURM386_VERSION_MINOR);
+             FRANK_386_VERSION_MAJOR, FRANK_386_VERSION_MINOR);
     osd_print_center(wy + 4, version_str, OSD_ATTR_NORMAL);
 
     // Author
-    osd_print_center(wy + 5, "Port by Mikhail Matveev, rh1.tech", OSD_ATTR_NORMAL);
+    osd_print_center(wy + 5, "Port by Mikhail Matveev & DnCraptor", OSD_ATTR_NORMAL);
+    osd_print_center(wy + 6, "https://github.com/rh1tech/frank-386", OSD_ATTR_NORMAL);
 
     // Hardware info
     char hw_str[50];
     snprintf(hw_str, sizeof(hw_str), "RP2350 @ %d MHz / PSRAM @ %d MHz / FLASH @ %d MHz",
              config_get_cpu_freq(), config_get_psram_freq(), config_get_flash_freq());
-    osd_print_center(wy + 7, hw_str, OSD_ATTR(OSD_LIGHTCYAN, OSD_BLUE));
+    osd_print_center(wy + 8, hw_str, OSD_ATTR(OSD_LIGHTCYAN, OSD_BLUE));
 
     // Platform (green text)
 #ifdef BOARD_M1
-    osd_print_center(wy + 8, "Platform: M1", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+    osd_print_center(wy + 9, "Platform: M1", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #elif defined(BOARD_M2)
-    osd_print_center(wy + 8, "Platform: M2", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+    osd_print_center(wy + 9, "Platform: M2", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #elif defined(BOARD_PC)
-    osd_print_center(wy + 8, "Platform: Olimex PICO-PC", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+    osd_print_center(wy + 9, "Platform: Olimex PICO-PC", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #elif defined(BOARD_Z2)
-    osd_print_center(wy + 8, "Platform: RP2350-PiZero", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+    osd_print_center(wy + 9, "Platform: RP2350-PiZero", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #else
-    osd_print_center(wy + 8, "Platform: Unknown", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+    osd_print_center(wy + 9, "Platform: Unknown", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #endif
 
     osd_show();
@@ -946,8 +947,8 @@ int main(void) {
     #endif
     DBG_PRINT("\n\n");
     DBG_PRINT("============================================\n");
-    DBG_PRINT("  murm386 - 386 Emulator for RP2350\n");
-    DBG_PRINT("  Version %d.%02d\n", MURM386_VERSION_MAJOR, MURM386_VERSION_MINOR);
+    DBG_PRINT("  frank-386 - 386 Emulator for RP2350\n");
+    DBG_PRINT("  Version %d.%02d\n", FRANK_386_VERSION_MAJOR, FRANK_386_VERSION_MINOR);
     DBG_PRINT("============================================\n\n");
 
 #ifndef USB_HID_ENABLED
@@ -1003,9 +1004,23 @@ int main(void) {
 
     initialized = true;
 
+    // HDMI DMA starts at normal priority to avoid starving SD/PSRAM during
+    // BIOS loading.  Now that all ROMs are in PSRAM, raise DMA priority for
+    // glitch-free video output.
+    {
+        extern bool SELECT_VGA;
+        if (!SELECT_VGA) {
+            extern void hdmi_set_dma_high_priority(void);
+            hdmi_set_dma_high_priority();
+            DBG_PRINT("HDMI DMA priority raised\n");
+        }
+    }
+
     // Show welcome screen
+    DBG_PRINT("\nAbout to show welcome screen...\n");
     if(*(uint32_t*)(0x20000000 + (512ul << 10) - 32) != 0x1927fa52) // magic to fast reboot
         show_welcome_screen();
+    DBG_PRINT("Welcome screen done.\n");
 
     DBG_PRINT("\nStarting emulation...\n");
 

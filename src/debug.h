@@ -1,5 +1,5 @@
 /**
- * Debug output macros for murm386
+ * Debug output macros for frank-386
  *
  * Use DBG_PRINT for informational debug messages that should only
  * appear when DEBUG_ENABLED=1 is set at compile time.

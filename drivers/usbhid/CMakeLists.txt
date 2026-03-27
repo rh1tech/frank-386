@@ -1,4 +1,4 @@
-# USB HID Driver for murm386
+# USB HID Driver for frank-386
 # Provides keyboard input via USB Host
 #
 # SPDX-License-Identifier: MIT

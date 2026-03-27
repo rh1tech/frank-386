@@ -1,5 +1,5 @@
 /*
- * murm386 JIT Compiler - i386 to ARM Thumb-2 dynamic recompilation
+ * frank-386 JIT Compiler - i386 to ARM Thumb-2 dynamic recompilation
  *
  * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
  * MIT License
