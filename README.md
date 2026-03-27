@@ -211,7 +211,7 @@ cd frank-386
 
 | Option | Description |
 |--------|-------------|
-| `-b, --board <M1\|M2>` | Board variant (default: M2) |
+| `-b, --board <M1\|M2\|PC\|Z2>` | Board variant (default: M2) |
 | `-c, --cpu <MHz>` | CPU speed: 378 (default), 504 |
 | `-p, --psram <MHz>` | PSRAM speed: 133 (default), 166 |
 | `--usb-hid` | Enable USB keyboard (disables USB serial) |
@@ -247,8 +247,10 @@ To build all firmware variants:
 ```
 
 This creates firmware files in the `release/` directory:
-- `frank-386_m1_<version>.uf2` - M1 board, standard UF2 format
-- `frank-386_m2_<version>.uf2` - M2 board, standard UF2 format
+- `frank-386_m1_<version>.uf2` - M1 board (Murmulator)
+- `frank-386_m2_<version>.uf2` - M2 board (Murmulator)
+- `frank-386_pc_<version>.uf2` - Olimex PICO-PC
+- `frank-386_z2_<version>.uf2` - Waveshare RP2350-PiZero
 
 ### Flashing
 

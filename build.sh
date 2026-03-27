@@ -2,7 +2,7 @@
 # Build frank-386 - 386 Emulator for RP2350
 #
 # Usage: ./build.sh [OPTIONS]
-#   -b, --board      Board variant: M1 or M2 (default: M2)
+#   -b, --board      Board variant: M1, M2, PC, Z2 (default: M2)
 #   -p, --psram      PSRAM speed in MHz (default: 133)
 #   -c, --cpu        CPU speed in MHz: 378 (default), 504
 #   --usb-hid        Enable USB HID keyboard (disables USB CDC)
@@ -11,8 +11,8 @@
 #   -h, --help       Show this help
 #
 # Short options:
-#   -M1, -M2         Board variant
-#   -378, -504       CPU speed in MHz
+#   -M1, -M2, -PC, -Z2   Board variant
+#   -378, -504            CPU speed in MHz
 
 # Defaults (378/133 for stable overclocked operation)
 BOARD="M2"
@@ -37,6 +37,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         -M2)
             BOARD="M2"
+            shift
+            ;;
+        -PC)
+            BOARD="PC"
+            shift
+            ;;
+        -Z2)
+            BOARD="Z2"
             shift
             ;;
         -p|--psram)

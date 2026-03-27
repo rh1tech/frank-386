@@ -97,12 +97,12 @@ RELEASE_DIR="$SCRIPT_DIR/release"
 mkdir -p "$RELEASE_DIR"
 
 # Configuration
-BOARDS=("M1" "M2")
+BOARDS=("M1" "M2" "PC" "Z2")
 CPU_SPEED="378"    # Stable overclock for releases
 PSRAM_SPEED="133"  # Stable PSRAM speed for releases
 
-# Count total builds: 2 boards
-TOTAL_BUILDS=2
+# Count total builds: 4 boards
+TOTAL_BUILDS=4
 BUILD_COUNT=0
 
 echo ""
