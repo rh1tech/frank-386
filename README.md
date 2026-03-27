@@ -22,8 +22,8 @@ Based on [Tiny386](https://github.com/hchunhui/tiny386) by Chunhui He.
 
 This firmware is designed for RP2350-based boards with integrated VGA/HDMI, SD card, and keyboard input:
 
-- **[Murmulator](https://murmulator.ru)** - A compact retro-computing platform based on RP Pico 2 (M1 and M2 variants)
 - **[FRANK](https://rh1.tech/projects/frank?area=about)** - A versatile development board with VGA output
+- **[Murmulator](https://murmulator.ru)** - A compact retro-computing platform based on RP Pico 2 (M1 and M2 variants)
 - **[Olimex PICO-PC](https://www.olimex.com/)** - Olimex RP2350 PC board
 - **[Waveshare RP2350-PiZero](https://www.waveshare.com/)** - Waveshare RP2350 board
 

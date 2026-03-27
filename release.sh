@@ -142,7 +142,7 @@ build_variant() {
         # Build
         if make -j8 > /dev/null 2>&1; then
             # Find and copy output file
-            local SRC_FILE=$(ls "$SCRIPT_DIR/build/"*.uf2 2>/dev/null | head -1)
+            local SRC_FILE=$(find "$SCRIPT_DIR" -name "*.uf2" -newer "$SCRIPT_DIR/build/CMakeCache.txt" 2>/dev/null | head -1)
 
             if [[ -f "$SRC_FILE" ]]; then
                 cp "$SRC_FILE" "$RELEASE_DIR/$OUTPUT_NAME"

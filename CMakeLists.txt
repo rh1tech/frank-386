@@ -20,7 +20,7 @@ set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 set(BUILD_NAME "386")
 
 # Firmware version string (set by release.sh or manually)
-set(FIRMWARE_VERSION "v1.01" CACHE STRING "Firmware version string")
+# FIRMWARE_VERSION is derived from version.txt after parsing (see below)
 
 # Board configuration variant (M1, M2, PC or Z2)
 set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC or Z2")
@@ -90,7 +90,13 @@ string(STRIP "${VERSION_CONTENT}" VERSION_CONTENT)
 string(REPLACE " " ";" VERSION_LIST "${VERSION_CONTENT}")
 list(GET VERSION_LIST 0 FRANK_386_VERSION_MAJOR)
 list(GET VERSION_LIST 1 FRANK_386_VERSION_MINOR)
-message(STATUS "frank-386 version: ${FRANK_386_VERSION_MAJOR}.${FRANK_386_VERSION_MINOR}")
+string(LENGTH "${FRANK_386_VERSION_MINOR}" _minor_len)
+if(_minor_len LESS 2)
+    set(FIRMWARE_VERSION "v${FRANK_386_VERSION_MAJOR}.0${FRANK_386_VERSION_MINOR}")
+else()
+    set(FIRMWARE_VERSION "v${FRANK_386_VERSION_MAJOR}.${FRANK_386_VERSION_MINOR}")
+endif()
+message(STATUS "frank-386 version: ${FIRMWARE_VERSION}")
 
 pico_sdk_init()
 
