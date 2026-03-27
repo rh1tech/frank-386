@@ -499,6 +499,7 @@ bool fpu_exec2(FPU *fpu, void *cpu, bool opsz16, int op, int group, int seg, uin
 				u16 sw;
 				if(!cpu_load16(cpu, seg, addr + 4, &sw))
 					return false;
+				setsw(fpu, sw);
 			}
 			break;
 		case 5: // FLDCW

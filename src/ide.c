@@ -1804,3 +1804,32 @@ PCIDevice *piix3_ide_init(PCIBus *pci_bus, int devfn)
     pci_device_set_config8(d, 0x09, 0x00);
     return d;
 }
+
+void ide_fill_cmos(IDEIFState *s, void *cmos,
+                   uint8_t (*set)(void *cmos, int addr, uint8_t val))
+{
+    uint8_t d_0x12 = 0;
+    if (s->drives[0]) {
+        d_0x12 |= 0xf0;
+        set(cmos, 0x19, 47);
+        set(cmos, 0x1b, set(cmos, 0x21, s->drives[0]->cylinders));
+        set(cmos, 0x1c, set(cmos, 0x22, s->drives[0]->cylinders >> 8));
+        set(cmos, 0x1d, s->drives[0]->heads);
+        set(cmos, 0x1e, 0xff);
+        set(cmos, 0x1f, 0xff);
+        set(cmos, 0x20, 0xc0 | ((s->drives[0]->heads > 8) << 3));
+        set(cmos, 0x23, s->drives[0]->sectors);
+    }
+    if (s->drives[1]) {
+        d_0x12 |= 0x0f;
+        set(cmos, 0x1a, 47);
+        set(cmos, 0x24, set(cmos, 0x2a, s->drives[1]->cylinders));
+        set(cmos, 0x25, set(cmos, 0x2b, s->drives[1]->cylinders >> 8));
+        set(cmos, 0x26, s->drives[1]->heads);
+        set(cmos, 0x27, 0xff);
+        set(cmos, 0x28, 0xff);
+        set(cmos, 0x29, 0xc0 | ((s->drives[1]->heads > 8) << 3));
+        set(cmos, 0x2c, s->drives[1]->sectors);
+    }
+    set(cmos, 0x12, d_0x12);
+}

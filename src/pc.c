@@ -209,10 +209,10 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	case 0x70: case 0x71:
 		val = cmos_ioport_read(pc->cmos, addr);
 		return val;
-	case 0x1f1: case 0x1f2: case 0x1f3:
+	case 0x1f0: case 0x1f1: case 0x1f2: case 0x1f3:
 	case 0x1f4: case 0x1f5: case 0x1f6: case 0x1f7:
 		return ide_ioport_read(pc->ide, addr - 0x1f0);
-	case 0x171: case 0x172: case 0x173:
+	case 0x170: case 0x171: case 0x172: case 0x173:
 	case 0x174: case 0x175: case 0x176: case 0x177:
 		return ide_ioport_read(pc->ide2, addr - 0x170);
 	case 0x3f6:
@@ -381,8 +381,7 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 			return adlib_read(pc->adlib, addr);
 		return 0xFFFF;
 	default:
-		fprintf(stderr, "inw 0x%x <= 0x%x\n", addr, 0xffff);
-		return 0xffff;
+		return 0;
 	}
 }
 
@@ -414,9 +413,8 @@ static __always_inline u32 _pc_io_read32(void *o, int addr)
 	case 0xf1f0:
 		return emulink_read32(pc);
 	default:
-		fprintf(stderr, "ind 0x%x <= 0x%x\n", addr, 0xffffffff);
+		return 0;
 	}
-	return 0xffffffff;
 }
 
 static u32 pc_io_read32(void *o, int addr) {
@@ -482,11 +480,11 @@ static void pc_io_write(void *o, int addr, u8 val)
 		cmos_ioport_write(pc->cmos, addr, val);
 		return;
 	/* IDE ports */
-	case 0x1f1: case 0x1f2: case 0x1f3:
+	case 0x1f0: case 0x1f1: case 0x1f2: case 0x1f3:
 	case 0x1f4: case 0x1f5: case 0x1f6: case 0x1f7:
 		ide_ioport_write(pc->ide, addr - 0x1f0, val);
 		return;
-	case 0x171: case 0x172: case 0x173:
+	case 0x170: case 0x171: case 0x172: case 0x173:
 	case 0x174: case 0x175: case 0x176: case 0x177:
 		ide_ioport_write(pc->ide2, addr - 0x170, val);
 		return;
@@ -514,8 +512,6 @@ static void pc_io_write(void *o, int addr, u8 val)
 		vga_ioport_write(pc->vga, addr, val);
 		return;
 	case 0x402:
-		putchar(val);
-		fflush(stdout);
 		return;
 	case 0x92:
 		pc->port92 = val;
@@ -749,14 +745,7 @@ void pc_vga_step(void *o)
 
 void __not_in_flash_func(pc_step)(PC *pc)
 {
-#ifndef USEKVM
-	if (pc->reset_request) {
-		pc->reset_request = 0;
-		*(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
-		watchdog_reboot(0, 0, 0);
-		/// load_bios_and_reset(pc);
-	}
-#endif
+	/* reset_request is handled in main.c via load_bios_and_reset() */
 	int refresh = vga_step(pc->vga);
 	i8254_update_irq(pc->pit);
 	cmos_update_irq(pc->cmos);
@@ -1073,6 +1062,8 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 		ide_attach_cd(pc->ide2, 0);
 
 
+
+	ide_fill_cmos(pc->ide, pc->cmos, cmos_set);
 
 	/* we have emulation for 2 FDDs (CMOS 0x10):
 		биты 7-4 = тип A:

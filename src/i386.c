@@ -575,54 +575,10 @@ static bool __not_in_flash_func(segcheck)(CPUI386 *cpu, int rwm, int seg, uword 
 			dolog("segcheck null: seg=%d sel=%04x addr=%08x\n", seg, cpu->seg[seg].sel, addr);
 			THROW(seg == SEG_SS ? EX_SS : EX_GP, 0);
 		}
-		/* limit check */
-		uword flags = cpu->seg[seg].flags;
-		int type = flags & 0xf;
-		bool code = type & 0x8;
-		bool writable = type & 0x2;
-		bool expand_down = !code && ((type & 0x4) != 0);
-		uword limit = cpu->seg[seg].limit;
-		uword last = addr + (uword)size - 1;
-		bool wrap = last < addr;
-		bool over;
-		if (expand_down) {
-			/*
-			 * Valid offsets for expand-down segments are:
-			 *   limit+1 .. max_offset
-			 * where max_offset is 0xffff for 16-bit segments and
-			 * 0xffffffff for big (B-bit) segments.
-			 */
-			uword maxoff = (flags & SEG_B_BIT) ? 0xffffffffu : 0xffffu;
-			over = wrap || addr <= limit || last > maxoff;
-		} else {
-			over = wrap || last > limit;
-		}
-		if (over) {
-			dolog("segcheck limit: seg=%d sel=%04x type=%x flags=%04x "
-			      "addr=%08x size=%d limit=%08x expand_down=%d cpl=%d eip=%08x\n",
-			      seg, cpu->seg[seg].sel, type, (unsigned)flags,
-			      addr, size, limit, (int)expand_down, cpu->cpl, cpu->ip);
-			THROW(seg == SEG_SS ? EX_SS : EX_GP, 0);
-		}
-		/*
-		 * Write check.
-		 * For normal data segments, bit1 means writable.
-		 * For code segments, writes are never allowed through the segment.
-		 *
-		 * Keep this conservative: only reject definite writes.
-		 */
-		#if 1 // TODO: win95 failed on this point, so turned off for a while
-		if (rwm > 1 && cpu->cpl != 0 /* check it, but not in ring 0 */) {
-			if (code || !writable) {
-				dolog("segcheck write: seg=%d sel=%04x type=%x flags=%04x "
-					"addr=%08x size=%d cpl=%d eip=%08x\n",
-					seg, cpu->seg[seg].sel, type, (unsigned)flags,
-					addr, size, cpu->cpl, cpu->ip);
-        		uword errcode = (seg == SEG_SS) ? 0 : (cpu->seg[seg].sel & ~0x3);
-		        THROW(seg == SEG_SS ? EX_SS : EX_GP, errcode);
-			}
-		}
-		#endif
+		/* limit check + write check disabled to match tiny386 upstream */
+#if 0
+		/* todo: limit check, readonly check */
+#endif
 	}
 	return true;
 }
@@ -1039,81 +995,17 @@ static bool __not_in_flash_func(set_seg)(CPUI386 *cpu, int seg, int sel)
 	uword w1, w2;
 	TRY(read_desc(cpu, sel, &w1, &w2));
 
+	// TODO: various permission checks
 	bool s = (w2 >> 12) & 1;
 	bool p = (w2 >> 15) & 1;
-	int dpl = (w2 >> 13) & 0x3;
-	int rpl = sel & 0x3;
-	int type = (w2 >> 8) & 0xf;
-	bool code = type & 0x8;
-	bool conforming = type & 0x4;
-	bool readable = type & 0x2; /* for code segments */
-	bool writable = type & 0x2; /* for data segments */
-
-	switch(seg) {
-	case SEG_DS:
-	case SEG_ES:
-	case SEG_FS:
-	case SEG_GS:
-		/*
-		 * Allow only data segments or readable code segments.
-		 * For data/nonconforming code, require DPL >= max(CPL, RPL).
-		 * Conforming readable code is allowed without that check.
-		 */
-		if (!s) {
-			THROW(EX_GP, sel & ~0x3);
-		}
-		if (code) {
-			if (!readable) {
+	if (sel & ~0x3) {
+		switch(seg) {
+		case SEG_DS: case SEG_ES: case SEG_FS: case SEG_GS:
+			if (!s) {
 				THROW(EX_GP, sel & ~0x3);
 			}
-			if (!conforming && dpl < cpu->cpl) {
-				THROW(EX_GP, sel & ~0x3);
-			}
-			if (!conforming && dpl < rpl) {
-				THROW(EX_GP, sel & ~0x3);
-			}
-		} else {
-			if (dpl < cpu->cpl) {
-				THROW(EX_GP, sel & ~0x3);
-			}
-			if (dpl < rpl) {
-				THROW(EX_GP, sel & ~0x3);
-			}
- 		}
-		if (!p) THROW(EX_NP, sel & ~0x3);
-		break;
-	case SEG_SS:
-		/*
-		 * Conservative check:
-		 * must be present writable data segment.
-		 * Intentionally do not enforce DPL/RPL==CPL here, because this
-		 * helper is also used during ring transitions before CPL is updated.
-		 */
-		if (!s || code || !writable) {
-			THROW(EX_GP, sel & ~0x3);
 		}
-		if (!p) THROW(EX_SS, sel & ~0x3);
-		break;
-	case SEG_CS:
-		if (!s || !code) {
-			THROW(EX_GP, sel & ~0x3);
-		}
-		if (!p) THROW(EX_NP, sel & ~0x3);
-		break;
-	case SEG_LDT:
-		/* System descriptor, type 0x2 = LDT */
-		if (s || type != 0x2) {
-			THROW(EX_GP, sel & ~0x3);
-		}
-		if (!p) THROW(EX_NP, sel & ~0x3);
-		break;
-	case SEG_TR:
-		/* Accept available/busy 16/32-bit TSS only. */
-		if (s || !(type == 0x1 || type == 0x3 || type == 0x9 || type == 0xb)) {
-			THROW(EX_GP, sel & ~0x3);
-		}
-		if (!p) THROW(EX_NP, sel & ~0x3);
-		break;
+		if (!p) THROW((seg == SEG_SS ? EX_SS : EX_NP), sel & ~0x3);
 	}
 
 	cpu->seg[seg].sel = sel;
@@ -2874,7 +2766,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if (rep == 0) { \
 		if (adsz16) { indxstdi(BIT, 16) } else { indxstdi(BIT, 32) } \
 	} else { \
-		if (rep != 1) THROW0(EX_UD); \
+		if (rep != 1 && rep != 2) THROW0(EX_UD); \
 		if (adsz16) { INS_helper2(BIT, 16) } else { INS_helper2(BIT, 32) } \
 	}
 
@@ -2938,7 +2830,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if (rep == 0) { \
 		if (adsz16) { ldsioutdx(BIT, 16) } else { ldsioutdx(BIT, 32) } \
 	} else { \
-		if (rep != 1) THROW0(EX_UD); \
+		if (rep != 1 && rep != 2) THROW0(EX_UD); \
 		if (adsz16) { \
 			OUTS_helper2(BIT, 16) \
 		} else { \
@@ -3668,7 +3560,9 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 	TRY(translate ## BIT(cpu, &meml2, 3, curr_seg, addr1 + BIT / 8)); \
 	s ## BIT lo = load ## BIT(cpu, &meml1); \
 	s ## BIT hi = load ## BIT(cpu, &meml2); \
-	if (idx < lo || idx > hi) THROW0(EX_BR);
+	if (idx < lo || idx > hi) { \
+		if (cpu->cr0 & 1) THROW0(EX_BR); \
+	}
 #define BOUNDw(...) BOUND_helper(16, __VA_ARGS__)
 #define BOUNDd(...) BOUND_helper(32, __VA_ARGS__)
 
@@ -5015,7 +4909,12 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
 		cpu->ip = cpu->next_ip;
-		TRY1(call_isr(cpu, no, false, 1));
+		if (!call_isr(cpu, no, false, 1)) {
+			if (!call_isr(cpu, EX_DF, true, 1)) {
+				cpui386_reset(cpu);
+				return;
+			}
+		}
 	}
 
 	if (cpu->halt) {
@@ -5032,7 +4931,17 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 		}
 		cpu->next_ip = cpu->ip;
 
-		TRY1(call_isr(cpu, cpu->excno, pusherr, 1));
+		if (cpu->excno == EX_DF) {
+			if (!call_isr(cpu, EX_DF, true, 1)) {
+				cpui386_reset(cpu);
+				return;
+			}
+		} else if (!call_isr(cpu, cpu->excno, pusherr, 1)) {
+			if (!call_isr(cpu, EX_DF, true, 1)) {
+				cpui386_reset(cpu);
+				return;
+			}
+		}
 	}
 }
 
