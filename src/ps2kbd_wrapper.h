@@ -1,5 +1,5 @@
 /**
- * PS/2 Keyboard wrapper for tiny386
+ * PS/2 Keyboard wrapper for frank-386
  * Converts HID keycodes to Linux input keycodes
  */
 
@@ -11,8 +11,8 @@ extern "C" {
 #endif
 
 // Initialize PS/2 keyboard driver
-// clk_pin = CLK GPIO, clk_pin+1 = DATA GPIO
-void ps2kbd_init(int clk_pin);
+// Must be called after ps2_init()
+void ps2kbd_init(void);
 
 // Poll for keyboard events, call frequently
 void ps2kbd_tick(void);

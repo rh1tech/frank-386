@@ -9,17 +9,8 @@
 // https://wiki.osdev.org/PS/2_Keyboard
 //
 #include "ps2kbd_mrmltr.h"
-#include "hardware/clocks.h"
+#include "ps2.h"
 #include <cstdio>
-
-// Include correct PIO header based on board configuration
-// M1: CLK=GPIO0, DATA=GPIO1 (ps2kbd_mrmltr.pio)
-// M2: CLK=GPIO2, DATA=GPIO3 (ps2kbd_mrmltr2.pio)
-#ifdef BOARD_M2
-#include "ps2kbd_mrmltr2.pio.h"
-#else
-#include "ps2kbd_mrmltr.pio.h"
-#endif
 
 #ifdef DEBUG_PS2
 #define DBG_PRINTF(...) printf(__VA_ARGS__)
@@ -165,11 +156,8 @@ static uint8_t ps2kbd_page_0[] {
   /* 83 (131) */ HID_KEY_F7
 };
 
-Ps2Kbd_Mrmltr::Ps2Kbd_Mrmltr(PIO pio, uint base_gpio, std::function<void(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev)> keyHandler) :
-  _pio(pio),
-  _base_gpio(base_gpio),
+Ps2Kbd_Mrmltr::Ps2Kbd_Mrmltr(std::function<void(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev)> keyHandler) :
   _double(false),
-  _overflow(false),
   _keyHandler(keyHandler)
 {
   clearHidKeys();
@@ -193,14 +181,14 @@ inline static uint8_t hidKeyToMod(uint8_t hidKeyCode) {
   case HID_KEY_ALT_RIGHT: m = KEYBOARD_MODIFIER_RIGHTALT; break;
   case HID_KEY_GUI_RIGHT: m = KEYBOARD_MODIFIER_RIGHTGUI; break;
   default: break;
-  } 
+  }
   return m;
 }
 
 void Ps2Kbd_Mrmltr::handleHidKeyPress(uint8_t hidKeyCode) {
   hid_keyboard_report_t prev = _report;
-  
-  // Check the key is not alreay pressed
+
+  // Check the key is not already pressed
   for (int i = 0; i < HID_KEYBOARD_REPORT_MAX_KEYS; ++i) {
     if (_report.keycode[i] == hidKeyCode) {
       // Key repeat: trick the handler into thinking it's a new press
@@ -210,26 +198,26 @@ void Ps2Kbd_Mrmltr::handleHidKeyPress(uint8_t hidKeyCode) {
       return;
     }
   }
-  
+
   _report.modifier |= hidKeyToMod(hidKeyCode);
-  
+
   for (int i = 0; i < HID_KEYBOARD_REPORT_MAX_KEYS; ++i) {
     if (_report.keycode[i] == HID_KEY_NONE) {
-      _report.keycode[i] = hidKeyCode;      
+      _report.keycode[i] = hidKeyCode;
       _keyHandler(&_report, &prev);
       return;
     }
   }
-  
+
   // TODO Overflow
   DBG_PRINTF("PS/2 keyboard HID overflow\n");
 }
 
 void Ps2Kbd_Mrmltr::handleHidKeyRelease(uint8_t hidKeyCode) {
   hid_keyboard_report_t prev = _report;
-  
+
   _report.modifier &= ~hidKeyToMod(hidKeyCode);
-  
+
   for (int i = 0; i < HID_KEYBOARD_REPORT_MAX_KEYS; ++i) {
     if (_report.keycode[i] == hidKeyCode) {
       _report.keycode[i] = HID_KEY_NONE;
@@ -268,7 +256,7 @@ uint8_t Ps2Kbd_Mrmltr::hidCodePage1(uint8_t ps2code) {
   case 0x7a: return HID_KEY_PAGE_DOWN;
   case 0x7d: return HID_KEY_PAGE_UP;
 
-  default: 
+  default:
     return HID_KEY_NONE;
   }
 }
@@ -284,14 +272,14 @@ void Ps2Kbd_Mrmltr::handleActions() {
       _actions[i].code);
   }
   #endif
-  
+
   uint8_t hidCode;
   bool release;
   if (_action == 0) {
     switch (_actions[0].page) {
       case 1: {
         hidCode = hidCodePage1(_actions[0].code);
-        break; 
+        break;
       }
       default: {
         hidCode = hidCodePage0(_actions[0].code);
@@ -305,14 +293,14 @@ void Ps2Kbd_Mrmltr::handleActions() {
     hidCode = HID_KEY_NONE;
     release = false;
   }
-  
+
   if (hidCode != HID_KEY_NONE) {
-    
+
     DBG_PRINTF("HID key %s code %2.2X (%3.3d)\n",
       release ? "release" : "press",
       hidCode,
       hidCode);
-      
+
     if (release) {
       handleHidKeyRelease(hidCode);
     }
@@ -320,7 +308,7 @@ void Ps2Kbd_Mrmltr::handleActions() {
       handleHidKeyPress(hidCode);
     }
   }
-  
+
   DBG_PRINTF("PS/2 HID m=%2X ", _report.modifier);
   #ifdef DEBUG_PS2
   for (int i = 0; i < HID_KEYBOARD_REPORT_MAX_KEYS; ++i) printf("%2X ", _report.keycode[i]);
@@ -329,31 +317,15 @@ void Ps2Kbd_Mrmltr::handleActions() {
 }
 
 void Ps2Kbd_Mrmltr::tick() {
-  if (pio_sm_is_rx_fifo_full(_pio, _sm)) {
-    DBG_PRINTF("PS/2 keyboard PIO overflow\n");
-    _overflow = true;
-    while (!pio_sm_is_rx_fifo_empty(_pio, _sm)) {
-      // pull a scan code from the PIO SM fifo
-      uint32_t rc = _pio->rxf[_sm];    
-      printf("PS/2 drain rc %4.4lX (%ld)\n", rc, rc);
-    }
-    clearHidKeys();
-    clearActions();
-  }
-  
-  while (!pio_sm_is_rx_fifo_empty(_pio, _sm)) {
-    // pull a scan code from the PIO SM fifo
-    uint32_t rc = _pio->rxf[_sm];    
-    DBG_PRINTF("PS/2 rc %4.4lX (%ld)\n", rc, rc);
-    
-    uint32_t code = (rc << 2) >> 24;
-    DBG_PRINTF("PS/2 keycode %2.2lX (%ld)\n", code, code);
+  // Read decoded bytes from the unified PS/2 driver
+  int code;
+  while ((code = ps2_kbd_get_byte()) >= 0) {
+    DBG_PRINTF("PS/2 keycode %2.2X (%d)\n", code, code);
 
-    // TODO Handle PS/2 overflow/error messages
     switch (code) {
       case 0xaa: {
          DBG_PRINTF("PS/2 keyboard Self test passed\n");
-         break;       
+         break;
       }
       case 0xe1: {
         _double = true;
@@ -381,36 +353,4 @@ void Ps2Kbd_Mrmltr::tick() {
       }
     }
   }
-}
-
-// TODO Error checking and reporting
-void Ps2Kbd_Mrmltr::init_gpio() {
-    // init KBD pins to input
-    gpio_init(_base_gpio);     // Data
-    gpio_init(_base_gpio + 1); // Clock
-    // with pull up
-    gpio_pull_up(_base_gpio);
-    gpio_pull_up(_base_gpio + 1);
-    // get a state machine
-    _sm = pio_claim_unused_sm(_pio, true);
-    // reserve program space in SM memory
-    uint offset = pio_add_program(_pio, &ps2kbd_program);
-    // Set pin directions base
-    pio_sm_set_consecutive_pindirs(_pio, _sm, _base_gpio, 2, false);
-    // program the start and wrap SM registers
-    pio_sm_config c = ps2kbd_program_get_default_config(offset);
-    // Set the base input pin. pin index 0 is DAT, index 1 is CLK  // Murmulator: 0->CLK 1->DAT ( _base_gpio + 1)
-    //  sm_config_set_in_pins(&c, _base_gpio);
-    sm_config_set_in_pins(&c, _base_gpio + 1);
-    // Shift 8 bits to the right, autopush enabled
-    sm_config_set_in_shift(&c, true, true, 10);
-    // Deeper FIFO as we're not doing any TX
-    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
-    // We don't expect clock faster than 16.7KHz and want no less
-    // than 8 SM cycles per keyboard clock.
-    float div = (float)clock_get_hz(clk_sys) / (8 * 16700);
-    sm_config_set_clkdiv(&c, div);
-    // Ready to go
-    pio_sm_init(_pio, _sm, offset, &c);
-    pio_sm_set_enabled(_pio, _sm, true);
 }

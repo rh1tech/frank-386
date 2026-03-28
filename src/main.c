@@ -26,8 +26,8 @@
 #include "psram_init.h"
 #include "vga_hw.h"
 #include "vga.h"
+#include "ps2.h"
 #include "ps2kbd_wrapper.h"
-#include "ps2mouse.h"
 #ifdef USB_HID_ENABLED
 #include "usbkbd_wrapper.h"
 #include "usbmouse_wrapper.h"
@@ -366,7 +366,7 @@ static void poll_keyboard(void) {
         int16_t dx, dy;
         int8_t dz;
         uint8_t buttons;
-        if (ps2mouse_get_state(&dx, &dy, &dz, &buttons)) {
+        if (ps2_mouse_get_state(&dx, &dy, &dz, &buttons)) {
             if (pc->mouse) {
                 int16_t my = config_get_mouse_invert_y() ? -dy : dy;
                 ps2_mouse_event(pc->mouse, dx, my, dz, buttons);
@@ -739,15 +739,19 @@ static bool init_hardware(void) {
         }
     }
 
-    // Initialize PS/2 keyboard
-    DBG_PRINT("Initializing PS/2 keyboard...\n");
-    DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
-    ps2kbd_init(PS2_PIN_CLK);
+    // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
+    DBG_PRINT("Initializing PS/2 (unified driver)...\n");
+    DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
+    DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
+    if (!ps2_init(pio0, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
+        printf("WARNING: PS/2 PIO init failed\n");
+    }
 
-    // Initialize PS/2 mouse
-    DBG_PRINT("Initializing PS/2 mouse...\n");
-    DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
-    ps2mouse_init();
+    // Initialize PS/2 keyboard wrapper (uses unified driver for PIO)
+    ps2kbd_init();
+
+    // Initialize PS/2 mouse device (reset, detect IntelliMouse, enable streaming)
+    ps2_mouse_init_device();
 
     // Initialize USB HID keyboard (if enabled)
 #ifdef USB_HID_ENABLED

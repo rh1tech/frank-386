@@ -1,5 +1,5 @@
 /**
- * PS/2 Keyboard wrapper for tiny386
+ * PS/2 Keyboard wrapper for frank-386
  * Converts HID keycodes to Linux input keycodes for ps2_put_keycode()
  */
 
@@ -14,7 +14,6 @@ struct KeyEvent {
 
 static std::queue<KeyEvent> event_queue;
 static Ps2Kbd_Mrmltr* kbd = nullptr;
-static int kbd_clk_pin = 0;
 
 // HID keycode to Linux input keycode mapping
 // Linux keycodes are essentially evdev codes (same as AT Set 1 for most keys)
@@ -49,7 +48,7 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
         case 0x1B: return 45;  // X
         case 0x1C: return 21;  // Y
         case 0x1D: return 44;  // Z
-        
+
         // Numbers 1-9, 0 (HID 0x1E-0x27)
         case 0x1E: return 2;   // 1
         case 0x1F: return 3;   // 2
@@ -61,7 +60,7 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
         case 0x25: return 9;   // 8
         case 0x26: return 10;  // 9
         case 0x27: return 11;  // 0
-        
+
         // Special keys
         case 0x28: return 28;  // Enter
         case 0x29: return 1;   // Escape
@@ -80,7 +79,7 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
         case 0x37: return 52;  // Period
         case 0x38: return 53;  // Slash
         case 0x39: return 58;  // Caps Lock
-        
+
         // Function keys F1-F12
         case 0x3A: return 59;  // F1
         case 0x3B: return 60;  // F2
@@ -94,12 +93,12 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
         case 0x43: return 68;  // F10
         case 0x44: return 87;  // F11
         case 0x45: return 88;  // F12
-        
+
         // Print Screen, Scroll Lock, Pause
         case 0x46: return 99;  // Print Screen (extended)
         case 0x47: return 70;  // Scroll Lock
         case 0x48: return 119; // Pause (extended)
-        
+
         // Navigation cluster (extended keys, need 0xe0 prefix)
         case 0x49: return 110; // Insert
         case 0x4A: return 102; // Home
@@ -111,7 +110,7 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
         case 0x50: return 105; // Left Arrow
         case 0x51: return 108; // Down Arrow
         case 0x52: return 103; // Up Arrow
-        
+
         // Numpad
         case 0x53: return 69;  // Num Lock
         case 0x54: return 98;  // Keypad /
@@ -130,7 +129,7 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
         case 0x61: return 73;  // Keypad 9
         case 0x62: return 82;  // Keypad 0
         case 0x63: return 83;  // Keypad .
-        
+
         // Modifiers (handled separately but included for completeness)
         case 0xE0: return 29;  // Left Control
         case 0xE1: return 42;  // Left Shift
@@ -140,7 +139,7 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
         case 0xE5: return 54;  // Right Shift
         case 0xE6: return 100; // Right Alt
         case 0xE7: return 126; // Right GUI
-        
+
         default: return 0;     // Unknown key
     }
 }
@@ -149,7 +148,7 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
 static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev) {
     // Check modifier changes
     uint8_t changed_mods = curr->modifier ^ prev->modifier;
-    
+
     if (changed_mods & KEYBOARD_MODIFIER_LEFTCTRL) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_LEFTCTRL) != 0;
         event_queue.push({is_down, 29});  // Left Ctrl
@@ -222,11 +221,8 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
     }
 }
 
-extern "C" void ps2kbd_init(int clk_pin) {
-    kbd_clk_pin = clk_pin;
-    // PS2 keyboard: CLK = clk_pin, DATA = clk_pin + 1
-    kbd = new Ps2Kbd_Mrmltr(pio0, clk_pin, key_handler);
-    kbd->init_gpio();
+extern "C" void ps2kbd_init(void) {
+    kbd = new Ps2Kbd_Mrmltr(key_handler);
 }
 
 extern "C" void ps2kbd_tick(void) {

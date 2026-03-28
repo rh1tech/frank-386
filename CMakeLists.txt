@@ -129,32 +129,17 @@ target_link_libraries(sdcard pico_stdlib hardware_spi hardware_pio hardware_dma)
 pico_generate_pio_header(sdcard ${CMAKE_CURRENT_LIST_DIR}/drivers/sdcard/spi.pio)
 
 #=============================================================================
-# PS/2 Keyboard Driver
+# Unified PS/2 Driver (keyboard + mouse on shared PIO)
 #=============================================================================
-add_library(ps2kbd
-    drivers/ps2kbd/ps2kbd_mrmltr.cpp
-    drivers/ps2kbd/ps2kbd_wrapper.cpp
+add_library(ps2_driver
+    drivers/ps2/ps2.c
 )
-target_include_directories(ps2kbd PUBLIC drivers/ps2kbd src)
-target_compile_definitions(ps2kbd PRIVATE
+target_include_directories(ps2_driver PUBLIC drivers/ps2 src)
+target_compile_definitions(ps2_driver PRIVATE
     BOARD_${BOARD}
 )
-target_link_libraries(ps2kbd pico_stdlib hardware_pio)
-# Generate PIO headers for both M1 and M2 board variants
-pico_generate_pio_header(ps2kbd ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd/ps2kbd_mrmltr.pio)
-pico_generate_pio_header(ps2kbd ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd/ps2kbd_mrmltr2.pio)
-
-#=============================================================================
-# PS/2 Mouse Driver
-#=============================================================================
-add_library(ps2mouse
-    drivers/ps2mouse/ps2mouse.c
-)
-target_include_directories(ps2mouse PUBLIC drivers/ps2mouse src)
-target_compile_definitions(ps2mouse PRIVATE
-    BOARD_${BOARD}
-)
-target_link_libraries(ps2mouse pico_stdlib hardware_gpio)
+target_link_libraries(ps2_driver pico_stdlib hardware_pio hardware_gpio hardware_clocks)
+pico_generate_pio_header(ps2_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2/ps2.pio)
 
 #=============================================================================
 # NES/SNES Gamepad Driver
@@ -283,6 +268,8 @@ add_executable(${BUILD_NAME}
     src/diskui.c
     src/settingsui.c
     src/config_save.c
+    src/ps2kbd_mrmltr.cpp
+    src/ps2kbd_wrapper.cpp
     ${EMU_CORE_SOURCES}
 )
 
@@ -291,8 +278,7 @@ target_include_directories(${BUILD_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${CMAKE_CURRENT_LIST_DIR}/drivers/fatfs
     ${CMAKE_CURRENT_LIST_DIR}/drivers/sdcard
-    ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2kbd
-    ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2mouse
+    ${CMAKE_CURRENT_LIST_DIR}/drivers/ps2
     ${CMAKE_CURRENT_LIST_DIR}/drivers/psram
     ${CMAKE_CURRENT_LIST_DIR}/drivers/vga
     ${CMAKE_CURRENT_LIST_DIR}/drivers/hdmi
@@ -405,8 +391,7 @@ target_link_libraries(${BUILD_NAME}
     hardware_interp
     fatfs
     sdcard
-    ps2kbd
-    ps2mouse
+    ps2_driver
     psram
     video_driver
     audio_driver
