@@ -72,6 +72,8 @@ int config_get_volume(void);
 void config_set_volume(int vol);
 int config_get_voltage(void);
 void config_set_voltage(int v);
+int config_get_mouse_invert_y(void);
+void config_set_mouse_invert_y(int enabled);
 
 // Check if hardware settings changed (requires reboot)
 bool config_hw_changed(void);

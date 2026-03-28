@@ -16,6 +16,8 @@
 #include <stdio.h>
 #include "audio.h"
 
+extern bool SELECT_VGA;
+
 // Menu states
 typedef enum {
     SETTINGS_CLOSED,
@@ -40,6 +42,7 @@ typedef enum {
     SETTING_DSS,
     SETTING_MOUSE,
     SETTING_NES_MOUSE,
+    SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
     SETTING_PSRAM_FREQ,
@@ -95,7 +98,7 @@ static int plasma_frame = 0;  // Animation frame counter
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_redirector;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_mpu401;
-static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage;
+static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y;
 
 // UI dimensions
 #define MENU_X      10
@@ -138,6 +141,7 @@ void settingsui_open(void) {
     orig_flash_freq = config_get_flash_freq();
     orig_volume = audio_get_volume();
     orig_voltage = config_get_voltage();
+    orig_mouse_invert_y = config_get_mouse_invert_y();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
@@ -158,6 +162,7 @@ void settingsui_close(void) {
         config_set_psram_freq(orig_psram_freq);
         config_set_flash_freq(orig_flash_freq);
         config_set_voltage(orig_voltage);
+        config_set_mouse_invert_y(orig_mouse_invert_y);
         audio_set_volume(orig_volume);
         config_clear_changes();
     }
@@ -260,7 +265,12 @@ static void cycle_option(int direction) {
             if (config_get_nes_mouse()) config_set_mouse(0);
             break;
 
+        case SETTING_MOUSE_INVERT_Y:
+            config_set_mouse_invert_y(config_get_mouse_invert_y() ? 0 : 1);
+            break;
+
         case SETTING_CPU_FREQ:
+            if (!SELECT_VGA) break;  // locked to 504 MHz on HDMI
             options = cpu_freq_options;
             count = cpu_freq_option_count;
             idx = find_option_index(options, count, config_get_cpu_freq());
@@ -269,6 +279,7 @@ static void cycle_option(int direction) {
             break;
 
         case SETTING_VOLTAGE:
+            if (!SELECT_VGA) break;  // locked on HDMI
             options = voltage_options;
             count = voltage_option_count;
             idx = find_option_index(options, count, config_get_voltage());
@@ -319,6 +330,7 @@ static void draw_settings_menu(void) {
         "Disney Sound Source:",
         "PS/2 or USB Mouse:",
         "NES Mouse:",
+        "Invert Mouse Y:",
         "RP2350 Freq:",
         "CPU Voltage:",
         "PSRAM Freq:",
@@ -380,12 +392,22 @@ static void draw_settings_menu(void) {
             case SETTING_NES_MOUSE:
                 snprintf(value, sizeof(value), "< %s >", config_get_nes_mouse() ? "Enabled" : "Disabled");
                 break;
+            case SETTING_MOUSE_INVERT_Y:
+                snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");
+                break;
             case SETTING_CPU_FREQ:
-                snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
+                if (!SELECT_VGA)
+                    snprintf(value, sizeof(value), "  504 MHz (HDMI)");
+                else
+                    snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
                 break;
             case SETTING_VOLTAGE: {
-                int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
-                snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);
+                if (!SELECT_VGA) {
+                    snprintf(value, sizeof(value), "  1.65V (HDMI)");
+                } else {
+                    int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
+                    snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);
+                }
                 break;
             }
             case SETTING_PSRAM_FREQ:

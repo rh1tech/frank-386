@@ -1051,7 +1051,7 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
 int testPins(uint32_t pin0, uint32_t pin1);
 void graphics_init_hdmi();
 // From main.c — needed for safe flash access at high clock speeds
-extern void set_flash_timings(int cpu_mhz);
+extern void set_flash_timings(int cpu_mhz, int cfg_flash);
 
 // HDMI TMDS requires an exact 252 MHz PIO clock. Boost clk_sys to 504 MHz
 // so the PIO divider is an integer 2 (no jitter).
@@ -1063,7 +1063,7 @@ static void hdmi_boost_clock(void) {
     vreg_disable_voltage_limit();
     vreg_set_voltage(VREG_VOLTAGE_1_65);
     sleep_ms(50);
-    set_flash_timings(HDMI_SYS_CLOCK_MHZ);
+    set_flash_timings(HDMI_SYS_CLOCK_MHZ, FLASH_MAX_FREQ_MHZ);
     set_sys_clock_khz(HDMI_SYS_CLOCK_MHZ * 1000, false);
     // Immediately reinit PSRAM for the new clock speed.
     // Without this, PSRAM runs at ~177 MHz (overclocked) until
@@ -1094,6 +1094,17 @@ void vga_hw_init(void) {
         #else
             SELECT_VGA = (linkVGA01 == 0) || (linkVGA01 == 0x1F);
         #endif
+        // If HDMI detected, reset tested pins to clean hi-Z state.
+        // testPins leaves pull-downs enabled via gpio_deinit(), which can
+        // disturb the HDMI differential pair during clock boost.
+        if (!SELECT_VGA) {
+            gpio_init(VGA_BASE_PIN);
+            gpio_set_dir(VGA_BASE_PIN, GPIO_IN);
+            gpio_disable_pulls(VGA_BASE_PIN);
+            gpio_init(VGA_BASE_PIN + 1);
+            gpio_set_dir(VGA_BASE_PIN + 1, GPIO_IN);
+            gpio_disable_pulls(VGA_BASE_PIN + 1);
+        }
     #endif
     DBG_PRINT("  Video output: %s\n", SELECT_VGA ? "VGA" : "HDMI");
     if (!SELECT_VGA) {

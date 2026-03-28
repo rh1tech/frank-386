@@ -368,7 +368,8 @@ static void poll_keyboard(void) {
         uint8_t buttons;
         if (ps2mouse_get_state(&dx, &dy, &dz, &buttons)) {
             if (pc->mouse) {
-                ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
+                int16_t my = config_get_mouse_invert_y() ? -dy : dy;
+                ps2_mouse_event(pc->mouse, dx, my, dz, buttons);
             }
         }
     }
