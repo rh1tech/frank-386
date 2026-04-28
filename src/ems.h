@@ -63,6 +63,7 @@ static inline void ems_copy_to_guest(uint8_t *phys_mem, uint32_t guest,
     /* Fast path: entirely outside EMS window */
     if (!ems_in_window(guest) && !ems_in_window(guest + len - 1)) {
         memcpy(phys_mem + guest, buf, len);
+        cache_invalidate_range(guest, len);
         return;
     }
     /* General path: byte-by-byte with per-byte window test */
@@ -73,6 +74,7 @@ static inline void ems_copy_to_guest(uint8_t *phys_mem, uint32_t guest,
         else
             phys_mem[a] = buf[i];
     }
+    cache_invalidate_range(guest, len);
 }
 
 static inline void ems_copy_from_guest(uint8_t *phys_mem, uint32_t guest,
@@ -107,9 +109,15 @@ static inline int ems_verify_guest(uint8_t *phys_mem, uint32_t guest,
 #else /* !EMULATE_LTEMS — compile away to nothing */
 
 static inline int  ems_in_window(uint32_t addr)               { (void)addr; return 0; }
-static inline void ems_copy_to_guest(uint8_t *m, uint32_t g,
-                                     const uint8_t *b, uint32_t l)
-                                     { memcpy(m + g, b, l); }
+static inline void ems_copy_to_guest(
+    uint8_t *m,
+    uint32_t g,
+    const uint8_t *b,
+    uint32_t l
+) {
+    memcpy(m + g, b, l);
+    cache_invalidate_range(g, l);
+}
 static inline void ems_copy_from_guest(uint8_t *m, uint32_t g,
                                        uint8_t *b, uint32_t l)
                                        { memcpy(b, m + g, l); }

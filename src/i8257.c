@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include "i8257.h"
+#include "i386.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -474,6 +475,7 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
 #endif
                 s->phys_mem[a] = p[i];
         }
+        cache_invalidate_range(base, len);
         //cpu_physical_memory_write (addr - pos - len, buf, len);
         /* What about 16bit transfers? */
         for (int i = 0; i < len; i++) {
@@ -492,6 +494,7 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
 #endif
                 s->phys_mem[a] = p[i];
         }
+        cache_invalidate_range(base, len);
         //cpu_physical_memory_write (addr + pos, buf, len);
     }
 

@@ -6,6 +6,8 @@
 #include <unistd.h>
 #include <string.h>
 
+static CPUI386* _cpu = 0; // TODO: organize it
+
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
 #else
@@ -173,35 +175,151 @@ static inline uword sext32(u32 a)
 }
 
 #ifdef I386_OPT1
-/* only works on hosts that are little-endian and support unaligned access */
-static inline u8 pload8(CPUI386 *cpu, uword addr)
-{
-	return cpu->phys_mem[addr];
-}
-
-static inline u16 pload16(CPUI386 *cpu, uword addr)
-{
-	return *(u16 *)&(cpu->phys_mem[addr]);
-}
-
-static inline u32 pload32(CPUI386 *cpu, uword addr)
+static inline u32 pload32_no_cache(CPUI386 *cpu, uword addr)
 {
 	return *(u32 *)&(cpu->phys_mem[addr]);
 }
 
-static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
+static inline void cache_fill_line(CPUI386 *cpu, CacheLine *line, uword addr, uint32_t tag)
 {
-	cpu->phys_mem[addr] = val;
+    u32 base = addr & ~0xF;
+    u32* dst = (u32*)line->data;
+    *dst++ = pload32_no_cache(cpu, base + 0);
+    *dst++ = pload32_no_cache(cpu, base + 4);
+    *dst++ = pload32_no_cache(cpu, base + 8);
+    *dst++ = pload32_no_cache(cpu, base + 12);
+    line->tag = tag;
 }
 
-static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
+static u8 pload8(CPUI386 *cpu, uword addr)
+{
+    uint32_t index  = (addr >> 4) & 0xFF;
+    uint32_t tag    = addr >> 12;
+    uint32_t offset = addr & 0xF;
+    CacheSet *set = &cpu->cache[index];
+    CacheLine *l0 = &set->way[0];
+    if (l0->tag == tag) {
+        set->lru = 1;
+        return l0->data[offset];
+    }
+    CacheLine *l1 = &set->way[1];
+    if (l1->tag == tag) {
+        set->lru = 0;
+        return l1->data[offset];
+    }
+    // MISS
+    uint32_t victim = set->lru;
+    CacheLine *line = &set->way[victim];
+    cache_fill_line(cpu, line, addr, tag);
+    set->lru = victim ^ 1;
+    return line->data[offset];
+}
+
+static inline u16 pload16_no_cache(CPUI386 *cpu, uword addr) { return *(u16 *)&(cpu->phys_mem[addr]); }
+
+static u16 pload16(CPUI386 *cpu, uword addr)
+{
+    uint32_t offset = addr & 0xF;
+    // внутри одной cache line
+    if (likely(offset <= 14)) {
+        uint32_t index  = (addr >> 4) & 0xFF;
+        uint32_t tag    = addr >> 12;
+        CacheSet *set = &cpu->cache[index];
+        CacheLine *l0 = &set->way[0];
+        if (l0->tag == tag) {
+            set->lru = 1;
+            return *(u16*)&(l0->data[offset]);
+        }
+        CacheLine *l1 = &set->way[1];
+        if (l1->tag == tag) {
+            set->lru = 0;
+            return *(u16*)&(l1->data[offset]);
+        }
+        // MISS
+        uint32_t victim = set->lru;
+        CacheLine *line = &set->way[victim];
+        cache_fill_line(cpu, line, addr, tag);
+        set->lru = victim ^ 1;
+        return *(u16*)&(line->data[offset]);
+    }
+    // пересечение линии
+    u16 lo = pload8(cpu, addr);
+    u16 hi = pload8(cpu, addr + 1);
+    return lo | (hi << 8);
+}
+
+static u32 pload32(CPUI386 *cpu, uword addr)
+{
+    uint32_t offset = addr & 0xF;
+    // внутри одной cache line
+    if (likely(offset <= 12)) {
+        uint32_t index  = (addr >> 4) & 0xFF;
+        uint32_t tag    = addr >> 12;
+        CacheSet *set = &cpu->cache[index];
+        CacheLine *l0 = &set->way[0];
+        if (l0->tag == tag) {
+            set->lru = 1;
+            return *(u32*)&(l0->data[offset]);
+        }
+        CacheLine *l1 = &set->way[1];
+        if (l1->tag == tag) {
+            set->lru = 0;
+            return *(u32*)&(l1->data[offset]);
+        }
+        // MISS
+        uint32_t victim = set->lru;
+        CacheLine *line = &set->way[victim];
+        cache_fill_line(cpu, line, addr, tag);
+        set->lru = victim ^ 1;
+        return *(u32*)&(line->data[offset]);
+    }
+    // пересечение линии
+    u32 b0 = pload8(cpu, addr);
+    u32 b1 = pload8(cpu, addr + 1);
+    u32 b2 = pload8(cpu, addr + 2);
+    u32 b3 = pload8(cpu, addr + 3);
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+}
+
+static inline void cache_invalidate(CPUI386 *cpu, uword addr)
+{
+    uint32_t index = (addr >> 4) & 0xFF;
+    CacheSet *set = &cpu->cache[index];
+    set->way[0].tag = 0xFFFFFFFF;
+    set->way[1].tag = 0xFFFFFFFF;
+}
+
+static void pstore8(CPUI386 *cpu, uword addr, u8 val)
+{
+    cpu->phys_mem[addr] = val;
+    cache_invalidate(cpu, addr);
+}
+
+static void pstore16(CPUI386 *cpu, uword addr, u16 val)
 {
 	*(u16 *)&(cpu->phys_mem[addr]) = val;
+	cache_invalidate(cpu, addr);
+    if ((addr & 0xF) == 0xF) {
+        cache_invalidate(cpu, addr + 1);
+    }
 }
 
-static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
+static void pstore32(CPUI386 *cpu, uword addr, u32 val)
 {
 	*(u32 *)&(cpu->phys_mem[addr]) = val;
+	cache_invalidate(cpu, addr);
+    if ((addr & 0xF) > 0xC) {
+        cache_invalidate(cpu, addr + 3);
+    }
+}
+
+static inline void cache_clear(CPUI386 *cpu)
+{
+    for (int i = 0; i < 256; i++) {
+        cpu->cache[i].way[0].tag = 0xFFFFFFFFu;
+        cpu->cache[i].way[1].tag = 0xFFFFFFFFu;
+        cpu->cache[i].lru = 0;
+    }
 }
 #else
 static inline u8 pload8(CPUI386 *cpu, uword addr)
@@ -474,7 +592,7 @@ static void tlb_clear(CPUI386 *cpu)
 		cpu->tlb.tab[i].lpgno = -1;
 	}
 	cpu->ifetch.laddr = -1;
-	cpu->prefetch_base = (u32)-1;
+// TODO: cache WT	cpu->prefetch_base = (u32)-1;
 }
 
 static int pte_lookup[2][4][2][2] = { //[wp != 0][(pte >> 1) & 3][cpl > 0][rwm > 1]
@@ -503,6 +621,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	if (!(pde & 1))
 		return false;
 	mem[base_addr + i * 4] |= 1 << 5; // accessed
+	cache_invalidate(cpu, base_addr + i * 4);
 
 	uword base_addr2 = pde & ~0xfff;
 	uword pte = pload32(cpu, base_addr2 + j * 4);
@@ -510,6 +629,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 		return false;
 
 	mem[base_addr2 + j * 4] |= 1 << 5; // accessed
+	cache_invalidate(cpu, base_addr + j * 4);
 //	mem[base_addr2 + j * 4] |= 1 << 6; // dirty
 
 	ent->lpgno = lpgno;
@@ -549,6 +669,7 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 	*paddr = ent->xaddr ^ laddr;
 	if (rwm & 2) {
 		*(ent->ppte) |= 1 << 6; // dirty
+		cache_invalidate(cpu, (uword)(ent->ppte - cpu->phys_mem));
 //		pstore8(cpu, ent->ppte,
 //			pload8(cpu, ent->ppte) | (1 << 6)); // dirty
 	}
@@ -3100,7 +3221,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define RET() RETw(0, limm, 0)
 
-static bool __not_in_flash_func(enter_helper)(
+static bool enter_helper(
 	CPUI386 *cpu,
 	bool opsz16,
 	uword sp_mask,
@@ -5107,6 +5228,7 @@ void cpui386_reset(CPUI386 *cpu)
 	cpu->sysenter.cs = 0;
 	cpu->sysenter.eip = 0;
 	cpu->sysenter.esp = 0;
+	cache_clear(cpu);
 }
 
 void cpui386_reset_pm(CPUI386 *cpu, uint32_t start_addr)
@@ -5183,6 +5305,7 @@ CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)
 		*cb = &(cpu->cb);
+	_cpu = cpu;
 	return cpu;
 }
 
@@ -5348,4 +5471,8 @@ void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque)
 {
 	cpu->int2f_handler = handler;
 	cpu->int2f_opaque  = opaque;
+}
+
+void __not_in_flash_func(notify_dma_write)(uint32_t a) {
+	cache_invalidate(_cpu, a);
 }

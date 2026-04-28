@@ -56,6 +56,16 @@ struct tlb_entry {
 	u8 *ppte;
 };
 
+typedef struct {
+    u8 data[16] __attribute__((aligned(4)));
+    u32 tag;
+} CacheLine;
+
+typedef struct {
+    CacheLine way[2];
+    u8 lru;
+} CacheSet;
+
 /*
  * CPUI386 structure - main CPU state
  * Defined here so JIT compiler can access fields directly
@@ -115,10 +125,11 @@ struct CPUI386 {
 		struct tlb_entry *tab;
 	} tlb;
 
-	u8 *phys_mem;
+	u8* phys_mem;
 	u32 prefetch_base;
 	u8  prefetch[16] __attribute__((aligned(4)));
-	long phys_mem_size;
+	CacheSet cache[256]; // i486+
+	u32 phys_mem_size;
 
 	long cycle;
 
@@ -204,6 +215,16 @@ void cpu_set_cf(CPUI386 *cpu, int val);
 int cpu_get_cf(CPUI386 *cpu);
 // Physical memory access
 u8 *cpu_get_phys_mem(CPUI386 *cpu);
+void notify_dma_write(uint32_t a);
+static inline void cache_invalidate_range(uint32_t addr, uint32_t len)
+{
+    uint32_t start = addr & ~0xF;
+    uint32_t end   = (addr + len - 1) & ~0xF;
+    for (uint32_t a = start; a <= end; a += 16) {
+        notify_dma_write(a);
+    }
+}
+
 long cpu_get_phys_mem_size(CPUI386 *cpu);
 // A20 gate control
 void cpu_set_a20(CPUI386 *cpu, int enabled);

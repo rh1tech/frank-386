@@ -70,9 +70,9 @@ static uint8_t *_nr_mem;
 static inline uint8_t  read86(uint32_t a)     { return _nr_mem[a]; }
 static inline uint16_t readw86(uint32_t a)    { return _nr_mem[a] | ((uint16_t)_nr_mem[a+1] << 8); }
 static inline uint32_t readdw86(uint32_t a)   { return _nr_mem[a] | ((uint32_t)_nr_mem[a+1]<<8) | ((uint32_t)_nr_mem[a+2]<<16) | ((uint32_t)_nr_mem[a+3]<<24); }
-static inline void write86(uint32_t a, uint8_t v)   { _nr_mem[a] = v; }
-static inline void writew86(uint32_t a, uint16_t v) { _nr_mem[a]=v&0xff; _nr_mem[a+1]=v>>8; }
-static inline void writedw86(uint32_t a, uint32_t v){ _nr_mem[a]=v&0xff; _nr_mem[a+1]=(v>>8)&0xff; _nr_mem[a+2]=(v>>16)&0xff; _nr_mem[a+3]=(v>>24)&0xff; }
+static inline void write86(uint32_t a, uint8_t v)   { _nr_mem[a] = v; cache_invalidate_range(a, 1); }
+static inline void writew86(uint32_t a, uint16_t v) { _nr_mem[a]=v&0xff; _nr_mem[a+1]=v>>8;  cache_invalidate_range(a, 2); }
+static inline void writedw86(uint32_t a, uint32_t v){ _nr_mem[a]=v&0xff; _nr_mem[a+1]=(v>>8)&0xff; _nr_mem[a+2]=(v>>16)&0xff; _nr_mem[a+3]=(v>>24)&0xff;  cache_invalidate_range(a, 4); }
 
 // Host filesystem passthrough base directory
 #define HOST_BASE_DIR "\\"

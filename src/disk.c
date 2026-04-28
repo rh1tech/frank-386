@@ -98,16 +98,19 @@ static void install_fdpt(void) {
     disk_mem[(base)+0x0C]=0; \
     disk_mem[(base)+0x0D]=_c&0xFF; disk_mem[(base)+0x0E]=_c>>8; /* landing zone */ \
     disk_mem[(base)+0x0F]=_s; /* sectors per track */ \
+    cache_invalidate_range((base), 0x10); \
 } while(0)
     if (ata[0].name) {
         FDPT(0x522, ata[0].cyls, ata[0].heads, ata[0].sects);
         disk_mem[0x104]=0x22; disk_mem[0x105]=0x05;
         disk_mem[0x106]=0x00; disk_mem[0x107]=0x00;
+        cache_invalidate_range(0x104, 4);
     }
     if (ata[1].name) {
         FDPT(0x532, ata[1].cyls, ata[1].heads, ata[1].sects);
         disk_mem[0x118]=0x32; disk_mem[0x119]=0x05;
         disk_mem[0x11A]=0x00; disk_mem[0x11B]=0x00;
+        cache_invalidate_range(0x118, 4);
     }
     // TODO: ata[2,3]
 #undef FDPT
