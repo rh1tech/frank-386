@@ -175,110 +175,113 @@ static inline uword sext32(u32 a)
 }
 
 #ifdef I386_OPT1
-static inline u32 pload32_no_cache(CPUI386 *cpu, uword addr)
-{
-	return *(u32 *)&(cpu->phys_mem[addr]);
-}
 
 static inline void cache_fill_line(CPUI386 *cpu, CacheLine *line, uword addr, uint32_t tag)
 {
-    u32 base = addr & ~0xF;
+	u32* src = (u32*)&(cpu->phys_mem[addr & ~0xF]);
     u32* dst = (u32*)line->data;
-    *dst++ = pload32_no_cache(cpu, base + 0);
-    *dst++ = pload32_no_cache(cpu, base + 4);
-    *dst++ = pload32_no_cache(cpu, base + 8);
-    *dst++ = pload32_no_cache(cpu, base + 12);
+    dst[0] = src[0];
+    dst[1] = src[1];
+    dst[2] = src[2];
+    dst[3] = src[3];
     line->tag = tag;
 }
 
-static u8 pload8(CPUI386 *cpu, uword addr)
+static inline u8 pload8(CPUI386 *cpu, uword addr)
 {
-    uint32_t index  = (addr >> 4) & 0xFF;
-    uint32_t tag    = addr >> 12;
-    uint32_t offset = addr & 0xF;
-    CacheSet *set = &cpu->cache[index];
-    CacheLine *l0 = &set->way[0];
-    if (l0->tag == tag) {
-        set->lru = 1;
-        return l0->data[offset];
+    CacheSet* set = &cpu->cache[(addr >> 4) & 0xFF];
+    CacheLine* l = &set->way[set->lru];
+    uint32_t tag  = addr >> 12;
+    if (l->tag == tag) {
+        return l->data[addr & 0xF];
     }
-    CacheLine *l1 = &set->way[1];
-    if (l1->tag == tag) {
-        set->lru = 0;
-        return l1->data[offset];
+    l = &set->way[set->lru ^ 1];
+    if (l->tag == tag) {
+        set->lru ^= 1;
+        return l->data[addr & 0xF];
     }
     // MISS
-    uint32_t victim = set->lru;
-    CacheLine *line = &set->way[victim];
-    cache_fill_line(cpu, line, addr, tag);
-    set->lru = victim ^ 1;
-    return line->data[offset];
+    uint32_t victim = set->lru ^ 1;
+    l = &set->way[victim];
+    cache_fill_line(cpu, l, addr, tag);
+    set->lru = victim;
+    return l->data[addr & 0xF];
 }
 
-static inline u16 pload16_no_cache(CPUI386 *cpu, uword addr) { return *(u16 *)&(cpu->phys_mem[addr]); }
-
-static u16 pload16(CPUI386 *cpu, uword addr)
+static inline u16 pload16(CPUI386 *cpu, uword addr)
 {
     uint32_t offset = addr & 0xF;
-    // внутри одной cache line
+
+    // fast path — внутри одной линии
     if (likely(offset <= 14)) {
-        uint32_t index  = (addr >> 4) & 0xFF;
-        uint32_t tag    = addr >> 12;
-        CacheSet *set = &cpu->cache[index];
-        CacheLine *l0 = &set->way[0];
-        if (l0->tag == tag) {
-            set->lru = 1;
-            return *(u16*)&(l0->data[offset]);
+        CacheSet* set = &cpu->cache[(addr >> 4) & 0xFF];
+        uint32_t tag  = addr >> 12;
+
+        CacheLine* l = &set->way[set->lru];
+
+        if (l->tag == tag) {
+            return *(u16*)&l->data[offset];
         }
-        CacheLine *l1 = &set->way[1];
-        if (l1->tag == tag) {
-            set->lru = 0;
-            return *(u16*)&(l1->data[offset]);
+
+        l = &set->way[set->lru ^ 1];
+
+        if (l->tag == tag) {
+            set->lru ^= 1;
+            return *(u16*)&l->data[offset];
         }
+
         // MISS
-        uint32_t victim = set->lru;
-        CacheLine *line = &set->way[victim];
-        cache_fill_line(cpu, line, addr, tag);
-        set->lru = victim ^ 1;
-        return *(u16*)&(line->data[offset]);
+        uint32_t victim = set->lru ^ 1;
+        l = &set->way[victim];
+
+        cache_fill_line(cpu, l, addr, tag);
+
+        set->lru = victim;
+
+        return *(u16*)&l->data[offset];
     }
-    // пересечение линии
-    u16 lo = pload8(cpu, addr);
-    u16 hi = pload8(cpu, addr + 1);
+
+    // cross-line (редкий случай)
+    uint32_t lo = pload8(cpu, addr);
+    uint32_t hi = pload8(cpu, addr + 1);
     return lo | (hi << 8);
 }
 
-static u32 pload32(CPUI386 *cpu, uword addr)
+static inline u32 pload32(CPUI386 *cpu, uword addr)
 {
-    uint32_t offset = addr & 0xF;
-    // внутри одной cache line
-    if (likely(offset <= 12)) {
-        uint32_t index  = (addr >> 4) & 0xFF;
-        uint32_t tag    = addr >> 12;
-        CacheSet *set = &cpu->cache[index];
-        CacheLine *l0 = &set->way[0];
-        if (l0->tag == tag) {
-            set->lru = 1;
-            return *(u32*)&(l0->data[offset]);
+    uint32_t off = addr & 0xF;
+
+    if (likely(off <= 12)) {
+        CacheSet* set = &cpu->cache[(addr >> 4) & 0xFF];
+        uint32_t tag  = addr >> 12;
+
+        CacheLine* l = &set->way[set->lru];
+
+        if (likely(l->tag == tag)) {
+            return *(u32*)&l->data[off];
         }
-        CacheLine *l1 = &set->way[1];
-        if (l1->tag == tag) {
-            set->lru = 0;
-            return *(u32*)&(l1->data[offset]);
+
+        l = &set->way[set->lru ^ 1];
+
+        if (l->tag == tag) {
+            set->lru ^= 1;
+            return *(u32*)&l->data[off];
         }
-        // MISS
-        uint32_t victim = set->lru;
-        CacheLine *line = &set->way[victim];
-        cache_fill_line(cpu, line, addr, tag);
-        set->lru = victim ^ 1;
-        return *(u32*)&(line->data[offset]);
+
+        uint32_t victim = set->lru ^ 1;
+        l = &set->way[victim];
+
+        cache_fill_line(cpu, l, addr, tag);
+
+        set->lru = victim;
+
+        return *(u32*)&l->data[off];
     }
-    // пересечение линии
-    u32 b0 = pload8(cpu, addr);
-    u32 b1 = pload8(cpu, addr + 1);
-    u32 b2 = pload8(cpu, addr + 2);
-    u32 b3 = pload8(cpu, addr + 3);
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+
+    // ✔ оптимальный cross-line через pload16
+    u32 w0 = pload16(cpu, addr);
+    u32 w1 = pload16(cpu, addr + 2);
+    return w0 | (w1 << 16);
 }
 
 static inline void cache_invalidate(CPUI386 *cpu, uword addr)
@@ -289,13 +292,13 @@ static inline void cache_invalidate(CPUI386 *cpu, uword addr)
     set->way[1].tag = 0xFFFFFFFF;
 }
 
-static void pstore8(CPUI386 *cpu, uword addr, u8 val)
+static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
 {
     cpu->phys_mem[addr] = val;
     cache_invalidate(cpu, addr);
 }
 
-static void pstore16(CPUI386 *cpu, uword addr, u16 val)
+static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
 {
 	*(u16 *)&(cpu->phys_mem[addr]) = val;
 	cache_invalidate(cpu, addr);
@@ -304,7 +307,7 @@ static void pstore16(CPUI386 *cpu, uword addr, u16 val)
     }
 }
 
-static void pstore32(CPUI386 *cpu, uword addr, u32 val)
+static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
 {
 	*(u32 *)&(cpu->phys_mem[addr]) = val;
 	cache_invalidate(cpu, addr);
