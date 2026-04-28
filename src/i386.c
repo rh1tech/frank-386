@@ -576,7 +576,7 @@ static bool IRAM_ATTR translate_laddr(CPUI386 *cpu, OptAddr *res, int rwm, uword
 	return true;
 }
 
-static bool __not_in_flash_func(segcheck)(CPUI386 *cpu, int rwm, int seg, uword addr, int size)
+static inline bool __attribute__((always_inline)) segcheck(CPUI386 *cpu, int rwm, int seg, uword addr, int size)
 {
 	if ((cpu->cr0 & 1) && !(cpu->flags & VM)) {
 		/* null selector check */
@@ -656,9 +656,10 @@ static inline bool translate32(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uwo
 	return translate(cpu, res, rwm, seg, addr, 4, cpu->cpl);
 }
 
-static inline bool in_iomem(uword addr)
+static inline bool __attribute__((always_inline)) in_iomem(uword addr)
 {
-	return (addr >= 0xa0000 && addr < 0xc0000) || addr >= 0xe0000000;
+	/* one unsigned-subtract trick replaces two comparisons for VGA window */
+	return ((addr - 0xa0000u) < 0x20000u) || addr >= 0xe0000000u;
 }
 
 static u8 IRAM_ATTR load8(CPUI386 *cpu, OptAddr *res)
