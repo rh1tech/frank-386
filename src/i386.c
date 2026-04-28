@@ -309,7 +309,7 @@ static void pstore32(CPUI386 *cpu, uword addr, u32 val)
 	*(u32 *)&(cpu->phys_mem[addr]) = val;
 	cache_invalidate(cpu, addr);
     if ((addr & 0xF) > 0xC) {
-        cache_invalidate(cpu, addr + 3);
+        cache_invalidate(cpu, addr + 4);
     }
 }
 
@@ -629,7 +629,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 		return false;
 
 	mem[base_addr2 + j * 4] |= 1 << 5; // accessed
-	cache_invalidate(cpu, base_addr + j * 4);
+	cache_invalidate(cpu, base_addr2 + j * 4);
 //	mem[base_addr2 + j * 4] |= 1 << 6; // dirty
 
 	ent->lpgno = lpgno;
@@ -2940,10 +2940,9 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		if (cpu->cb.io_read_string && dir > 0 && \
 		    (memld.addr1 | 4095) < cpu->phys_mem_size && \
 		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | 4095)) { \
-			int count1 = cpu->cb.io_read_string( \
-				cpu->cb.io, lreg16(2), \
-				cpu->phys_mem + memld.addr1, dir, count); \
+			int count1 = cpu->cb.io_read_string( cpu->cb.io, lreg16(2), cpu->phys_mem + memld.addr1, dir, count); \
 			if (count1 > 0) { \
+				cache_invalidate_range(memld.addr1, count1 * (BIT / 8)); \
 				count = count1; \
 				sreg ## ABIT(7, lreg ## ABIT(7) + count * dir); \
 				sreg ## ABIT(1, cx - count); \
@@ -3393,7 +3392,9 @@ static bool enter_helper(
 
 #define LMSW(addr, laddr, saddr) \
 	if (cpu->cpl != 0) THROW(EX_GP, 0); \
-	cpu->cr0 = (cpu->cr0 & ((~0xf) | 1)) | (laddr(addr) & 0xf);
+	{ u32 _new_cr0 = (cpu->cr0 & ((~0xf) | 1)) | (laddr(addr) & 0xf); \
+	  if ((_new_cr0 ^ cpu->cr0) & 1) tlb_clear(cpu); /* PE change */ \
+	  cpu->cr0 = _new_cr0; }
 
 #define LSEGd(NAME, reg, addr, lreg32, sreg32, laddr32, saddr32) \
 	OptAddr meml1, meml2; \
@@ -3797,7 +3798,14 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 #define XADDw(...) XADD_helper(16, __VA_ARGS__)
 #define XADDd(...) XADD_helper(32, __VA_ARGS__)
 
-#define INVLPG(addr) tlb_clear(cpu);
+#define INVLPG(addr) \
+	{ /* invalidate the single TLB entry for this page */ \
+	  uword _lpgno = (addr) >> 12; \
+	  int _idx = _lpgno & (tlb_size - 1); \
+	  if (cpu->tlb.tab[_idx].lpgno == _lpgno) \
+	      cpu->tlb.tab[_idx].lpgno = (uword)-1; \
+	  cpu->ifetch.laddr = -1; \
+	  cpu->prefetch_base = (u32)-1; }
 
 #define BSWAPw(a, la, sa) THROW0(EX_UD);
 
@@ -3806,7 +3814,7 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 	u32 dst = ((src & 0xff) << 24) | (((src >> 8) & 0xff) << 16) | (((src >> 16) & 0xff) << 8) | ((src >> 24) & 0xff); \
 	sa(a, dst);
 
-#define WBINVD()
+#define WBINVD() cache_clear(cpu); /* WT cache: no dirty data to write back */
 
 // 586 and later...
 #define UD0() THROW0(EX_UD);

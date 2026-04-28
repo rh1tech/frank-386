@@ -77,8 +77,8 @@ void disk_set_cmos_callback(void (*cb)(uint8_t, uint8_t)) { disk_cmos_update_cb 
 static void (*disk_fdc_mediachange_cb)(int drive) = NULL;
 void disk_set_fdc_mediachange_callback(void (*cb)(int drive)) { disk_fdc_mediachange_cb = cb; }
 
-static void (*disk_cdrom_change_cb)(int drive, const char *filename) = NULL;
-void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename)) { disk_cdrom_change_cb = cb; }
+static void (*disk_cdrom_change_cb)(int drive, const char *filename, int was_present) = NULL;
+void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename, int was_present)) { disk_cdrom_change_cb = cb; }
 
 /* Установить FDPT (Fixed Disk Parameter Table) и INT 41h/46h векторы.
  * Вызывается при каждом INT 13h для HDD — перезаписывает то что мог
@@ -163,7 +163,7 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
         free(ata[drivenum].name);
         ata[drivenum].name = 0;
         if (disk_cdrom_change_cb)
-            disk_cdrom_change_cb(drivenum, NULL);
+            disk_cdrom_change_cb(drivenum, NULL, 1 /* was_present */);
         return;
     }
     if (drivenum < 4 && ata[drivenum].name) {
@@ -224,8 +224,9 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
         ata[drivenum].cyls       = 0;
         ata[drivenum].heads      = 0;
         ata[drivenum].sects      = 0;
+        int _was_present = (pf->obj.fs != 0); /* file was open before insert */
         if (disk_cdrom_change_cb)
-            disk_cdrom_change_cb(drivenum, path);
+            disk_cdrom_change_cb(drivenum, path, _was_present);
         return 1;
     }
     // Validate size constraints (non-CD-ROM only)
