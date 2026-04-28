@@ -254,7 +254,7 @@ enum {
 	CC_AND, CC_OR, CC_XOR,
 };
 
-static inline int get_CF(CPUI386 *cpu)
+static int __not_in_flash_func( get_CF )(CPUI386 *cpu)
 {
 	if (cpu->cc.mask & CF) {
 		switch(cpu->cc.op) {
@@ -387,7 +387,7 @@ static int IRAM_ATTR get_SF(CPUI386 *cpu)
 	}
 }
 
-static int get_OF(CPUI386 *cpu)
+static int IRAM_ATTR get_OF(CPUI386 *cpu)
 {
 	if (cpu->cc.mask & OF) {
 		switch(cpu->cc.op) {
@@ -436,7 +436,7 @@ static int get_OF(CPUI386 *cpu)
 	assert(false);
 }
 
-static void refresh_flags(CPUI386 *cpu)
+static inline void refresh_flags(CPUI386 *cpu)
 {
 	SET_BIT(cpu->flags, get_CF(cpu), CF);
 	SET_BIT(cpu->flags, get_PF(cpu), PF);
@@ -576,7 +576,7 @@ static bool IRAM_ATTR translate_laddr(CPUI386 *cpu, OptAddr *res, int rwm, uword
 	return true;
 }
 
-static inline bool __attribute__((always_inline)) segcheck(CPUI386 *cpu, int rwm, int seg, uword addr, int size)
+static bool IRAM_ATTR segcheck(CPUI386 *cpu, int rwm, int seg, uword addr, int size)
 {
 	if ((cpu->cr0 & 1) && !(cpu->flags & VM)) {
 		/* null selector check */
@@ -3306,7 +3306,7 @@ static bool __not_in_flash_func(enter_helper)(
 #define LFSw(...) LSEGw(FS, __VA_ARGS__)
 #define LGSw(...) LSEGw(GS, __VA_ARGS__)
 
-static bool check_ioperm(CPUI386 *cpu, int port, int bit)
+static bool __not_in_flash_func( check_ioperm )(CPUI386 *cpu, int port, int bit)
 {
 	bool allow = true;
 	if ((cpu->cr0 & 1) && (cpu->cpl > get_IOPL(cpu) || (cpu->flags & VM))) {
