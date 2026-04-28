@@ -29,6 +29,14 @@
 typedef void FPU;
 #endif
 
+/* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
+ * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
+ * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
+ * Invalidated automatically when the physical address of next_ip falls outside
+ * the current 4-byte slot */
+//static u32 cpu->prefetch_base = (u32)-1;
+//static u8  cpu->prefetch[16] __attribute__((aligned(4))) = {0};
+
 // #define DEBUG_CPU 1
 #ifdef DEBUG_CPU
 #include <stdarg.h>
@@ -466,6 +474,7 @@ static void tlb_clear(CPUI386 *cpu)
 		cpu->tlb.tab[i].lpgno = -1;
 	}
 	cpu->ifetch.laddr = -1;
+	cpu->prefetch_base = (u32)-1;
 }
 
 static int pte_lookup[2][4][2][2] = { //[wp != 0][(pte >> 1) & 3][cpl > 0][rwm > 1]
@@ -782,18 +791,60 @@ LOADSTORE(8)
 LOADSTORE(16)
 LOADSTORE(32)
 
+/*
+ * Instruction prefetch buffer: 16 bytes loaded as four 32-bit reads from a
+ * 16-byte-aligned physical address.  cpu->prefetch_base holds that physical base
+ * address (always a multiple of 16), or (u32)-1 when invalid.
+ *
+ * Invalidation is implicit: any jump/call/ret changes next_ip so that the
+ * resulting paddr falls outside [cpu->prefetch_base, cpu->prefetch_base+16), causing
+ * an automatic refill on the very next fetch.  No explicit flush is needed
+ * at branch sites.
+ *
+ * cpu->prefetch[] is aligned to 4 bytes so the four pload32 calls are natural.
+ */
+
+/* Refill: load 16 bytes (4 x u32) from the 16-byte-aligned block that
+ * contains paddr.  Caller guarantees paddr is in plain RAM and within the
+ * current ifetch page. */
+static inline void __attribute__((always_inline))
+prefetch_fill(CPUI386 *cpu, uword paddr)
+{
+	u32 base = paddr & ~(u32)15;
+	cpu->prefetch_base = base;
+	u32* prefetch = (u32*)cpu->prefetch;
+	*prefetch++ = pload32(cpu, base);
+	*prefetch++ = pload32(cpu, base + 4);
+	*prefetch++ = pload32(cpu, base + 8);
+	*prefetch++ = pload32(cpu, base + 12);
+}
+
+/* True if paddr is covered by the current prefetch buffer. */
+#define PREFETCH_HIT(paddr) \
+	(likely(((uword)(paddr) - cpu->prefetch_base) < 16u))
+
 static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
-		*val = pload8(cpu, cpu->ifetch.xaddr ^ laddr);
+		uword paddr = cpu->ifetch.xaddr ^ laddr;
+		if (!PREFETCH_HIT(paddr))
+			prefetch_fill(cpu, paddr);
+		*val = cpu->prefetch[paddr & 15];
 		return true;
 	}
+	/* ifetch page miss: full TLB translate */
 	OptAddr res;
 	TRY(translate8r(cpu, &res, SEG_CS, cpu->next_ip));
-	*val = load8(cpu, &res);
 	cpu->ifetch.laddr = laddr & (~4095ul);
 	cpu->ifetch.xaddr = res.addr1 ^ laddr;
+	if (!in_iomem(res.addr1) && res.addr1 + 15 < cpu->phys_mem_size) {
+		prefetch_fill(cpu, res.addr1);
+		*val = cpu->prefetch[res.addr1 & 15];
+	} else {
+		cpu->prefetch_base = (u32)-1;
+		*val = load8(cpu, &res);
+	}
 	return true;
 }
 
@@ -808,11 +859,25 @@ static bool IRAM_ATTR fetch16(CPUI386 *cpu, u16 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4095)) {
-		*val = pload16(cpu, cpu->ifetch.xaddr ^ laddr);
+		uword paddr = cpu->ifetch.xaddr ^ laddr;
+		if (!PREFETCH_HIT(paddr))
+			prefetch_fill(cpu, paddr);
+		unsigned off = paddr & 15;
+		if (likely(off <= 14)) {
+			/* Both bytes inside the buffer */
+			*val = cpu->prefetch[off] | ((u16)cpu->prefetch[off + 1] << 8);
+		} else {
+			/* Byte 1 is last byte of current block; byte 0 already in buffer.
+			 * Read second byte via pload (still within ifetch page). */
+			u8 lo = cpu->prefetch[15];
+			u8 hi = pload8(cpu, paddr + 1);
+			*val = lo | ((u16)hi << 8);
+		}
 	} else {
 		OptAddr res;
 		TRY(translate16(cpu, &res, 1, SEG_CS, cpu->next_ip));
 		*val = load16(cpu, &res);
+		cpu->prefetch_base = (u32)-1;
 	}
 	cpu->next_ip += 2;
 	return true;
@@ -822,11 +887,27 @@ static bool IRAM_ATTR fetch32(CPUI386 *cpu, u32 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4093)) {
-		*val = pload32(cpu, cpu->ifetch.xaddr ^ laddr);
+		uword paddr = cpu->ifetch.xaddr ^ laddr;
+		if (!PREFETCH_HIT(paddr))
+			prefetch_fill(cpu, paddr);
+		unsigned off = paddr & 15;
+		if (likely(off <= 12)) {
+			/* All 4 bytes inside the buffer */
+			*val = cpu->prefetch[off]
+			     | ((u32)cpu->prefetch[off + 1] << 8)
+			     | ((u32)cpu->prefetch[off + 2] << 16)
+			     | ((u32)cpu->prefetch[off + 3] << 24);
+		} else {
+			/* Spans two 16-byte blocks: read the remaining bytes
+			 * directly and let the next fetch refill. */
+			*val = pload32(cpu, paddr);
+			cpu->prefetch_base = (u32)-1;
+		}
 	} else {
 		OptAddr res;
 		TRY(translate32(cpu, &res, 1, SEG_CS, cpu->next_ip));
 		*val = load32(cpu, &res);
+		cpu->prefetch_base = (u32)-1;
 	}
 	cpu->next_ip += 4;
 	return true;
@@ -2153,12 +2234,14 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 #define IRET() \
 	if ((cpu->cr0 & 1) && (!(cpu->flags & VM) || get_IOPL(cpu) < 3)) { \
 		TRY(pmret(cpu, opsz16, 0, true)); \
+        cpu->prefetch_base = (u32)-1; \
 	} else { \
+		OptAddr meml1, meml2, meml3; \
 		uword sp = lreg32(4); \
+		register uword newip; \
 		if (opsz16) { \
-			OptAddr meml1, meml2, meml3; \
 			/* ip */ TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
-			uword newip = laddr16(&meml1); \
+			newip = laddr16(&meml1); \
 			/* cs */ TRY(translate16(cpu, &meml2, 1, SEG_SS, (sp + 2) & sp_mask)); \
 			int newcs = laddr16(&meml2); \
 			/* flags */ TRY(translate16(cpu, &meml3, 1, SEG_SS, (sp + 4) & sp_mask)); \
@@ -2170,11 +2253,9 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			if (!set_seg(cpu, SEG_CS, newcs)) { cpu->flags = oldflags; return false; } \
 			cpu->cc.mask = 0; \
 			set_sp(sp + 6, sp_mask); \
-			cpu->next_ip = newip; \
 		} else { \
-			OptAddr meml1, meml2, meml3; \
 			/* eip */ TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
-			uword newip = laddr32(&meml1); \
+			newip = laddr32(&meml1); \
 			/* cs (pop as dword, selector is low 16 bits) */ \
 			TRY(translate32(cpu, &meml2, 1, SEG_SS, (sp + 4) & sp_mask)); \
 			int newcs = laddr32(&meml2); \
@@ -2187,8 +2268,9 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			if (!set_seg(cpu, SEG_CS, newcs)) { cpu->flags = oldflags; return false; } \
 			cpu->cc.mask = 0; \
 			set_sp(sp + 12, sp_mask); \
-			cpu->next_ip = newip; \
 		} \
+		cpu->next_ip = newip; \
+        cpu->prefetch_base = (u32)-1; \
 	} \
 	if (cpu->intr && (cpu->flags & IF)) return true;
 
@@ -2196,27 +2278,26 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	if ((cpu->cr0 & 1) && !(cpu->flags & VM)) { \
 		TRY(pmret(cpu, opsz16, li(i), false)); \
 	} else { \
+		uword sp = lreg32(4); \
+		OptAddr meml1, meml2; \
+		register uword newip; \
 		if (opsz16) { \
-			OptAddr meml1, meml2; \
-			uword sp = lreg32(4); \
 			/* ip */ TRY(translate16(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
-			uword newip = laddr16(&meml1); \
+			newip = laddr16(&meml1); \
 			/* cs */ TRY(translate16(cpu, &meml2, 1, SEG_SS, (sp + 2) & sp_mask)); \
 			int newcs = laddr16(&meml2); \
 			TRY(set_seg(cpu, SEG_CS, newcs)); \
 			set_sp(sp + 4 + li(i), sp_mask); \
-			cpu->next_ip = newip; \
 		} else { \
-			OptAddr meml1, meml2; \
-			uword sp = lreg32(4); \
 			/* ip */ TRY(translate32(cpu, &meml1, 1, SEG_SS, sp & sp_mask)); \
-			uword newip = laddr32(&meml1); \
+			newip = laddr32(&meml1); \
 			/* cs */ TRY(translate32(cpu, &meml2, 1, SEG_SS, (sp + 4) & sp_mask)); \
 			int newcs = laddr32(&meml2); \
 			TRY(set_seg(cpu, SEG_CS, newcs)); \
 			set_sp(sp + 8 + li(i), sp_mask); \
-			cpu->next_ip = newip; \
 		} \
+		cpu->next_ip = newip; \
+		cpu->prefetch_base = (u32)-1; \
 	}
 
 #define RETFAR() RETFARw(0, limm, 0)
@@ -2844,39 +2925,39 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 #define JCXZb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
-		if (lreg16(1) == 0) cpu->next_ip += d; \
+		if (lreg16(1) == 0) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	} else { \
-		if (lreg32(1) == 0) cpu->next_ip += d; \
+		if (lreg32(1) == 0) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	}
 
 #define LOOPb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
 		sreg16(1, lreg16(1) - 1); \
-		if (lreg16(1)) cpu->next_ip += d; \
+		if (lreg16(1)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	} else { \
 		sreg32(1, lreg32(1) - 1); \
-		if (lreg32(1)) cpu->next_ip += d; \
+		if (lreg32(1)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	}
 
 #define LOOPEb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
 		sreg16(1, lreg16(1) - 1); \
-		if (lreg16(1) && get_ZF(cpu)) cpu->next_ip += d; \
+		if (lreg16(1) && get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	} else { \
 		sreg32(1, lreg32(1) - 1); \
-		if (lreg32(1) && get_ZF(cpu)) cpu->next_ip += d; \
+		if (lreg32(1) && get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	}
 
 #define LOOPNEb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
 		sreg16(1, lreg16(1) - 1); \
-		if (lreg16(1) && !get_ZF(cpu)) cpu->next_ip += d; \
+		if (lreg16(1) && !get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	} else { \
 		sreg32(1, lreg32(1) - 1); \
-		if (lreg32(1) && !get_ZF(cpu)) cpu->next_ip += d; \
+		if (lreg32(1) && !get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
 	}
 
 #define COND() \
@@ -2902,7 +2983,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define JCC_common(d) \
 	COND() \
-	if (cond) cpu->next_ip += d;
+	if (cond) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; }
 
 #define SETCCb(a, la, sa) \
 	COND() \
@@ -2922,29 +3003,30 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define JMPb(i, li, _) \
 	sword d = sext8(li(i)); \
-	cpu->next_ip += d;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
 
 #define JMPw(i, li, _) \
 	sword d = sext16(li(i)); \
-	cpu->next_ip += d;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
 
 #define JMPd(i, li, _) \
 	sword d = sext32(li(i)); \
-	cpu->next_ip += d;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
 
 #define JMPABSw(i, li, _) \
-	cpu->next_ip = li(i);
+	cpu->next_ip = li(i); cpu->prefetch_base = (u32)-1;
 
 #define JMPABSd(i, li, _) \
-	cpu->next_ip = li(i);
+	cpu->next_ip = li(i); cpu->prefetch_base = (u32)-1;
 
 #define JMPFAR(addr, seg) \
 	if ((cpu->cr0 & 1) && !(cpu->flags & VM)) { \
 		TRY(pmcall(cpu, opsz16, addr, seg, true)); \
 	} else { \
-	TRY(set_seg(cpu, SEG_CS, seg)); \
-	cpu->next_ip = addr; \
-	}
+	    TRY(set_seg(cpu, SEG_CS, seg)); \
+	    cpu->next_ip = addr; \
+	} \
+	cpu->prefetch_base = (u32)-1;
 
 #define CALLFAR(addr, seg) \
 	if ((cpu->cr0 & 1) && !(cpu->flags & VM)) { \
@@ -2967,7 +3049,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	} \
 	TRY(set_seg(cpu, SEG_CS, seg)); \
 	cpu->next_ip = addr; \
-	}
+	} \
+	cpu->prefetch_base = (u32)-1;
 
 #define CALLw(i, li, _) \
 	sword d = sext16(li(i)); \
@@ -2975,7 +3058,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	TRY(translate16(cpu, &meml, 2, SEG_SS, (sp - 2) & sp_mask)); \
 	set_sp(sp - 2, sp_mask); \
 	saddr16(&meml, cpu->next_ip); \
-	cpu->next_ip += d;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
 
 #define CALLd(i, li, _) \
 	sword d = sext32(li(i)); \
@@ -2983,7 +3066,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	TRY(translate32(cpu, &meml, 2, SEG_SS, (sp - 4) & sp_mask)); \
 	set_sp(sp - 4, sp_mask); \
 	saddr32(&meml, cpu->next_ip); \
-	cpu->next_ip += d;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
 
 #define CALLABSw(i, li, _) \
 	uword nip = li(i); \
@@ -2991,7 +3074,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	TRY(translate16(cpu, &meml, 2, SEG_SS, (sp - 2) & sp_mask)); \
 	set_sp(sp - 2, sp_mask); \
 	saddr16(&meml, cpu->next_ip); \
-	cpu->next_ip = nip;
+	cpu->next_ip = nip; cpu->prefetch_base = (u32)-1;
 
 #define CALLABSd(i, li, _) \
 	uword nip = li(i); \
@@ -2999,7 +3082,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	TRY(translate32(cpu, &meml, 2, SEG_SS, (sp - 4) & sp_mask)); \
 	set_sp(sp - 4, sp_mask); \
 	saddr32(&meml, cpu->next_ip); \
-	cpu->next_ip = nip;
+	cpu->next_ip = nip; cpu->prefetch_base = (u32)-1;
 
 #define RETw(i, li, _) \
 	if (opsz16) { \
@@ -3012,7 +3095,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		TRY(translate32(cpu, &meml, 1, SEG_SS, sp & sp_mask)); \
 		set_sp(sp + 4 + li(i), sp_mask); \
 		cpu->next_ip = laddr32(&meml); \
-	}
+	} \
+	cpu->prefetch_base = (u32)-1;
 
 #define RET() RETw(0, limm, 0)
 
@@ -3719,13 +3803,13 @@ static void __sysenter(CPUI386 *cpu, int pl, int cs)
 	cpu->flags &= ~(VM | IF); \
 	__sysenter(cpu, 0, cpu->sysenter.cs); \
 	REGi(4) = cpu->sysenter.esp; \
-	cpu->next_ip = cpu->sysenter.eip;
+	cpu->next_ip = cpu->sysenter.eip; cpu->prefetch_base = (u32)-1;
 
 #define SYSEXIT() \
 	if (!(cpu->cr0 & 1) || (cpu->sysenter.cs & ~0x3) == 0 || cpu->cpl) THROW(EX_GP, 0); \
 	__sysenter(cpu, 3, cpu->sysenter.cs + 16); \
 	REGi(4) = REGi(1); \
-	cpu->next_ip = REGi(2);
+	cpu->next_ip = REGi(2); cpu->prefetch_base = (u32)-1;
 
 #if defined(I386_ENABLE_MMX) || defined(I386_ENABLE_SSE)
 #define SIMD_i386_c
@@ -4112,7 +4196,7 @@ static bool task_switch(CPUI386 *cpu, int tss, int sw_type)
 	}
 
 	TRY1(translate(cpu, &meml, 1, SEG_TR, 0x20, 4, 0));
-	cpu->next_ip = load32(cpu, &meml);
+	cpu->next_ip = load32(cpu, &meml); cpu->prefetch_base = (u32)-1;
 
 	TRY1(translate(cpu, &meml, 1, SEG_TR, 0x24, 4, 0));
 	cpu->flags = load32(cpu, &meml);
@@ -4184,7 +4268,7 @@ static bool pmcall(CPUI386 *cpu, bool opsz16, uword addr, int sel, bool isjmp)
 //		if ((sel & 3) != cpu->cpl)
 //			dolog("pmcall PVL %d => %d\n", cpu->cpl, sel & 3);
 		TRY1(set_seg(cpu, SEG_CS, sel));
-		cpu->next_ip = addr;
+		cpu->next_ip = addr; cpu->prefetch_base = (u32)-1;
 	} else {
 		int newcs = w1 >> 16;
 		uword newip = (w1 & 0xffff) | (w2 & 0xffff0000);
@@ -4336,7 +4420,7 @@ static bool pmcall(CPUI386 *cpu, bool opsz16, uword addr, int sel, bool isjmp)
 
 		TRY1(set_seg(cpu, SEG_CS, newcs));
 
-		cpu->next_ip = newip;
+		cpu->next_ip = newip; cpu->prefetch_base = (u32)-1;
 	}
 	return true;
 }
@@ -4441,7 +4525,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		sreg32(4, (sp - 2 * 3) & sp_mask);
 
 		TRY1(set_seg(cpu, SEG_CS, newcs));
-		cpu->next_ip = newip;
+		cpu->next_ip = newip; cpu->prefetch_base = (u32)-1;
 		cpu->ip = newip;
 		cpu->flags &= ~(IF|TF);
 		return true;
@@ -4686,7 +4770,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		TRY1(set_seg(cpu, SEG_GS, 0));
 		cpu->flags &= ~(TF | RF | NT);
 		TRY1(set_seg(cpu, SEG_CS, newcs));
-		cpu->next_ip = newip;
+		cpu->next_ip = newip; cpu->prefetch_base = (u32)-1;
 		cpu->ip = newip;
 		if (gt == 0x6 || gt == 0xe)
 			cpu->flags &= ~IF;
@@ -4695,7 +4779,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	default: assert(false);
 	}
 	TRY1(set_seg(cpu, SEG_CS, newcs));
-	cpu->next_ip = newip;
+	cpu->next_ip = newip; cpu->prefetch_base = (u32)-1;
 	cpu->ip = newip;
 	cpu->flags &= ~(TF | RF | NT);
 	if (gt == 0x6 || gt == 0xe)
@@ -4845,7 +4929,7 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
               laddr32(&meml4), laddr32(&meml5));
 		cpu->flags = newflags;
 		TRY1(set_seg(cpu, SEG_CS, newcs));
-		cpu->next_ip = newip;
+		cpu->next_ip = newip; cpu->prefetch_base = (u32)-1;
 		TRY1(set_seg(cpu, SEG_SS, laddr32(&meml5)));
 		TRY1(set_seg(cpu, SEG_ES, laddr32(&meml_vmes)));
 		TRY1(set_seg(cpu, SEG_DS, laddr32(&meml_vmds)));
@@ -4868,7 +4952,7 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 			} else {
 				set_sp(sp + 8 + off, sp_mask);
 			}
-			cpu->next_ip = newip;
+			cpu->next_ip = newip; cpu->prefetch_base = (u32)-1;
 		} else {
 			// return to outer level
 			TRY(__pmiret_check_cs_outer(cpu, newcs));
@@ -4893,7 +4977,7 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 			TRY1(set_seg(cpu, SEG_SS, newss));
 			uword newsp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
 			set_sp(newsp, newsp_mask);
-			cpu->next_ip = newip;
+			cpu->next_ip = newip; cpu->prefetch_base = (u32)-1;
 			clear_segs(cpu);
 		}
 	}
@@ -5002,7 +5086,7 @@ void cpui386_reset(CPUI386 *cpu)
 	cpu->seg[1].flags = (1 << 22);
 
 	cpu->ip = 0xfff0;
-	cpu->next_ip = cpu->ip;
+	cpu->next_ip = cpu->ip; cpu->prefetch_base = (u32)-1;
 	cpu->seg[SEG_CS].sel = 0xf000;
 	cpu->seg[SEG_CS].base = 0xf0000;
 

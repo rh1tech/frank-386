@@ -116,6 +116,8 @@ struct CPUI386 {
 	} tlb;
 
 	u8 *phys_mem;
+	u32 prefetch_base;
+	u8  prefetch[16] __attribute__((aligned(4)));
 	long phys_mem_size;
 
 	long cycle;
@@ -135,7 +137,7 @@ struct CPUI386 {
 	bool (*int2f_handler)(struct CPUI386 *cpu, void *opaque);
 	void *int2f_opaque;
 
-	uint32_t a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
+	u32 a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
 };
 
 typedef struct CPUI386 CPUI386;
