@@ -436,7 +436,7 @@ static int IRAM_ATTR get_OF(CPUI386 *cpu)
 	assert(false);
 }
 
-static inline void refresh_flags(CPUI386 *cpu)
+static void IRAM_ATTR refresh_flags(CPUI386 *cpu)
 {
 	SET_BIT(cpu->flags, get_CF(cpu), CF);
 	SET_BIT(cpu->flags, get_PF(cpu), PF);
