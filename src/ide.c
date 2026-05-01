@@ -29,6 +29,7 @@
 
 //#include "cutils.h"
 #include "ide.h"
+#include "mem.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1586,7 +1587,7 @@ uint32_t ide_data_readl(void *opaque)
     return v;
 }
 
-int ide_data_write_string(void *opaque, uint8_t *buf, int size, int count)
+int ide_data_write_string(void *opaque, uint32_t addr, int size, int count)
 {
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
@@ -1595,16 +1596,27 @@ int ide_data_write_string(void *opaque, uint8_t *buf, int size, int count)
     if (len > s->xfer_left) len = s->xfer_left;
     len -= len % size;
     if (s->drive_kind == IDE_HD) {
-        UINT bw; f_write(s->fp, buf, len, &bw);
+        UINT bw;
+        uint8_t buf[512];
+        for (int i = 0; i < len; i += 512) {
+            UINT l = len - i;
+            if (l > 512) l = 512;
+            for (int j = 0; j < l; ++j) {
+                buf[j] = pload8(addr + i + j);
+            }
+            f_write(s->fp, buf, l, &bw);
+        }
     } else {
-        memcpy(s->atapi_buf + s->atapi_buf_pos, buf, len);
+        for (int i = 0; i < len; ++i) {
+            s->atapi_buf[s->atapi_buf_pos + i] = pload8(addr + i);
+        }
         s->atapi_buf_pos += len;
     }
     xfer_advance(s, len);
     return len / size;
 }
 
-int ide_data_read_string(void *opaque, uint8_t *buf, int size, int count)
+int ide_data_read_string(void *opaque, uint32_t addr, int size, int count)
 {
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
@@ -1613,9 +1625,20 @@ int ide_data_read_string(void *opaque, uint8_t *buf, int size, int count)
     if (len > s->xfer_left) len = s->xfer_left;
     len -= len % size;
     if (xfer_from_file(s)) {
-        UINT br; f_read(s->fp, buf, len, &br);
+        UINT br;
+        uint8_t buf[512];
+        for (int i = 0; i < len; i += 512) {
+            UINT l = len - i;
+            if (l > 512) l = 512;
+            f_read(s->fp, buf, l, &br);
+            for (int j = 0; j < l; ++j) {
+                pstore8(addr + i + j, buf[j]);
+            }
+        }
     } else {
-        memcpy(buf, s->atapi_buf + s->atapi_buf_pos, len);
+        for (int i = 0; i < len; ++i) {
+            pstore8(addr + i, s->atapi_buf[s->atapi_buf_pos + i]);
+        }
         s->atapi_buf_pos += len;
     }
     xfer_advance(s, len);

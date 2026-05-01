@@ -43,8 +43,6 @@ typedef struct {
 	U8250 *serial;
 	CMOS *cmos;
 	VGAState *vga;
-	char *phys_mem;
-	long phys_mem_size;
 	char *vga_mem;
 	int vga_mem_size;
 	int64_t boot_start_time;

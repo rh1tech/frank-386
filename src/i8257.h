@@ -27,8 +27,6 @@ typedef struct I8257State {
     uint8_t mask;
     uint8_t flip_flop;
     I8257Regs regs[4];
-    char *phys_mem;
-    long phys_mem_size;
 //    MemoryRegion channel_io;
 //    MemoryRegion cont_io;
 
@@ -68,6 +66,5 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
                            int len);
 
 I8257State *i8257_new(
-    char *phys_mem, long phys_mem_size,
     int base, int page_base, int pageh_base, int dshift);
 #endif

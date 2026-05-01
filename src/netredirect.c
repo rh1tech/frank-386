@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include "i386.h"
 #include "ff.h"
+#include "mem.h"
 
 //#define DEBUG_2F
 
@@ -65,14 +66,13 @@ void debug_log(const char *fmt, ...) {
 
 /* Guest memory access via physical mem pointer */
 static CPUI386 *_nr_cpu;
-static uint8_t *_nr_mem;
 
-static inline uint8_t  read86(uint32_t a)     { return _nr_mem[a]; }
-static inline uint16_t readw86(uint32_t a)    { return _nr_mem[a] | ((uint16_t)_nr_mem[a+1] << 8); }
-static inline uint32_t readdw86(uint32_t a)   { return _nr_mem[a] | ((uint32_t)_nr_mem[a+1]<<8) | ((uint32_t)_nr_mem[a+2]<<16) | ((uint32_t)_nr_mem[a+3]<<24); }
-static inline void write86(uint32_t a, uint8_t v)   { _nr_mem[a] = v; }
-static inline void writew86(uint32_t a, uint16_t v) { _nr_mem[a]=v&0xff; _nr_mem[a+1]=v>>8; }
-static inline void writedw86(uint32_t a, uint32_t v){ _nr_mem[a]=v&0xff; _nr_mem[a+1]=(v>>8)&0xff; _nr_mem[a+2]=(v>>16)&0xff; _nr_mem[a+3]=(v>>24)&0xff; }
+static inline uint8_t  read86(uint32_t a)     { return pload8(a); }
+static inline uint16_t readw86(uint32_t a)    { return pload8(a) | ((uint16_t)pload8(a+1) << 8); }
+static inline uint32_t readdw86(uint32_t a)   { return pload8(a) | ((uint32_t)pload8(a+1)<<8) | ((uint32_t)pload8(a+2)<<16) | ((uint32_t)pload8(a+3)<<24); }
+static inline void write86(uint32_t a, uint8_t v)   { pstore8(a, v); }
+static inline void writew86(uint32_t a, uint16_t v) { pstore8(a, v); pstore8(a+1, v>>8); }
+static inline void writedw86(uint32_t a, uint32_t v){ pstore8(a, v); pstore8(a+1, v>>8); pstore8(a+2, v>>16); pstore8(a+3, v>>24); }
 
 // Host filesystem passthrough base directory
 #define HOST_BASE_DIR "\\"
@@ -837,6 +837,5 @@ static bool int2f_callback(CPUI386 *cpu, void *opaque) {
 }
 
 void netredirect_init(CPUI386 *cpu, int enable) {
-    _nr_mem = cpu_get_phys_mem(cpu);
     cpu_set_int2f_handler(cpu, enable ? int2f_callback : NULL, NULL);
 }

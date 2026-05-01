@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ems.h"
+#include "mem.h"
 
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
@@ -404,95 +405,50 @@ static bool i8257_is_verify_transfer(I8257Regs *r)
     return (r->mode & 0x0c) == 0;
 }
 
-int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
-                          int len)
+static inline int dma_is_iomem(uint32_t a)
+{
+    return ((a - 0xA0000u) < 0x20000u) || a >= 0xE0000000u;
+}
+
+int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos, int len)
 {
     I8257State *d = I8257(obj);
     I8257Regs *r = &d->regs[nchan & 3];
     hwaddr addr = ((r->pageh & 0x7f) << 24) | (r->page << 16) | r->now[ADDR];
 
-    if (i8257_is_verify_transfer(r)) {
+    if (i8257_is_verify_transfer(r))
         return len;
-    }
 
     uint8_t *p = buf;
+
     if (r->mode & 0x20) {
-        /* Decrement mode: guest address runs backwards */
-        hwaddr base = addr - pos - len;
-        for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-            p[i] =
-#if EMULATE_LTEMS
-            ems_in_window(a) ? *ems_host_ptr(a) :
-#endif
-             d->phys_mem[a];
-        }
-        //cpu_physical_memory_read (d->phys_mem + addr - pos - len, buf, len);
-        /* What about 16bit transfers? */
-        for (int i = 0; i < len >> 1; i++) {
-            uint8_t b = p[len - i - 1];
-            p[i] = b;
-        }
+        for (int i = 0; i < len; i++)
+            p[i] = pload8((uint32_t)(addr - pos - i));
     } else {
-        /* Normal (increment) mode */
-        hwaddr base = addr + pos;
-        for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-            p[i] =
-#if EMULATE_LTEMS
-             ems_in_window(a) ? *ems_host_ptr(a) :
-#endif
-             d->phys_mem[a];
-        }
-        //cpu_physical_memory_read (addr + pos, buf, len);
+        for (int i = 0; i < len; i++)
+            p[i] = pload8((uint32_t)(addr + pos + i));
     }
 
     return len;
 }
 
-int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
-                           int len)
+int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos, int len)
 {
-    I8257State *s = I8257(obj);
-    I8257Regs *r = &s->regs[nchan & 3];
+    I8257State *d = I8257(obj);
+    I8257Regs *r = &d->regs[nchan & 3];
     hwaddr addr = ((r->pageh & 0x7f) << 24) | (r->page << 16) | r->now[ADDR];
 
-    if (i8257_is_verify_transfer(r)) {
+    if (i8257_is_verify_transfer(r))
         return len;
-    }
 
     uint8_t *p = buf;
+
     if (r->mode & 0x20) {
-        /* Decrement mode */
-        hwaddr base = addr - pos - len;
-        for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-#if EMULATE_LTEMS
-            if (ems_in_window(a))
-                *ems_host_ptr(a) = p[i];
-            else
-#endif
-                s->phys_mem[a] = p[i];
-        }
-        //cpu_physical_memory_write (addr - pos - len, buf, len);
-        /* What about 16bit transfers? */
-        for (int i = 0; i < len; i++) {
-            uint8_t b = p[len - i - 1];
-            p[i] = b;
-        }
+        for (int i = 0; i < len; i++)
+            pstore8((uint32_t)(addr - pos - i), p[i]);
     } else {
-        /* Normal (increment) mode */
-        hwaddr base = addr + pos;
-        for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-#if EMULATE_LTEMS
-            if (ems_in_window(a))
-                *ems_host_ptr(a) = p[i];
-            else
-#endif
-                s->phys_mem[a] = p[i];
-        }
-        //cpu_physical_memory_write (addr + pos, buf, len);
+        for (int i = 0; i < len; i++)
+            pstore8((uint32_t)(addr + pos + i), p[i]);
     }
 
     return len;
@@ -672,8 +628,6 @@ void i8257_dma_init(ISABus *bus, bool high_page_enable)
 #endif
 
 I8257State *i8257_new(
-    char *phys_mem,
-    long phys_mem_size,
     int base, int page_base, int pageh_base, int dshift)
 {
     I8257State *d = malloc(sizeof(I8257State));
@@ -682,8 +636,6 @@ I8257State *i8257_new(
     d->page_base = page_base;
     d->pageh_base = pageh_base;
     d->dshift = dshift;
-    d->phys_mem = phys_mem;
-    d->phys_mem_size = phys_mem_size;
     int i;
 
 //    memory_region_init_io(&d->channel_io, OBJECT(dev), &channel_io_ops, d,

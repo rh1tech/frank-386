@@ -51,8 +51,8 @@ void     ide_data_writew(void *opaque, uint32_t val);
 uint32_t ide_data_readw(void *opaque);
 void     ide_data_writel(void *opaque, uint32_t val);
 uint32_t ide_data_readl(void *opaque);
-int      ide_data_write_string(void *opaque, uint8_t *buf, int size, int count);
-int      ide_data_read_string(void *opaque, uint8_t *buf, int size, int count);
+int      ide_data_write_string(void *opaque, uint32_t buf, int size, int count);
+int      ide_data_read_string(void *opaque, uint32_t buf, int size, int count);
 
 void     ide_ioport_write(void *opaque, uint32_t offset, uint32_t val);
 uint32_t ide_ioport_read(void *opaque, uint32_t offset);

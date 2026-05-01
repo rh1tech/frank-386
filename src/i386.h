@@ -15,6 +15,8 @@ typedef int8_t s8;
 typedef u32 uword;
 typedef s32 sword;
 
+#define PREFETCH_ENABLED 1
+
 /* Enable optimized register layout (union-based) */
 #ifndef I386_OPT1
 #define I386_OPT1
@@ -35,17 +37,11 @@ typedef struct {
 	void (*io_write16)(void *, int, u16);
 	u32 (*io_read32)(void *, int);
 	void (*io_write32)(void *, int, u32);
-	int (*io_read_string)(void *, int, uint8_t *, int, int);
-	int (*io_write_string)(void *, int, uint8_t *, int, int);
+	int (*io_read_string)(void *, int, uint32_t, int, int);
+	int (*io_write_string)(void *, int, uint32_t, int, int);
 
 	void *iomem;
-	u8 (*iomem_read8)(void *, uword);
-	void (*iomem_write8)(void *, uword, u8);
-	u16 (*iomem_read16)(void *, uword);
-	void (*iomem_write16)(void *, uword, u16);
-	u32 (*iomem_read32)(void *, uword);
-	void (*iomem_write32)(void *, uword, u32);
-	bool (*iomem_write_string)(void *, uword, uint8_t *, int);
+	bool (*iomem_write_string)(void *, uword, uint32_t, int);
 } CPU_CB;
 
 /* TLB entry structure */
@@ -114,12 +110,15 @@ struct CPUI386 {
 		int size;
 		struct tlb_entry *tab;
 	} tlb;
-
-	u8 *phys_mem;
+#if PREFETCH_ENABLED
+/* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
+ * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
+ * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
+ * Invalidated automatically when the physical address of next_ip falls outside
+ * the current 4-byte slot */
 	u32 prefetch_base;
 	u8  prefetch[16] __attribute__((aligned(4)));
-	long phys_mem_size;
-
+#endif
 	long cycle;
 
 	int excno;
@@ -142,7 +141,7 @@ struct CPUI386 {
 
 typedef struct CPUI386 CPUI386;
 
-CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb);
+CPUI386 *cpui386_new(int gen, CPU_CB **cb);
 void cpui386_delete(CPUI386 *cpu);
 void cpui386_enable_fpu(CPUI386 *cpu);
 void cpui386_reset(CPUI386 *cpu);
@@ -202,9 +201,6 @@ u16 cpu_get_ds(CPUI386 *cpu);
 u16 cpu_get_ss(CPUI386 *cpu);
 void cpu_set_cf(CPUI386 *cpu, int val);
 int cpu_get_cf(CPUI386 *cpu);
-// Physical memory access
-u8 *cpu_get_phys_mem(CPUI386 *cpu);
-long cpu_get_phys_mem_size(CPUI386 *cpu);
 // A20 gate control
 void cpu_set_a20(CPUI386 *cpu, int enabled);
 int cpu_get_a20(CPUI386 *cpu);
