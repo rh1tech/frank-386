@@ -925,21 +925,27 @@ void __not_in_flash_func(iomem_write32)(void *iomem, uword addr, u32 val)
 	vga_mem_write32(pc->vga, addr - 0xa0000, val);
 }
 
-bool __not_in_flash_func(iomem_write_string)(void *iomem, uword addr, uint32_t buf, int len)
+
+// Новая версия принимает host-pointer напрямую
+bool __not_in_flash_func(iomem_write_string_ptr)(void *iomem, uint32_t addr, const uint8_t *buf, int len)
 {
-	PC *pc = iomem;
-	// fast path for vga ram
-	uword vga_addr2 = pc->pci_vga_ram_addr;
-	if (addr >= vga_addr2) {
-		uword vga_addr2 = pc->pci_vga_ram_addr;
-		addr -= vga_addr2;
-		if (addr + len < pc->vga_mem_size) {
-			memcpy(pc->vga_mem + addr, PC_RAM + buf, len);
-			return true;
-		}
-		return false;
-	}
-	return vga_mem_write_string(pc->vga, addr - 0xa0000, PC_RAM + buf, len);
+    PC *pc = iomem;
+    uint32_t vga_addr2 = pc->pci_vga_ram_addr;
+    if (addr >= vga_addr2) {
+        addr -= vga_addr2;
+        if (addr + len < pc->vga_mem_size) {
+            memcpy(pc->vga_mem + addr, buf, len);
+            return true;
+        }
+        return false;
+    }
+    return vga_mem_write_string(pc->vga, addr - 0xa0000, (uint8_t*)buf, len);
+}
+
+// Старая версия теперь через новую
+bool __not_in_flash_func(iomem_write_string)(void *iomem, uint32_t addr, uint32_t buf, int len)
+{
+    return iomem_write_string_ptr(iomem, addr, PC_RAM + buf, len);
 }
 
 static void pc_reset_request(void *p)
@@ -1134,7 +1140,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	}
 
 	cb->iomem = pc;
-	cb->iomem_write_string = iomem_write_string;
 
 	pc->redraw = redraw;
 	pc->redraw_data = redraw_data;

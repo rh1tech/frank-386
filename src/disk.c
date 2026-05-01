@@ -48,29 +48,6 @@ static CPUI386 *disk_cpu = NULL;
 static VGAState *disk_vga = NULL;
 void disk_set_vga(VGAState *vga) { disk_vga = vga; }
 
-/* Copy sector data to guest memory, routing VGA IOMEM through vga_mem_write */
-static inline void disk_copy_to_guest(uint8_t *phys_mem, uint32_t guest,
-                                      const uint8_t *buf, uint32_t len)
-{
-    if (disk_vga && guest >= 0xA0000 && guest + len <= 0xC0000) {
-        for (uint32_t i = 0; i < len; i++)
-            vga_mem_write(disk_vga, guest - 0xA0000 + i, buf[i]);
-        return;
-    }
-    ems_copy_to_guest(phys_mem, guest, buf, len);
-}
-
-/* Copy from guest memory, routing VGA IOMEM through vga_mem_read */
-static inline void disk_copy_from_guest(uint8_t *phys_mem, uint32_t guest,
-                                        uint8_t *buf, uint32_t len)
-{
-    if (disk_vga && guest >= 0xA0000 && guest + len <= 0xC0000) {
-        for (uint32_t i = 0; i < len; i++)
-            buf[i] = vga_mem_read(disk_vga, guest - 0xA0000 + i);
-        return;
-    }
-    ems_copy_from_guest(phys_mem, guest, buf, len);
-}
 static void (*disk_cmos_update_cb)(uint8_t type_a, uint8_t type_b) = NULL;
 void disk_set_cmos_callback(void (*cb)(uint8_t, uint8_t)) { disk_cmos_update_cb = cb; }
 

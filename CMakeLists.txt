@@ -40,7 +40,7 @@ set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133,
 set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 
 # Enable LTEMM support (performance degradation is expected)
-option(EMM "Enable LTEMM support" OFF)
+option(EMM "Enable LTEMM support" ON)
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)

@@ -632,11 +632,6 @@ inline static void __attribute__((always_inline)) store8(CPUI386 *cpu, OptAddr *
 static void IRAM_ATTR store16(CPUI386 *cpu, OptAddr *res, u16 val)
 {
 	register u32 a1 = res->addr1;
-#if CHECH_RAM_BOARDER_ENABLED
-	if (unlikely(a1 >= phys_mem_size)) {
-		return;
-	}
-#endif
 	if (likely(res->res == ADDR_OK1)) {
 		pstore16(a1, val);
 	} else {
@@ -648,11 +643,6 @@ static void IRAM_ATTR store16(CPUI386 *cpu, OptAddr *res, u16 val)
 static void IRAM_ATTR store32(CPUI386 *cpu, OptAddr *res, u32 val)
 {
 	register u32 a1 = res->addr1;
-#if CHECH_RAM_BOARDER_ENABLED
-	if (unlikely(a1 >= phys_mem_size)) {
-		return;
-	}
-#endif
 	if (likely(res->res == ADDR_OK1)) {
 		pstore32(a1, val);
 	} else {
@@ -2646,9 +2636,10 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	uword cx = lreg ## ABIT(1); \
 	while (cx) { \
 		TRY(translate ## BIT(cpu, &memls, 1, curr_seg, lreg ## ABIT(6))); \
-		TRY(translate ## BIT(cpu, &memld, 2, SEG_ES, lreg ## ABIT(7))); \
-		if (memls.addr1 % (BIT / 8) || memld.addr1 % (BIT / 8)) { \
-			/* slow path */ \
+		TRY(translate ## BIT(cpu, &memld, 2, SEG_ES,   lreg ## ABIT(7))); \
+		if (memls.res != ADDR_OK1 || memld.res != ADDR_OK1 || \
+		    memls.addr1 % (BIT / 8) || memld.addr1 % (BIT / 8)) { \
+			/* slow path: cross-page или unaligned */ \
 			while (lreg ## ABIT(1)) { \
 				ldsistdi(BIT, ABIT) \
 				sreg ## ABIT(1, lreg ## ABIT(1) - 1); \
@@ -2664,35 +2655,94 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 			counts = 1 + (memls.addr1 & 4095) / (BIT / 8); \
 			countd = 1 + (memld.addr1 & 4095) / (BIT / 8); \
 		} \
-		if (counts < count) \
-			count = counts; \
-		if (countd < count) \
-			count = countd; \
-		if (cpu->cb.iomem_write_string && in_iomem(memld.addr1) && \
-		    dir > 0  && in_iomem(memld.addr1 + count - 1) && \
-		    (memls.addr1 | 4095) < phys_mem_size && \
-		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
-			if (cpu->cb.iomem_write_string( \
-				    cpu->cb.iomem, memld.addr1, \
-				    memls.addr1, count * dir)) { \
-				sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \
-				sreg ## ABIT(7, lreg ## ABIT(7) + count * dir); \
+		if ((uword)counts < count) count = (uword)counts; \
+		if ((uword)countd < count) count = (uword)countd; \
+		int byte_count = (int)count * (BIT / 8); \
+		/* bulk forward path: src — RAM или EMS, dst — RAM/EMS/VGA */ \
+		if (dir > 0) { \
+			if (in_iomem(memld.addr1)) { \
+				/* dst = VGA: источник RAM или EMS */ \
+				const uint8_t *src_ptr; \
+				bool src_ok = false; \
+				if (!in_iomem(memls.addr1) && \
+				    (memls.addr1 | 4095) < (uword)phys_mem_size) { \
+					src_ptr = PC_RAM + memls.addr1; \
+					src_ok = true; \
+				} \
+				IF_EMS( \
+				else if (EMS_WINDOW(memls.addr1) && \
+				         EMS_WINDOW(memls.addr1 + byte_count - 1)) { \
+					src_ptr = ems_host_ptr(memls.addr1); \
+					src_ok = true; \
+				} \
+				) \
+				if (src_ok) { \
+					if (iomem_write_string_ptr( \
+					        cpu->cb.iomem, memld.addr1, \
+					        src_ptr, byte_count)) { \
+						sreg ## ABIT(6, lreg ## ABIT(6) + (uword)byte_count); \
+						sreg ## ABIT(7, lreg ## ABIT(7) + (uword)byte_count); \
+						sreg ## ABIT(1, cx - count); \
+						cx = lreg ## ABIT(1); \
+						continue; \
+					} \
+				} \
+			} else if (!in_iomem(memls.addr1)) { \
+				/* dst = RAM или EMS, src = RAM: word-wide copy */ \
+				bool handled = false; \
+				IF_EMS( \
+				if (EMS_WINDOW(memld.addr1) || \
+				    EMS_WINDOW(memld.addr1 + byte_count - 1) || \
+				    EMS_WINDOW(memls.addr1) || \
+				    EMS_WINDOW(memls.addr1 + byte_count - 1)) { \
+					/* EMS участвует — через pload/pstore */ \
+					uint8_t *dp = ems_host_ptr(memld.addr1); \
+					const uint8_t *sp = EMS_WINDOW(memls.addr1) \
+					                  ? ems_host_ptr(memls.addr1) \
+					                  : PC_RAM + memls.addr1; \
+					int n32 = byte_count >> 2; \
+					int rem = byte_count & 3; \
+					uint32_t *d32 = (uint32_t*)dp; \
+					const uint32_t *s32 = (const uint32_t*)sp; \
+					while (n32--) *d32++ = *s32++; \
+					uint8_t *d8 = (uint8_t*)d32; \
+					const uint8_t *s8 = (const uint8_t*)s32; \
+					while (rem--) *d8++ = *s8++; \
+					handled = true; \
+				} \
+				) \
+				if (!handled) { \
+					/* plain RAM → RAM */ \
+					uint8_t *d = PC_RAM + memld.addr1; \
+					const uint8_t *s = PC_RAM + memls.addr1; \
+					int n32 = byte_count >> 2; \
+					int rem = byte_count & 3; \
+					uint32_t *d32 = (uint32_t*)d; \
+					const uint32_t *s32 = (const uint32_t*)s; \
+					while (n32--) *d32++ = *s32++; \
+					uint8_t *d8 = (uint8_t*)d32; \
+					const uint8_t *s8 = (const uint8_t*)s32; \
+					while (rem--) *d8++ = *s8++; \
+				} \
+				sreg ## ABIT(6, lreg ## ABIT(6) + (uword)byte_count); \
+				sreg ## ABIT(7, lreg ## ABIT(7) + (uword)byte_count); \
 				sreg ## ABIT(1, cx - count); \
 				cx = lreg ## ABIT(1); \
 				continue; \
 			} \
 		} \
-		for (uword i = 0; i <= count - 1; i++) { \
+		/* элементный fallback: обратное направление или неподдержанный случай */ \
+		for (uword i = 0; i < count; i++) { \
 			store ## BIT(cpu, &memld, load ## BIT(cpu, &memls)); \
-			memld.addr1 += dir; \
-			memls.addr1 += dir; \
+			memld.addr1 += (uword)(dir); \
+			memls.addr1 += (uword)(dir); \
 		} \
-		sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \
-		sreg ## ABIT(7, lreg ## ABIT(7) + count * dir); \
+		sreg ## ABIT(6, lreg ## ABIT(6) + count * (uword)(dir)); \
+		sreg ## ABIT(7, lreg ## ABIT(7) + count * (uword)(dir)); \
 		sreg ## ABIT(1, cx - count); \
 		cx = lreg ## ABIT(1); \
 	}
-
+		
 #define MOVS_helper(BIT) \
 	if (curr_seg == -1) curr_seg = SEG_DS; \
 	xdir ## BIT \

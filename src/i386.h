@@ -41,7 +41,6 @@ typedef struct {
 	int (*io_write_string)(void *, int, uint32_t, int, int);
 
 	void *iomem;
-	bool (*iomem_write_string)(void *, uword, uint32_t, int);
 } CPU_CB;
 
 /* TLB entry structure */
