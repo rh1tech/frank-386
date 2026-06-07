@@ -837,5 +837,8 @@ static bool int2f_callback(CPUI386 *cpu, void *opaque) {
 }
 
 void netredirect_init(CPUI386 *cpu, int enable) {
-    cpu_set_int2f_handler(cpu, enable ? int2f_callback : NULL, NULL);
+    cpu_int_hook_t* new = enable ? (cpu_int_hook_t*)calloc(sizeof(cpu_int_hook_t), 1) : NULL;
+    if (new) new->handler = int2f_callback;
+    cpu_int_hook_t* prev = cpu_set_int_hook(cpu, 0x2F, new);
+    if (prev) free(prev);
 }

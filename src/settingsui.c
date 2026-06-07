@@ -403,7 +403,7 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_VOLTAGE: {
                 if (!SELECT_VGA) {
-                    snprintf(value, sizeof(value), "  1.65V (HDMI)");
+                    snprintf(value, sizeof(value), "  1.60V (HDMI)");
                 } else {
                     int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
                     snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);

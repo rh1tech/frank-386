@@ -51,6 +51,14 @@ struct tlb_entry {
 	u8 *ppte;
 };
 
+#define CPU_INT_COUNT 256
+struct CPUI386;
+typedef bool (*cpu_int_handler_t)(struct CPUI386 *cpu, void *opaque);
+typedef struct cpu_int_hook {
+    cpu_int_handler_t handler;
+    void *opaque;
+} cpu_int_hook_t;
+
 /*
  * CPUI386 structure - main CPU state
  * Defined here so JIT compiler can access fields directly
@@ -131,9 +139,19 @@ struct CPUI386 {
 		uword cs, eip, esp;
 	} sysenter;
 
-	/* INT 2Fh network attached drive handler hook */
-	bool (*int2f_handler)(struct CPUI386 *cpu, void *opaque);
-	void *int2f_opaque;
+	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
+#ifdef I386_PROFILE
+	/* BIOS INT profiler state.  The hook records the entry cycle; IRET closes
+	 * the topmost active BIOS INT.  last_start[] is kept per vector, while
+	 * the stack preserves nesting when BIOS code invokes another INT.
+	 */
+	long bios_prof_last_start[CPU_INT_COUNT];
+	uint64_t bios_prof_total[CPU_INT_COUNT];
+	uint32_t bios_prof_count[CPU_INT_COUNT];
+	u8 bios_prof_stack[16];
+	long bios_prof_stack_start[16];
+	u8 bios_prof_depth;
+#endif
 
 	u32 a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
 };
@@ -204,13 +222,18 @@ int cpu_get_cf(CPUI386 *cpu);
 void cpu_set_a20(CPUI386 *cpu, int enabled);
 int cpu_get_a20(CPUI386 *cpu);
 
-typedef bool (*int2f_handler_t)(CPUI386 *cpu, void *opaque);
-void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque);
+inline static cpu_int_hook_t* cpu_set_int_hook(CPUI386 *cpu, u8 no, cpu_int_hook_t* hook)
+{
+	cpu_int_hook_t* prev = cpu->int_hooks[no];
+	cpu->int_hooks[no] = hook;
+	return prev;
+}
 
 /* Profiling support (enable with -DI386_PROFILE) */
 #ifdef I386_PROFILE
 void i386_profile_dump(void);
 void i386_profile_reset(void);
+void i386_profile_install_bios_hooks(CPUI386 *cpu);
 #endif
 
 #endif /* I386_H */

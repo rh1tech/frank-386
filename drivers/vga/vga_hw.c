@@ -1061,7 +1061,7 @@ static void hdmi_boost_clock(void) {
     int cur_mhz = clock_get_hz(clk_sys) / 1000000;
     if (cur_mhz >= HDMI_SYS_CLOCK_MHZ) return;
     vreg_disable_voltage_limit();
-    vreg_set_voltage(VREG_VOLTAGE_1_65);
+    vreg_set_voltage(VREG_VOLTAGE_1_60);
     sleep_ms(50);
     set_flash_timings(HDMI_SYS_CLOCK_MHZ, FLASH_MAX_FREQ_MHZ);
     set_sys_clock_khz(HDMI_SYS_CLOCK_MHZ * 1000, false);

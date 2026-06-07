@@ -149,6 +149,89 @@ enum {
 
 static void cpu_debug(CPUI386 *cpu);
 
+#ifdef I386_PROFILE
+static CPUI386 *i386_profile_cpu;
+static cpu_int_hook_t i386_profile_bios_hooks[CPU_INT_COUNT];
+
+static bool i386_profile_bios_int_handler(CPUI386 *cpu, void *opaque)
+{
+	unsigned no = (unsigned)(uintptr_t)opaque & 0xffu;
+
+	/* INT 2Fh is already used as a non-BIOS redirector hook. */
+	if (no == 0x2f)
+		return false;
+
+	cpu->bios_prof_last_start[no] = cpu->cycle;
+	cpu->bios_prof_count[no]++;
+
+	if (cpu->bios_prof_depth < sizeof(cpu->bios_prof_stack)) {
+		u8 depth = cpu->bios_prof_depth++;
+		cpu->bios_prof_stack[depth] = (u8)no;
+		cpu->bios_prof_stack_start[depth] = cpu->cycle;
+	}
+
+	return false; /* profiler only observes; let the real BIOS handler run */
+}
+
+static inline void i386_profile_bios_iret(CPUI386 *cpu)
+{
+	if (!cpu->bios_prof_depth)
+		return;
+
+	u8 depth = --cpu->bios_prof_depth;
+	u8 no = cpu->bios_prof_stack[depth];
+	long start = cpu->bios_prof_stack_start[depth];
+	long delta = cpu->cycle - start;
+
+	if (delta > 0)
+		cpu->bios_prof_total[no] += (uint64_t)delta;
+}
+
+void i386_profile_install_bios_hooks(CPUI386 *cpu)
+{
+	i386_profile_cpu = cpu;
+	for (unsigned no = 0; no < CPU_INT_COUNT; ++no) {
+		if (no == 0x2f)
+			continue;
+		i386_profile_bios_hooks[no].handler = i386_profile_bios_int_handler;
+		i386_profile_bios_hooks[no].opaque = (void *)(uintptr_t)no;
+		cpu_set_int_hook(cpu, (u8)no, &i386_profile_bios_hooks[no]);
+	}
+}
+
+void i386_profile_reset(void)
+{
+	CPUI386 *cpu = i386_profile_cpu;
+	if (!cpu)
+		return;
+	memset(cpu->bios_prof_last_start, 0, sizeof(cpu->bios_prof_last_start));
+	memset(cpu->bios_prof_total, 0, sizeof(cpu->bios_prof_total));
+	memset(cpu->bios_prof_count, 0, sizeof(cpu->bios_prof_count));
+	cpu->bios_prof_depth = 0;
+}
+
+void i386_profile_dump(void)
+{
+	CPUI386 *cpu = i386_profile_cpu;
+	if (!cpu)
+		return;
+
+	printf("BIOS INT profile: cycle=%ld\n", cpu->cycle);
+	for (unsigned no = 0; no < CPU_INT_COUNT; ++no) {
+		if (!cpu->bios_prof_count[no] && !cpu->bios_prof_total[no])
+			continue;
+		printf("  INT %02X: count=%lu total=%llu last_start=%ld\n",
+		       no,
+		       (unsigned long)cpu->bios_prof_count[no],
+		       (unsigned long long)cpu->bios_prof_total[no],
+		       cpu->bios_prof_last_start[no]);
+	}
+}
+#else
+#define i386_profile_bios_iret(cpu) ((void)0)
+#endif
+
+
 void cpu_abort(CPUI386 *cpu, int code)
 {
 	dolog("abort: %d %x cycle %ld\n", code, code, cpu->cycle);
@@ -2224,6 +2307,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		cpu->next_ip = newip; \
         PREFETCH_RESET \
 	} \
+	i386_profile_bios_iret(cpu); \
 	if (cpu->intr && (cpu->flags & IF)) return true;
 
 #define RETFARw(i, li, _) \
@@ -4376,9 +4460,10 @@ static int __not_in_flash_func(__call_isr_check_cs)(CPUI386 *cpu, int sel, int e
 
 static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 {
-	/* INT 2Fh network-attached-drive handler hook - intercept in V86 and real mode */
-	if (no == 0x2F && cpu->int2f_handler && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
-		if (cpu->int2f_handler(cpu, cpu->int2f_opaque)) return true; /* handled */
+	cpu_int_hook_t* int_hook = cpu->int_hooks[no];
+	/* INT handler hook - intercept in V86 and real mode */
+	if (int_hook && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
+		if (int_hook->handler(cpu, int_hook->opaque)) return true; /* handled */
 	}
 	#if DEBUG_CPU
 	if (cpu->flags & VM && no >= 0x20) {
@@ -5058,8 +5143,18 @@ CPUI386 *cpui386_new(int gen, CPU_CB **cb)
 	cpu->intr = false;
 
 	cpu->fpu = NULL;
+	memset(cpu->int_hooks, 0, sizeof(cpu->int_hooks));
+#ifdef I386_PROFILE
+	memset(cpu->bios_prof_last_start, 0, sizeof(cpu->bios_prof_last_start));
+	memset(cpu->bios_prof_total, 0, sizeof(cpu->bios_prof_total));
+	memset(cpu->bios_prof_count, 0, sizeof(cpu->bios_prof_count));
+	cpu->bios_prof_depth = 0;
+#endif
 
 	cpui386_reset(cpu);
+#ifdef I386_PROFILE
+	i386_profile_install_bios_hooks(cpu);
+#endif
 
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)
@@ -5220,10 +5315,4 @@ int cpu_get_cf(CPUI386 *cpu)
 		cpu->cc.mask = 0;
 	}
 	return (cpu->flags & CF) ? 1 : 0;
-}
-
-void cpu_set_int2f_handler(CPUI386 *cpu, int2f_handler_t handler, void *opaque)
-{
-	cpu->int2f_handler = handler;
-	cpu->int2f_opaque  = opaque;
 }

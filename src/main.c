@@ -602,7 +602,7 @@ static enum vreg_voltage get_voltage_for_freq(int mhz) {
     int v = config_get_voltage();
     if (v >= 0) return (enum vreg_voltage)v;  /* user override */
     /* auto: safe defaults per frequency */
-    if (mhz >= 504) return VREG_VOLTAGE_1_65;
+    if (mhz > 504) return VREG_VOLTAGE_1_65;
     if (mhz >= 378) return VREG_VOLTAGE_1_60;
     return VREG_VOLTAGE_1_50;
 }

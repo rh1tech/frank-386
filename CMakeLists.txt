@@ -23,7 +23,7 @@ set(BUILD_NAME "386")
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
 
 # Board configuration variant (M1, M2, PC or Z2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC or Z2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC or Z2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -37,10 +37,10 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
 
 # Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
+set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 
 # Enable LTEMM support (performance degradation is expected)
-option(EMM "Enable LTEMM support" ON)
+option(EMM "Enable LTEMM support" OFF)
 
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
@@ -52,7 +52,7 @@ option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
 
 # Profiling (for performance analysis)
-option(PROFILE_ENABLED "Enable i386 instruction profiling" OFF)
+option(PROFILE_ENABLED "Enable i386 instruction profiling" ON)
 
 if(BOARD STREQUAL "M1")
     SET(BUILD_NAME "m1p2-${BUILD_NAME}")
@@ -66,11 +66,11 @@ endif()
 
 # CPU voltage selection based on speed
 if(CPU_SPEED GREATER_EQUAL 504)
-    set(CPU_VOLTAGE "VREG_VOLTAGE_1_65")
+    set(CPU_VOLTAGE "VREG_VOLTAGE_1_60")
 elseif(CPU_SPEED GREATER_EQUAL 378)
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_60")
 else()
-    set(CPU_VOLTAGE "VREG_VOLTAGE_1_50")
+    set(CPU_VOLTAGE "VREG_VOLTAGE_1_60")
 endif()
 
 message(STATUS "frank-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE} ${AUDIO_TYPE}")
@@ -208,9 +208,9 @@ endif()
 add_subdirectory(drivers/usbhid)
 
 if(EMM)
-    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}-emm")
+    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}-emm")
 else ()
-    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
+    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
 endif()
 
 #=============================================================================
