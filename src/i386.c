@@ -150,8 +150,12 @@ enum {
 static void cpu_debug(CPUI386 *cpu);
 
 #ifdef I386_PROFILE
+#include "ff.h"
+#include <pico/time.h>
 static CPUI386 *i386_profile_cpu;
 static cpu_int_hook_t i386_profile_bios_hooks[CPU_INT_COUNT];
+static uint64_t i386_profile_start_us;
+static unsigned i386_profile_dump_seq;
 
 static bool i386_profile_bios_int_handler(CPUI386 *cpu, void *opaque)
 {
@@ -190,6 +194,7 @@ static inline void i386_profile_bios_iret(CPUI386 *cpu)
 void i386_profile_install_bios_hooks(CPUI386 *cpu)
 {
 	i386_profile_cpu = cpu;
+	i386_profile_start_us = time_us_64();
 	for (unsigned no = 0; no < CPU_INT_COUNT; ++no) {
 		if (no == 0x2f)
 			continue;
@@ -210,13 +215,36 @@ void i386_profile_reset(void)
 	cpu->bios_prof_depth = 0;
 }
 
+static bool i386_profile_has_data(CPUI386 *cpu)
+{
+	if (!cpu)
+		return false;
+
+	for (unsigned no = 0; no < CPU_INT_COUNT; ++no) {
+		if (cpu->bios_prof_count[no] || cpu->bios_prof_total[no])
+			return true;
+	}
+	return false;
+}
+
+static void i386_profile_write_line(FIL *fp, const char *s)
+{
+	UINT bw;
+	f_write(fp, s, strlen(s), &bw);
+}
+
 void i386_profile_dump(void)
 {
 	CPUI386 *cpu = i386_profile_cpu;
 	if (!cpu)
 		return;
 
-	printf("BIOS INT profile: cycle=%ld\n", cpu->cycle);
+	uint64_t now_us = time_us_64();
+	uint64_t elapsed_us = i386_profile_start_us ? (now_us - i386_profile_start_us) : 0;
+	printf("BIOS INT profile: cycle=%ld elapsed_us=%llu elapsed_ms=%llu\n",
+	       cpu->cycle,
+	       (unsigned long long)elapsed_us,
+	       (unsigned long long)(elapsed_us / 1000));
 	for (unsigned no = 0; no < CPU_INT_COUNT; ++no) {
 		if (!cpu->bios_prof_count[no] && !cpu->bios_prof_total[no])
 			continue;
@@ -226,6 +254,79 @@ void i386_profile_dump(void)
 		       (unsigned long long)cpu->bios_prof_total[no],
 		       cpu->bios_prof_last_start[no]);
 	}
+}
+
+static unsigned i386_profile_next_dump_seq(void)
+{
+	/* Keep numbering monotonic for multiple resets in one emulator session and
+	 * also avoid overwriting files that already exist on the SD card.
+	 */
+	FILINFO info;
+	char path[32];
+	unsigned seq = i386_profile_dump_seq + 1;
+
+	for (; seq < 10000; ++seq) {
+		snprintf(path, sizeof(path), "386/biosprof_%04u.txt", seq);
+		if (f_stat(path, &info) != FR_OK) {
+			i386_profile_dump_seq = seq;
+			return seq;
+		}
+	}
+
+	/* Fallback after 9999 dumps: do not wrap to 0001 and overwrite old data. */
+	return ++i386_profile_dump_seq;
+}
+
+
+void i386_profile_dump_sd_and_reset(const char *reason)
+{
+	CPUI386 *cpu = i386_profile_cpu;
+	if (!i386_profile_has_data(cpu))
+		return;
+
+	uint64_t now_us = time_us_64();
+	uint64_t elapsed_us = i386_profile_start_us ? (now_us - i386_profile_start_us) : 0;
+	unsigned seq = i386_profile_next_dump_seq();
+	char path[40];
+	snprintf(path, sizeof(path), "386/biosprof_%04u.txt", seq);
+		
+	FIL fp;
+	FRESULT fr = f_open(&fp, path, FA_WRITE | FA_CREATE_NEW);
+	if (fr != FR_OK) {
+		/* Keep data in RAM if SD write is unavailable.  The caller may try again
+		 * before a later reset/watchdog reboot.
+		 */
+		return;
+	}
+
+	char buf[192];
+	int len = snprintf(buf, sizeof(buf),
+	                   "BIOS INT profile: file=%s reason=%s cycle=%ld elapsed_us=%llu elapsed_ms=%llu\n",
+	                   path,
+	                   reason ? reason : "reset",
+	                   cpu->cycle,
+	                   (unsigned long long)elapsed_us,
+	                   (unsigned long long)(elapsed_us / 1000));
+	if (len > 0)
+		i386_profile_write_line(&fp, buf);
+
+	for (unsigned no = 0; no < CPU_INT_COUNT; ++no) {
+		if (!cpu->bios_prof_count[no] && !cpu->bios_prof_total[no])
+			continue;
+		len = snprintf(buf, sizeof(buf),
+		              "  INT %02X: count=%lu total=%llu last_start=%ld\n",
+		              no,
+		              (unsigned long)cpu->bios_prof_count[no],
+		              (unsigned long long)cpu->bios_prof_total[no],
+		              cpu->bios_prof_last_start[no]);
+		if (len > 0)
+			i386_profile_write_line(&fp, buf);
+	}
+
+	i386_profile_write_line(&fp, "\n");
+	f_sync(&fp);
+	f_close(&fp);
+	i386_profile_reset();
 }
 #else
 #define i386_profile_bios_iret(cpu) ((void)0)
@@ -5036,6 +5137,9 @@ uword cpu_getflags(CPUI386 *cpu)
 
 void cpui386_reset(CPUI386 *cpu)
 {
+#ifdef I386_PROFILE
+	i386_profile_dump_sd_and_reset("cpui386_reset");
+#endif
 	for (int i = 0; i < 8; i++) {
 		REGi(i) = 0;
 	}

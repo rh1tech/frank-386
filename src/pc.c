@@ -811,7 +811,7 @@ void __not_in_flash_func(pc_step)(PC *pc)
 #endif
 #endif
 
-#ifdef I386_PROFILE
+#if 0
 	/* Dump profile every ~10M instructions */
 	static uint32_t prof_dump_counter = 0;
 	prof_dump_counter += 4096;

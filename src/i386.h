@@ -233,6 +233,7 @@ inline static cpu_int_hook_t* cpu_set_int_hook(CPUI386 *cpu, u8 no, cpu_int_hook
 #ifdef I386_PROFILE
 void i386_profile_dump(void);
 void i386_profile_reset(void);
+void i386_profile_dump_sd_and_reset(const char *reason);
 void i386_profile_install_bios_hooks(CPUI386 *cpu);
 #endif
 

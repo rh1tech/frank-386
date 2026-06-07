@@ -1124,6 +1124,9 @@ int main(void) {
         if (settingsui_restart_requested()) {
             settingsui_clear_restart();
             DBG_PRINT("Settings changed - triggering RP reset...\n");
+#ifdef I386_PROFILE
+            i386_profile_dump_sd_and_reset("watchdog_reboot_settings");
+#endif
             // Full hardware reset via watchdog
             *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
             watchdog_reboot(0, 0, 0);
@@ -1153,6 +1156,9 @@ int main(void) {
     }
 
     DBG_PRINT("\nEmulation stopped.\n");
+#ifdef I386_PROFILE
+    i386_profile_dump_sd_and_reset("watchdog_reboot_shutdown");
+#endif
     *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
     watchdog_reboot(0, 0, 0);
     while (true);
