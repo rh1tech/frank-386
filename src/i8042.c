@@ -115,9 +115,9 @@ struct KBDState {
 
 /* A20 gate — controlled by KBC commands 0xDD/0xDF and output port bit 1.
  * The CPU pointer is set once from pc_new() via i8042_set_cpu(). */
-static CPUI386 *a20_cpu = NULL;
+static CPU *a20_cpu = NULL;
 
-void i8042_set_cpu(void *cpu) { a20_cpu = (CPUI386 *)cpu; }
+void i8042_set_cpu(void *cpu) { a20_cpu = (CPU *)cpu; }
 
 static void ioport_set_a20(int val)
 {

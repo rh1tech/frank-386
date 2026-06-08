@@ -41,31 +41,31 @@ void debug_log(const char *fmt, ...) {
 
 
 /* ---- Register access adapter macros ---- */
-#define _cpu  (_nr_cpu)
-#define CPU_AX   cpu_getax(_cpu)
-#define CPU_AH   cpu_get_ah(_cpu)
-#define CPU_AL   cpu_get_al(_cpu)
-#define CPU_BX   cpu_get_bx(_cpu)
-#define CPU_CX   cpu_get_cx(_cpu)
-#define CPU_DX   cpu_get_dx(_cpu)
-#define CPU_ES   cpu_get_es(_cpu)
-#define CPU_DI   cpu_get_di(_cpu)
-#define CPU_SI   cpu_get_si(_cpu)
-#define CPU_DS   cpu_get_ds(_cpu)
+#define _cpu  _nr_cpu
+#define CPU_AX   _cpu->ext_accessors->get_reg16(_cpu, AX_REG_IDX)
+#define CPU_AH   _cpu->ext_accessors->get_reg8(_cpu, AH_REG_IDX)
+#define CPU_AL   _cpu->ext_accessors->get_reg8(_cpu, AL_REG_IDX)
+#define CPU_BX   _cpu->ext_accessors->get_reg16(_cpu, BX_REG_IDX)
+#define CPU_CX   _cpu->ext_accessors->get_reg16(_cpu, CX_REG_IDX)
+#define CPU_DX   _cpu->ext_accessors->get_reg16(_cpu, DX_REG_IDX)
+#define CPU_ES   _cpu->ext_accessors->get_seg16(_cpu, SEG_ES)
+#define CPU_DI   _cpu->ext_accessors->get_reg16(_cpu, DI_REG_IDX)
+#define CPU_SI   _cpu->ext_accessors->get_reg16(_cpu, SI_REG_IDX)
+#define CPU_DS   _cpu->ext_accessors->get_seg16(_cpu, SEG_DS)
 
 /* Setters as lvalue-compatible macros via statement expressions */
-#define SET_CPU_AX(v)  cpu_setax(_cpu, (v))
-#define SET_CPU_AL(v)  cpu_set_al(_cpu, (v))
-#define SET_CPU_AH(v)  cpu_set_ah(_cpu, (v))
-#define SET_CPU_BX(v)  cpu_set_bx(_cpu, (v))
-#define SET_CPU_CX(v)  cpu_set_cx(_cpu, (v))
-#define SET_CPU_DX(v)  cpu_set_dx(_cpu, (v))
-#define SET_CPU_DI(v)  cpu_set_di(_cpu, (v))
-#define SET_CPU_FL_CF(v) cpu_set_cf(_cpu, (v))
-#define CPU_FL_CF      cpu_get_cf(_cpu)
+#define SET_CPU_AX(v)  _cpu->ext_accessors->set_reg16(_cpu, AX_REG_IDX, (v))
+#define SET_CPU_AL(v)  _cpu->ext_accessors->set_reg8(_cpu, AL_REG_IDX, (v))
+#define SET_CPU_AH(v)  _cpu->ext_accessors->set_reg8(_cpu, AH_REG_IDX, (v))
+#define SET_CPU_BX(v)  _cpu->ext_accessors->set_reg16(_cpu, BX_REG_IDX, (v))
+#define SET_CPU_CX(v)  _cpu->ext_accessors->set_reg16(_cpu, CX_REG_IDX, (v))
+#define SET_CPU_DX(v)  _cpu->ext_accessors->set_reg16(_cpu, DX_REG_IDX, (v))
+#define SET_CPU_DI(v)  _cpu->ext_accessors->set_reg16(_cpu, DI_REG_IDX, (v))
+#define SET_CPU_FL_CF(v) _cpu->ext_accessors->set_flag(_cpu, CF, (v))
+#define CPU_FL_CF      (_cpu->ext_accessors->get_flags(_cpu, CF) ? 1 : 0)
 
 /* Guest memory access via physical mem pointer */
-static CPUI386 *_nr_cpu;
+static CPU* _nr_cpu;
 
 static inline uint8_t  read86(uint32_t a)     { return pload8(a); }
 static inline uint16_t readw86(uint32_t a)    { return pload8(a) | ((uint16_t)pload8(a+1) << 8); }
@@ -824,10 +824,10 @@ static bool redirector_handler_impl() {
     return true;
 }
 
-static bool int2f_callback(CPUI386 *cpu, void *opaque) {
+static bool int2f_callback(CPU *cpu, void *opaque) {
     _nr_cpu = cpu;
     /* Only handle our redirector multiplex (AH=11h) */
-    if (cpu_get_ah(cpu) != 0x11) {
+    if (CPU_AH != 0x11) {
         return false; /* not handled, let BIOS chain */
     }
     debug_log("redirector_handler_impl -> 0x%04x\n", CPU_AX);
@@ -836,7 +836,7 @@ static bool int2f_callback(CPUI386 *cpu, void *opaque) {
     return res;
 }
 
-void netredirect_init(CPUI386 *cpu, int enable) {
+void netredirect_init(CPU *cpu, int enable) {
     cpu_int_hook_t* new = enable ? (cpu_int_hook_t*)calloc(sizeof(cpu_int_hook_t), 1) : NULL;
     if (new) new->handler = int2f_callback;
     cpu_int_hook_t* prev = cpu_set_int_hook(cpu, 0x2F, new);

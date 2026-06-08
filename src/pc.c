@@ -12,18 +12,12 @@
 #include <hardware/watchdog.h>
 
 #include "mpu401.c.inl"
-void netredirect_init(CPUI386 *cpu, int enable);
+void netredirect_init(CPU *cpu, int enable);
 
 unsigned long phys_mem_size = 8l << 20;
 void* g_pc;
 
-#ifdef USEKVM
-#define cpu_raise_irq cpukvm_raise_irq
-#define cpu_get_cycle cpukvm_get_cycle
-#else
 #define cpu_raise_irq cpui386_raise_irq
-#define cpu_get_cycle cpui386_get_cycle
-#endif
 
 /* ---- Emulink FDD: simple virtual floppy on ports 0xF1F0/0xF1F4 ----------
  * Protocol (matches tiny386 / this BIOS):
@@ -1017,10 +1011,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 		cpui386_enable_fpu(pc->cpu);
 	pc->bios = conf->bios;
 	pc->vga_bios = conf->vga_bios;
-	pc->linuxstart = conf->linuxstart;
-	pc->kernel = conf->kernel;
-	pc->initrd = conf->initrd;
-	pc->cmdline = conf->cmdline;
 	pc->enable_serial = conf->enable_serial;
 #if !defined(_WIN32) && !defined(__wasm__)
 	if (pc->enable_serial)
@@ -1203,38 +1193,7 @@ void load_bios_and_reset(PC *pc)
 	}
 	sn76489_reset();
 
-	// Debug: verify BIOS loaded at reset vector
-	uint8_t *reset_vec = PC_RAM + 0xFFFF0;
-
-#ifndef USEKVM
-	if (pc->kernel && pc->kernel[0]) {
-		int start_addr = 0x10000;
-		int cmdline_addr = 0xf800;
-		int kernel_size = load_rom(PC_RAM, pc->kernel, 0x00100000, 0);
-		int initrd_size = 0;
-		if (pc->initrd && pc->initrd[0])
-			initrd_size = load_rom(PC_RAM, pc->initrd, 0x00400000, 0);
-		if (pc->cmdline && pc->cmdline[0])
-			strcpy(PC_RAM + cmdline_addr, pc->cmdline);
-		else
-			strcpy(PC_RAM + cmdline_addr, "");
-
-		load_rom(PC_RAM, pc->linuxstart, start_addr, 0);
-		cpui386_reset_pm(pc->cpu, 0x10000);
-		cpui386_set_gpr(pc->cpu, 0, phys_mem_size);
-		cpui386_set_gpr(pc->cpu, 3, initrd_size);
-		cpui386_set_gpr(pc->cpu, 1, cmdline_addr);
-		cpui386_set_gpr(pc->cpu, 2, kernel_size);
-	} else {
-		cpui386_reset(pc->cpu);
-	}
-	// Debug: print CPU state after reset
-	uint32_t cs, ip;
-	int halt;
-	cpui386_get_state(pc->cpu, &cs, &ip, &halt);
-	printf("CPU after reset: CS=%04lx IP=%08lx halt=%d\n",
-	       (unsigned long)cs, (unsigned long)ip, halt);
-#endif
+	cpui386_reset(pc->cpu);
 }
 
 static long parse_mem_size(const char *value)
@@ -1297,14 +1256,6 @@ int parse_conf_ini(void* user, const char* section,
 			conf->fdd[1] = strdup(value);
 		} else if (NAME("redirector")) {
 			conf->redirector = atoi(value);
-		} else if (NAME("linuxstart")) {
-			conf->linuxstart = strdup(value);
-		} else if (NAME("kernel")) {
-			conf->kernel = strdup(value);
-		} else if (NAME("initrd")) {
-			conf->initrd = strdup(value);
-		} else if (NAME("cmdline")) {
-			conf->cmdline = strdup(value);
 		} else if (NAME("enable_serial")) {
 			conf->enable_serial = atoi(value);
 		} else if (NAME("vga_force_8dm")) {

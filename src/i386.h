@@ -25,7 +25,7 @@ typedef s32 sword;
 /* Forward declaration for FPU */
 typedef struct FPU FPU;
 
-/* CPU callback structure - must be defined before CPUI386 */
+/* CPU callback structure - must be defined before CPU */
 typedef struct {
 	void *pic;
 	int (*pic_read_irq)(void *);
@@ -52,18 +52,54 @@ struct tlb_entry {
 };
 
 #define CPU_INT_COUNT 256
-struct CPUI386;
-typedef bool (*cpu_int_handler_t)(struct CPUI386 *cpu, void *opaque);
+struct CPU;
+typedef bool (*cpu_int_handler_t)(struct CPU *cpu, void *opaque);
 typedef struct cpu_int_hook {
     cpu_int_handler_t handler;
     void *opaque;
 } cpu_int_hook_t;
 
-/*
- * CPUI386 structure - main CPU state
- * Defined here so JIT compiler can access fields directly
- */
-struct CPUI386 {
+typedef u8 (*get_reg8_t)(struct CPU* cpu, u8 regn);
+typedef u16 (*get_reg16_t)(struct CPU* cpu, u8 regn);
+typedef u32 (*get_reg32_t)(struct CPU* cpu, u8 regn);
+typedef u32 (*get_flags_t)(struct CPU* cpu, u32 mask);
+
+typedef void (*set_reg8_t)(struct CPU* cpu, u8 regn, u8 v);
+typedef void (*set_reg16_t)(struct CPU* cpu, u8 regn, u16 v);
+typedef void (*set_reg32_t)(struct CPU* cpu, u8 regn, u32 v);
+typedef void (*set_flag_t)(struct CPU* cpu, u32 mask, bool v);
+typedef void (*set_flags_t)(struct CPU* cpu, uword set_mask, uword clear_mask);
+
+typedef void (*cpu_enable_fpu_t)(struct CPU* cpu);
+typedef void (*cpu_reset_t)(struct CPU* cpu);
+typedef void (*cpu_reset_pm_t)(struct CPU* cpu, uint32_t start_addr);
+typedef void (*cpu_step_t)(struct CPU* cpu, int stepcount);
+typedef void (*cpu_raise_irq_t)(struct CPU* cpu);
+typedef void (*cpu_setexc_t)(struct CPU* cpu, int excno, uword excerr);
+typedef void (*cpu_abort_t)(struct CPU* cpu, int code);
+
+typedef struct CPU_ext_accessors {
+	get_reg8_t get_reg8;
+	get_reg16_t get_reg16;
+	get_reg32_t get_reg32;
+	set_reg8_t set_reg8;
+	set_reg16_t set_reg16;
+	set_reg32_t set_reg32;
+	get_reg16_t get_seg16;
+	set_reg16_t set_seg16;
+	get_flags_t get_flags;
+	set_flag_t set_flag;
+	set_flags_t setflags;
+	cpu_enable_fpu_t enable_fpu;
+	cpu_reset_t reset;
+	cpu_reset_pm_t reset_pm;
+	cpu_step_t step;
+	cpu_raise_irq_t raise_irq;
+	cpu_setexc_t setexc;
+	cpu_abort_t abort;
+} CPU_ext_accessors_t;
+
+struct CPU {
 #ifdef I386_OPT1
 	union {
 		u32 r32;
@@ -76,165 +112,107 @@ struct CPUI386 {
 	uword ip, next_ip;
 	uword flags;
 	uword flags_mask;
-	int cpl;
-	bool code16;
-	uword sp_mask;
-	bool halt;
-
-	FPU *fpu;
-
-	struct {
-		uword sel;
-		uword base;
-		uword limit;
-		uword flags;
-	} seg[8];
-
-	struct {
-		uword base;
-		uword limit;
-	} idt, gdt;
-
-	uword cr0, cr2, cr3;
-
-	uword dr[8];
-
-	struct {
-		unsigned long laddr;
-		uword xaddr;
-	} ifetch;
-
-	struct {
-		int op;
-		uword dst;
-		uword dst2;
-		uword src1;
-		uword src2;
-		uword mask;
-	} cc;
-
-	struct {
-		int size;
-		struct tlb_entry *tab;
-	} tlb;
-#if PREFETCH_ENABLED
-/* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
- * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
- * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
- * Invalidated automatically when the physical address of next_ip falls outside
- * the current 4-byte slot */
-	u32 prefetch_base;
-	u8  prefetch[16] __attribute__((aligned(4)));
-#endif
-	long cycle;
-
-	int excno;
-	uword excerr;
-
-	bool intr;
-	CPU_CB cb;
 
 	int gen;
-	struct {
-		uword cs, eip, esp;
-	} sysenter;
-
 	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
-#ifdef I386_PROFILE
-	/* BIOS INT profiler state.  The hook records the entry cycle; IRET closes
-	 * the topmost active BIOS INT.  last_start[] is kept per vector, while
-	 * the stack preserves nesting when BIOS code invokes another INT.
-	 */
-	long bios_prof_last_start[CPU_INT_COUNT];
-	uint64_t bios_prof_total[CPU_INT_COUNT];
-	uint32_t bios_prof_count[CPU_INT_COUNT];
-	u8 bios_prof_stack[16];
-	long bios_prof_stack_start[16];
-	u8 bios_prof_depth;
-#endif
-
 	u32 a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
-};
+	CPU_ext_accessors_t* ext_accessors;
+}; // should be the same in all implementations
 
-typedef struct CPUI386 CPUI386;
+typedef struct CPU CPU;
 
-CPUI386 *cpui386_new(int gen, CPU_CB **cb);
-void cpui386_delete(CPUI386 *cpu);
-void cpui386_enable_fpu(CPUI386 *cpu);
-void cpui386_reset(CPUI386 *cpu);
-void cpui386_reset_pm(CPUI386 *cpu, uint32_t start_addr);
-void cpui386_step(CPUI386 *cpu, int stepcount);
-void cpui386_raise_irq(CPUI386 *cpu);
-void cpui386_set_gpr(CPUI386 *cpu, int i, u32 val);
-long cpui386_get_cycle(CPUI386 *cpu);
-void cpui386_get_state(CPUI386 *cpu, uint32_t *cs, uint32_t *ip, int *halt);
-
-bool cpu_load8(CPUI386 *cpu, int seg, uword addr, u8 *res);
-bool cpu_store8(CPUI386 *cpu, int seg, uword addr, u8 val);
-bool cpu_load16(CPUI386 *cpu, int seg, uword addr, u16 *res);
-bool cpu_store16(CPUI386 *cpu, int seg, uword addr, u16 val);
-bool cpu_load32(CPUI386 *cpu, int seg, uword addr, u32 *res);
-bool cpu_store32(CPUI386 *cpu, int seg, uword addr, u32 val);
-void cpu_setax(CPUI386 *cpu, u16 ax);
-u16 cpu_getax(CPUI386 *cpu);
-void cpu_setexc(CPUI386 *cpu, int excno, uword excerr);
-void cpu_setflags(CPUI386 *cpu, uword set_mask, uword clear_mask);
-uword cpu_getflags(CPUI386 *cpu);
-void cpu_abort(CPUI386 *cpu, int code);
+CPU *cpui386_new(int gen, CPU_CB **cb);
+inline static void cpui386_enable_fpu(CPU *cpu) {
+	cpu->ext_accessors->enable_fpu(cpu);
+}
+inline static void cpui386_reset(CPU *cpu) {
+	cpu->ext_accessors->reset(cpu);
+}
+inline static void cpui386_reset_pm(CPU *cpu, uint32_t start_addr) {
+	cpu->ext_accessors->reset_pm(cpu, start_addr);
+}
+inline static void cpui386_step(CPU *cpu, int stepcount) {
+	cpu->ext_accessors->step(cpu, stepcount);
+}
+inline static void cpui386_raise_irq(CPU *cpu) {
+	cpu->ext_accessors->raise_irq(cpu);
+}
+inline static void cpu_setexc(CPU *cpu, int excno, uword excerr) {
+	cpu->ext_accessors->setexc(cpu, excno, excerr);
+}
+inline static void cpu_setflags(CPU *cpu, uword set_mask, uword clear_mask) {
+	cpu->ext_accessors->setflags(cpu, set_mask, clear_mask);
+}
+inline static uword cpu_getflags(CPU *cpu) {
+	return cpu->ext_accessors->get_flags(cpu, ~0);
+}
+inline static void cpu_abort(CPU *cpu, int code) {
+	cpu->ext_accessors->abort(cpu, code);
+}
 
 // Register accessors for disk/BIOS emulation
 // 8-bit registers
-u8 cpu_get_al(CPUI386 *cpu);
-u8 cpu_get_ah(CPUI386 *cpu);
-u8 cpu_get_bl(CPUI386 *cpu);
-u8 cpu_get_bh(CPUI386 *cpu);
-u8 cpu_get_cl(CPUI386 *cpu);
-u8 cpu_get_ch(CPUI386 *cpu);
-u8 cpu_get_dl(CPUI386 *cpu);
-u8 cpu_get_dh(CPUI386 *cpu);
-void cpu_set_al(CPUI386 *cpu, u8 val);
-void cpu_set_ah(CPUI386 *cpu, u8 val);
-void cpu_set_bl(CPUI386 *cpu, u8 val);
-void cpu_set_bh(CPUI386 *cpu, u8 val);
-void cpu_set_cl(CPUI386 *cpu, u8 val);
-void cpu_set_ch(CPUI386 *cpu, u8 val);
-void cpu_set_dl(CPUI386 *cpu, u8 val);
-void cpu_set_dh(CPUI386 *cpu, u8 val);
+#define AL_REG_IDX 0
+#define CL_REG_IDX 1
+#define DL_REG_IDX 2
+#define BL_REG_IDX 3
+#define AH_REG_IDX 4
+#define CH_REG_IDX 5
+#define DH_REG_IDX 6
+#define BH_REG_IDX 7
 // 16-bit registers
-u16 cpu_get_bx(CPUI386 *cpu);
-u16 cpu_get_cx(CPUI386 *cpu);
-u16 cpu_get_dx(CPUI386 *cpu);
-u16 cpu_get_es(CPUI386 *cpu);
-void cpu_set_bx(CPUI386 *cpu, u16 val);
-void cpu_set_cx(CPUI386 *cpu, u16 val);
-void cpu_set_dx(CPUI386 *cpu, u16 val);
-// Carry flag
-u16 cpu_get_bp(CPUI386 *cpu);
-u16 cpu_get_si(CPUI386 *cpu);
-u16 cpu_get_di(CPUI386 *cpu);
-void cpu_set_si(CPUI386 *cpu, u16 val);
-void cpu_set_di(CPUI386 *cpu, u16 val);
-u16 cpu_get_ds(CPUI386 *cpu);
-u16 cpu_get_ss(CPUI386 *cpu);
-void cpu_set_cf(CPUI386 *cpu, int val);
-int cpu_get_cf(CPUI386 *cpu);
-// A20 gate control
-void cpu_set_a20(CPUI386 *cpu, int enabled);
-int cpu_get_a20(CPUI386 *cpu);
+#define AX_REG_IDX 0
+#define CX_REG_IDX 1
+#define DX_REG_IDX 2
+#define BX_REG_IDX 3
+#define SP_REG_IDX 4
+#define BP_REG_IDX 5
+#define SI_REG_IDX 6
+#define DI_REG_IDX 7
 
-inline static cpu_int_hook_t* cpu_set_int_hook(CPUI386 *cpu, u8 no, cpu_int_hook_t* hook)
-{
-	cpu_int_hook_t* prev = cpu->int_hooks[no];
-	cpu->int_hooks[no] = hook;
-	return prev;
-}
+enum {
+	SEG_ES = 0,
+	SEG_CS,
+	SEG_SS,
+	SEG_DS,
+	SEG_FS,
+	SEG_GS,
+	SEG_LDT,
+	SEG_TR,
+};
+
+enum {
+	CF = 0x1,
+	/* 1 0x2 */
+	PF = 0x4,
+	/* 0 0x8 */
+	AF = 0x10,
+	/* 0 0x20 */
+	ZF = 0x40,
+	SF = 0x80,
+	TF = 0x100,
+	IF = 0x200,
+	DF = 0x400,
+	OF = 0x800,
+	IOPL = 0x3000,
+	NT = 0x4000,
+	/* 0 0x8000 */
+	RF = 0x10000,
+	VM = 0x20000,
+};
+
+// A20 gate control
+void cpu_set_a20(CPU *cpu, int enabled);
+int cpu_get_a20(CPU *cpu);
+
+cpu_int_hook_t* cpu_set_int_hook(CPU *cpu, u8 no, cpu_int_hook_t* hook);
 
 /* Profiling support (enable with -DI386_PROFILE) */
 #ifdef I386_PROFILE
 void i386_profile_dump(void);
 void i386_profile_reset(void);
 void i386_profile_dump_sd_and_reset(const char *reason);
-void i386_profile_install_bios_hooks(CPUI386 *cpu);
+void i386_profile_install_bios_hooks(CPU *cpu);
 #endif
 
 #endif /* I386_H */

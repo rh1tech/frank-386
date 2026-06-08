@@ -7,6 +7,112 @@
 #include <unistd.h>
 #include <string.h>
 
+/*
+ * CPUI386 structure - main CPU state
+ */
+typedef struct CPUI386 {
+#ifdef I386_OPT1
+	union {
+		u32 r32;
+		u16 r16;
+		u8 r8[2];
+	} gprx[8];
+#else
+	uword gpr[8];
+#endif
+	uword ip, next_ip;
+	uword flags;
+	uword flags_mask;
+
+	int gen;
+	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
+	u32 a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
+	CPU_ext_accessors_t* ext_accessors;
+// ^ base part
+
+	int cpl;
+	bool code16;
+	uword sp_mask;
+	bool halt;
+
+	FPU *fpu;
+
+	struct {
+		uword sel;
+		uword base;
+		uword limit;
+		uword flags;
+	} seg[8];
+
+	struct {
+		uword base;
+		uword limit;
+	} idt, gdt;
+
+	uword cr0, cr2, cr3;
+
+	uword dr[8];
+
+	struct {
+		unsigned long laddr;
+		uword xaddr;
+	} ifetch;
+
+	struct {
+		int op;
+		uword dst;
+		uword dst2;
+		uword src1;
+		uword src2;
+		uword mask;
+	} cc;
+
+	struct {
+		int size;
+		struct tlb_entry *tab;
+	} tlb;
+#if PREFETCH_ENABLED
+/* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
+ * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
+ * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
+ * Invalidated automatically when the physical address of next_ip falls outside
+ * the current 4-byte slot */
+	u32 prefetch_base;
+	u8  prefetch[16] __attribute__((aligned(4)));
+#endif
+	long cycle;
+
+	int excno;
+	uword excerr;
+
+	bool intr;
+	CPU_CB cb;
+
+	struct {
+		uword cs, eip, esp;
+	} sysenter;
+
+#ifdef I386_PROFILE
+	/* BIOS INT profiler state.  The hook records the entry cycle; IRET closes
+	 * the topmost active BIOS INT.  last_start[] is kept per vector, while
+	 * the stack preserves nesting when BIOS code invokes another INT.
+	 */
+	long bios_prof_last_start[CPU_INT_COUNT];
+	uint64_t bios_prof_total[CPU_INT_COUNT];
+	uint32_t bios_prof_count[CPU_INT_COUNT];
+	u8 bios_prof_stack[16];
+	long bios_prof_stack_start[16];
+	u8 bios_prof_depth;
+#endif
+} CPUI386;
+
+bool cpu_load8(CPUI386 *cpu, int seg, uword addr, u8 *res);
+bool cpu_store8(CPUI386 *cpu, int seg, uword addr, u8 val);
+bool cpu_load16(CPUI386 *cpu, int seg, uword addr, u16 *res);
+bool cpu_store16(CPUI386 *cpu, int seg, uword addr, u16 val);
+bool cpu_load32(CPUI386 *cpu, int seg, uword addr, u32 *res);
+bool cpu_store32(CPUI386 *cpu, int seg, uword addr, u32 val);
+
 #if PREFETCH_ENABLED
    #define PREFETCH_RESET cpu->prefetch_base = (u32)-1;
 #else
@@ -67,7 +173,7 @@ void dolog(const char *fmt, ...)
 #define wordmask ((uword) ((sword) -1))
 #define TRY(f) if(!(f)) { return false; }
 #define TRYL(f) if(unlikely(!(f))) { return false; }
-#define TRY1(f) if(unlikely(!(f))) { dolog("TRY1 @ %s %d\n", __func__, __LINE__); cpu_abort(cpu, -1); }
+#define TRY1(f) if(unlikely(!(f))) { dolog("TRY1 @ %s %d\n", __func__, __LINE__); cpu_abort((CPU*)cpu, -1); }
 #define THROW(ex, err) do { \
     dolog("THROW ex=%d err=%x eip=%08x cs=%04x %s:%d\n", \
           (ex), (unsigned)(err), cpu->ip, cpu->seg[SEG_CS].sel,  __func__, __LINE__); \
@@ -105,37 +211,6 @@ enum {
 };
 
 enum {
-	CF = 0x1,
-	/* 1 0x2 */
-	PF = 0x4,
-	/* 0 0x8 */
-	AF = 0x10,
-	/* 0 0x20 */
-	ZF = 0x40,
-	SF = 0x80,
-	TF = 0x100,
-	IF = 0x200,
-	DF = 0x400,
-	OF = 0x800,
-	IOPL = 0x3000,
-	NT = 0x4000,
-	/* 0 0x8000 */
-	RF = 0x10000,
-	VM = 0x20000,
-};
-
-enum {
-	SEG_ES = 0,
-	SEG_CS,
-	SEG_SS,
-	SEG_DS,
-	SEG_FS,
-	SEG_GS,
-	SEG_LDT,
-	SEG_TR,
-};
-
-enum {
 	SEG_D_BIT = 1 << 14,
 	SEG_B_BIT = 1 << 14,
 };
@@ -147,7 +222,6 @@ enum {
 #endif
 #define SEGi(x) (cpu->seg[x].sel)
 
-static void cpu_debug(CPUI386 *cpu);
 
 #ifdef I386_PROFILE
 #include "ff.h"
@@ -333,10 +407,10 @@ void i386_profile_dump_sd_and_reset(const char *reason)
 #endif
 
 
-void cpu_abort(CPUI386 *cpu, int code)
+static void i386_abort(CPU *_cpu, int code)
 {
+	CPUI386 *cpu = (CPUI386*)_cpu;
 	dolog("abort: %d %x cycle %ld\n", code, code, cpu->cycle);
-	cpu_debug(cpu);
 	abort();
 }
 
@@ -367,8 +441,9 @@ enum {
 	CC_AND, CC_OR, CC_XOR,
 };
 
-static int __not_in_flash_func( get_CF )(CPUI386 *cpu)
+static int __not_in_flash_func( get_CF )(CPU* _cpu)
 {
+	CPUI386* cpu = (CPUI386*)_cpu;
 	if (cpu->cc.mask & CF) {
 		switch(cpu->cc.op) {
 		case CC_ADC:
@@ -524,7 +599,7 @@ static int IRAM_ATTR get_OF(CPUI386 *cpu)
 			return cpu->cc.dst == sext32(1u << 31);
 		case CC_IMUL8: case CC_IMUL16: case CC_IMUL32:
 		case CC_MUL8: case CC_MUL16: case CC_MUL32:
-			return get_CF(cpu);
+			return get_CF((CPU*)cpu);
 		case CC_SAR:
 			return 0;
 		case CC_SHL:
@@ -551,7 +626,7 @@ static int IRAM_ATTR get_OF(CPUI386 *cpu)
 
 static void IRAM_ATTR refresh_flags(CPUI386 *cpu)
 {
-	SET_BIT(cpu->flags, get_CF(cpu), CF);
+	SET_BIT(cpu->flags, get_CF((CPU*)cpu), CF);
 	SET_BIT(cpu->flags, get_PF(cpu), PF);
 	SET_BIT(cpu->flags, get_AF(cpu), AF);
 	SET_BIT(cpu->flags, get_ZF(cpu), ZF);
@@ -1789,7 +1864,7 @@ static inline void clear_segs(CPUI386 *cpu)
  * instructions
  */
 #define ACOP_helper(NAME1, NAME2, BIT, OP, a, b, la, sa, lb, sb) \
-	int cf = get_CF(cpu); \
+	int cf = get_CF((CPU*)cpu); \
 	cpu->cc.src1 = sext ## BIT(la(a)); \
 	cpu->cc.src2 = sext ## BIT(lb(b)); \
 	cpu->cc.dst = sext ## BIT(cpu->cc.src1 OP cpu->cc.src2 OP cf); \
@@ -1818,7 +1893,7 @@ static inline void clear_segs(CPUI386 *cpu)
 	sa(a, cpu->cc.dst);
 
 #define INCDEC_helper(NAME, BIT, OP, a, la, sa) \
-	int cf = get_CF(cpu); \
+	int cf = get_CF((CPU*)cpu); \
 	cpu->cc.dst = sext ## BIT(sext ## BIT(la(a)) OP 1); \
 	cpu->cc.op = CC_ ## NAME ## BIT; \
 	SET_BIT(cpu->flags, cf, CF); \
@@ -1912,7 +1987,7 @@ static inline void clear_segs(CPUI386 *cpu)
 	uword x = la(a); \
 	uword y = ((lb(b)) & 0x1f) % (BIT + 1); \
 	if (y) { \
-		uword cf = get_CF(cpu); \
+		uword cf = get_CF((CPU*)cpu); \
 		uword res = sext ## BIT((x << y) | (cf << (y - 1)) | (y != 1 ? (x >> (BIT + 1 - y)) : 0)); \
 		int cf1 = (x >> (BIT - y)) & 1; \
 		int of1 = (res >> (sizeof(uword) * 8 - 1)) ^ cf1; \
@@ -1930,7 +2005,7 @@ static inline void clear_segs(CPUI386 *cpu)
 	uword x = la(a); \
 	uword y = ((lb(b)) & 0x1f) % (BIT + 1); \
 	if (y) { \
-		uword cf = get_CF(cpu); \
+		uword cf = get_CF((CPU*)cpu); \
 		uword res = sext ## BIT((x >> y) | (cf << (BIT - y)) | (y != 1 ? (x << (BIT + 1 - y)) : 0)); \
 		int cf1 = (sext ## BIT(x << (BIT - y)) >> (BIT - 1)) & 1; \
 		int of1 = ((res ^ (res << 1)) >> (BIT - 1)) & 1; \
@@ -2456,7 +2531,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	cpu->flags |= 0x2;
 
 #define CMC() \
-	int cf = get_CF(cpu); \
+	int cf = get_CF((CPU*)cpu); \
 	cpu->cc.mask &= ~CF; \
 	SET_BIT(cpu->flags, !cf, CF);
 
@@ -2570,6 +2645,9 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		saddr32(&meml, cpu->flags & ~(RF | VM)); \
 	}
 
+#define EFLAGS_MASK_86  0x0fd7
+#define EFLAGS_MASK_186 0x0fd7
+#define EFLAGS_MASK_286 0x7fd7
 #define EFLAGS_MASK_386 0x37fd7
 #define EFLAGS_MASK_486 0x77fd7
 #define EFLAGS_MASK_586 0x277fd7
@@ -3034,12 +3112,12 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	switch(b1 & 0xf) { \
 	case 0x0: cond =  get_OF(cpu); break; \
 	case 0x1: cond = !get_OF(cpu); break; \
-	case 0x2: cond =  get_CF(cpu); break; \
-	case 0x3: cond = !get_CF(cpu); break; \
+	case 0x2: cond =  get_CF((CPU*)cpu); break; \
+	case 0x3: cond = !get_CF((CPU*)cpu); break; \
 	case 0x4: cond =  get_ZF(cpu); break; \
 	case 0x5: cond = !get_ZF(cpu); break; \
-	case 0x6: cond =  get_ZF(cpu) ||  get_CF(cpu); break; \
-	case 0x7: cond = !get_ZF(cpu) && !get_CF(cpu); break; \
+	case 0x6: cond =  get_ZF(cpu) ||  get_CF((CPU*)cpu); break; \
+	case 0x7: cond = !get_ZF(cpu) && !get_CF((CPU*)cpu); break; \
 	case 0x8: cond =  get_SF(cpu); break; \
 	case 0x9: cond = !get_SF(cpu); break; \
 	case 0xa: cond =  get_PF(cpu); break; \
@@ -3479,7 +3557,7 @@ static bool __not_in_flash_func( check_ioperm )(CPUI386 *cpu, int port, int bit)
 	cpu->cc.mask = ZF | SF | PF;
 
 #define SALC() \
-	if (get_CF(cpu)) sreg8(0, 0xff); else sreg8(0, 0x00);
+	if (get_CF((CPU*)cpu)) sreg8(0, 0xff); else sreg8(0, 0x00);
 
 #define XLAT() \
 	if (curr_seg == -1) curr_seg = SEG_DS; \
@@ -3496,7 +3574,7 @@ static bool __not_in_flash_func( check_ioperm )(CPUI386 *cpu, int port, int bit)
 
 #define DAA() \
 	u8 al = lreg8(0); \
-	int cf = get_CF(cpu); \
+	int cf = get_CF((CPU*)cpu); \
 	cpu->flags &= ~CF; \
 	if ((al & 0xf) > 9 || get_AF(cpu)) { \
 		sreg8(0, al + 6); \
@@ -3514,7 +3592,7 @@ static bool __not_in_flash_func( check_ioperm )(CPUI386 *cpu, int port, int bit)
 
 #define DAS() \
 	u8 al = lreg8(0); \
-	int cf = get_CF(cpu); \
+	int cf = get_CF((CPU*)cpu); \
 	cpu->flags &= ~CF; \
 	if ((al & 0xf) > 9 || get_AF(cpu)) { \
 		sreg8(0, al - 6); \
@@ -3840,7 +3918,7 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 	case 0x174: cpu->sysenter.cs = REGi(0); break; \
 	case 0x176: cpu->sysenter.eip = REGi(0); break; \
 	case 0x175: cpu->sysenter.esp = REGi(0); break; \
-	default: cpu_debug(cpu); THROW(EX_GP, 0); \
+	default: THROW(EX_GP, 0); \
 	}
 
 #define RDMSR() \
@@ -3849,7 +3927,7 @@ static bool verrw_helper(CPUI386 *cpu, int sel, int wr, int *zf)
 	case 0x174: REGi(0) = cpu->sysenter.cs; REGi(2) = 0; break; \
 	case 0x176: REGi(0) = cpu->sysenter.eip; REGi(2) = 0; break; \
 	case 0x175: REGi(0) = cpu->sysenter.esp; REGi(2) = 0; break; \
-	default: cpu_debug(cpu); THROW(EX_GP, 0); \
+	default: THROW(EX_GP, 0); \
 	}
 
 static void __sysenter(CPUI386 *cpu, int pl, int cs)
@@ -4365,7 +4443,7 @@ static bool pmcall(CPUI386 *cpu, bool opsz16, uword addr, int sel, bool isjmp)
 
 		if (gt != 4 && gt != 12) {
 			fprintf(stderr, "gate type = %d\n", gt);
-			cpu_abort(cpu, -203);
+			cpu_abort((CPU*)cpu, -203);
 		}
 
 		// call gates
@@ -4564,7 +4642,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	cpu_int_hook_t* int_hook = cpu->int_hooks[no];
 	/* INT handler hook - intercept in V86 and real mode */
 	if (int_hook && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
-		if (int_hook->handler(cpu, int_hook->opaque)) return true; /* handled */
+		if (int_hook->handler((CPU*)cpu, int_hook->opaque)) return true; /* handled */
 	}
 	#if DEBUG_CPU
 	if (cpu->flags & VM && no >= 0x20) {
@@ -4774,15 +4852,15 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	}
 	case 3: /* from v8086 */ {
 //		dolog("int from v8086\n");
-		if (csdpl != 0) cpu_abort(cpu, -205);
-		if (gate16) cpu_abort(cpu, -206);
+		if (csdpl != 0) cpu_abort((CPU*)cpu, -205);
+		if (gate16) cpu_abort((CPU*)cpu, -206);
 //		dolog("call_isr %d %x PVL %d => 0\n", no, no, cpu->cpl, csdpl);
 		OptAddr msp0, mss0;
 		int newpl = 0;
 		uword oldss = cpu->seg[SEG_SS].sel;
 		uword oldsp = REGi(4);
 		uword newss, newsp;
-		if (!(cpu->seg[SEG_TR].flags & 0x8)) cpu_abort(cpu, -207);
+		if (!(cpu->seg[SEG_TR].flags & 0x8)) cpu_abort((CPU*)cpu, -207);
 		TRY(translate(cpu, &msp0, 1, SEG_TR, 4 + 8 * newpl, 4, 0));
 		TRY(translate(cpu, &mss0, 1, SEG_TR, 8 + 8 * newpl, 4, 0));
 		newsp = load32(cpu, &msp0);
@@ -4981,11 +5059,11 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 	}
 
 	if (isiret && (newflags & VM)) {
-		if (cpu->cpl != 0) cpu_abort(cpu, -208);
+		if (cpu->cpl != 0) cpu_abort((CPU*)cpu, -208);
 		// return to v8086
 //		dolog("pmiret PVL %d => %d (vm) %04x:%08x\n", cpu->cpl, 3, newcs, newip);
 		OptAddr meml_vmes, meml_vmds, meml_vmfs, meml_vmgs;
-		if (opsz16) cpu_abort(cpu, -209);
+		if (opsz16) cpu_abort((CPU*)cpu, -209);
 		TRY(translate(cpu, &meml4, 1, SEG_SS, (sp + 12) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml5, 1, SEG_SS, (sp + 16) & sp_mask, 4, 0));
 		TRY(translate(cpu, &meml_vmes, 1, SEG_SS, (sp + 20) & sp_mask, 4, 0));
@@ -5056,8 +5134,9 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 	return true;
 }
 
-void cpui386_step(CPUI386 *cpu, int stepcount)
+static void IRAM_ATTR i386_step(CPU* _cpu, int stepcount)
 {
+	CPUI386* cpu = (CPUI386*)_cpu;
 	if ((cpu->flags & IF) && cpu->intr) {
 		cpu->intr = false;
 		cpu->halt = false;
@@ -5065,7 +5144,7 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 		cpu->ip = cpu->next_ip;
 		if (!call_isr(cpu, no, false, 1)) {
 			if (!call_isr(cpu, EX_DF, true, 1)) {
-				cpui386_reset(cpu);
+				cpu->ext_accessors->reset(_cpu);
 				return;
 			}
 		}
@@ -5087,36 +5166,40 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 
 		if (cpu->excno == EX_DF) {
 			if (!call_isr(cpu, EX_DF, true, 1)) {
-				cpui386_reset(cpu);
+				cpu->ext_accessors->reset(_cpu);
 				return;
 			}
 		} else if (!call_isr(cpu, cpu->excno, pusherr, 1)) {
 			if (!call_isr(cpu, EX_DF, true, 1)) {
-				cpui386_reset(cpu);
+				cpu->ext_accessors->reset(_cpu);
 				return;
 			}
 		}
 	}
 }
 
-void cpu_setax(CPUI386 *cpu, u16 ax)
+void IRAM_ATTR cpu_set_ax(CPU* _cpu, u16 ax)
 {
+	CPUI386 *cpu = (CPUI386*)_cpu;
 	sreg16(0, ax);
 }
 
-u16 cpu_getax(CPUI386 *cpu)
+u16 IRAM_ATTR cpu_get_ax(CPU* _cpu)
 {
+	CPUI386 *cpu = (CPUI386*)_cpu;
 	return lreg16(0);
 }
 
-void cpu_setexc(CPUI386 *cpu, int excno, uword excerr)
+static void IRAM_ATTR i386_setexc(CPU* _cpu, int excno, uword excerr)
 {
+	CPUI386 *cpu = (CPUI386*)_cpu;
 	cpu->excno = excno;
 	cpu->excerr = excerr;
 }
 
-void cpu_setflags(CPUI386 *cpu, uword set_mask, uword clear_mask)
+static void IRAM_ATTR i386_setflags(CPU* _cpu, uword set_mask, uword clear_mask)
 {
+	CPUI386 *cpu = (CPUI386*)_cpu;
 	if (cpu->cc.mask & (set_mask | clear_mask)) {
 		refresh_flags(cpu);
 		cpu->cc.mask = 0;
@@ -5126,17 +5209,9 @@ void cpu_setflags(CPUI386 *cpu, uword set_mask, uword clear_mask)
 	cpu->flags &= EFLAGS_MASK;
 }
 
-uword cpu_getflags(CPUI386 *cpu)
+static void i386_reset(CPU* _cpu)
 {
-	if (cpu->cc.mask) {
-		refresh_flags(cpu);
-		cpu->cc.mask = 0;
-	}
-	return cpu->flags;
-}
-
-void cpui386_reset(CPUI386 *cpu)
-{
+	CPUI386 *cpu = (CPUI386*)_cpu;
 #ifdef I386_PROFILE
 	i386_profile_dump_sd_and_reset("cpui386_reset");
 #endif
@@ -5182,9 +5257,10 @@ void cpui386_reset(CPUI386 *cpu)
 	cpu->sysenter.esp = 0;
 }
 
-void cpui386_reset_pm(CPUI386 *cpu, uint32_t start_addr)
+static void i386_reset_pm(CPU* _cpu, uint32_t start_addr)
 {
-	cpui386_reset(cpu);
+	cpui386_reset(_cpu);
+	CPUI386 *cpu = (CPUI386*)_cpu;
 	cpu->cr0 = 1;
 	cpu->seg[SEG_CS].sel = 0x8;
 	cpu->seg[SEG_CS].base = 0;
@@ -5203,8 +5279,9 @@ void cpui386_reset_pm(CPUI386 *cpu, uint32_t start_addr)
 	cpu->seg[SEG_ES] = cpu->seg[SEG_SS];
 }
 
-void IRAM_ATTR cpui386_raise_irq(CPUI386 *cpu)
+static void IRAM_ATTR i386_raise_irq(CPU* _cpu)
 {
+	CPUI386 *cpu = (CPUI386*)_cpu;
 	cpu->intr = true;
 }
 
@@ -5213,21 +5290,100 @@ void cpui386_set_gpr(CPUI386 *cpu, int i, u32 val)
 	sreg32(i, val);
 }
 
-long IRAM_ATTR cpui386_get_cycle(CPUI386 *cpu)
+u8 IRAM_ATTR get_reg8(struct CPU* _cpu, u8 regn) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	return lreg8(regn);
+}
+u16 IRAM_ATTR get_reg16(struct CPU* _cpu, u8 regn) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	return lreg16(regn);
+}
+u16 IRAM_ATTR get_seg16(struct CPU* _cpu, u8 segn) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	return cpu->seg[segn].sel;
+}
+u32 IRAM_ATTR get_reg32(struct CPU* _cpu, u8 regn) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	return lreg32(regn);
+}
+void IRAM_ATTR set_reg8(struct CPU* _cpu, u8 regn, u8 v) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	sreg8(regn, v);
+}
+void IRAM_ATTR set_reg16(struct CPU* _cpu, u8 regn, u16 v) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	sreg16(regn, v);
+}
+void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	cpu->seg[segn].sel = v;
+}
+void IRAM_ATTR set_reg32(struct CPU* _cpu, u8 regn, u32 v) {
+	register CPUI386* cpu = (CPUI386*)_cpu;
+	sreg32(regn, v);
+}
+void IRAM_ATTR set_flag(CPU* _cpu, u32 mask, bool val)
 {
-	return cpu->cycle;
+	CPUI386* cpu = (CPUI386*)_cpu;
+	if (cpu->cc.mask & mask) {
+		refresh_flags(cpu);
+		cpu->cc.mask = 0;
+	}
+	if (val)
+		cpu->flags |= mask;
+	else
+		cpu->flags &= ~mask;
+}
+u32 IRAM_ATTR get_flags(CPU* _cpu, u32 mask)
+{
+	CPUI386* cpu = (CPUI386*)_cpu;
+	if (cpu->cc.mask & mask) {
+		refresh_flags(cpu);
+		cpu->cc.mask = 0;
+	}
+	return cpu->flags & mask;
 }
 
-CPUI386 *cpui386_new(int gen, CPU_CB **cb)
+static void i386_enable_fpu(CPU* _cpu)
 {
-	CPUI386 *cpu = malloc(sizeof(CPUI386));
+	CPUI386* cpu = (CPUI386*)_cpu;
+	if (!cpu->fpu)
+		cpu->fpu = fpu_new();
+}
+
+CPU* cpui386_new(int gen, CPU_CB **cb)
+{
+	CPUI386 *cpu = calloc(sizeof(CPUI386), 1);
 	switch (gen) {
+	case 0: cpu->flags_mask = EFLAGS_MASK_86; break;
+	case 1: cpu->flags_mask = EFLAGS_MASK_186; break;
+	case 2: cpu->flags_mask = EFLAGS_MASK_286; break;
 	case 3: cpu->flags_mask = EFLAGS_MASK_386; break;
 	case 4: cpu->flags_mask = EFLAGS_MASK_486; break;
 	case 5: case 6: cpu->flags_mask = EFLAGS_MASK_586; break;
 	default: assert(false);
 	}
 	cpu->gen = gen;
+	CPU_ext_accessors_t *cpue = calloc(sizeof(CPU_ext_accessors_t), 1);
+	cpu->ext_accessors = cpue;
+	cpue->get_reg8 = get_reg8;
+	cpue->get_reg16 = get_reg16;
+	cpue->get_reg32 = get_reg32;
+	cpue->set_reg8 = set_reg8;
+	cpue->set_reg16 = set_reg16;
+	cpue->set_reg32 = set_reg32;
+	cpue->get_seg16 = get_seg16;
+	cpue->set_seg16 = set_seg16;
+	cpue->get_flags = get_flags;
+	cpue->set_flag = set_flag;
+	cpue->setflags = i386_setflags;
+	cpue->enable_fpu = i386_enable_fpu;
+	cpue->reset = i386_reset;
+	cpue->reset_pm = i386_reset_pm;
+	cpue->step = i386_step;
+	cpue->raise_irq = i386_raise_irq;
+	cpue->setexc = i386_setexc;
+	cpue->abort = i386_abort;
 
 	cpu->tlb.size = tlb_size;
 #ifdef BUILD_ESP32
@@ -5255,7 +5411,7 @@ CPUI386 *cpui386_new(int gen, CPU_CB **cb)
 	cpu->bios_prof_depth = 0;
 #endif
 
-	cpui386_reset(cpu);
+	cpu->ext_accessors->reset((CPU*)cpu);
 #ifdef I386_PROFILE
 	i386_profile_install_bios_hooks(cpu);
 #endif
@@ -5263,20 +5419,7 @@ CPUI386 *cpui386_new(int gen, CPU_CB **cb)
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)
 		*cb = &(cpu->cb);
-	return cpu;
-}
-
-void cpui386_enable_fpu(CPUI386 *cpu)
-{
-	if (!cpu->fpu)
-		cpu->fpu = fpu_new();
-}
-
-void cpui386_delete(CPUI386 *cpu)
-{
-	if (cpu->fpu)
-		fpu_delete(cpu->fpu);
-	free(cpu);
+	return (CPU*)cpu;
 }
 
 #if !defined(_WIN32) && !defined(__wasm__)
@@ -5288,6 +5431,7 @@ void cpui386_set_verbose() // for debugging
 }
 #endif
 
+#if 0
 static void cpu_debug(CPUI386 *cpu)
 {
 	static int nest;
@@ -5347,76 +5491,21 @@ static void cpu_debug(CPUI386 *cpu)
 	cpu->excerr = excerr;
 	nest--;
 }
+#endif
 
-void cpu_set_a20(CPUI386 *cpu, int enabled)
+void IRAM_ATTR cpu_set_a20(CPU* cpu, int enabled)
 {
 	cpu->a20_mask = enabled ? 0xFFFFFFFFu : 0xFFEFFFFFu;
 }
 
-int cpu_get_a20(CPUI386 *cpu)
+int IRAM_ATTR cpu_get_a20(CPU* cpu)
 {
 	return cpu->a20_mask >> 20 & 1;
 }
 
-void cpui386_get_state(CPUI386 *cpu, uint32_t *cs, uint32_t *ip, int *halt)
+cpu_int_hook_t* cpu_set_int_hook(CPU* cpu, u8 no, cpu_int_hook_t* hook)
 {
-	*cs = cpu->seg[1].sel;  // SEG_CS = 1
-	*ip = cpu->ip;
-	*halt = cpu->halt ? 1 : 0;
-}
-
-// Register accessors for disk/BIOS emulation
-u8 cpu_get_al(CPUI386 *cpu) { return lreg8(0); }
-u8 cpu_get_ah(CPUI386 *cpu) { return lreg8(4); }
-u8 cpu_get_bl(CPUI386 *cpu) { return lreg8(3); }
-u8 cpu_get_bh(CPUI386 *cpu) { return lreg8(7); }
-u8 cpu_get_cl(CPUI386 *cpu) { return lreg8(1); }
-u8 cpu_get_ch(CPUI386 *cpu) { return lreg8(5); }
-u8 cpu_get_dl(CPUI386 *cpu) { return lreg8(2); }
-u8 cpu_get_dh(CPUI386 *cpu) { return lreg8(6); }
-
-void cpu_set_al(CPUI386 *cpu, u8 val) { sreg8(0, val); }
-void cpu_set_ah(CPUI386 *cpu, u8 val) { sreg8(4, val); }
-void cpu_set_bl(CPUI386 *cpu, u8 val) { sreg8(3, val); }
-void cpu_set_bh(CPUI386 *cpu, u8 val) { sreg8(7, val); }
-void cpu_set_cl(CPUI386 *cpu, u8 val) { sreg8(1, val); }
-void cpu_set_ch(CPUI386 *cpu, u8 val) { sreg8(5, val); }
-void cpu_set_dl(CPUI386 *cpu, u8 val) { sreg8(2, val); }
-void cpu_set_dh(CPUI386 *cpu, u8 val) { sreg8(6, val); }
-
-u16 cpu_get_bx(CPUI386 *cpu) { return lreg16(3); }
-u16 cpu_get_cx(CPUI386 *cpu) { return lreg16(1); }
-u16 cpu_get_dx(CPUI386 *cpu) { return lreg16(2); }
-u16 cpu_get_es(CPUI386 *cpu) { return cpu->seg[SEG_ES].sel; }
-
-void cpu_set_bx(CPUI386 *cpu, u16 val) { sreg16(3, val); }
-void cpu_set_cx(CPUI386 *cpu, u16 val) { sreg16(1, val); }
-void cpu_set_dx(CPUI386 *cpu, u16 val) { sreg16(2, val); }
-u16 cpu_get_bp(CPUI386 *cpu) { return lreg16(5); }
-u16 cpu_get_si(CPUI386 *cpu) { return lreg16(6); }
-u16 cpu_get_di(CPUI386 *cpu) { return lreg16(7); }
-void cpu_set_si(CPUI386 *cpu, u16 val) { sreg16(6, val); }
-void cpu_set_di(CPUI386 *cpu, u16 val) { sreg16(7, val); }
-u16 cpu_get_ds(CPUI386 *cpu) { return cpu->seg[SEG_DS].sel; }
-u16 cpu_get_ss(CPUI386 *cpu) { return cpu->seg[SEG_SS].sel; }
-
-void cpu_set_cf(CPUI386 *cpu, int val)
-{
-	if (cpu->cc.mask & CF) {
-		refresh_flags(cpu);
-		cpu->cc.mask = 0;
-	}
-	if (val)
-		cpu->flags |= CF;
-	else
-		cpu->flags &= ~CF;
-}
-
-int cpu_get_cf(CPUI386 *cpu)
-{
-	if (cpu->cc.mask & CF) {
-		refresh_flags(cpu);
-		cpu->cc.mask = 0;
-	}
-	return (cpu->flags & CF) ? 1 : 0;
+	cpu_int_hook_t* prev = cpu->int_hooks[no];
+	cpu->int_hooks[no] = hook;
+	return prev;
 }

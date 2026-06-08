@@ -191,6 +191,13 @@ static void fppop(FPU *fpu)
 	// set tw
 }
 
+bool cpu_load8(void *cpu, int seg, uword addr, u8 *res);
+bool cpu_store8(void *cpu, int seg, uword addr, u8 val);
+bool cpu_load16(void *cpu, int seg, uword addr, u16 *res);
+bool cpu_store16(void *cpu, int seg, uword addr, u16 val);
+bool cpu_load32(void *cpu, int seg, uword addr, u32 *res);
+bool cpu_store32(void *cpu, int seg, uword addr, u32 val);
+
 static bool fploadf32(void *cpu, int seg, uword addr, double *res)
 {
 	union union32 u;
@@ -796,12 +803,6 @@ bool fpu_exec2(FPU *fpu, void *cpu, bool opsz16, int op, int group, int seg, uin
 #define LN2		0.69314718055994530941683L
 #define LG2		0.30102999566398119521379L
 
-enum {
-	CF = 0x1,
-	PF = 0x4,
-	ZF = 0x40,
-};
-
 static bool cmov_cond(FPU *fpu, void *cpu, int i)
 {
 	uword flags = cpu_getflags(cpu);
@@ -1185,7 +1186,7 @@ bool fpu_exec1(FPU *fpu, void *cpu, int op, int group, unsigned int i)
 		case 4:
 			if (i == 0) { // FNSTSW
 				u16 sw = getsw(fpu);
-				cpu_setax(cpu, sw);
+				((CPU*)cpu)->ext_accessors->set_reg16((CPU*)cpu, AX_REG_IDX, sw);
 			} else {
 				cpu_setexc(cpu, 6, 0);
 				return false;

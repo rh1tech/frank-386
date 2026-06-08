@@ -61,8 +61,8 @@ static const int mem_options[] = { 1, 2, 4, 8 };
 #endif
 static const int mem_option_count = 4;
 
-static const int cpu_options[] = { 3, 4, 5 };
-static const int cpu_option_count = 3;
+static const int cpu_options[] = { 0, 1, 2, 3, 4, 5 };
+static const int cpu_option_count = 6;
 
 static const int cpu_freq_options[] = { 252, 378, 504, 524, 564 };
 static const int cpu_freq_option_count = 5;
@@ -357,7 +357,11 @@ static void draw_settings_menu(void) {
                 snprintf(value, sizeof(value), "< %d MB >", config_get_mem_size_mb());
                 break;
             case SETTING_CPU:
-                snprintf(value, sizeof(value), "< 80%d86 >", config_get_cpu_gen());
+                if (!config_get_cpu_gen()) {
+                    snprintf(value, sizeof(value), "< i8086 >");
+                } else {
+                    snprintf(value, sizeof(value), "< 80%d86 >", config_get_cpu_gen());
+                }
                 break;
             case SETTING_FPU:
                 snprintf(value, sizeof(value), "< %s >", config_get_fpu() ? "Enabled" : "Disabled");

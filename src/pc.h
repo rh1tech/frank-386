@@ -26,14 +26,6 @@ uint32_t get_uticks();
 void *pcmalloc(long size);
 int load_rom(void *phys_mem, const char *file, uword addr, int backward);
 
-/// PC
-#ifdef USEKVM
-#include "kvm.h"
-typedef CPUKVM CPU;
-#else
-typedef CPUI386 CPU;
-#endif
-
 typedef struct IDEIFState IDEIFState;
 
 typedef struct {
@@ -99,19 +91,11 @@ typedef struct {
 	int reset_request;
 	int paused;  // Emulation paused (e.g., for disk UI)
 
-	const char *linuxstart;
-	const char *kernel;
-	const char *initrd;
-	const char *cmdline;
 	int enable_serial;
 	int full_update;
 } PC;
 
 typedef struct {
-	const char *linuxstart;
-	const char *kernel;
-	const char *initrd;
-	const char *cmdline;
 	const char *bios;
 	const char *vga_bios;
 	long mem_size;

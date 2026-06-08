@@ -23,7 +23,7 @@ set(BUILD_NAME "386")
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
 
 # Board configuration variant (M1, M2, PC or Z2)
-set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC or Z2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC or Z2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -52,7 +52,7 @@ option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
 
 # Profiling (for performance analysis)
-option(PROFILE_ENABLED "Enable i386 instruction profiling" ON)
+option(PROFILE_ENABLED "Enable i386 instruction profiling" OFF)
 
 if(BOARD STREQUAL "M1")
     SET(BUILD_NAME "m1p2-${BUILD_NAME}")

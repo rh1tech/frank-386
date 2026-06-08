@@ -44,7 +44,7 @@ struct struct_ata {
 } ata[4] = { 0 };
 
 
-static CPUI386 *disk_cpu = NULL;
+static CPU *disk_cpu = NULL;
 static VGAState *disk_vga = NULL;
 void disk_set_vga(VGAState *vga) { disk_vga = vga; }
 
@@ -111,7 +111,7 @@ static int detect_vhd(FIL *file, size_t size) {
     return 0;
 }
 
-void disk_set_cpu(CPUI386 *cpu) {
+void disk_set_cpu(CPU *cpu) {
     disk_cpu = cpu;
 }
 
