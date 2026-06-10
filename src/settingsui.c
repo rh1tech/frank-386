@@ -61,8 +61,12 @@ static const int mem_options[] = { 1, 2, 4, 8 };
 #endif
 static const int mem_option_count = 4;
 
-static const int cpu_options[] = { 0, 1, 2, 3, 4, 5 };
-static const int cpu_option_count = 6;
+#ifndef I386_MODE
+static const int cpu_options[] = { 0, 1, 2 };
+#else
+static const int cpu_options[] = { 3, 4, 5 };
+#endif
+static const int cpu_option_count = 3;
 
 static const int cpu_freq_options[] = { 252, 378, 504, 524, 564 };
 static const int cpu_freq_option_count = 5;

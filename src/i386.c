@@ -5294,20 +5294,23 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 {
 	CPU* cpu;
 	switch (gen) {
+#ifndef I386_MODE
 	case 0: cpu->flags_mask = EFLAGS_MASK_86; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
 	case 1: cpu->flags_mask = EFLAGS_MASK_186; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
-	case 2: cpu->flags_mask = EFLAGS_MASK_286; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
+	default:
+	        cpu->flags_mask = EFLAGS_MASK_286; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
+#else
 	case 3: cpu->flags_mask = EFLAGS_MASK_386; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
 	case 4: cpu->flags_mask = EFLAGS_MASK_486; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
-	case 5: case 6: cpu->flags_mask = EFLAGS_MASK_586; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
-	default: assert(false);
+	default:
+	        cpu->flags_mask = EFLAGS_MASK_586; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
+#endif
 	}
 	cpu->gen = gen;
 	CPU_ext_accessors_t* cpue = calloc(sizeof(CPU_ext_accessors_t), 1);
 	cpu->ext_accessors = cpue;
 
-	switch (gen) {
-		case 3: case 4: case 5: case 6: {
+#ifdef I386_MODE
 			cpue->get_reg8 = get_reg8;
 			cpue->get_reg16 = get_reg16;
 			cpue->get_reg32 = get_reg32;
@@ -5335,12 +5338,9 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 			cpu->bios_prof_depth = 0;
 			i386_profile_install_bios_hooks(cpu);
 			#endif
-			break;
-		}
-		default: {
+#else
 			cpu_init_286(cpu);
-		}
-	}
+#endif
 	cpu->ext_accessors->reset((CPU*)cpu);
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)

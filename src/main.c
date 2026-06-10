@@ -934,7 +934,11 @@ static void show_welcome_screen(void) {
     osd_fill(wx + 1, wy + 1, ww - 2, wh - 2, ' ', OSD_ATTR_NORMAL);
 
     // Title
+#ifndef I386_MODE
+    osd_print_center(wy + 3, "FRANK 286", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+#else
     osd_print_center(wy + 3, "FRANK 386", OSD_ATTR(OSD_YELLOW, OSD_BLUE));
+#endif
 
     // Version
     char version_str[32];
