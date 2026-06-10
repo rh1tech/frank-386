@@ -11,31 +11,34 @@
  * CPUI386 structure - main CPU state
  */
 typedef struct CPUI386 {
-#ifdef I386_OPT1
 	union {
 		u32 r32;
 		u16 r16;
 		u8 r8[2];
 	} gprx[8];
-#else
-	uword gpr[8];
-#endif
 	uword ip, next_ip;
 	uword flags;
 	uword flags_mask;
 
+	bool intr;
+
 	int gen;
-	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
 	u32 a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
 	CPU_ext_accessors_t* ext_accessors;
+	CPU_CB cb;
+
+	int excno;
+	uword excerr;
+
+	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
+
+	FPU *fpu;
 // ^ base part
 
 	int cpl;
 	bool code16;
 	uword sp_mask;
 	bool halt;
-
-	FPU *fpu;
 
 	struct {
 		uword sel;
@@ -82,12 +85,6 @@ typedef struct CPUI386 {
 #endif
 	long cycle;
 
-	int excno;
-	uword excerr;
-
-	bool intr;
-	CPU_CB cb;
-
 	struct {
 		uword cs, eip, esp;
 	} sysenter;
@@ -119,14 +116,9 @@ bool cpu_store32(CPUI386 *cpu, int seg, uword addr, u32 val);
    #define PREFETCH_RESET
 #endif
 
-#ifdef BUILD_ESP32
-#include "esp_attr.h"
-#else
 #define IRAM_ATTR __not_in_flash()
 #define IRAM_ATTR_CPU_EXEC1 __not_in_flash()
-#endif
 
-#define I386_OPT1
 #ifndef __wasm__
 #define I386_OPT2
 #endif
@@ -215,11 +207,7 @@ enum {
 	SEG_B_BIT = 1 << 14,
 };
 
-#ifdef I386_OPT1
 #define REGi(x) (cpu->gprx[x].r32)
-#else
-#define REGi(x) (cpu->gpr[x])
-#endif
 #define SEGi(x) (cpu->seg[x].sel)
 
 
@@ -1834,23 +1822,12 @@ static inline void clear_segs(CPUI386 *cpu)
 	}
 
 #define limm(i) i
-#ifdef I386_OPT1
 #define lreg8(i) ((i) > 3 ? cpu->gprx[i - 4].r8[1] : cpu->gprx[i].r8[0])
 #define sreg8(i, v) ((i) > 3 ? (cpu->gprx[i - 4].r8[1] = (v)) : (cpu->gprx[i].r8[0] = (v)))
 #define lreg16(i) (cpu->gprx[i].r16)
 #define sreg16(i, v) (cpu->gprx[i].r16 = (v))
 #define lreg32(i) (REGi(i))
 #define sreg32(i, v) ((REGi(i)) = (v))
-#else
-#define lreg8(i) ((u8) ((i) > 3 ? REGi((i) - 4) >> 8 : REGi((i))))
-#define sreg8(i, v) ((i) > 3 ? \
-		     (REGi((i) - 4) = (REGi((i) - 4) & (wordmask ^ 0xff00)) | (((v) & 0xff) << 8)) : \
-		     (REGi((i)) = (REGi((i)) & (wordmask ^ 0xff)) | ((v) & 0xff)))
-#define lreg16(i) ((u16) REGi((i)))
-#define sreg16(i, v) (REGi((i)) = (REGi((i)) & (wordmask ^ 0xffff)) | ((v) & 0xffff))
-#define lreg32(i) ((u32) REGi((i)))
-#define sreg32(i, v) (REGi((i)) = (REGi((i)) & (wordmask ^ 0xffffffff)) | ((v) & 0xffffffff))
-#endif
 #define laddr8(addr) load8(cpu, addr)
 #define saddr8(addr, v) store8(cpu, addr, v)
 #define laddr16(addr) load16(cpu, addr)
@@ -4027,11 +4004,6 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 #endif
 	cpu->cycle++;
 
-#ifndef I386_OPT1
-	if (verbose) {
-		cpu_debug(cpu);
-	}
-#endif
 	// prefix
 	bool opsz16 = code16;
 	bool adsz16 = code16;
@@ -5190,9 +5162,8 @@ u16 IRAM_ATTR cpu_get_ax(CPU* _cpu)
 	return lreg16(0);
 }
 
-static void IRAM_ATTR i386_setexc(CPU* _cpu, int excno, uword excerr)
+void IRAM_ATTR setexc(CPU* cpu, int excno, uword excerr)
 {
-	CPUI386 *cpu = (CPUI386*)_cpu;
 	cpu->excno = excno;
 	cpu->excerr = excerr;
 }
@@ -5257,31 +5228,7 @@ static void i386_reset(CPU* _cpu)
 	cpu->sysenter.esp = 0;
 }
 
-static void i386_reset_pm(CPU* _cpu, uint32_t start_addr)
-{
-	cpui386_reset(_cpu);
-	CPUI386 *cpu = (CPUI386*)_cpu;
-	cpu->cr0 = 1;
-	cpu->seg[SEG_CS].sel = 0x8;
-	cpu->seg[SEG_CS].base = 0;
-	cpu->seg[SEG_CS].limit = 0xffffffff;
-	cpu->seg[SEG_CS].flags = SEG_D_BIT;
-	cpu->next_ip = start_addr;
-	cpu->cpl = 0;
-	cpu->code16 = false;
-	cpu->sp_mask = 0xffffffff;
-	cpu->seg[SEG_SS].sel = 0x10;
-	cpu->seg[SEG_SS].base = 0;
-	cpu->seg[SEG_SS].limit = 0xffffffff;
-	cpu->seg[SEG_SS].flags = SEG_B_BIT;
-
-	cpu->seg[SEG_DS] = cpu->seg[SEG_SS];
-	cpu->seg[SEG_ES] = cpu->seg[SEG_SS];
-}
-
-static void IRAM_ATTR i386_raise_irq(CPU* _cpu)
-{
-	CPUI386 *cpu = (CPUI386*)_cpu;
+void IRAM_ATTR raise_irq(CPU* cpu) {
 	cpu->intr = true;
 }
 
@@ -5290,39 +5237,33 @@ void cpui386_set_gpr(CPUI386 *cpu, int i, u32 val)
 	sreg32(i, val);
 }
 
-u8 IRAM_ATTR get_reg8(struct CPU* _cpu, u8 regn) {
-	register CPUI386* cpu = (CPUI386*)_cpu;
+u8 IRAM_ATTR get_reg8(struct CPU* cpu, u8 regn) {
 	return lreg8(regn);
 }
-u16 IRAM_ATTR get_reg16(struct CPU* _cpu, u8 regn) {
-	register CPUI386* cpu = (CPUI386*)_cpu;
+u16 IRAM_ATTR get_reg16(struct CPU* cpu, u8 regn) {
 	return lreg16(regn);
 }
-u16 IRAM_ATTR get_seg16(struct CPU* _cpu, u8 segn) {
+u32 IRAM_ATTR get_reg32(struct CPU* cpu, u8 regn) {
+	return lreg32(regn);
+}
+void IRAM_ATTR set_reg8(struct CPU* cpu, u8 regn, u8 v) {
+	sreg8(regn, v);
+}
+void IRAM_ATTR set_reg16(struct CPU* cpu, u8 regn, u16 v) {
+	sreg16(regn, v);
+}
+void IRAM_ATTR set_reg32(struct CPU* cpu, u8 regn, u32 v) {
+	sreg32(regn, v);
+}
+static u16 IRAM_ATTR get_seg16(struct CPU* _cpu, u8 segn) {
 	register CPUI386* cpu = (CPUI386*)_cpu;
 	return cpu->seg[segn].sel;
 }
-u32 IRAM_ATTR get_reg32(struct CPU* _cpu, u8 regn) {
-	register CPUI386* cpu = (CPUI386*)_cpu;
-	return lreg32(regn);
-}
-void IRAM_ATTR set_reg8(struct CPU* _cpu, u8 regn, u8 v) {
-	register CPUI386* cpu = (CPUI386*)_cpu;
-	sreg8(regn, v);
-}
-void IRAM_ATTR set_reg16(struct CPU* _cpu, u8 regn, u16 v) {
-	register CPUI386* cpu = (CPUI386*)_cpu;
-	sreg16(regn, v);
-}
-void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
+static void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
 	register CPUI386* cpu = (CPUI386*)_cpu;
 	cpu->seg[segn].sel = v;
 }
-void IRAM_ATTR set_reg32(struct CPU* _cpu, u8 regn, u32 v) {
-	register CPUI386* cpu = (CPUI386*)_cpu;
-	sreg32(regn, v);
-}
-void IRAM_ATTR set_flag(CPU* _cpu, u32 mask, bool val)
+static void IRAM_ATTR set_flag(CPU* _cpu, u32 mask, bool val)
 {
 	CPUI386* cpu = (CPUI386*)_cpu;
 	if (cpu->cc.mask & mask) {
@@ -5334,7 +5275,7 @@ void IRAM_ATTR set_flag(CPU* _cpu, u32 mask, bool val)
 	else
 		cpu->flags &= ~mask;
 }
-u32 IRAM_ATTR get_flags(CPU* _cpu, u32 mask)
+static u32 IRAM_ATTR get_flags(CPU* _cpu, u32 mask)
 {
 	CPUI386* cpu = (CPUI386*)_cpu;
 	if (cpu->cc.mask & mask) {
@@ -5343,83 +5284,68 @@ u32 IRAM_ATTR get_flags(CPU* _cpu, u32 mask)
 	}
 	return cpu->flags & mask;
 }
-
-static void i386_enable_fpu(CPU* _cpu)
+void cpu_enable_fpu(CPU* cpu)
 {
-	CPUI386* cpu = (CPUI386*)_cpu;
-	if (!cpu->fpu)
-		cpu->fpu = fpu_new();
+	if (cpu->fpu) free(cpu->fpu);
+	cpu->fpu = fpu_new();
 }
 
-CPU* cpui386_new(int gen, CPU_CB **cb)
+CPU* cpu_new(int gen, CPU_CB **cb)
 {
-	CPUI386 *cpu = calloc(sizeof(CPUI386), 1);
+	CPU* cpu;
 	switch (gen) {
-	case 0: cpu->flags_mask = EFLAGS_MASK_86; break;
-	case 1: cpu->flags_mask = EFLAGS_MASK_186; break;
-	case 2: cpu->flags_mask = EFLAGS_MASK_286; break;
-	case 3: cpu->flags_mask = EFLAGS_MASK_386; break;
-	case 4: cpu->flags_mask = EFLAGS_MASK_486; break;
-	case 5: case 6: cpu->flags_mask = EFLAGS_MASK_586; break;
+	case 0: cpu->flags_mask = EFLAGS_MASK_86; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
+	case 1: cpu->flags_mask = EFLAGS_MASK_186; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
+	case 2: cpu->flags_mask = EFLAGS_MASK_286; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
+	case 3: cpu->flags_mask = EFLAGS_MASK_386; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
+	case 4: cpu->flags_mask = EFLAGS_MASK_486; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
+	case 5: case 6: cpu->flags_mask = EFLAGS_MASK_586; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
 	default: assert(false);
 	}
 	cpu->gen = gen;
-	CPU_ext_accessors_t *cpue = calloc(sizeof(CPU_ext_accessors_t), 1);
+	CPU_ext_accessors_t* cpue = calloc(sizeof(CPU_ext_accessors_t), 1);
 	cpu->ext_accessors = cpue;
-	cpue->get_reg8 = get_reg8;
-	cpue->get_reg16 = get_reg16;
-	cpue->get_reg32 = get_reg32;
-	cpue->set_reg8 = set_reg8;
-	cpue->set_reg16 = set_reg16;
-	cpue->set_reg32 = set_reg32;
-	cpue->get_seg16 = get_seg16;
-	cpue->set_seg16 = set_seg16;
-	cpue->get_flags = get_flags;
-	cpue->set_flag = set_flag;
-	cpue->setflags = i386_setflags;
-	cpue->enable_fpu = i386_enable_fpu;
-	cpue->reset = i386_reset;
-	cpue->reset_pm = i386_reset_pm;
-	cpue->step = i386_step;
-	cpue->raise_irq = i386_raise_irq;
-	cpue->setexc = i386_setexc;
-	cpue->abort = i386_abort;
 
-	cpu->tlb.size = tlb_size;
-#ifdef BUILD_ESP32
-	{
-		extern void *pcmalloc(long size);
-		size_t tlb_bytes = sizeof(struct tlb_entry) * tlb_size;
-		cpu->tlb.tab = malloc(tlb_bytes);
-		if (!cpu->tlb.tab)
-			cpu->tlb.tab = pcmalloc(tlb_bytes);
+	switch (gen) {
+		case 3: case 4: case 5: case 6: {
+			cpue->get_reg8 = get_reg8;
+			cpue->get_reg16 = get_reg16;
+			cpue->get_reg32 = get_reg32;
+			cpue->set_reg8 = set_reg8;
+			cpue->set_reg16 = set_reg16;
+			cpue->set_reg32 = set_reg32;
+			cpue->get_seg16 = get_seg16;
+			cpue->set_seg16 = set_seg16;
+			cpue->get_flags = get_flags;
+			cpue->set_flag = set_flag;
+			cpue->set_flags = i386_setflags;
+			cpue->enable_fpu = cpu_enable_fpu;
+			cpue->reset = i386_reset;
+			cpue->step = i386_step;
+			cpue->raise_irq = raise_irq;
+			cpue->setexc = setexc;
+			cpue->abort = i386_abort;
+			CPUI386* i386 = (CPUI386*)cpu;
+			i386->tlb.size = tlb_size;
+			i386->tlb.tab = malloc(sizeof(struct tlb_entry) * tlb_size);
+			#ifdef I386_PROFILE
+			memset(cpu->bios_prof_last_start, 0, sizeof(cpu->bios_prof_last_start));
+			memset(cpu->bios_prof_total, 0, sizeof(cpu->bios_prof_total));
+			memset(cpu->bios_prof_count, 0, sizeof(cpu->bios_prof_count));
+			cpu->bios_prof_depth = 0;
+			i386_profile_install_bios_hooks(cpu);
+			#endif
+			break;
+		}
+		default: {
+			cpu_init_286(cpu);
+		}
 	}
-#else
-	cpu->tlb.tab = malloc(sizeof(struct tlb_entry) * tlb_size);
-#endif
-
-	cpu->cycle = 0;
-
-	cpu->intr = false;
-
-	cpu->fpu = NULL;
-	memset(cpu->int_hooks, 0, sizeof(cpu->int_hooks));
-#ifdef I386_PROFILE
-	memset(cpu->bios_prof_last_start, 0, sizeof(cpu->bios_prof_last_start));
-	memset(cpu->bios_prof_total, 0, sizeof(cpu->bios_prof_total));
-	memset(cpu->bios_prof_count, 0, sizeof(cpu->bios_prof_count));
-	cpu->bios_prof_depth = 0;
-#endif
-
 	cpu->ext_accessors->reset((CPU*)cpu);
-#ifdef I386_PROFILE
-	i386_profile_install_bios_hooks(cpu);
-#endif
-
 	memset(&(cpu->cb), 0, sizeof(CPU_CB));
 	if (cb)
 		*cb = &(cpu->cb);
-	return (CPU*)cpu;
+	return cpu;
 }
 
 #if !defined(_WIN32) && !defined(__wasm__)

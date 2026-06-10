@@ -222,6 +222,9 @@ set(EMU_CORE_SOURCES
     src/i386_arm.S   # ARM assembly optimizations for hot paths
     src/pc.c
 
+    src/286/cpu.c
+    src/286/fpu.c
+
     # Peripheral chips
     src/i8042.c      # Keyboard controller
     src/i8254.c      # Timer

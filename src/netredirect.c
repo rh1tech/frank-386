@@ -67,6 +67,8 @@ void debug_log(const char *fmt, ...) {
 /* Guest memory access via physical mem pointer */
 static CPU* _nr_cpu;
 
+
+// TODO: emulator.h
 static inline uint8_t  read86(uint32_t a)     { return pload8(a); }
 static inline uint16_t readw86(uint32_t a)    { return pload8(a) | ((uint16_t)pload8(a+1) << 8); }
 static inline uint32_t readdw86(uint32_t a)   { return pload8(a) | ((uint32_t)pload8(a+1)<<8) | ((uint32_t)pload8(a+2)<<16) | ((uint32_t)pload8(a+3)<<24); }

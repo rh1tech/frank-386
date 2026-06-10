@@ -17,7 +17,7 @@ void netredirect_init(CPU *cpu, int enable);
 unsigned long phys_mem_size = 8l << 20;
 void* g_pc;
 
-#define cpu_raise_irq cpui386_raise_irq
+#define cpu_raise_irq cpu_raise_irq
 
 /* ---- Emulink FDD: simple virtual floppy on ports 0xF1F0/0xF1F4 ----------
  * Protocol (matches tiny386 / this BIOS):
@@ -769,15 +769,6 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	i8257_dma_run(pc->isa_dma);
 	i8257_dma_run(pc->isa_hdma);
 	if (pc->fdc) fdc_tick(pc->fdc);
-#if !defined(BUILD_ESP32) && !defined(RP2350_BUILD)
-	pc->poll(pc->redraw_data);
-	if (refresh) {
-		vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
-			    pc->full_update != 0);
-		if (pc->full_update == 2)
-			pc->full_update = 0;
-	}
-#else
 	if (pc->poll) pc->poll(pc->redraw_data);
 	if (refresh && pc->redraw) {
 		vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
@@ -785,25 +776,14 @@ void __not_in_flash_func(pc_step)(PC *pc)
 		if (pc->full_update == 2)
 			pc->full_update = 0;
 	}
-#endif
-#ifdef USEKVM
-	cpukvm_step(pc->cpu, 4096);
-#else
-#if defined(BUILD_ESP32)
-	cpui386_step(pc->cpu, 512);
-#elif defined(RP2350_BUILD)
 	if (pc->adlib_enabled) {
 		for (int i = 0; i < 409; ++i) {
-			cpui386_step(pc->cpu, 10);
+			cpu_step(pc->cpu, 10);
 			adlib_core0(pc->adlib);
 		}
 	} else {
-		cpui386_step(pc->cpu, 4096);
+		cpu_step(pc->cpu, 4096);
 	}
-#else
-	cpui386_step(pc->cpu, 10240);
-#endif
-#endif
 
 #if 0
 	/* Dump profile every ~10M instructions */
@@ -1006,9 +986,9 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pcram_len = 0xc0000 - 0xa0000;
 #endif
 	phys_mem_size = conf->mem_size;
-	pc->cpu = cpui386_new(conf->cpu_gen, &cb);
+	pc->cpu = cpu_new(conf->cpu_gen, &cb);
 	if (conf->fpu)
-		cpui386_enable_fpu(pc->cpu);
+		enable_fpu(pc->cpu);
 	pc->bios = conf->bios;
 	pc->vga_bios = conf->vga_bios;
 	pc->enable_serial = conf->enable_serial;
@@ -1193,7 +1173,7 @@ void load_bios_and_reset(PC *pc)
 	}
 	sn76489_reset();
 
-	cpui386_reset(pc->cpu);
+	cpu_reset(pc->cpu);
 }
 
 static long parse_mem_size(const char *value)

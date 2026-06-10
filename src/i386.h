@@ -17,11 +17,6 @@ typedef s32 sword;
 
 #define PREFETCH_ENABLED 1
 
-/* Enable optimized register layout (union-based) */
-#ifndef I386_OPT1
-#define I386_OPT1
-#endif
-
 /* Forward declaration for FPU */
 typedef struct FPU FPU;
 
@@ -72,7 +67,6 @@ typedef void (*set_flags_t)(struct CPU* cpu, uword set_mask, uword clear_mask);
 
 typedef void (*cpu_enable_fpu_t)(struct CPU* cpu);
 typedef void (*cpu_reset_t)(struct CPU* cpu);
-typedef void (*cpu_reset_pm_t)(struct CPU* cpu, uint32_t start_addr);
 typedef void (*cpu_step_t)(struct CPU* cpu, int stepcount);
 typedef void (*cpu_raise_irq_t)(struct CPU* cpu);
 typedef void (*cpu_setexc_t)(struct CPU* cpu, int excno, uword excerr);
@@ -89,59 +83,89 @@ typedef struct CPU_ext_accessors {
 	set_reg16_t set_seg16;
 	get_flags_t get_flags;
 	set_flag_t set_flag;
-	set_flags_t setflags;
+	set_flags_t set_flags;
 	cpu_enable_fpu_t enable_fpu;
 	cpu_reset_t reset;
-	cpu_reset_pm_t reset_pm;
 	cpu_step_t step;
 	cpu_raise_irq_t raise_irq;
 	cpu_setexc_t setexc;
 	cpu_abort_t abort;
 } CPU_ext_accessors_t;
 
+typedef union {
+    uint32_t value;
+    struct {
+        unsigned CF : 1;  // 0 bit of value
+        unsigned _1 : 1;  // 1
+        unsigned PF : 1;  // 2
+        unsigned _3 : 1;  // 3
+        unsigned AF : 1;  // 4
+        unsigned _5 : 1;  // 5
+        unsigned ZF : 1;  // 6
+        unsigned SF : 1;  // 7
+        unsigned TF : 1;  // 8
+        unsigned IF : 1;  // 9
+        unsigned DF : 1;  // 10
+        unsigned OF : 1;  // 11
+        unsigned _12 : 1;
+        unsigned _13 : 1;
+        unsigned _14 : 1;
+        unsigned _15 : 1;
+        unsigned _16 : 1;
+        unsigned _17 : 1;
+        unsigned AC : 1; // 18 (Alignment Check)	Проверка выравнивания (включается в CPL=3 при CR0.AM=1)
+                         // (Alignment Check Exception) — INT 17 (11h)
+        unsigned VIF : 1; // 19 (Virtual Interrupt Flag)	Виртуальный IF для виртуализации (введён в 486, но зарезервирован с 386)
+        unsigned VIP : 1; // 20 (Virtual Interrupt Pending)	Виртуальное прерывание ожидает (аналогично — введён в 486)
+        unsigned ID : 1; // 21 (ID Flag)	Позволяет проверить поддержку CPUID инструкцией
+    } bits;
+} x86_flags_t;
+
 struct CPU {
-#ifdef I386_OPT1
 	union {
 		u32 r32;
 		u16 r16;
 		u8 r8[2];
 	} gprx[8];
-#else
-	uword gpr[8];
-#endif
 	uword ip, next_ip;
-	uword flags;
+	x86_flags_t flags;
 	uword flags_mask;
 
+	bool intr;
+
 	int gen;
-	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
 	u32 a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
 	CPU_ext_accessors_t* ext_accessors;
+	CPU_CB cb;
+
+	int excno;
+	uword excerr;
+
+	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
+
+	FPU *fpu;
 }; // should be the same in all implementations
 
 typedef struct CPU CPU;
 
-CPU *cpui386_new(int gen, CPU_CB **cb);
-inline static void cpui386_enable_fpu(CPU *cpu) {
+CPU *cpu_new(int gen, CPU_CB **cb);
+inline static void enable_fpu(CPU *cpu) {
 	cpu->ext_accessors->enable_fpu(cpu);
 }
-inline static void cpui386_reset(CPU *cpu) {
+inline static void cpu_reset(CPU *cpu) {
 	cpu->ext_accessors->reset(cpu);
 }
-inline static void cpui386_reset_pm(CPU *cpu, uint32_t start_addr) {
-	cpu->ext_accessors->reset_pm(cpu, start_addr);
-}
-inline static void cpui386_step(CPU *cpu, int stepcount) {
+inline static void cpu_step(CPU *cpu, int stepcount) {
 	cpu->ext_accessors->step(cpu, stepcount);
 }
-inline static void cpui386_raise_irq(CPU *cpu) {
+inline static void cpu_raise_irq(CPU *cpu) {
 	cpu->ext_accessors->raise_irq(cpu);
 }
 inline static void cpu_setexc(CPU *cpu, int excno, uword excerr) {
 	cpu->ext_accessors->setexc(cpu, excno, excerr);
 }
 inline static void cpu_setflags(CPU *cpu, uword set_mask, uword clear_mask) {
-	cpu->ext_accessors->setflags(cpu, set_mask, clear_mask);
+	cpu->ext_accessors->set_flags(cpu, set_mask, clear_mask);
 }
 inline static uword cpu_getflags(CPU *cpu) {
 	return cpu->ext_accessors->get_flags(cpu, ~0);
@@ -169,6 +193,27 @@ inline static void cpu_abort(CPU *cpu, int code) {
 #define BP_REG_IDX 5
 #define SI_REG_IDX 6
 #define DI_REG_IDX 7
+
+#define CPU_IP    (*(uint16_t*)&(cpu->ip))
+#define StepIP(x) CPU_IP += x
+
+#define CPU_AX    cpu->gprx[regax].r16
+#define CPU_BX    cpu->gprx[regbx].r16
+#define CPU_CX    cpu->gprx[regcx].r16
+#define CPU_DX    cpu->gprx[regdx].r16
+#define CPU_SI    cpu->gprx[regsi].r16
+#define CPU_DI    cpu->gprx[regdi].r16
+#define CPU_BP    cpu->gprx[regbp].r16
+#define CPU_SP    cpu->gprx[regsp].r16
+
+#define CPU_AL    cpu->gprx[regax].r8[0]
+#define CPU_AH    cpu->gprx[regax].r8[1]
+#define CPU_BL    cpu->gprx[regbx].r8[0]
+#define CPU_BH    cpu->gprx[regbx].r8[1]
+#define CPU_CL    cpu->gprx[regcx].r8[0]
+#define CPU_CH    cpu->gprx[regcx].r8[1]
+#define CPU_DL    cpu->gprx[regdx].r8[0]
+#define CPU_DH    cpu->gprx[regdx].r8[1]
 
 enum {
 	SEG_ES = 0,
@@ -214,5 +259,7 @@ void i386_profile_reset(void);
 void i386_profile_dump_sd_and_reset(const char *reason);
 void i386_profile_install_bios_hooks(CPU *cpu);
 #endif
+
+void cpu_init_286(CPU* cpu);
 
 #endif /* I386_H */
