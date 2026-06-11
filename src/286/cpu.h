@@ -3,6 +3,7 @@
 #include <inttypes.h>
 
 #include "i386.h"
+#include "emulator.h"
 
 #define regax 0
 #define regcx 1
@@ -73,3 +74,21 @@
 
 void modregrm(CPU* cpu);
 void getea(CPU* cpu, uint8_t rmval);
+
+inline static void print_char(char c, int char_row, int char_pos) {
+    writew86(0xB8000 + char_row * 160 + char_pos * 2, 0x0F00 | c);
+}
+
+inline static void print_line(const char* s, int row) {
+    if (!s) return;
+    for (int col = 0; col < 80 && s[col]; ++col) {
+        print_char(s[col], row, col);
+    }
+}
+
+inline static void print_line2(const char* s, int row, int col) {
+    if (!s) return;
+    for (; col < 80 && *s; ++col) {
+        print_char(*s++, row, col);
+    }
+}

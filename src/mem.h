@@ -1,3 +1,6 @@
+#ifndef CPU_MEM_H
+#define CPU_MEM_H
+
 #include <stdint.h>
 #include <stdbool.h>
 #include "ems.h"
@@ -190,3 +193,5 @@ pstore_block(uint32_t dst, uint32_t src, int len)
     /* RAM → VGA */
     return iomem_write_string(g_pc, dst, src, len);
 }
+
+#endif // CPU_MEM_H

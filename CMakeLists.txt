@@ -225,6 +225,9 @@ set(EMU_CORE_SOURCES
     src/286/cpu.c
     src/286/fpu.c
 
+    # 286 BIOS
+    src/286/bios/bios_10h.c
+
     # Peripheral chips
     src/i8042.c      # Keyboard controller
     src/i8254.c      # Timer

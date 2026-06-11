@@ -1,9 +1,9 @@
 #include <time.h>
 #include <stdbool.h>
 #include <pico.h>
-#include "emulator.h"
 #include "i386.h"
 #include "cpu.h"
+#include "bios.h"
 
 #define IRAM_ATTR __not_in_flash()
 #define INLINE __always_inline
@@ -48,11 +48,59 @@ static void IRAM_ATTR set_flags(CPU* cpu, uword set_mask, uword clear_mask)
 }
 void cpu_enable_fpu(CPU* cpu);
 
+static void boot_from(CPU* cpu, uint8_t dl)
+{
+    CPU_DL = dl;
+    /* IBM PC compatible entry point: physical 0000:7C00.
+     * Some BIOSes use 07C0:0000; 0000:7C00 is the usual safe form. */
+    CPU_CS = 0x0000;
+    CPU_IP = 0x7C00;
+}
+
+#include "disk.h"
+#include "ff.h"
+
+#define BOOT_ADDR 0x07C00u
+
+static int read_boot_sector(FIL *f)
+{
+    UINT br = 0;
+    if (!f || !f->obj.fs)
+        return 0;
+    if (f_lseek(f, 0) != FR_OK)
+        return 0;
+    if (f_read(f, PC_RAM + BOOT_ADDR, 512, &br) != FR_OK || br != 512)
+        return 0;
+    return readw86(BOOT_ADDR + 510) == 0xAA55;
+}
+
+static INLINE void push(CPU* cpu, uint16_t pushval) {
+    CPU_SP = CPU_SP - 2;
+    putmem16(CPU_SS, CPU_SP, pushval);
+}
+
 static void reset(CPU* cpu) {
-    CPU_CS = 0xFFFF;
+    if (cpu->gen == 2) {
+        CPU_CS = 0xF000;
+        CPU_IP = 0xFFF0;
+    } else {
+        CPU_CS = 0xFFFF;
+        CPU_IP = 0x0000;
+    }
+    cpu->flags.value = 2;
+// like after POST (bios-less solution):
     CPU_SS = 0x0000;
-    CPU_SP = 0x0000;
-    CPU_IP = 0x0000;
+    CPU_SP = 0x7C00;
+// like int 19h
+    if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
+        boot_from(cpu, 0x00);
+    }
+    else if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
+        boot_from(cpu, 0x80);
+    }
+    else {
+        // TODO: int 18h
+    }
 }
 
 #include "./fpu.h"
@@ -64,6 +112,13 @@ static void i286_abort(CPU* cpu, int code)
 {
 //	dolog("abort: %d %x\n", code, code);
 	abort();
+}
+
+typedef bool (*handler_t)(CPU*);
+static handler_t handlers[256];
+
+static bool no_handler(CPU*) {
+    return true;
 }
 
 void cpu_init_286(CPU* cpu) {
@@ -85,6 +140,11 @@ void cpu_init_286(CPU* cpu) {
     cpue->raise_irq = raise_irq;
     cpue->setexc = setexc;
     cpue->abort = i286_abort;
+
+    for(int i = 0; i < 256; ++i) {
+        handlers[i] = no_handler;
+    }
+    handlers[0x10] = bios_10h; // VIDEO
 }
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION
@@ -199,11 +259,6 @@ __not_in_flash() void getea(CPU* cpu, uint8_t rmval) {
             break;
     }
     ea = (tempea & 0xFFFF) + (useseg << 4);
-}
-
-static INLINE void push(CPU* cpu, uint16_t pushval) {
-    CPU_SP = CPU_SP - 2;
-    putmem16(CPU_SS, CPU_SP, pushval);
 }
 
 static INLINE uint16_t pop(CPU* cpu) {
@@ -831,6 +886,28 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
     }
 }
 
+// 0xFFE00..0xFFEFF
+inline static bool fake_bios_area(CPU* cpu) {
+    u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP) >> 8;
+    return ip32 == 0xFFE;
+}
+
+static bool rp2350_bios_handler(CPU* cpu) {
+    uint8_t intnum = CPU_IP;
+    bool normal_iret_flow = handlers[intnum](cpu);
+    uint16_t flags_on_stack = getmem16(CPU_SS, CPU_SP + 4);
+    if (normal_iret_flow) {
+        // patch FLAGS to be returnable by IRET
+        flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                       | (cpu->flags.value & 0x0041); // set them back from CPU
+        putmem16(CPU_SS, CPU_SP + 4, flags_on_stack);
+    } else {
+        // should be processed on exact handler side, no common logic for this
+        // some handlers should turn IF = 1, some - not
+        // some patch stack, other - not
+    }
+}
+
 static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
     static uint16_t firstip;
     static bool was_TF;
@@ -842,6 +919,16 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
     }
 
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
+        if (fake_bios_area(cpu)) {
+            if (rp2350_bios_handler(cpu)) { // normal flow IRET is expected
+                CPU_IP = 0x0006;
+                CPU_CS = 0xFFF0; // reusable IRET (pc.c)
+            }
+            else {// internal using INT in JMP style (INT 19h...)
+                continue; // to allow to recheck IRQ before next step
+            }
+        }
+
         reptype = 0;
         segoverride = 0;
         useseg = CPU_DS;
