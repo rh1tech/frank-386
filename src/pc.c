@@ -1412,7 +1412,7 @@ void load_bios_and_reset(PC *pc)
 // INT 10h support:
 	bios_10h_install_rom_fonts(pc->cpu);
 // INT 13h support: 0xFFF20-0xFFF30
-///	install_floppy_dpt();
+	install_floppy_dpt();
 // INT 41h/46h support: 0xFFF30-0xFFF4F
 ///    install_hdd_dpt(pc, 0, 0xFFF30);  // INT 41h → первый HDD
 ///    install_hdd_dpt(pc, 1, 0xFFF40);  // INT 46h → второй HDD

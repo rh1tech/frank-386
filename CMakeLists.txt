@@ -227,6 +227,7 @@ set(EMU_CORE_SOURCES
 
     # 286 BIOS
     src/286/bios/bios_10h.c
+    src/286/bios/bios_13h.c
 
     # Peripheral chips
     src/i8042.c      # Keyboard controller

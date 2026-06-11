@@ -1,7 +1,7 @@
 #include <ff.h>
 #include "debug.h"
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 #include "disk.h"
 
 /* INT 13h status codes used by the minimal BIOS layer below.
@@ -52,7 +52,7 @@ typedef struct BiosDisk_s {
  * FDD and HDD have separate "last status" locations, so AH=01h can report
  * the status for the same class of drive that the caller asks about in DL.
  */
-static void int13_set_status(uint8_t drive, uint8_t status)
+static void int13_set_status(CPU* cpu, uint8_t drive, uint8_t status)
 {
     CPU_AH = status;
     cf = status ? 1 : 0;
@@ -109,7 +109,7 @@ static bool int13_get_disk(uint8_t drive, BiosDisk *d)
  * CL bits 6-7 = cylinder bits 8-9
  * DH = head
  */
-static bool int13_chs_to_lba(const BiosDisk *d, uint32_t *lba)
+static bool int13_chs_to_lba(CPU* cpu, const BiosDisk *d, uint32_t *lba)
 {
     uint16_t cyl = ((uint16_t)(CPU_CL & 0xC0) << 2) | (uint16_t)CPU_CH;
     uint8_t sect = CPU_CL & 0x3F;
@@ -144,23 +144,20 @@ static uint32_t int13_total_sectors(const BiosDisk *d)
  * The caller supplies an already-decoded LBA, sector count and linear guest RAM
  * address.  For verify requests data is read from the image but not stored.
  */
-static bool int13_transfer_lba(const BiosDisk *d, uint32_t lba, uint16_t count,
+static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16_t count,
                                uint32_t addr, uint8_t write, uint8_t verify)
 {
     uint8_t drive = d->bios_drive;
 
     if (!int13_check_range(d, lba, count)) {
-        int13_set_status(drive, INT13_ST_SECTOR_NF);
+        int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
     }
 
     if (f_lseek(d->f, lba * 512u) != FR_OK) {
-        int13_set_status(drive, INT13_ST_SEEK_FAILED);
+        int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
         return true;
     }
-debug_write("int13_transfer_lba DL=%02X CHS/LBA=%lu CNT=%u ES:BX=%04X:%04X PHYS=%05lX\n",
-            drive, lba, count, CPU_ES, CPU_BX,
-            ((uint32_t)CPU_ES << 4) + CPU_BX);
 
     uint8_t buf[512];
 
@@ -174,13 +171,13 @@ debug_write("int13_transfer_lba DL=%02X CHS/LBA=%lu CNT=%u ES:BX=%04X:%04X PHYS=
 
             if (f_write(d->f, buf, 512, &done) != FR_OK || done != 512) {
                 CPU_AL = (uint8_t)i;
-                int13_set_status(drive, INT13_ST_CONTROLLER);
+                int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
                 return true;
             }
         } else {
             if (f_read(d->f, buf, 512, &done) != FR_OK || done != 512) {
                 CPU_AL = (uint8_t)i;
-                int13_set_status(drive, INT13_ST_CONTROLLER);
+                int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
                 return true;
             }
 
@@ -194,13 +191,8 @@ debug_write("int13_transfer_lba DL=%02X CHS/LBA=%lu CNT=%u ES:BX=%04X:%04X PHYS=
     if (write)
         f_sync(d->f);
 
-debug_write("INT13 DATA %02X %02X %02X %02X %02X %02X %02X %02X "
-            "%02X %02X %02X %02X %02X %02X %02X %02X\n",
-            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-            buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15]);
-
     CPU_AL = (uint8_t)count;
-    int13_set_status(drive, INT13_ST_OK);
+    int13_set_status(cpu, drive, INT13_ST_OK);
     return true;
 }
 
@@ -209,7 +201,7 @@ debug_write("INT13 DATA %02X %02X %02X %02X %02X %02X %02X %02X "
  * write=1, verify=0: write sectors from ES:BX
  * write=0, verify=1: read sectors from image but do not copy them to guest RAM
  */
-static bool int13_rw_chs(uint8_t write, uint8_t verify)
+static bool int13_rw_chs(CPU* cpu, uint8_t write, uint8_t verify)
 {
     BiosDisk d;
     uint32_t lba;
@@ -217,25 +209,25 @@ static bool int13_rw_chs(uint8_t write, uint8_t verify)
     uint8_t drive = CPU_DL;
 
     if (!count) { // || count > 128) { TODO: -- 128 in SeaBIOS. Why?
-        int13_set_status(drive, INT13_ST_BAD_COMMAND);
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
     }
 
     if (!int13_get_disk(drive, &d)) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
     if (!d.f) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
-    if (!int13_chs_to_lba(&d, &lba)) {
-        int13_set_status(drive, INT13_ST_SECTOR_NF);
+    if (!int13_chs_to_lba(cpu, &d, &lba)) {
+        int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
     }
 
-    uint32_t addr = ((uint32_t)CPU_ES << 4) + CPU_BX;
-    return int13_transfer_lba(&d, lba, count, addr, write, verify);
+    uint32_t addr = ((uint32_t)(cpu->ext_accessors->get_seg16(cpu, SEG_ES)) << 4) + CPU_BX;
+    return int13_transfer_lba(cpu, &d, lba, count, addr, write, verify);
 }
 
 /*
@@ -250,7 +242,7 @@ AH = status
 This file-backed implementation has no real controller state to recalibrate.
 The meaningful effect is clearing the appropriate BDA last-status byte.
 */
-static bool bios_13h_00h()
+static bool bios_13h_00h(CPU* cpu)
 {
     if (!(CPU_DL & 0x80)) {
         /* FDD reset: сбросить BDA-состояние контроллера (SeaBIOS floppy_reset()) */
@@ -261,7 +253,7 @@ static bool bios_13h_00h()
         pstore8(0x495, 0x00); /* floppy_track[1] */
         pstore8(0x48B, 0x00); /* floppy_last_data_rate */
     }
-    int13_set_status(CPU_DL, INT13_ST_OK);
+    int13_set_status(cpu, CPU_DL, INT13_ST_OK);
     return true;
 }
 
@@ -274,7 +266,7 @@ Return:
 AH = status of previous INT 13h operation for diskette/fixed-disk class
 CF clear if AH=00h, set otherwise
 */
-static bool bios_13h_01h()
+static bool bios_13h_01h(CPU* cpu)
 {
     uint8_t st = int13_get_last_status(CPU_DL);
     CPU_AH = st;
@@ -314,9 +306,9 @@ Notes: Errors on a floppy may be due to the motor failing to spin up quickly eno
  drivers flush their buffers when detecting that DOS is bypassed by directly issuing INT 13h from applications.
  A dummy read can be used as one of several methods to force cache flushing for unknown caches (e.g. before rebooting).
 */
-static bool bios_13h_02h()
+static bool bios_13h_02h(CPU* cpu)
 {
-    return int13_rw_chs(0, 0);
+    return int13_rw_chs(cpu, 0, 0);
 }
 
 /*
@@ -331,9 +323,9 @@ CF clear if successful, set on error
 AH = status
 AL = number of sectors transferred on some BIOSes when CF set
 */
-static bool bios_13h_03h()
+static bool bios_13h_03h(CPU* cpu)
 {
-    return int13_rw_chs(1, 0);
+    return int13_rw_chs(cpu, 1, 0);
 }
 
 /*
@@ -349,9 +341,9 @@ AH = status
 For this emulator, "verify" means the backing sectors are readable and inside
 configured geometry.  Data is not copied to guest memory.
 */
-static bool bios_13h_04h()
+static bool bios_13h_04h(CPU* cpu)
 {
-    return int13_rw_chs(0, 1);
+    return int13_rw_chs(cpu, 0, 1);
 }
 
 /*
@@ -378,17 +370,17 @@ Offset  Size    Description     (Table 00235)
 02h    BYTE    sector number
 03h    BYTE    sector size (00h=128 bytes, 01h=256 bytes, 02h=512, 03h=1024)
 */
-static bool bios_13h_05h()
+static bool bios_13h_05h(CPU* cpu)
 {
     BiosDisk d;
     uint8_t drive = CPU_DL;
 
     if (!int13_get_disk(drive, &d)) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
     if (!d.f) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
     uint8_t count    = CPU_AL;
@@ -396,7 +388,7 @@ static bool bios_13h_05h()
     uint8_t head     = CPU_DH;
 
     if (cylinder >= d.cyls || head >= d.heads || count == 0 || count > d.sects) {
-        int13_set_status(drive, INT13_ST_BAD_COMMAND);
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
     }
 
@@ -407,18 +399,18 @@ static bool bios_13h_05h()
     for (uint8_t s = 0; s < count; s++) {
         uint32_t lba = ((uint32_t)cylinder * d.heads + head) * d.sects + s;
         if (f_lseek(d.f, lba * 512u) != FR_OK) {
-            int13_set_status(drive, INT13_ST_SEEK_FAILED);
+            int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
             return true;
         }
         UINT done = 0;
         if (f_write(d.f, buf, 512, &done) != FR_OK || done != 512) {
-            int13_set_status(drive, INT13_ST_CONTROLLER);
+            int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
             return true;
         }
     }
     f_sync(d.f);
 
-    int13_set_status(drive, INT13_ST_OK);
+    int13_set_status(cpu, drive, INT13_ST_OK);
     return true;
 }
 
@@ -460,13 +452,13 @@ DL = number of drives of this type
 BL = diskette drive type for floppy drives, if known
 ES:DI -> diskette parameter table for floppy drives
 */
-static bool bios_13h_08h()
+static bool bios_13h_08h(CPU* cpu)
 {
     BiosDisk d;
     uint8_t drive = CPU_DL;
 
     if (!int13_get_disk(drive, &d)) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
 
@@ -483,16 +475,18 @@ static bool bios_13h_08h()
 
     if (drive & 0x80) {
         CPU_DL = pload8(BDA_HDD_COUNT);
-        CPU_ES = 0x0000;
+        //CPU_ES = 0x0000;
+        cpu->ext_accessors->set_seg16(cpu, SEG_ES, 0);
         CPU_DI = 0x0000;
     } else {
         CPU_DL = 2;       /* BDA equipment word currently advertises two floppy drives. */
         CPU_BL = fdds_types() >> (drive ? 4 : 0);
-        CPU_ES = (FLOPPY_DPT_ADDR >> 4) & 0xFFFF;
+        //CPU_ES = (FLOPPY_DPT_ADDR >> 4) & 0xFFFF;
+        cpu->ext_accessors->set_seg16(cpu, SEG_ES, (FLOPPY_DPT_ADDR >> 4) & 0xFFFF);
         CPU_DI = FLOPPY_DPT_ADDR & 0x000F;
     }
 
-    int13_set_status(drive, INT13_ST_OK);
+    int13_set_status(cpu, drive, INT13_ST_OK);
     return true;
 }
 
@@ -507,7 +501,7 @@ AH = 01h diskette, no change-line support
 AH = 03h fixed disk present, CX:DX = number of 512-byte sectors
 CF clear when a drive is present, set when absent
 */
-static bool bios_13h_15h()
+static bool bios_13h_15h(CPU* cpu)
 {
     BiosDisk d;
     uint8_t drive = CPU_DL;
@@ -549,7 +543,7 @@ CX = feature bitmap
 This is intentionally HDD-only.  Classic floppy drives continue to use CHS
 functions; reporting EDD for DL=00h would be misleading.
 */
-static bool bios_13h_41h()
+static bool bios_13h_41h(CPU* cpu)
 {
     BiosDisk d;
     uint8_t drive = CPU_DL;
@@ -579,9 +573,9 @@ static bool bios_13h_41h()
  * This emulator stores image offsets in 32-bit LBA.  Non-zero high dword is
  * rejected instead of silently wrapping.
  */
-static bool int13_decode_dap(uint32_t *lba, uint16_t *count, uint32_t *addr)
+static bool int13_decode_dap(CPU* cpu, uint32_t *lba, uint16_t *count, uint32_t *addr)
 {
-    uint32_t dap = ((uint32_t)CPU_DS << 4) + CPU_SI;
+    uint32_t dap = ((uint32_t)(cpu->ext_accessors->get_seg16(cpu, SEG_DS)) << 4) + CPU_SI;
     uint8_t size = read86(dap + 0);
 
     if (size < 0x10)
@@ -614,7 +608,7 @@ This is the EDD/LBA equivalent of AH=02h.  It uses the same image file and the
 same geometry-backed range limit as the CHS path, but the sector address comes
 from the packet LBA instead of CH/CL/DH.
 */
-static bool bios_13h_42h()
+static bool bios_13h_42h(CPU* cpu)
 {
     BiosDisk d;
     uint32_t lba, addr;
@@ -622,27 +616,27 @@ static bool bios_13h_42h()
     uint8_t drive = CPU_DL;
 
     if (!(drive & 0x80) || !int13_get_disk(drive, &d)) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
 
-    if (!int13_decode_dap(&lba, &count, &addr)) {
-        int13_set_status(drive, INT13_ST_BAD_COMMAND);
+    if (!int13_decode_dap(cpu, &lba, &count, &addr)) {
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
     }
 
     if (count == 0) {                              /* SeaBIOS: empty request → SUCCESS */
-        int13_set_status(drive, INT13_ST_OK);
+        int13_set_status(cpu, drive, INT13_ST_OK);
         return true;
     }
 
     uint32_t total = (uint32_t)d.cyls * d.heads * d.sects;
     if (lba >= total) {                            /* SeaBIOS: explicit range check */
-        int13_set_status(drive, INT13_ST_SECTOR_NF);
+        int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
     }
     
-    return int13_transfer_lba(&d, lba, count, addr, 0, 0);
+    return int13_transfer_lba(cpu, &d, lba, count, addr, 0, 0);
 }
 
 /*
@@ -660,7 +654,7 @@ The write path writes guest memory to the backing image and f_sync() is called
 by the common transfer helper.  AL verify-after-write is accepted but not given
 extra handling, matching a minimal file-backed BIOS service.
 */
-static bool bios_13h_43h()
+static bool bios_13h_43h(CPU* cpu)
 {
     BiosDisk d;
     uint32_t lba, addr;
@@ -668,27 +662,27 @@ static bool bios_13h_43h()
     uint8_t drive = CPU_DL;
 
     if (!(drive & 0x80) || !int13_get_disk(drive, &d)) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
 
-    if (!int13_decode_dap(&lba, &count, &addr)) {
-        int13_set_status(drive, INT13_ST_BAD_COMMAND);
+    if (!int13_decode_dap(cpu, &lba, &count, &addr)) {
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
     }
 
     if (count == 0) {                              /* SeaBIOS: empty request → SUCCESS */
-        int13_set_status(drive, INT13_ST_OK);
+        int13_set_status(cpu, drive, INT13_ST_OK);
         return true;
     }
 
     uint32_t total = (uint32_t)d.cyls * d.heads * d.sects;
     if (lba >= total) {                            /* SeaBIOS: explicit range check */
-        int13_set_status(drive, INT13_ST_SECTOR_NF);
+        int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
     }
     
-    return int13_transfer_lba(&d, lba, count, addr, 1, 0);
+    return int13_transfer_lba(cpu, &d, lba, count, addr, 1, 0);
 }
 
 /*
@@ -705,7 +699,7 @@ AH = error code (see #00234)
 disk address packet's block count field set to number of blocks
 successfully verified
 */
-static bool bios_13h_44h()
+static bool bios_13h_44h(CPU* cpu)
 {
     BiosDisk d;
     uint32_t lba, addr;
@@ -713,27 +707,27 @@ static bool bios_13h_44h()
     uint8_t drive = CPU_DL;
 
     if (!(drive & 0x80) || !int13_get_disk(drive, &d)) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
 
-    if (!int13_decode_dap(&lba, &count, &addr)) {
-        int13_set_status(drive, INT13_ST_BAD_COMMAND);
+    if (!int13_decode_dap(cpu, &lba, &count, &addr)) {
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
     }
 
     if (count == 0) {
-        int13_set_status(drive, INT13_ST_OK);
+        int13_set_status(cpu, drive, INT13_ST_OK);
         return true;
     }
 
     uint32_t total = (uint32_t)d.cyls * d.heads * d.sects;
     if (lba >= total) {
-        int13_set_status(drive, INT13_ST_SECTOR_NF);
+        int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
     }
 
-    return int13_transfer_lba(&d, lba, count, addr, 0, 1);
+    return int13_transfer_lba(cpu, &d, lba, count, addr, 0, 1);
 }
 
 /*
@@ -757,24 +751,24 @@ DS:SI buffer filled with at least the 1Ah-byte EDD parameter table:
 No DPTE pointer is returned because the emulator is not exposing a real BIOS
 IDE parameter table here.
 */
-static bool bios_13h_48h()
+static bool bios_13h_48h(CPU* cpu)
 {
     BiosDisk d;
     uint8_t  drive = CPU_DL;
-    uint32_t p     = ((uint32_t)CPU_DS << 4) + CPU_SI;
+    uint32_t p     = ((uint32_t)(cpu->ext_accessors->get_seg16(cpu, SEG_DS)) << 4) + CPU_SI;
     uint16_t caller_size = readw86(p);
 
     if (!(drive & 0x80) || !int13_get_disk(drive, &d)) {
-        int13_set_status(drive, INT13_ST_TIMEOUT);
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
     if ((drive & 0x7F) > 1) {
         /* DPTE только для 0x80 и 0x81; остальные не поддерживаются */
-        int13_set_status(drive, INT13_ST_BAD_COMMAND);
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
     }
     if (caller_size < 0x1A) {
-        int13_set_status(drive, INT13_ST_BAD_COMMAND);
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
     }
 
@@ -847,112 +841,112 @@ static bool bios_13h_48h()
     }
 
     writew86(p + 0x00, ret_size);  // финальный размер
-    int13_set_status(drive, INT13_ST_OK);
+    int13_set_status(cpu, drive, INT13_ST_OK);
     return true;
 }
 
-bool bios_13h() {
+bool bios_13h(CPU* cpu) {
     bool res = true;
     switch(CPU_AH) {
         case 0x00:
-            res = bios_13h_00h(); // RESET DISK SYSTEM
+            res = bios_13h_00h(cpu); // RESET DISK SYSTEM
             break;
         case 0x01:
-            res = bios_13h_01h(); // GET STATUS OF LAST OPERATION
+            res = bios_13h_01h(cpu); // GET STATUS OF LAST OPERATION
             break;
         case 0x02:
-            res = bios_13h_02h(); // READ SECTOR(S) INTO MEMORY
+            res = bios_13h_02h(cpu); // READ SECTOR(S) INTO MEMORY
             break;
         case 0x03:
-            res = bios_13h_03h(); // WRITE DISK SECTOR(S)
+            res = bios_13h_03h(cpu); // WRITE DISK SECTOR(S)
             break;
         case 0x04:
-            res = bios_13h_04h(); // VERIFY DISK SECTOR(S)
+            res = bios_13h_04h(cpu); // VERIFY DISK SECTOR(S)
             break;
         case 0x05:
-            res = bios_13h_05h(); // FORMAT
+            res = bios_13h_05h(cpu); // FORMAT
             break;
         case 0x08:
-            res = bios_13h_08h(); // GET DRIVE PARAMETERS
+            res = bios_13h_08h(cpu); // GET DRIVE PARAMETERS
             break;
         case 0x09:  /* INITIALIZE DRIVE PARAMETERS — no-op for file-backed emulator */
         case 0x0C:  /* SEEK TO CYLINDER — no-op for file-backed emulator */
         case 0x0D:  /* ALTERNATE DISK RESET — no-op for file-backed emulator */
         case 0x11:  /* RECALIBRATE DRIVE — no-op for file-backed emulator */
         case 0x14:  /* CONTROLLER INTERNAL DIAGNOSTIC — no-op for file-backed emulator */
-            int13_set_status(CPU_DL, INT13_ST_OK);
+            int13_set_status(cpu, CPU_DL, INT13_ST_OK);
             break;
         case 0x10: { /* CHECK DRIVE READY */
             BiosDisk d;
-            int13_set_status(CPU_DL, int13_get_disk(CPU_DL, &d)
+            int13_set_status(cpu, CPU_DL, int13_get_disk(CPU_DL, &d)
                             ? INT13_ST_OK : INT13_ST_TIMEOUT);
             break;
         }
         case 0x15:
-            res = bios_13h_15h(); // GET DISK TYPE
+            res = bios_13h_15h(cpu); // GET DISK TYPE
             break;
         case 0x41:
-            res = bios_13h_41h(); // EXTENSIONS INSTALLATION CHECK
+            res = bios_13h_41h(cpu); // EXTENSIONS INSTALLATION CHECK
             break;
         case 0x42:
-            res = bios_13h_42h(); // EXTENDED READ
+            res = bios_13h_42h(cpu); // EXTENDED READ
             break;
         case 0x43:
-            res = bios_13h_43h(); // EXTENDED WRITE
+            res = bios_13h_43h(cpu); // EXTENDED WRITE
             break;
         case 0x44:
-            res = bios_13h_44h(); // IBM/MS INT 13 Extensions - VERIFY SECTORS
+            res = bios_13h_44h(cpu); // IBM/MS INT 13 Extensions - VERIFY SECTORS
             break;
         case 0x45:  /* LOCK/UNLOCK DRIVE — no removable media support TODO: */
-            int13_set_status(CPU_DL, INT13_ST_OK);
+            int13_set_status(cpu, CPU_DL, INT13_ST_OK);
             break;
         case 0x46: {  /* EJECT MEDIA — not supported TODO: ensure */
             BiosDisk d;
             if (!int13_get_disk(CPU_DL, &d)) {
-                int13_set_status(CPU_DL, INT13_ST_TIMEOUT);
+                int13_set_status(cpu, CPU_DL, INT13_ST_TIMEOUT);
             } else if (d.hdd && ata_is_cdrom(CPU_DL & 0x7F)) {
                 /* CD-ROM: нет реального эжекта — сообщаем locked */
-                int13_set_status(CPU_DL, INT13_ST_ELOCKED);
+                int13_set_status(cpu, CPU_DL, INT13_ST_ELOCKED);
             } else {
                 /* HDD/FDD: SeaBIOS ENOTREMOVABLE */
-                int13_set_status(CPU_DL, INT13_ST_NOT_REMOVABLE);
+                int13_set_status(cpu, CPU_DL, INT13_ST_NOT_REMOVABLE);
             }
             break;
         }
         case 0x47: { /* EXTENDED SEEK — no-op for file-backed emulator */
             uint32_t lba, addr;
             uint16_t count;
-            if (!int13_decode_dap(&lba, &count, &addr)) {
-                int13_set_status(CPU_DL, INT13_ST_BAD_COMMAND);
+            if (!int13_decode_dap(cpu, &lba, &count, &addr)) {
+                int13_set_status(cpu, CPU_DL, INT13_ST_BAD_COMMAND);
             } else {
-                int13_set_status(CPU_DL, INT13_ST_OK);
+                int13_set_status(cpu, CPU_DL, INT13_ST_OK);
             }
             break;
         }
         case 0x48:
-            res = bios_13h_48h(); // GET EXTENDED DRIVE PARAMETERS
+            res = bios_13h_48h(cpu); // GET EXTENDED DRIVE PARAMETERS
             break;
         case 0x49: { /* EXTENDED MEDIA CHANGE */
             BiosDisk d;
             if (!int13_get_disk(CPU_DL, &d)) {
-                int13_set_status(CPU_DL, INT13_ST_TIMEOUT);
+                int13_set_status(cpu, CPU_DL, INT13_ST_TIMEOUT);
             } else if (d.hdd && ata_is_cdrom((CPU_DL & 0x7F))) {
                 /* CD-ROM: SeaBIOS всегда возвращает ECHANGED (0x06) */
                 CPU_AH = INT13_ST_ECHANGED;
                 cf = 1;
             } else {
                 /* HDD/FDD: SeaBIOS всегда SUCCESS */
-                int13_set_status(CPU_DL, INT13_ST_OK);
+                int13_set_status(cpu, CPU_DL, INT13_ST_OK);
             }
             break;
         }
         case 0x4E: /* SET HARDWARE CONFIGURATION (SeaBIOS disk_134e) */
             switch (CPU_AL) {
             case 0x01: case 0x03: case 0x04: case 0x06:
-                int13_set_status(CPU_DL, INT13_ST_OK);
+                int13_set_status(cpu, CPU_DL, INT13_ST_OK);
                 break;
             default:
-                int13_set_status(CPU_DL, INT13_ST_BAD_COMMAND);
+                int13_set_status(cpu, CPU_DL, INT13_ST_BAD_COMMAND);
                 break;
             }
             break;
@@ -960,7 +954,7 @@ bool bios_13h() {
             break;
         default:
 // BIOS INT 13h is covered, all other - not related
-            int13_set_status(CPU_DL, INT13_ST_BAD_COMMAND);
+            int13_set_status(cpu, CPU_DL, INT13_ST_BAD_COMMAND);
     }
     return res;
 }
