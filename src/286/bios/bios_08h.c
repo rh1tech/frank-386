@@ -1,6 +1,6 @@
 #include <stdio.h>
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 
 /* INT 08h  –  IRQ0 System Timer Tick (18.2065 Hz)
  *
@@ -17,7 +17,7 @@
 /* Ticks per 24 h at 18.20648 Hz (IBM BIOS value). */
 #define TICKS_PER_DAY  0x1800B0u
 
-bool bios_08h(void)
+bool bios_08h(CPU* cpu)
 {
     /* 1 & 2: tick counter */
     uint32_t ticks = pload32(0x046C);
@@ -46,7 +46,8 @@ bool bios_08h(void)
     */
 //    { char buf[32]; snprintf(buf, sizeof(buf), "08h SS=%04x SP=%04x", CPU_SS, CPU_SP); print_line(buf, 13); }
  
-    CPU_CS = 0xFFF0;
+    //CPU_CS = 0xFFF0;
+    cpu->ext_accessors->set_seg16(cpu, SEG_CS, 0xFFF0);
     CPU_IP = 0x0000;
 
     return false;

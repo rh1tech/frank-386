@@ -117,7 +117,25 @@ static void i286_abort(CPU* cpu, int code)
 typedef bool (*handler_t)(CPU*);
 static handler_t handlers[256];
 
-static bool no_handler(CPU*) {
+#include <stdio.h>
+static bool no_handler(CPU* cpu) {
+    print_line("ERROR: no handler defined", 1);
+    char buf[10];
+    snprintf(buf, 10, "AX: %04xh", CPU_AX); print_line(buf, 2);
+    snprintf(buf, 10, "BX: %04xh", CPU_BX); print_line(buf, 3);
+    snprintf(buf, 10, "CX: %04xh", CPU_CX); print_line(buf, 4);
+    snprintf(buf, 10, "DX: %04xh", CPU_DX); print_line(buf, 5);
+    snprintf(buf, 10, "SI: %04xh", CPU_SI); print_line(buf, 5);
+    snprintf(buf, 10, "DI: %04xh", CPU_DI); print_line(buf, 6);
+    snprintf(buf, 10, "BP: %04xh", CPU_BP); print_line(buf, 7);
+    snprintf(buf, 10, "DS: %04xh", CPU_DS); print_line(buf, 8);
+    snprintf(buf, 10, "SS: %04xh", CPU_SS); print_line(buf, 9);
+    snprintf(buf, 10, "FS: %04xh", CPU_FS); print_line(buf, 10);
+    snprintf(buf, 10, "GS: %04xh", CPU_GS); print_line(buf, 11);
+    snprintf(buf, 10, "ES: %04xh", CPU_ES); print_line(buf, 12);
+    snprintf(buf, 10, "CS: %04xh", CPU_CS); print_line(buf, 13);
+    snprintf(buf, 10, "IP: %04xh", CPU_IP); print_line(buf, 14);
+while(1); // remove it
     return true;
 }
 
@@ -144,7 +162,9 @@ void cpu_init_286(CPU* cpu) {
     for(int i = 0; i < 256; ++i) {
         handlers[i] = no_handler;
     }
+    handlers[0x08] = bios_08h; // IRQ0: Timer
     handlers[0x10] = bios_10h; // VIDEO
+    handlers[0x13] = bios_13h; // DISK
 }
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION
@@ -327,6 +347,13 @@ static INLINE void decodeflagsword(CPU* cpu, uint16_t x) {
 }
 
 static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
+    {
+        char buf[80];
+        u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
+        u16 new_ip = getmem16(0, (uint16_t) intnum * 4);
+        snprintf(buf, 79, "INT %02Xh DOS? %04X:%04X->%04X:%04X AX:%04X", intnum, CPU_CS, CPU_IP, new_cs, new_ip, CPU_AX);
+        print_line(buf, 0);
+    }
     push(cpu, makeflagsword(cpu));
     push(cpu, CPU_CS);
     push(cpu, CPU_IP);
@@ -893,6 +920,7 @@ inline static bool fake_bios_area(CPU* cpu) {
 }
 
 static bool rp2350_bios_handler(CPU* cpu) {
+    print_line2("BIOS", 0, 8);
     uint8_t intnum = CPU_IP;
     bool normal_iret_flow = handlers[intnum](cpu);
     uint16_t flags_on_stack = getmem16(CPU_SS, CPU_SP + 4);

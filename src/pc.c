@@ -1182,7 +1182,15 @@ void load_bios_and_reset(PC *pc)
 	}
 	sn76489_reset();
 
+#ifndef I386_MODE
+// fast IRET cases:
+	for (int i = 0; i < 256; ++i) { // initially all them just pointed to IRET
+		point2iret(i);
+	}
+#endif
+
 	cpu_reset(pc->cpu);
+
 #ifndef I386_MODE
 // POST
 	// TODO:
@@ -1294,7 +1302,7 @@ void load_bios_and_reset(PC *pc)
 		pstore16(ipa*4, ipa);
 		pstore16(ipa*4 + 2, 0xFFE0);
 	}
-// Timer specific W/A
+// IRQ0: Timer specific W/A
     pstore8(0xFFF00, 0xCD); // INT 1Ch
     pstore8(0xFFF01, 0x1C);
     pstore8(0xFFF02, 0xB0); // MOV AL, 20h
@@ -1319,10 +1327,6 @@ void load_bios_and_reset(PC *pc)
     pstore8(0xFFF7B, 0xCF); // IRET — fallback if phase2 returns false
     // + IVT: INT 77h → callback handler (fake BIOS area, IP=0x77)
     // already set by general IVT init loop (0xFFE0:0x77)
-// fast IRET cases:
-	for (int i = 0; i < 256; ++i) { // initially all them just pointed to IRET
-		point2iret(i);
-	}
 /*
 	point2iret(0x00); // CPU-generated - DIVIZION BY ZERO
 	point2iret(0x01); // CPU-generated - SINGLE STEP
@@ -1422,6 +1426,10 @@ void load_bios_and_reset(PC *pc)
 
 // like VGA BIOS banner:
 	vga_bios_baner(pc->cpu);
+//  do not trap custom timer (to be overriden by DOS)
+	point2iret(0x1C);
+// unblock IRQs
+	pc->cpu->ext_accessors->set_flag(pc->cpu, IF, 1);
 #endif
 }
 
