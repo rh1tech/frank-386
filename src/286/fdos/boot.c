@@ -1,0 +1,15 @@
+#include <stdio.h>
+#include "../cpu.h"
+#include "../fdos.h"
+
+// like kernel/boot/boot.asm
+// without redundant actions
+void _boot(CPU* cpu) {
+   CPU_BP = 0x7C00;
+//   CPU_SS = 0x1FE0;
+   cpu->ext_accessors->set_seg16(cpu, SEG_SS, 0x1FE0);
+   CPU_SP = CPU_BP - 0x60;
+   u16 drive = CPU_DL;
+   CPU_BL = drive; // FreeDOS expects drive there
+   // TODO: load FAT?
+}

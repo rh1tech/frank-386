@@ -1159,6 +1159,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 #ifndef I386_MODE
 #include "286/bios.h"
+#include "286/fdos.h"
 // IRET is saved on 0xFFF06
 static void point2iret(u32 intno) {
 	pstore16(intno*4, 0x0006);
@@ -1428,6 +1429,9 @@ void load_bios_and_reset(PC *pc)
 	vga_bios_baner(pc->cpu);
 //  do not trap custom timer (to be overriden by DOS)
 	point2iret(0x1C);
+// FreeDOS kernel
+	_boot(pc->cpu);
+	kernel(pc->cpu);
 // unblock IRQs
 	pc->cpu->ext_accessors->set_flag(pc->cpu, IF, 1);
 #endif

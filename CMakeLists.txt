@@ -230,6 +230,10 @@ set(EMU_CORE_SOURCES
     src/286/bios/bios_10h.c
     src/286/bios/bios_13h.c
 
+    # FreeDOS kernel
+    src/286/fdos/boot.c
+    src/286/fdos/kernel.c
+
     # Peripheral chips
     src/i8042.c      # Keyboard controller
     src/i8254.c      # Timer
