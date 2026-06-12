@@ -4,6 +4,7 @@
 #include "i386.h"
 #include "cpu.h"
 #include "bios.h"
+#include "fdos.h"
 
 #define IRAM_ATTR __not_in_flash()
 #define INLINE __always_inline
@@ -165,6 +166,27 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x08] = bios_08h; // IRQ0: Timer
     handlers[0x10] = bios_10h; // VIDEO
     handlers[0x13] = bios_13h; // DISK
+    handlers[0x29] = fdos_29h; // fast console output.
+    /*
+00h  divide error
+01h  single step
+03h  breakpoint
+06h  invalid opcode
+19h  bootstrap/reboot hook
+1Bh — BIOS Ctrl-Break hook.
+20h  terminate program
+21h  основной DOS API
+22h  terminate address
+24h  critical error
+25h  absolute disk read
+26h  absolute disk write
+27h  TSR terminate
+28h  DOS idle
+2Ah  DOS internal/network/critical section
+2Fh  multiplex
+23h до 3Fh сначала получают empty_handler, то есть простой IRET.
+// TODO: INT 30h как far jump на CP/M entry
+    */
 }
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION

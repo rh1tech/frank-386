@@ -233,6 +233,7 @@ set(EMU_CORE_SOURCES
     # FreeDOS kernel
     src/286/fdos/boot.c
     src/286/fdos/kernel.c
+    src/286/fdos/fdos_29h.c
 
     # Peripheral chips
     src/i8042.c      # Keyboard controller
@@ -317,6 +318,9 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
     FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
     FRANK_386_VERSION_MINOR=${FRANK_386_VERSION_MINOR}
+
+    # no FreeDOS redundant messages
+    QUIET=1
 
     # Board configuration
     BOARD_${BOARD}
