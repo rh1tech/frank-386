@@ -1,10 +1,11 @@
 /****************************************************************/
 /*                                                              */
-/*                          version.h                           */
+/*                          globals.h                           */
+/*                            DOS-C                             */
 /*                                                              */
-/*                  Common version information                  */
+/*             Global data structures and declarations          */
 /*                                                              */
-/*                      Copyright (c) 1997                      */
+/*                   Copyright (c) 1995, 1996                   */
 /*                      Pasquale J. Villani                     */
 /*                      All Rights Reserved                     */
 /*                                                              */
@@ -25,29 +26,10 @@
 /* write to the Free Software Foundation, 675 Mass Ave,         */
 /* Cambridge, MA 02139, USA.                                    */
 /****************************************************************/
-
-/* The version the kernel reports as compatible with */
-#ifdef WITHFAT32
-#define MAJOR_RELEASE   7
-#define MINOR_RELEASE   10
-#else
-#define MAJOR_RELEASE   6
-#define MINOR_RELEASE   22
+#ifndef DOS_PSP
+// default DOS Kernel Program Segment Prefix
+#define DOS_PSP 0x60
 #endif
 
-/* The actual kernel revision, 2000+REVISION_SEQ = 2.REVISION_SEQ */
-#define REVISION_SEQ    45      /* returned in BL by int 21 function 30 */
-#define OEM_ID          0xfd    /* FreeDOS, returned in BH by int 21 30 */
-
-/* Used for version information displayed to user at boot (& stored in os_release string) */
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION "RP2350"
-#endif
-
-/* actual version string */
-#define STR2(x) #x
-#define STR(x) STR2(x)
-#define KVS(v,s,o) "FreeDOS " STR(MAJOR_RELEASE) "." STR(MINOR_RELEASE) " kernel " v " (build 20" #s " OEM:" #o ") [compiled " __DATE__ "]\n"
-#define xKVS(v,s,o) KVS(v,s,o)
-#define KERNEL_VERSION_STRING xKVS(KERNEL_VERSION, REVISION_SEQ, OEM_ID)
-#define KERNEL_VERSION_SHORT_STRING "FreeDOS " STR(MAJOR_RELEASE) "." STR(MINOR_RELEASE) " " KERNEL_VERSION " kernel\n"
+extern UWORD ASM Int21AX;
+extern seg ASM cu_psp;              /* current psp segment                  */

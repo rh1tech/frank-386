@@ -110,16 +110,21 @@
 /*
  *      structures
  */
-
+struct request;
 /* Device header */
-
 struct dhdr {
-  struct dhdr
-  FAR *dh_next;
-  UWORD dh_attr;
-    VOID(*dh_strategy) (void);
-    VOID(*dh_interrupt) (void);
-  UBYTE dh_name[8];
+    struct dhdr FAR *dh_next;
+    UWORD dh_attr;
+    union {
+      struct {
+        VOID(*dh_interrupt)(struct request *rq);
+      } arm;
+      struct {
+        uint32_t dh_strategy; // offset in x86 RAM space
+        uint32_t dh_interrupt; // offset in x86 RAM space
+      } x86;
+    };
+    UBYTE dh_name[8];
 };
 
 #define ATTR_SUBST      0x8000
@@ -128,9 +133,11 @@ struct dhdr {
 #define ATTR_BLDFAT     0x2000
 #define ATTR_REMOTE     0x1000
 #define ATTR_EXCALLS    0x0800
+#define ATTR_RAW        0x0400
+#define ATTR_NATIVE     0x0200 // for RP2350 only for now
+#define ATTR_RESETVED   0x0100
 #define ATTR_QRYIOCTL   0x0080
 #define ATTR_GENIOCTL   0x0040
-#define ATTR_RAW        0x0400
 #define ATTR_FASTCON    0x0010
 #define ATTR_CLOCK      0x0008
 #define ATTR_NULL       0x0004
@@ -333,7 +340,7 @@ struct fsinfo {
 
 typedef boot super;             /* Alias for boot structure             */
 
-typedef struct {
+typedef struct request {
   UBYTE r_length;               /*  Request Header length               */
   UBYTE r_unit;                 /*  Unit Code                           */
   UBYTE r_command;              /*  Command Code                        */

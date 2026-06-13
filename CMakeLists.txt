@@ -23,7 +23,7 @@ set(BUILD_NAME "386")
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
 
 # Board configuration variant (M1, M2, PC or Z2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC or Z2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC or Z2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -228,11 +228,13 @@ set(EMU_CORE_SOURCES
     # 286 BIOS
     src/286/bios/bios_08h.c
     src/286/bios/bios_10h.c
+    src/286/bios/bios_12h.c
     src/286/bios/bios_13h.c
 
     # FreeDOS kernel
     src/286/fdos/boot.c
     src/286/fdos/kernel.c
+    src/286/fdos/fdos_21h.c
     src/286/fdos/fdos_29h.c
 
     # Peripheral chips
@@ -321,6 +323,8 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 
     # no FreeDOS redundant messages
     QUIET=1
+    # FreeDOS FAT32 support
+    WITHFAT32=1
 
     # Board configuration
     BOARD_${BOARD}

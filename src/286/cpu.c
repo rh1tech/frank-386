@@ -165,7 +165,9 @@ void cpu_init_286(CPU* cpu) {
     }
     handlers[0x08] = bios_08h; // IRQ0: Timer
     handlers[0x10] = bios_10h; // VIDEO
+    handlers[0x12] = bios_12h; // Conventional RAM count
     handlers[0x13] = bios_13h; // DISK
+    handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.
     /*
 00h  divide error
@@ -175,7 +177,6 @@ void cpu_init_286(CPU* cpu) {
 19h  bootstrap/reboot hook
 1Bh — BIOS Ctrl-Break hook.
 20h  terminate program
-21h  основной DOS API
 22h  terminate address
 24h  critical error
 25h  absolute disk read

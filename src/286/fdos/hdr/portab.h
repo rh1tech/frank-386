@@ -175,8 +175,31 @@ static inline unsigned short getSS(void)
 }
 extern char DosDataSeg[];
 #else
-/* for warnings only ! */
-#define MC68K
+  #ifdef PICO_RP2350
+    #define ARM_M33
+  #else
+    /* for warnings only ! */
+    #define MC68K
+  #endif
+#endif
+
+#ifdef ARM_M33
+#define VOID void
+#define CDECL
+#define PASCAL
+#define FAR
+#define far
+#define seg unsigned short
+#define GLOBAL extern
+#define ASM
+#define WIN31SUPPORT 1
+#define BSS_INIT(x) = x
+#define MK_FP(seg,ofs)         ((VOID *)(&(((BYTE *)(size_t)(seg))[(ofs)])))
+#define FP_SEG(fp)             (0)
+#define FP_OFF(fp)             ((size_t)(fp))
+#define DHDR_END ((uintptr_t)-1)
+#else
+#define DHDR_END 0xFFFF
 #endif
 
 #else
