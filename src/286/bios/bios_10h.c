@@ -742,13 +742,12 @@ static bool bios_10h_0Eh(CPU* cpu) {
 
     switch (ch) {
         case 0x07: /* BEL */
+        // TODO: Pc speaker beep should be there
             return true;
 
         case 0x08: /* BS */
             if (col > 0) {
-                uint32_t cell = vram_base + page_off + ((uint32_t)row * cols + col) * 2u;
-                write86(cell + 0, ' ');
-                write86(cell + 1, attr);
+                --col;
             }
             break;
 
@@ -943,6 +942,12 @@ void vga_bios_baner(CPU* cpu)
     CPU_AH = 0x00; CPU_AL = 0x03;
     bios_10h(cpu);
 
+    // Hide cursor while drawing the BIOS banner.
+    // Otherwise the first cursor position 0:0 can be rendered over
+    // the colored banner before we move the cursor to the final line.
+    CPU_AH = 0x01; CPU_CH = 0x20; CPU_CL = 0x00;
+    bios_10h(cpu);
+
     // Fill full row 0 with spaces using banner attribute
     CPU_AH = 0x02; CPU_BH = 0x00; CPU_DH = row; CPU_DL = 0x00;
     bios_10h(cpu);
@@ -953,16 +958,21 @@ void vga_bios_baner(CPU* cpu)
     // Move cursor to centered banner position
     CPU_AH = 0x02; CPU_BH = 0x00; CPU_DH = row; CPU_DL = col; bios_10h(cpu);
 
-    // Print banner via INT 10h-style BIOS service
-    for (const char *p = banner; *p; ++p) {
-        CPU_AH = 0x09; CPU_AL = (uint8_t)*p; CPU_BH = 0x00; CPU_BL = attr; CPU_CX = 1;
+    // Print banner via INT 10h-style BIOS service.
+    // AH=09h does not advance cursor, so set position explicitly.
+    for (uint8_t i = 0; banner[i]; ++i) {
+        CPU_AH = 0x02; CPU_BH = 0x00; CPU_DH = row; CPU_DL = col + i;
         bios_10h(cpu);
 
-        CPU_AH = 0x02; CPU_BH = 0x00; CPU_DH = row; CPU_DL++;
+        CPU_AH = 0x09; CPU_AL = (uint8_t)banner[i]; CPU_BH = 0x00; CPU_BL = attr; CPU_CX = 1;
         bios_10h(cpu);
     }
 
     // Move cursor to row 1, col 0
     CPU_AH = 0x02; CPU_BH = 0x00; CPU_DH = 0x01; CPU_DL = 0x00;
+    bios_10h(cpu);
+
+    // Restore normal 80x25 cursor shape.
+    CPU_AH = 0x01; CPU_CH = 0x0E; CPU_CL = 0x0F;
     bios_10h(cpu);
 }

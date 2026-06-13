@@ -313,11 +313,17 @@ static struct lol lol = {
 };
 
 void dos_puts(CPU* cpu, const char* str) {
+    u16 ax = CPU_AH;
+    u16 bx = CPU_BX;
+    CPU_AH = 0x0e;
+    CPU_BX = 0x0007;
     while(*str) {
         CPU_AL = *str;
-        fdos_29h(cpu);
+        bios_10h(cpu);
         str++;
     }
+    CPU_AX = ax;
+    CPU_BX = bx;
 }
 
 void kernel(CPU* cpu) {
