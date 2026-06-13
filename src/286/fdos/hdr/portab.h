@@ -189,6 +189,7 @@ extern char DosDataSeg[];
 #define PASCAL
 #define FAR
 #define far
+#define REG register
 #define seg unsigned short
 #define GLOBAL extern
 #define ASM

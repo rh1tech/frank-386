@@ -12,6 +12,8 @@ static CPU* cpu;
 #include "hdr/kconfig.h"
 #include "hdr/portab.h"
 #include "hdr/lol.h"
+#include "hdr/dcb.h"
+#include "hdr/cds.h"
 #include "hdr/version.h"
 #include "globals.h"
 
@@ -412,17 +414,77 @@ void FAR * KernelAllocPara(size_t nPara, char type, char *name, int mode) {
 }
 
 /* check for a block device and update  device control block    */
-STATIC VOID update_dcb(struct dhdr FAR * dhp) {
-  /// TODO:
-}
+STATIC VOID update_dcb(struct dhdr FAR * dhp)
+{
+  REG COUNT Index;
+  COUNT nunits = dhp->dh_name[0];
+   // Drive Parameter Block: описание одного DOS-диска/логического drive unit.
+   // Через DPB DOS связывает букву диска с конкретным block-device driver и его subunit.
+  struct dpb FAR *dpb;
 
+  /* printf("nblkdev = %i\n", LoL->nblkdev); */
+  
+  /* if no units, nothing to do, ensure at least 1 unit for rest of logic */
+  if (nunits == 0) return;
+
+  /* allocate memory for new device control blocks, insert into chain [at end], and update our pointer to new end */
+  dpb = (struct dpb FAR *)calloc(nunits, sizeof(struct dpb));
+  /* it was:
+  if ( LoL->first_mcb ) {
+    dpb = (struct dpb FAR *)KernelAlloc(nunits * sizeof(struct dpb), 'E', Config.cfgDosDataUmb);
+  }
+  else {
+    dpb = DynAlloc("DPBp", blk_dev.dh_name[0], sizeof(struct dpb));
+  }
+  */
+
+  /* find end of dpb chain or initialize root if needed */
+  if (LoL->nblkdev == 0)
+  {
+    /* update root pointer to new end (our just allocated block) */
+    LoL->DPBp = dpb;
+  }  
+  else
+  {
+    struct dpb FAR *tmp_dpb;
+    /* find current end of dpb chain by following next pointers to end */
+    for (tmp_dpb = LoL->DPBp; (ULONG) tmp_dpb->dpb_next != 0xFFFFFFFFl; tmp_dpb = tmp_dpb->dpb_next)
+      ;
+    /* insert into chain [at end] */
+    tmp_dpb->dpb_next = dpb;
+  }
+  /* dpb points to last block, one just allocated */
+
+  for (Index = 0; Index < nunits; Index++)
+  {		
+    /* printf("processing unit %i of %i nunits\n", Index, nunits); */
+    dpb->dpb_next = dpb + 1;  /* memory allocated as array, so next is just next element */
+    dpb->dpb_unit = LoL->nblkdev;
+    dpb->dpb_subunit = Index;
+    dpb->dpb_device = dhp;
+    dpb->dpb_flags = M_CHANGED;
+    // LoL->CDSp: Current Directory Structure
+    if ((LoL->CDSp != 0) && (LoL->nblkdev < LoL->lastdrive))
+    {
+      LoL->CDSp[LoL->nblkdev].cdsDpb = dpb;
+      LoL->CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
+    }
+	
+    ++dpb;  /* dbp = dbp->dpb_next; */
+    ++LoL->nblkdev;
+  }
+  /* note that always at least 1 valid dpb due to above early exit if nunits==0 */
+  (dpb - 1)->dpb_next = (void FAR *)0xFFFFFFFFl;
+
+  /* printf("processed %i nunits\n", nunits); */
+}
 
 /* If cmdLine is NULL, this is an internal driver */
 
 BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
                  char FAR **r_top)
 {
-  request rq;
+  request rq = { 0 };
   char name[8];
 
   if (cmdLine) {
