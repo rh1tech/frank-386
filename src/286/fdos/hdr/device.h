@@ -112,20 +112,27 @@
  */
 struct request;
 /* Device header */
+#pragma pack(push, 1)
 struct dhdr {
-    struct dhdr FAR *dh_next;
+    dos_far_ptr dh_next; // for x86 drivers only
     UWORD dh_attr;
     union {
       struct {
         VOID(*dh_interrupt)(struct request *rq);
       } arm;
       struct {
-        uint32_t dh_strategy; // offset in x86 RAM space
-        uint32_t dh_interrupt; // offset in x86 RAM space
+        dos_far_ptr dh_strategy;
+        dos_far_ptr dh_interrupt;
       } x86;
     };
     UBYTE dh_name[8];
+    // out of real dhd:
+#ifdef ARM_M33
+    struct dhdr *next; // real
+    dos_far_ptr this; // for mixed addressing, in case the driver is stored in x86 RAM
+#endif
 };
+#pragma pack(pop)
 
 #define ATTR_SUBST      0x8000
 #define ATTR_CHAR       0x8000
@@ -349,7 +356,7 @@ typedef struct request {
   union {
     struct {
       UBYTE _r_nunits;          /*  number of units     */
-      BYTE FAR *_r_endaddr;     /*  Ending Address      */
+      dos_far_ptr _r_endaddr;   /*  Ending Address      */
       bpb *FAR * _r_bpbptr;     /*  ptr to BPB array    */
       UBYTE _r_firstunit;
     } _r_init;

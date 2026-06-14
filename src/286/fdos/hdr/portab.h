@@ -184,6 +184,16 @@ extern char DosDataSeg[];
 #endif
 
 #ifdef ARM_M33
+
+#pragma pack(push, 1)
+typedef struct dos_far_ptr {
+    uint16_t offset;
+    uint16_t segment;
+} dos_far_ptr;
+#pragma pack(pop)
+typedef char dos_far_ptr_size_check[ // like static assert
+    sizeof(dos_far_ptr) == 4 ? 1 : -1
+];
 #define VOID void
 #define CDECL
 #define PASCAL
@@ -195,10 +205,11 @@ extern char DosDataSeg[];
 #define ASM
 #define WIN31SUPPORT 1
 #define BSS_INIT(x) = x
-#define MK_FP(seg,ofs)         ((VOID *)(&(((BYTE *)(size_t)(seg))[(ofs)])))
-#define FP_SEG(fp)             (0)
-#define FP_OFF(fp)             ((size_t)(fp))
-#define DHDR_END ((uintptr_t)-1)
+#define MK_FP(seg, off) ((dos_far_ptr){ .offset = (off), .segment = (seg)  })
+#define FP_SEG(fp)             ((fp).segment)
+#define FP_OFF(fp)             ((fp).offset)
+#define DHDR_END ((void*)(uintptr_t)-1)
+#define EFFECTIVE(a) (((uint32_t)a.segment << 4) + a.offset)
 #else
 #define DHDR_END 0xFFFF
 #endif

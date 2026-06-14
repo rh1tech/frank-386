@@ -1,3 +1,6 @@
+#include <pico.h>
+#include <pico/time.h>
+#include <hardware/pio.h>
 #include "../cpu.h"
 #include "../bios.h"
 #include "../fdos.h"
@@ -19,7 +22,7 @@ static CPU* cpu;
 
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
-BYTE FAR *lpTop BSS_INIT(0);
+dos_far_ptr lpTop;
 
 static KernelConfig InitKernelConfig = {
     .CONFIG = {'C','O','N','F','I','G'},
@@ -253,84 +256,96 @@ static void NulIntr(request FAR *rq) {
 }
 
 static struct dhdr blk_dev = {
-    .dh_next = (struct dhdr far *)-1,
+    .dh_next = MK_FP(-1, -1),
     .dh_attr = 0x08c2 | ATTR_NATIVE,
     .arm.dh_interrupt = BlkEntry,
-    .dh_name = { 4, 0, 0, 0, 0, 0, 0, 0 }
+    .dh_name = { 4, 0, 0, 0, 0, 0, 0, 0 },
+    .next = NULL
 };
 
 static struct dhdr clk_dev = {
-    .dh_next = &blk_dev,
+    .dh_next = MK_FP(-1, -1),
     .dh_attr = 0x8008 | ATTR_NATIVE,
     .arm.dh_interrupt = ClkEntry,
-    .dh_name = "CLOCK$  "
+    .dh_name = "CLOCK$  ",
+    .next = &blk_dev,
 };
 
 static struct dhdr com4_dev = {
-    .dh_next = &clk_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &clk_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com4Intr,
     .dh_name = "COM4    "
 };
 
 static struct dhdr com3_dev = {
-    .dh_next = &com4_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &com4_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com3Intr,
     .dh_name = "COM3    "
 };
 
 static struct dhdr com2_dev = {
-    .dh_next = &com3_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &com3_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com2Intr,
     .dh_name = "COM2    "
 };
 
 static struct dhdr com1_dev = {
-    .dh_next = &com2_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &com2_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = AuxIntr,
     .dh_name = "COM1    "
 };
 
 static struct dhdr lpt3_dev = {
-    .dh_next = &com1_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &com1_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt3Intr,
     .dh_name = "LPT3    "
 };
 
 static struct dhdr lpt2_dev = {
-    .dh_next = &lpt3_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &lpt3_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt2Intr,
     .dh_name = "LPT2    "
 };
 
 static struct dhdr lpt1_dev = {
-    .dh_next = &lpt2_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &lpt2_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt1Intr,
     .dh_name = "LPT1    "
 };
 
 static struct dhdr aux_dev = {
-    .dh_next = &lpt1_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &lpt1_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = AuxIntr,
     .dh_name = "AUX     "
 };
 
 static struct dhdr prn_dev = {
-    .dh_next = &aux_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &aux_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = PrnIntr,
     .dh_name = "PRN     "
 };
 
 static struct dhdr con_dev = {
-    .dh_next = &prn_dev,
+    .dh_next = MK_FP(-1, -1),
+    .next = &prn_dev,
     .dh_attr = 0x8013 | ATTR_NATIVE,
     .arm.dh_interrupt = ConIntr,
     .dh_name = "CON     "
@@ -349,7 +364,8 @@ static struct lol lol = {
     .lastdrive   = 0,
 
     .nul_dev = {
-        .dh_next = &con_dev,
+        .dh_next = MK_FP(-1, -1),
+        .next = &con_dev,
         .dh_attr = 0x8004 | ATTR_NATIVE,
         .arm.dh_interrupt = NulIntr,
         .dh_name = "NUL     "
@@ -397,6 +413,8 @@ void dos_puts(const char* str) {
 
 static void x86_execrh() {
   /// TODO: see execrh.asm
+        print_line("KERNEL INIT TODO (x86_execrh)", 1);
+        while(1);
 }
 
 WORD ASMPASCAL execrh(request FAR * rq, struct dhdr FAR * dhp) {
@@ -410,6 +428,9 @@ WORD ASMPASCAL execrh(request FAR * rq, struct dhdr FAR * dhp) {
 
 void FAR * KernelAllocPara(size_t nPara, char type, char *name, int mode) {
   /// TODO:
+        print_line("KERNEL INIT TODO (KernelAllocPara)", 1);
+        while(1);
+
   return NULL;
 }
 
@@ -482,7 +503,7 @@ STATIC VOID update_dcb(struct dhdr FAR * dhp)
 /* If cmdLine is NULL, this is an internal driver */
 
 BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
-                 char FAR **r_top)
+                 dos_far_ptr * r_top)
 {
   request rq = { 0 };
   char name[8];
@@ -529,13 +550,13 @@ BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
   if (cmdLine)
   {
     /* Don't link in device drivers which do not take up memory */
-    if (rq.r_endaddr == (BYTE FAR *) dhp)
+    if (EFFECTIVE(rq.r_endaddr) == EFFECTIVE(dhp->this))
       return TRUE;
 
     /* Don't link in block device drivers which indicate no units */
     if (!(dhp->dh_attr & ATTR_CHAR) && !rq.r_nunits)
     {
-      rq.r_endaddr = (BYTE FAR *) dhp;
+      rq.r_endaddr = dhp->this;
       return TRUE;
     }
 
@@ -546,10 +567,12 @@ BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
     /*   the used.  It is recommended that all the device drivers in   */
     /*   the file return the same address                              */
 
-    if (FP_OFF(dhp->dh_next) == DHDR_END)
+    if (FP_OFF(dhp->dh_next) == 0xffff)
     {
-      KernelAllocPara(FP_SEG(rq.r_endaddr) + (FP_OFF(rq.r_endaddr) + 15)/16
-                      - FP_SEG(dhp), 'D', name, mode);
+        print_line("KERNEL INIT TODO (KernelAllocPara)", 1);
+        while(1);
+ /// TODO:     KernelAllocPara(FP_SEG(rq.r_endaddr) + (FP_OFF(rq.r_endaddr) + 15)/16
+ ///                     - FP_SEG(dhp), 'D', name, mode);
     }
 
     /* Another fix for multisegmented device drivers:                  */
@@ -558,8 +581,7 @@ BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
     /*   single driver file, save the end address returned from the    */
     /*   last INIT call which will then be passed as the end address   */
     /*   for the next INIT call.                                       */
-
-    *r_top = (char FAR *)rq.r_endaddr;
+    *r_top = rq.r_endaddr;
   }
 
   if (!(dhp->dh_attr & ATTR_CHAR) && (rq.r_nunits != 0))
@@ -583,14 +605,21 @@ STATIC void InitIO()
   /* Initialize driver chain                                      */
   do {
     init_device(device, NULL, 0, &lpTop);
-    device = device->dh_next;
+    device = device->next;
   }
-  while (FP_OFF(device) != DHDR_END);
+  while (device != NULL);
 }
 
 static void init_PSPSet(u16 psp) {
     CPU_AH = 0x50; // Set Current PSP
     CPU_BX = psp;
+    fdos_21h(cpu);
+}
+
+static void set_DTA(dos_far_ptr p) {
+    CPU_AH = 0x1A; // Set Current DTA
+    cpu->ext_accessors->set_seg16(cpu, SEG_DS, FP_SEG(p));
+    CPU_DX = p.offset;
     fdos_21h(cpu);
 }
 
@@ -605,7 +634,7 @@ STATIC void init_kernel()
     ram_top = pload16(0x413);
 
     /* no resident DOS in guest RAM, so top is just below video RAM */
-    lpTop = X86_RAM_BASE + ((uint32_t)ram_top << 10) - 16;
+    lpTop = MK_FP((ram_top << 6) - 1, 0);
 
     /* Initialize IO subsystem                                      */
     InitIO();
@@ -615,9 +644,9 @@ STATIC void init_kernel()
 //  InitSerialPorts();
 
     init_PSPSet(DOS_PSP);
+    set_DTA(MK_FP(DOS_PSP, 0x80));
 /// TODO: next point to migrate:
 /*
-  set_DTA(MK_FP(DOS_PSP, 0x80));
   PSPInit();
 
   Init_clk_driver();
@@ -696,6 +725,14 @@ void kernel(CPU* _cpu) {
 
     /// TODO: next point to complete impl.
 
+    /// debug-blink this point acived
+    for (int i = 0; i < 6; i++) {
+    /// TODO: for reboot    keyboard_tick();
+        sleep_ms(23);
+        gpio_put(PICO_DEFAULT_LED_PIN, true);
+        sleep_ms(23);
+        gpio_put(PICO_DEFAULT_LED_PIN, false);
+    }
     // stop it before complete impl.
     while(1);
 }

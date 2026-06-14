@@ -10,6 +10,11 @@
 UWORD ASM Int21AX;
 seg ASM cu_psp;
 
+dos_far_ptr dta;
+
+#define FP_DS_DX (MK_FP(cpu->ext_accessors->get_seg16(cpu, SEG_DS), CPU_DX))
+#define FP_ES_DI (MK_FP(cpu->ext_accessors->get_seg16(cpu, SEG_ES), CPU_DI))
+
 static bool no_handler(CPU* cpu) {
     print_line("DOS 21H - ERROR: no handler defined", 1);
     char buf[10];
@@ -37,10 +42,18 @@ DOS 1+ - main DOS handler
 bool fdos_21h(CPU* cpu) {
     Int21AX = CPU_AX;
     switch (CPU_AH) {
-      /* Set PSP                                                      */
+      case 0x1A: // set DTA
+        dta = FP_DS_DX;
+        break;
+      case 0x2f:
+        CPU_BX = FP_OFF(dta);
+        cpu->ext_accessors->set_seg16(cpu, SEG_ES, FP_SEG(dta));
       case 0x50:
         cu_psp = CPU_BX;
         break;
+      //  TODO: provide DOS copartible replica of real data
+      // case 0x51: DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
+      /* Set PSP                                                      */
 
       /* Get PSP                                                      */
       case 0x51:
