@@ -92,3 +92,5 @@ inline static void print_line2(const char* s, int row, int col) {
         print_char(*s++, row, col);
     }
 }
+
+void cpu_err_msg(CPU* cpu, const char* msg);

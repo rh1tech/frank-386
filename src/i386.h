@@ -262,4 +262,20 @@ void i386_profile_install_bios_hooks(CPU *cpu);
 
 void cpu_init_286(CPU* cpu);
 
+/* Read one CMOS register via I/O ports (matches what real BIOS does). */
+static inline uint8_t cmos_read(CPU* cpu, uint8_t reg)
+{
+	
+	cpu->cb.io_write8(cpu->cb.io, 0x70, reg);
+    return cpu->cb.io_read8(cpu->cb.io, 0x71);
+}
+
+/* Write one CMOS register via I/O ports. */
+static inline void cmos_write(CPU* cpu, uint8_t reg, uint8_t val)
+{
+	cpu->cb.io_write8(cpu->cb.io, 0x70, reg);
+	cpu->cb.io_write8(cpu->cb.io, 0x70, val);
+}
+
+
 #endif /* I386_H */

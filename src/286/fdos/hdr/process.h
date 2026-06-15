@@ -78,7 +78,7 @@ typedef struct {
   BYTE FAR *ps_stack;           /* 2e user stack pointer - int 21  */
   UWORD ps_maxfiles;            /* 32 maximum open files           */
   UBYTE FAR *ps_filetab;        /* 34 open file table pointer      */
-  VOID FAR *ps_prevpsp;         /* 38 previous psp pointer         */
+  dos_far_ptr ps_prevpsp;       /* 38 previous psp pointer         */
   UBYTE ps_dbcs_inputmode;      /* 3c unused,see int21/6301h/6302h */
   UBYTE ps_truename;            /* 3d unused,append truename flag int2f/B711h */
   UBYTE ps_netx_taskid[2];      /* 3e [Novell only field] task id  */

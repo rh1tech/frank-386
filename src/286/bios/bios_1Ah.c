@@ -1,5 +1,5 @@
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 
 /* INT 1Ah  –  Time/Date services
  *
@@ -19,7 +19,7 @@
  *   All values are BCD as stored by the emulated MC146818.
  *   CMOS reg map: 00=sec, 02=min, 04=hour, 06=DOW, 07=day, 08=month, 09=year, 0x32=century
  */
-bool bios_1Ah(void)
+bool bios_1Ah(CPU* cpu)
 {
     switch (CPU_AH) {
 
@@ -46,13 +46,13 @@ bool bios_1Ah(void)
     /* ── AH=02h: Get RTC Time ─────────────────────────────────────────── */
     case 0x02: {
         /* CF=1 if RTC lost power (REG_D bit 7 = VRT, 0 means battery dead) */
-        if (!(cmos_read(0x0D) & 0x80)) {
+        if (!(cmos_read(cpu, 0x0D) & 0x80)) {
             cf = 1;
             break;
         }
-        CPU_CH = cmos_read(0x04); /* hours   BCD */
-        CPU_CL = cmos_read(0x02); /* minutes BCD */
-        CPU_DH = cmos_read(0x00); /* seconds BCD */
+        CPU_CH = cmos_read(cpu, 0x04); /* hours   BCD */
+        CPU_CL = cmos_read(cpu, 0x02); /* minutes BCD */
+        CPU_DH = cmos_read(cpu, 0x00); /* seconds BCD */
         CPU_DL = 0;               /* DST: not supported */
         cf = 0;
         break;
@@ -60,33 +60,33 @@ bool bios_1Ah(void)
 
     /* ── AH=03h: Set RTC Time ─────────────────────────────────────────── */
     case 0x03: {
-        cmos_write(0x04, CPU_CH); /* hours   BCD */
-        cmos_write(0x02, CPU_CL); /* minutes BCD */
-        cmos_write(0x00, CPU_DH); /* seconds BCD */
+        cmos_write(cpu, 0x04, CPU_CH); /* hours   BCD */
+        cmos_write(cpu, 0x02, CPU_CL); /* minutes BCD */
+        cmos_write(cpu, 0x00, CPU_DH); /* seconds BCD */
         cf = 0;
         break;
     }
 
     /* ── AH=04h: Get RTC Date ─────────────────────────────────────────── */
     case 0x04: {
-        if (!(cmos_read(0x0D) & 0x80)) {
+        if (!(cmos_read(cpu, 0x0D) & 0x80)) {
             cf = 1;
             break;
         }
-        CPU_CH = cmos_read(0x32); /* century BCD */
-        CPU_CL = cmos_read(0x09); /* year    BCD */
-        CPU_DH = cmos_read(0x08); /* month   BCD */
-        CPU_DL = cmos_read(0x07); /* day     BCD */
+        CPU_CH = cmos_read(cpu, 0x32); /* century BCD */
+        CPU_CL = cmos_read(cpu, 0x09); /* year    BCD */
+        CPU_DH = cmos_read(cpu, 0x08); /* month   BCD */
+        CPU_DL = cmos_read(cpu, 0x07); /* day     BCD */
         cf = 0;
         break;
     }
 
     /* ── AH=05h: Set RTC Date ─────────────────────────────────────────── */
     case 0x05: {
-        cmos_write(0x32, CPU_CH); /* century BCD */
-        cmos_write(0x09, CPU_CL); /* year    BCD */
-        cmos_write(0x08, CPU_DH); /* month   BCD */
-        cmos_write(0x07, CPU_DL); /* day     BCD */
+        cmos_write(cpu, 0x32, CPU_CH); /* century BCD */
+        cmos_write(cpu, 0x09, CPU_CL); /* year    BCD */
+        cmos_write(cpu, 0x08, CPU_DH); /* month   BCD */
+        cmos_write(cpu, 0x07, CPU_DL); /* day     BCD */
         cf = 0;
         break;
     }

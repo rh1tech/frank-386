@@ -200,7 +200,6 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define FAR
 #define far
 #define REG register
-#define seg unsigned short
 #define GLOBAL extern
 #define ASM
 #define WIN31SUPPORT 1
@@ -405,6 +404,8 @@ typedef signed long LONG;
 
 #if defined(__GNUC__) && defined(__FAR)
 typedef VOID FAR *intvec;
+#elif defined(ARM_M33)
+typedef dos_far_ptr intvec;
 #else
 typedef VOID (FAR ASMCFUNC * intvec) (void);
 #endif

@@ -119,8 +119,8 @@ typedef bool (*handler_t)(CPU*);
 static handler_t handlers[256];
 
 #include <stdio.h>
-static bool no_handler(CPU* cpu) {
-    print_line("ERROR: no handler defined", 1);
+void cpu_err_msg(CPU* cpu, const char* msg) {
+    print_line(msg, 1);
     char buf[10];
     snprintf(buf, 10, "AX: %04xh", CPU_AX); print_line(buf, 2);
     snprintf(buf, 10, "BX: %04xh", CPU_BX); print_line(buf, 3);
@@ -136,6 +136,9 @@ static bool no_handler(CPU* cpu) {
     snprintf(buf, 10, "ES: %04xh", CPU_ES); print_line(buf, 12);
     snprintf(buf, 10, "CS: %04xh", CPU_CS); print_line(buf, 13);
     snprintf(buf, 10, "IP: %04xh", CPU_IP); print_line(buf, 14);
+}
+static bool no_handler(CPU* cpu) {
+    cpu_err_msg(cpu, "ERROR: no handler defined");
 while(1); // remove it
     return true;
 }
@@ -167,6 +170,7 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x10] = bios_10h; // VIDEO
     handlers[0x12] = bios_12h; // Conventional RAM count
     handlers[0x13] = bios_13h; // DISK
+    handlers[0x1A] = bios_1Ah; // CMOS TIME
     handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.
     /*

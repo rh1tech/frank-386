@@ -14,15 +14,29 @@ static CPU* cpu;
 
 #include "hdr/kconfig.h"
 #include "hdr/portab.h"
+
+#include "hdr/ddate.h"
+#include "hdr/dtime.h"
+#include "hdr/device.h"
 #include "hdr/lol.h"
 #include "hdr/dcb.h"
 #include "hdr/cds.h"
+#include "hdr/fcb.h"
+#include "hdr/tail.h"
+#include "hdr/process.h"
 #include "hdr/version.h"
+#include "hdr/mcb.h"
+#include "hdr/clock.h"
 #include "globals.h"
 
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
 dos_far_ptr lpTop;
+
+COUNT ASM CritErrCode = 0;          // 04 - DOS format error Code
+request ASM CharReqHdr;             /* I/O Request packets                  */
+request ASM ClkReqHdr;              // 3A - Device driver request header
+struct ClockRecord ASM ClkRecord;   // 96 - CLOCK$ transfer record
 
 static KernelConfig InitKernelConfig = {
     .CONFIG = {'C','O','N','F','I','G'},
@@ -395,7 +409,7 @@ static struct lol lol = {
     .version_flags   = 0,
     .os_release      = KERNEL_VERSION /* near ptr на строку os_release */
 };
-static struct lol* LoL = &lol;
+struct lol* LoL = &lol;
 
 void dos_puts(const char* str) {
     u16 ax = CPU_AH;
@@ -623,6 +637,109 @@ static void set_DTA(dos_far_ptr p) {
     fdos_21h(cpu);
 }
 
+static dos_far_ptr getvec(uint8_t intno) {
+    uint32_t res = pload32(4ul * intno);
+    return *(dos_far_ptr*)&res;
+}
+
+STATIC void PSPInit(void)
+{
+  dos_far_ptr p_x86 = MK_FP(DOS_PSP, 0);
+  psp far *p = (psp far *) ( X86_RAM_BASE + EFFECTIVE(p_x86) );
+
+  /* Clear out new psp first                              */
+  memset(p, 0, sizeof(psp));
+  /* high half is used as environment */
+
+  /* initialize all entries and exits                     */
+  /* CP/M-like exit point                                 */
+  p->ps_exit = 0x20cd;
+
+  /* CP/M-like entry point - call far to special entry    */
+  p->ps_farcall = 0x9a;
+  p->ps_reentry = MK_FP(0, 0x30 * 4);
+  /* unix style call - 0xcd 0x21 0xcb (int 21, retf)      */
+  p->ps_unix[0] = 0xcd;
+  p->ps_unix[1] = 0x21;
+  p->ps_unix[2] = 0xcb;
+
+  /* Now for parent-child relationships                   */
+  /* parent psp segment                                   */
+  p->ps_parent = FP_SEG(p_x86);
+  /* previous psp pointer                                 */
+  p->ps_prevpsp = MK_FP(0xffff,0xffff);
+
+  /* Environment and memory useage parameters             */
+  /* memory size in paragraphs                            */
+  /*  p->ps_size = 0; clear from above                    */
+  /* environment paragraph                                */
+  p->ps_environ = DOS_PSP + 8;
+  /* terminate address                                    */
+  p->ps_isv22 = getvec(0x22);
+  /* break address                                        */
+  p->ps_isv23 = getvec(0x23);
+  /* critical error address                               */
+  p->ps_isv24 = getvec(0x24);
+
+  /* user stack pointer - int 21                          */
+  /* p->ps_stack = NULL; clear from above                 */
+
+  /* File System parameters                               */
+  /* maximum open files                                   */
+  p->ps_maxfiles = 20;
+  memset(p->ps_files, 0xff, 20);
+
+  /* open file table pointer                              */
+  p->ps_filetab = p->ps_files;
+
+  /* default system version for int21/ah=30               */
+  p->ps_retdosver = (LoL->os_setver_minor << 8) + LoL->os_setver_major;
+
+  /* first command line argument                          */
+  /* p->ps_fcb1.fcb_drive = 0; already set                */
+  memset(p->ps_fcb1.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
+  /* second command line argument                         */
+  /* p->ps_fcb2.fcb_drive = 0; already set                */
+  memset(p->ps_fcb2.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
+
+  /* do not modify command line tail, used as environment */
+}
+
+STATIC int InitBcdToByte(int x)
+{
+  return ((x >> 4) & 0xf) * 10 + (x & 0xf);
+}
+
+void Init_clk_driver(void)
+{
+  /* get BIOS time */
+  CPU_AH = 2;
+  bios_1Ah(cpu);
+
+  /* DosSetTime */
+  CPU_AH = 0x2d;
+  CPU_CL = InitBcdToByte(CPU_CL);   /* minutes */
+  CPU_CH = InitBcdToByte(CPU_CH);   /* hours   */
+  CPU_DH = InitBcdToByte(CPU_DH);   /*seconds */
+  CPU_DL = 0;
+  fdos_21h(cpu);
+
+  /* get BIOS date */
+  CPU_AH = 4;
+  bios_1Ah(cpu);
+
+  /* DosSetDate */
+  CPU_AH = 0x2b;
+  CPU_CX = 100 * InitBcdToByte(CPU_CH) /* century */
+               + InitBcdToByte(CPU_CL);/* year */
+  /* A BIOS with y2k (year 2000) bug will always report year 19nn */
+  if ((CPU_CX >= 1900) && (CPU_CX < 1980)) CPU_CX += 100;
+  CPU_DH = InitBcdToByte(CPU_DH);   /* month */
+  CPU_DL = InitBcdToByte(CPU_DL);   /* day   */
+  fdos_21h(cpu);
+
+}
+
 STATIC void init_kernel()
 {
     COUNT i;
@@ -645,12 +762,10 @@ STATIC void init_kernel()
 
     init_PSPSet(DOS_PSP);
     set_DTA(MK_FP(DOS_PSP, 0x80));
-/// TODO: next point to migrate:
-/*
-  PSPInit();
+    PSPInit();
 
-  Init_clk_driver();
-*/
+    Init_clk_driver();
+
   /* Do first initialization of system variable buffers so that   */
   /* we can read config.sys later.  */
 

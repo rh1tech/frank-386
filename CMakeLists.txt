@@ -230,6 +230,7 @@ set(EMU_CORE_SOURCES
     src/286/bios/bios_10h.c
     src/286/bios/bios_12h.c
     src/286/bios/bios_13h.c
+    src/286/bios/bios_1Ah.c
 
     # FreeDOS kernel
     src/286/fdos/boot.c
