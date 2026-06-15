@@ -133,7 +133,9 @@ VOID ASMCFUNC DosIdle_hlt(void);
 
 /* error.c */
 VOID dump(void);
+#ifdef DEBUG
 VOID panic(BYTE * s);
+#endif
 VOID fatal(BYTE * err_msg);
 
 /* fatdir.c */

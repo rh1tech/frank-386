@@ -4,6 +4,7 @@
 #include "../cpu.h"
 #include "../bios.h"
 #include "../fdos.h"
+#include "i8254.h"
 
 #ifndef PSRAM_BASE_ADDR
 #define PSRAM_BASE_ADDR   0x11000000
@@ -17,16 +18,24 @@ static CPU* cpu;
 
 #include "hdr/ddate.h"
 #include "hdr/dtime.h"
+#include "hdr/error.h"
+#include "hdr/clock.h"
 #include "hdr/device.h"
+#include "hdr/sft.h"
+#include "hdr/kbd.h"
+#include "hdr/fcb.h"
+#include "hdr/fat.h"
+#include "hdr/pcb.h"
+#include "hdr/dirmatch.h"
+#include "hdr/fnode.h"
+#include "hdr/mcb.h"
 #include "hdr/lol.h"
 #include "hdr/dcb.h"
 #include "hdr/cds.h"
-#include "hdr/fcb.h"
 #include "hdr/tail.h"
 #include "hdr/process.h"
 #include "hdr/version.h"
-#include "hdr/mcb.h"
-#include "hdr/clock.h"
+#include "proto.h"
 #include "globals.h"
 
 BYTE HaltCpuWhileIdle = 0;
@@ -196,6 +205,9 @@ static void Com4Intr(request FAR *rq) {
     AuxIntr(rq);
 }
 
+UWORD ASM DaysSinceEpoch = 0;
+typedef UDWORD ticks_t;
+
 static void ClkEntry(request FAR *rq) {
     /*
      * CLOCK$ device interrupt entry.
@@ -206,10 +218,102 @@ static void ClkEntry(request FAR *rq) {
      */
     switch (rq->r_command) {
     case C_INIT:
+        rq->r_nunits = 0;
+        rq_done(rq);
+        break;
+    case C_OFLUSH:
+    case C_IFLUSH:
+        rq_done(rq);
+        break;
+    case C_INPUT:
+      {
+        struct ClockRecord clk;
+        uint32_t bios_ticks;
+        uint32_t total_hundredths;
+
+        if (sizeof(struct ClockRecord) != rq->r_count) {
+            rq_error(rq, E_LENGTH);
+            break;
+        }
+
+        /*
+         * BDA 0040:006C contains BIOS timer ticks since midnight.
+         * Standard PC tick rate is PIT_FREQ / 65536 ~= 18.2065 Hz.
+         *
+         * Convert BIOS ticks to hundredths of second:
+         *
+         *   hundredths = ticks * 100 * 65536 / PIT_FREQ
+         *
+         * Use 64-bit intermediate to avoid overflow.
+         */
+        bios_ticks = pload32(0x46C);
+        total_hundredths =
+            (uint32_t)(((uint64_t)bios_ticks * 100u * 65536u) / PIT_FREQ);
+
+        total_hundredths %= 24u * 60u * 60u * 100u;
+
+        clk.clkHours = total_hundredths / (60u * 60u * 100u);
+        total_hundredths %= 60u * 60u * 100u;
+
+        clk.clkMinutes = total_hundredths / (60u * 100u);
+        total_hundredths %= 60u * 100u;
+
+        clk.clkSeconds = total_hundredths / 100u;
+        clk.clkHundredths = total_hundredths % 100u;
+
+        clk.clkDays = DaysSinceEpoch;
+
+        memcpy(rq->r_trans, &clk, sizeof(struct ClockRecord));
+      }
+        rq_done(rq);
+        break;
+    case C_OUTPUT:
+      {
+        struct ClockRecord clk;
+        uint32_t total_hundredths;
+        uint32_t bios_ticks;
+
+        if (sizeof(struct ClockRecord) != rq->r_count) {
+            rq_error(rq, E_LENGTH);
+            break;
+        }
+
+        memcpy(&clk, rq->r_trans, sizeof(struct ClockRecord));
+
+        /*
+         * Store DOS date counter.
+         * clkDays is days since 1980-01-01.
+         */
+        DaysSinceEpoch = clk.clkDays;
+
+        /*
+         * Convert CLOCK$ time to BIOS ticks since midnight.
+         *
+         * BDA 0040:006C stores ticks at PIT_FREQ / 65536 Hz.
+         *
+         *   ticks = hundredths * PIT_FREQ / (100 * 65536)
+         *
+         * Use 64-bit intermediate to avoid overflow.
+         */
+        total_hundredths =
+            ((uint32_t)clk.clkHours * 60u * 60u * 100u) +
+            ((uint32_t)clk.clkMinutes * 60u * 100u) +
+            ((uint32_t)clk.clkSeconds * 100u) +
+            (uint32_t)clk.clkHundredths;
+
+        total_hundredths %= 24u * 60u * 60u * 100u;
+
+        bios_ticks =
+            (uint32_t)(((uint64_t)total_hundredths * PIT_FREQ) /
+                       (100u * 65536u));
+
+        pstore32(0x46C, bios_ticks);
+        pstore8(0x470, 0);   /* midnight rollover flag */        
+      }
         rq_done(rq);
         break;
     default:
-        rq_error(rq, E_CMD);
+        rq_error(rq, E_FAILURE);
         break;
     }
 }
