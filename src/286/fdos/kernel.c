@@ -34,8 +34,7 @@ UWORD ram_top = 0;
 dos_far_ptr lpTop;
 
 COUNT ASM CritErrCode = 0;          // 04 - DOS format error Code
-request ASM CharReqHdr;             /* I/O Request packets                  */
-request ASM ClkReqHdr;              // 3A - Device driver request header
+request ASM CharReqHdr;             // 3A - Device driver request header
 struct ClockRecord ASM ClkRecord;   // 96 - CLOCK$ transfer record
 
 static KernelConfig InitKernelConfig = {
@@ -412,7 +411,7 @@ static struct lol lol = {
 struct lol* LoL = &lol;
 
 void dos_puts(const char* str) {
-    u16 ax = CPU_AH;
+    u16 ax = CPU_AX;
     u16 bx = CPU_BX;
     CPU_AH = 0x0e;
     CPU_BX = 0x0007;

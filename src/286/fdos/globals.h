@@ -30,7 +30,6 @@ extern UWORD ASM Int21AX;
 extern seg ASM cu_psp;              /* current psp segment                  */
 extern struct lol* LoL;
 extern struct ClockRecord ASM ClkRecord;
-extern request ASM ClkReqHdr;
 extern COUNT ASM CritErrCode;
 COUNT ASMCFUNC
     CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,

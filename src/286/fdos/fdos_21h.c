@@ -259,23 +259,24 @@ bool fdos_21h(CPU* _cpu) {
       case 0x2d:
         CPU_AL = DosSetTime (_cpu) == SUCCESS ? 0 : 0xFF;
         break;
-
+        // get DTA
       case 0x2f:
         CPU_BX = FP_OFF(dta);
         _cpu->ext_accessors->set_seg16(_cpu, SEG_ES, FP_SEG(dta));
+        break;
+        /* Set PSP                                                      */
       case 0x50:
         cu_psp = CPU_BX;
         break;
       //  TODO: provide DOS copartible replica of real data
       // case 0x51: DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
-      /* Set PSP                                                      */
 
-      /* Get PSP                                                      */
+        /* Get PSP                                                      */
       case 0x51:
-      /* UNDOCUMENTED: return current psp                             */
+        /* UNDOCUMENTED: return current psp                             */
       case 0x62:
         CPU_BX = cu_psp;
-
+        break;
       default:
         no_handler(_cpu);
     }
