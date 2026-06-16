@@ -521,20 +521,6 @@ static struct lol lol = {
 };
 struct lol* LoL = &lol;
 
-void dos_puts(const char* str) {
-    u16 ax = CPU_AX;
-    u16 bx = CPU_BX;
-    CPU_AH = 0x0e;
-    CPU_BX = 0x0007;
-    while(*str) {
-        CPU_AL = *str;
-        bios_10h(cpu);
-        str++;
-    }
-    CPU_AX = ax;
-    CPU_BX = bx;
-}
-
 static void x86_execrh() {
   /// TODO: see execrh.asm
         print_line("KERNEL INIT TODO (x86_execrh)", 1);
