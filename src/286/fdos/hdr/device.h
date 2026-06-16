@@ -218,7 +218,7 @@ struct CHS {
 
 /* DOS 4.0-7.0 drive data table (see RBIL at INT2F,AX=0803) */
 typedef struct ddtstruct {
-  struct ddtstruct FAR *ddt_next;
+  dos_far_ptr ddt_next;
   /* pointer to next table (offset FFFFh if last table) */
   UBYTE ddt_driveno;            /* physical unit number (for INT 13)     */
   UBYTE ddt_logdriveno;         /* logical drive number (0=A:)        */

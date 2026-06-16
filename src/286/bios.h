@@ -23,7 +23,17 @@ bool bios_1Ah(CPU*); // Time/Date services
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9
 void bios_10h_install_rom_fonts(CPU*); // INT 10h support
 void vga_bios_baner(CPU* cpu);
-void install_floppy_dpt(void); // INT 13h support
+
+/*
+ * INT 1Eh points to the Diskette Parameter Table.
+ * For a PC/AT-compatible BIOS the default table address is F000:EFC7.
+ * Keep the vector non-normalized exactly as F000:EFC7, because boot sectors
+ * and DOS code may save/restore or compare this BIOS pointer.
+ */
+#define FLOPPY_DPT_SEG   0xF000u
+#define FLOPPY_DPT_OFF   0xEFC7u
+#define FLOPPY_DPT_ADDR  (((uint32_t)FLOPPY_DPT_SEG << 4) + FLOPPY_DPT_OFF)
+void install_floppy_dpt(void);
 
 // Адреса в ROM для DPTE и структур
 #define DPTE_ADDR_0   0xFFF50u

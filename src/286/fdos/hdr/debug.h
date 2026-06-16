@@ -50,6 +50,7 @@
 VOID panic(BYTE * s);
 #define assert(condition) (void)(!(condition)?panic(#condition),0:0)
 #else
+#undef assert
 #define assert(condition) /* ((void)0) */
 #endif
 

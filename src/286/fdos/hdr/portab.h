@@ -209,6 +209,7 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define FP_OFF(fp)             ((fp).offset)
 #define DHDR_END ((void*)(uintptr_t)-1)
 #define EFFECTIVE(a) (((uint32_t)a.segment << 4) + a.offset)
+#define ARM_PTR(p_x86) ( X86_RAM_BASE + EFFECTIVE(p_x86) )
 #else
 #define DHDR_END 0xFFFF
 #endif

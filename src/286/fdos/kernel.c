@@ -13,6 +13,8 @@
 
 static CPU* cpu;
 
+#define MAX_HARD_DRIVE  4
+
 #include "hdr/kconfig.h"
 #include "hdr/portab.h"
 
@@ -37,10 +39,13 @@ static CPU* cpu;
 #include "hdr/version.h"
 #include "proto.h"
 #include "globals.h"
+#include "hdr/debug.h"
 
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
 dos_far_ptr lpTop;
+COUNT nUnits BSS_INIT(0);
+extern unsigned char DOSTEXTFAR ASM int1e_table[0xe];
 
 COUNT ASM CritErrCode = 0;          // 04 - DOS format error Code
 request ASM CharReqHdr;             // 3A - Device driver request header
@@ -748,7 +753,7 @@ static dos_far_ptr getvec(uint8_t intno) {
 STATIC void PSPInit(void)
 {
   dos_far_ptr p_x86 = MK_FP(DOS_PSP, 0);
-  psp far *p = (psp far *) ( X86_RAM_BASE + EFFECTIVE(p_x86) );
+  psp far *p = (psp far *) ARM_PTR(p_x86);
 
   /* Clear out new psp first                              */
   memset(p, 0, sizeof(psp));
@@ -843,6 +848,310 @@ void Init_clk_driver(void)
 
 }
 
+void BIOS_drive_reset(unsigned drive)
+{
+    CPU_DL = drive | 0x80;
+    CPU_AH = 0;
+    bios_13h(cpu);
+}
+
+/*
+    internal global data
+*/
+
+BOOL ExtLBAForce = FALSE;
+
+COUNT init_readdasd(UBYTE drive)
+{
+  CPU_AH = 0x15;
+  CPU_DL = drive;
+  bios_13h(cpu); // GET DISK TYPE
+  if (!cf)
+    switch (CPU_AH)
+    {
+      case 2:
+        return DF_CHANGELINE;
+      case 3:
+        return DF_FIXED;
+    }
+  return 0;
+}
+
+typedef struct {
+  UWORD bpb_nbyte;              /* Bytes per Sector             */
+  UBYTE bpb_nsector;            /* Sectors per Allocation Unit  */
+  UWORD bpb_nreserved;          /* # Reserved Sectors           */
+  UBYTE bpb_nfat;               /* # FATs                       */
+  UWORD bpb_ndirent;            /* # Root Directory entries     */
+  UWORD bpb_nsize;              /* Size in sectors              */
+  UBYTE bpb_mdesc;              /* MEDIA Descriptor Byte        */
+  UWORD bpb_nfsect;             /* FAT size in sectors          */
+  UWORD bpb_nsecs;              /* Sectors per track            */
+  UWORD bpb_nheads;             /* Number of heads              */
+} floppy_bpb;
+
+#define FLOPPY_SEC_SIZE 512u  /* common sector size */
+
+floppy_bpb floppy_bpbs[5] = {
+/* copied from Brian Reifsnyder's FORMAT, bpb.h */
+  {FLOPPY_SEC_SIZE, 2, 1, 2, 112, 720, 0xfd, 2, 9, 2}, /* FD360  5.25 DS   */
+  {FLOPPY_SEC_SIZE, 1, 1, 2, 224, 2400, 0xf9, 7, 15, 2},       /* FD1200 5.25 HD   */
+  {FLOPPY_SEC_SIZE, 2, 1, 2, 112, 1440, 0xf9, 3, 9, 2},        /* FD720  3.5  LD   */
+  {FLOPPY_SEC_SIZE, 1, 1, 2, 224, 2880, 0xf0, 9, 18, 2},       /* FD1440 3.5  HD   */
+  {FLOPPY_SEC_SIZE, 2, 1, 2, 240, 5760, 0xf0, 9, 36, 2}        /* FD2880 3.5  ED   */
+};
+
+COUNT init_getdriveparm(UBYTE drive, bpb * pbpbarray)
+{
+  REG UBYTE type;
+
+  if (drive & 0x80)
+    return 5;
+  CPU_AH = 0x08;
+  CPU_DL = drive;
+  bios_13h(cpu); // GET DRIVE PARAMETERS
+  type = CPU_BL - 1;
+  if (cf)
+    type = 0;                   /* return 320-360 for XTs */
+  else if (type > 6)
+    type = 8;                   /* any odd ball drives get 8&7=0: the 320-360 table */
+  else if (type == 5)
+    type = 4;                   /* 5 and 4 are both 2.88 MB */
+
+  memcpy(pbpbarray, &floppy_bpbs[type & 7], sizeof(floppy_bpb));
+  ((bpb *)pbpbarray)->bpb_hidden = 0;  /* very important to init to 0, see bug#1789 */
+  ((bpb *)pbpbarray)->bpb_huge = 0;
+
+  if (type == 3)
+    return 7;                   /* 1.44 MB */
+
+  if (type == 4)
+    return 9;                   /* 2.88 almost forgot this one */
+
+  /* 0=320-360kB, 1=1.2MB, 2=720kB, 8=any odd ball drives */
+  return type;
+}
+
+#pragma pack(push, 1)
+struct DynS {
+  UWORD Allocated;
+};
+#pragma pack(pop)
+
+void* fmemset(dos_far_ptr p, int v, unsigned int sz) {
+    void* res = ARM_PTR(p);
+    memset(res, v, sz);
+    return res;
+}
+
+void fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n) {
+    memcpy(ARM_PTR(d), ARM_PTR(s), n);
+}
+
+
+dos_far_ptr DynAlloc(char *what, unsigned num, unsigned size)
+{
+  unsigned total = num * size;
+  static dos_far_ptr Dyn = MK_FP(0x9000, 0); // 64k from 0x9000:0000 to 0x1A00:0000
+  struct DynS far *Dynp = (struct DynS far *)ARM_PTR(Dyn);
+
+#ifndef DEBUG
+  UNREFERENCED_PARAMETER(what);
+#endif
+
+  if ((ULONG) total + Dynp->Allocated > 0xffff)
+  {
+    /// TODO: printf impl. on int10h
+///    printf("PANIC:Dyn %lu\n", (ULONG) total + Dynp->Allocated);
+    cpu_err_msg(cpu, "PANIC:DynAlloc");
+    for (;;) ;
+  }
+
+  DebugPrintf(("DYNDATA:allocating %s - %u * %u bytes, total %u, %u..%u\n",
+               what, num, size, total, Dynp->Allocated,
+               Dynp->Allocated + total));
+
+  dos_far_ptr now = MK_FP(FP_SEG(Dyn), Dynp->Allocated + sizeof(struct DynS));
+  fmemset(now, 0, total);
+
+  Dynp->Allocated += total;
+
+  return now;
+}
+
+STATIC void push_ddt(ddt *pddt)
+{
+  dos_far_ptr fddt = DynAlloc("ddt", 1, sizeof(ddt));
+  memcpy(ARM_PTR(fddt), pddt, sizeof(ddt));
+  if (pddt->ddt_logdriveno != 0) {
+    ((ddt*)ARM_PTR(fddt) - 1)->ddt_next = fddt;
+    if (pddt->ddt_driveno == 0 && pddt->ddt_logdriveno == 1)
+      ((ddt*)ARM_PTR(fddt) - 1)->ddt_descflags |= DF_CURLOG | DF_MULTLOG;
+  }
+}
+
+STATIC void make_ddt (ddt *pddt, int Unit, int driveno, int flags)
+{
+  pddt->ddt_next = MK_FP(0, 0xffff);
+  pddt->ddt_logdriveno = Unit;
+  pddt->ddt_driveno = driveno;
+  pddt->ddt_type = init_getdriveparm(driveno, &pddt->ddt_defbpb);
+  pddt->ddt_ncyl = (pddt->ddt_type & 7) ? 80 : 40;
+  pddt->ddt_descflags = init_readdasd(driveno) | flags;
+
+  pddt->ddt_offset = 0;
+  pddt->ddt_serialno = 0x12345678l;
+  memcpy(&pddt->ddt_bpb, &pddt->ddt_defbpb, sizeof(bpb));
+  push_ddt(pddt);
+}
+
+void ReadAllPartitionTables(void)
+{
+  UBYTE foundPartitions[MAX_HARD_DRIVE];
+
+  int HardDrive;
+  int nHardDisk;
+  ddt nddt;
+  /* Setup media info and BPBs arrays for floppies */
+  make_ddt(&nddt, 0, 0, 0);
+
+/// TODO:
+#if 0 
+  /*
+     this is a quick patch - see if B: exists
+     test for A: also, need not exist
+   */
+  init_call_intr(0x11, &regs);  /* get equipment list */
+/*if ((regs.AL & 1)==0)*//* no floppy drives installed  */
+  if ((CPU_AL & 1) && (CPU_AL & 0xc0))
+  {
+    /* floppy drives installed and a B: drive */
+    make_ddt(&nddt, 1, 1, 0);
+  }
+  else
+  {
+    /* set up the DJ method : multiple logical drives */
+    make_ddt(&nddt, 1, 0, DF_MULTLOG);
+  }
+
+  /* Initial number of disk units                                 */
+  nUnits = 2;
+
+  nHardDisk = BIOS_nrdrives();
+  if (nHardDisk > LENGTH(foundPartitions))
+    nHardDisk = LENGTH(foundPartitions);
+
+  DebugPrintf(("DSK init: found %d disk drives\n", nHardDisk));
+
+  /* Reset the drives                                             */
+  for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
+  {
+    BIOS_drive_reset(HardDrive);
+    foundPartitions[HardDrive] = 0;
+  }
+
+  if (InitKernelConfig.DLASortByDriveNo == 0)
+  {
+    if (InitKernelConfig.Verbose >= 1) printf("Drive Letter Assignment - DOS order\n");
+
+    /* Process primary partition table   1 partition only      */
+    for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
+    {
+      foundPartitions[HardDrive] =
+          ProcessDisk(SCAN_PRIMARYBOOT, HardDrive, 0);
+
+      if (foundPartitions[HardDrive] == 0)
+        foundPartitions[HardDrive] =
+            ProcessDisk(SCAN_PRIMARY, HardDrive, 0);
+    }
+
+    /* Process extended partition table                      */
+    for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
+    {
+      ProcessDisk(SCAN_EXTENDED, HardDrive, 0);
+    }
+
+    /* Process primary a 2nd time */
+    for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
+    {
+      ProcessDisk(SCAN_PRIMARY2, HardDrive, foundPartitions[HardDrive]);
+    }
+  }
+  else
+  {
+    UBYTE bootdrv = peekb(0,0x5e0);
+
+    if (InitKernelConfig.Verbose >= 1) printf("Drive Letter Assignment - sorted by drive\n");
+
+    /* Process primary partition table   1 partition only      */
+    for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
+    {
+      struct DriveParamS driveParam;
+      if (LBA_Get_Drive_Parameters(HardDrive, &driveParam, 0) &&
+          driveParam.driveno == bootdrv)
+      {
+        foundPartitions[HardDrive] =
+          ProcessDisk(SCAN_PRIMARYBOOT, HardDrive, 0);
+        break;
+      }
+    }
+
+    for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
+    {
+      if (foundPartitions[HardDrive] == 0)
+      {
+        foundPartitions[HardDrive] =
+          ProcessDisk(SCAN_PRIMARYBOOT, HardDrive, 0);
+
+        if (foundPartitions[HardDrive] == 0)
+          foundPartitions[HardDrive] =
+            ProcessDisk(SCAN_PRIMARY, HardDrive, 0);
+      }
+
+      /* Process extended partition table                      */
+      ProcessDisk(SCAN_EXTENDED, HardDrive, 0);
+
+      /* Process primary a 2nd time */
+      ProcessDisk(SCAN_PRIMARY2, HardDrive, foundPartitions[HardDrive]);
+    }
+  }
+  
+  if (InitKernelConfig.Verbose >= 0)
+  {
+    unsigned foundPartitionsCount = 0;
+    /* Tell user if no valid partitions found on any hard drive     */
+    for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
+    {
+      foundPartitionsCount += foundPartitions[HardDrive];
+    }
+    /* printf("Found %i partitions\n", foundPartitionsCount); */
+    if (!foundPartitionsCount) printf("No supported partitions found.\n");
+  }
+#endif
+}
+
+/* disk initialization: returns number of units */
+COUNT dsk_init()
+{
+///  if (InitKernelConfig.Verbose >= 1) printf("\nInitDisk\n");
+
+#if defined(DEBUG) && !defined(DOSEMU) && !defined(DEBUG_PRINT_COMPORT)
+  {
+    iregs regs;
+    regs.a.x = 0x1112;          /* select 43 line mode - more space for partinfo */
+    regs.b.x = 0;
+    init_call_intr(0x10, &regs);
+  }
+#endif
+
+  /* Reset the drives                                             */
+  BIOS_drive_reset(0);
+
+  ReadAllPartitionTables();
+
+  return nUnits;
+}
+
 STATIC void init_kernel()
 {
     COUNT i;
@@ -869,17 +1178,17 @@ STATIC void init_kernel()
 
     Init_clk_driver();
 
-  /* Do first initialization of system variable buffers so that   */
-  /* we can read config.sys later.  */
+    /* Do first initialization of system variable buffers so that   */
+    /* we can read config.sys later.  */
 
-  /* use largest possible value for the initial CDS */
-  LoL->lastdrive = 26;
+    /* use largest possible value for the initial CDS */
+    LoL->lastdrive = 26;
 
-  /*  init_device((struct dhdr FAR *)&blk_dev, NULL, 0, &ram_top); */
-  /*  WARNING: dsk_init() must be called prior to update_dcb() to ensure
-      _Dyn (start of Dynamic memory block) is the start of drive data table (see getddt() in dsk.c)
-   */
-///  blk_dev.dh_name[0] = dsk_init();
+    /*  init_device((struct dhdr FAR *)&blk_dev, NULL, 0, &ram_top); */
+    /*  WARNING: dsk_init() must be called prior to update_dcb() to ensure
+        _Dyn (start of Dynamic memory block) is the start of drive data table (see getddt() in dsk.c)
+     */
+    blk_dev.dh_name[0] = dsk_init();
 
 ///  PreConfig();
 

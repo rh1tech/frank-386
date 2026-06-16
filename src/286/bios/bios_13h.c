@@ -415,8 +415,6 @@ static bool bios_13h_05h(CPU* cpu)
 }
 
 // В load_bios_and_reset() — один раз разместить таблицу в ROM-области:
-#define FLOPPY_DPT_ADDR  0xFFF20u   // свободное место после config table (0xFFF10+10)
-
 void install_floppy_dpt(void) {
     // Diskette Parameter Table — INT 1Eh standard format
     pstore8(FLOPPY_DPT_ADDR + 0, 0xDF); // specify 1: SRT=0xD, HUT=0xF
@@ -432,8 +430,8 @@ void install_floppy_dpt(void) {
     pstore8(FLOPPY_DPT_ADDR +10, 0x01); // motor start time (1=128 ms)
 
     // Вектор INT 1Eh должен указывать на эту таблицу
-    pstore16(0x1E * 4,     FLOPPY_DPT_ADDR & 0x000F);        // IP/offset
-    pstore16(0x1E * 4 + 2, (FLOPPY_DPT_ADDR >> 4) & 0xFFFF); // CS/segment
+    pstore16(0x1E * 4,     FLOPPY_DPT_OFF); // IP/offset
+    pstore16(0x1E * 4 + 2, FLOPPY_DPT_SEG); // CS/segment
 }
 
 /*
