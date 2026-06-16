@@ -1,5 +1,5 @@
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 
 /*
 BIOS - GET EQUIPMENT LIST
@@ -70,7 +70,7 @@ however.
 
 See Also: INT 12"BIOS" - #03215 at INT 4B"Tandy 2000"
 */
-bool bios_11h() {
+bool bios_11h(CPU* cpu) {
     /*
      * INT 11h - BIOS GET EQUIPMENT LIST
      *

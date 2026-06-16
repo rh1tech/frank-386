@@ -228,9 +228,11 @@ set(EMU_CORE_SOURCES
     # 286 BIOS
     src/286/bios/bios_08h.c
     src/286/bios/bios_10h.c
+    src/286/bios/bios_11h.c
     src/286/bios/bios_12h.c
     src/286/bios/bios_13h.c
     src/286/bios/bios_1Ah.c
+    src/286/bios/bios_printf.c
 
     # FreeDOS kernel
     src/286/fdos/boot.c

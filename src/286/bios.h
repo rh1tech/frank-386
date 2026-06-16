@@ -2,6 +2,7 @@
 #define BIOS_H
 
 #include <stdbool.h>
+#include <stdarg.h>
 #include "i386.h"
 
 bool bios_00h(CPU*); // Division by zero, etc...
@@ -23,6 +24,7 @@ bool bios_1Ah(CPU*); // Time/Date services
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9
 void bios_10h_install_rom_fonts(CPU*); // INT 10h support
 void vga_bios_baner(CPU* cpu);
+void bios_printf(CPU* cpu, const char *fmt, ...);
 
 /*
  * INT 1Eh points to the Diskette Parameter Table.

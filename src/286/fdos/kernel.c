@@ -6,6 +6,8 @@
 #include "../fdos.h"
 #include "i8254.h"
 
+#define printf(...) bios_printf(cpu, __VA_ARGS__)
+
 #ifndef PSRAM_BASE_ADDR
 #define PSRAM_BASE_ADDR   0x11000000
 #endif
@@ -961,9 +963,7 @@ dos_far_ptr DynAlloc(char *what, unsigned num, unsigned size)
 
   if ((ULONG) total + Dynp->Allocated > 0xffff)
   {
-    /// TODO: printf impl. on int10h
-///    printf("PANIC:Dyn %lu\n", (ULONG) total + Dynp->Allocated);
-    cpu_err_msg(cpu, "PANIC:DynAlloc");
+    printf("PANIC:Dyn %lu\n", (ULONG) total + Dynp->Allocated);
     for (;;) ;
   }
 
@@ -1005,44 +1005,56 @@ STATIC void make_ddt (ddt *pddt, int Unit, int driveno, int flags)
   push_ddt(pddt);
 }
 
+int BIOS_nrdrives(void)
+{
+  CPU_AH = 0x08;
+  CPU_DL = 0x80;
+  bios_13h(cpu); // GET DRIVE PARAMETERS
+  if (cf)
+  {
+    printf("no hard disks detected\n");
+    return 0;
+  }
+  return CPU_DL;
+}
+
 void ReadAllPartitionTables(void)
 {
-  UBYTE foundPartitions[MAX_HARD_DRIVE];
+    UBYTE foundPartitions[MAX_HARD_DRIVE];
+    int HardDrive;
+    int nHardDisk;
+    ddt nddt;
+    /* Setup media info and BPBs arrays for floppies */
+    make_ddt(&nddt, 0, 0, 0);
 
-  int HardDrive;
-  int nHardDisk;
-  ddt nddt;
-  /* Setup media info and BPBs arrays for floppies */
-  make_ddt(&nddt, 0, 0, 0);
+    /*
+     this is a quick patch - see if B: exists
+     test for A: also, need not exist
+    */
+    bios_11h(cpu);  /* get equipment list */
+    /*if ((regs.AL & 1)==0)*//* no floppy drives installed  */
+    if ((CPU_AL & 1) && (CPU_AL & 0xc0))
+    {
+        /* floppy drives installed and a B: drive */
+        make_ddt(&nddt, 1, 1, 0);
+    }
+    else
+    {
+        /* set up the DJ method : multiple logical drives */
+        make_ddt(&nddt, 1, 0, DF_MULTLOG);
+    }
+
+    /* Initial number of disk units                                 */
+    nUnits = 2;
+
+    nHardDisk = BIOS_nrdrives();
+    if (nHardDisk > LENGTH(foundPartitions))
+        nHardDisk = LENGTH(foundPartitions);
+
+    DebugPrintf(("DSK init: found %d disk drives\n", nHardDisk));
 
 /// TODO:
 #if 0 
-  /*
-     this is a quick patch - see if B: exists
-     test for A: also, need not exist
-   */
-  init_call_intr(0x11, &regs);  /* get equipment list */
-/*if ((regs.AL & 1)==0)*//* no floppy drives installed  */
-  if ((CPU_AL & 1) && (CPU_AL & 0xc0))
-  {
-    /* floppy drives installed and a B: drive */
-    make_ddt(&nddt, 1, 1, 0);
-  }
-  else
-  {
-    /* set up the DJ method : multiple logical drives */
-    make_ddt(&nddt, 1, 0, DF_MULTLOG);
-  }
-
-  /* Initial number of disk units                                 */
-  nUnits = 2;
-
-  nHardDisk = BIOS_nrdrives();
-  if (nHardDisk > LENGTH(foundPartitions))
-    nHardDisk = LENGTH(foundPartitions);
-
-  DebugPrintf(("DSK init: found %d disk drives\n", nHardDisk));
-
   /* Reset the drives                                             */
   for (HardDrive = 0; HardDrive < nHardDisk; HardDrive++)
   {

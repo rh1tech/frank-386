@@ -168,6 +168,7 @@ void cpu_init_286(CPU* cpu) {
     }
     handlers[0x08] = bios_08h; // IRQ0: Timer
     handlers[0x10] = bios_10h; // VIDEO
+    handlers[0x11] = bios_11h; // EQUIPMENT LIST
     handlers[0x12] = bios_12h; // Conventional RAM count
     handlers[0x13] = bios_13h; // DISK
     handlers[0x1A] = bios_1Ah; // CMOS TIME
