@@ -94,3 +94,13 @@ inline static void print_line2(const char* s, int row, int col) {
 }
 
 void cpu_err_msg(CPU* cpu, const char* msg);
+
+#define CPU_ES cpu->ext_accessors->get_seg16(cpu, SEG_ES)
+#define CPU_CS cpu->ext_accessors->get_seg16(cpu, SEG_CS)
+#define CPU_SS cpu->ext_accessors->get_seg16(cpu, SEG_SS)
+#define CPU_DS cpu->ext_accessors->get_seg16(cpu, SEG_DS)
+
+#define SET_ES(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))
+#define SET_CS(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))
+#define SET_SS(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))
+#define SET_DS(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))

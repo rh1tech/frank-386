@@ -27,6 +27,7 @@
 /* Cambridge, MA 02139, USA.                                    */
 /****************************************************************/
 
+#pragma pack(push, 1)
 
 /*
  *      Status Word Bits
@@ -112,7 +113,6 @@
  */
 struct request;
 /* Device header */
-#pragma pack(push, 1)
 struct dhdr {
     dos_far_ptr dh_next; // for x86 drivers only
     UWORD dh_attr;
@@ -132,7 +132,6 @@ struct dhdr {
     dos_far_ptr this; // for mixed addressing, in case the driver is stored in x86 RAM
 #endif
 };
-#pragma pack(pop)
 
 #define ATTR_SUBST      0x8000
 #define ATTR_CHAR       0x8000
@@ -205,7 +204,7 @@ struct _bios_LBA_address_packet
   unsigned char reserved_1;     /* set to 0...unused                */
   unsigned char number_of_blocks;       /* 0 < number_of_blocks < 128       */
   unsigned char reserved_2;     /* set to 0...unused                */
-  UBYTE far *buffer_address;    /* addr of transfer buffer          */
+  dos_far_ptr buffer_address;    /* addr of transfer buffer          */
   unsigned long block_address;  /* LBA address                      */
   unsigned long block_address_high;     /* high bytes of LBA addr...unused  */
 };
@@ -520,3 +519,4 @@ WORD ASMPASCAL execrh(request FAR *, struct dhdr FAR *);
  *      end of device.h
  */
 
+#pragma pack(pop)

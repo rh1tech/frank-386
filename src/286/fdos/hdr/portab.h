@@ -210,6 +210,12 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define DHDR_END ((void*)(uintptr_t)-1)
 #define EFFECTIVE(a) (((uint32_t)a.segment << 4) + a.offset)
 #define ARM_PTR(p_x86) ( X86_RAM_BASE + EFFECTIVE(p_x86) )
+
+#define FP_DS_DX (MK_FP(CPU_DS, CPU_DX))
+#define FP_ES_DI (MK_FP(CPU_ES, CPU_DI))
+
+#define peekb(seg, ofs) (*((unsigned char far *)ARM_PTR(MK_FP(seg,ofs))))
+
 #else
 #define DHDR_END 0xFFFF
 #endif

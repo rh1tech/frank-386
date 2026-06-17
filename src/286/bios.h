@@ -26,6 +26,9 @@ void bios_10h_install_rom_fonts(CPU*); // INT 10h support
 void vga_bios_baner(CPU* cpu);
 void bios_puts(CPU* cpu, const char* str);
 void bios_printf(CPU* cpu, const char *fmt, ...);
+// allow it for BIOS/DOS
+int	sprintf (char *__restrict, const char *__restrict, ...)
+               __attribute__ ((__format__ (__printf__, 2, 3)));
 
 /*
  * INT 1Eh points to the Diskette Parameter Table.

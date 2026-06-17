@@ -226,7 +226,7 @@ static bool int13_rw_chs(CPU* cpu, uint8_t write, uint8_t verify)
         return true;
     }
 
-    uint32_t addr = ((uint32_t)(cpu->ext_accessors->get_seg16(cpu, SEG_ES)) << 4) + CPU_BX;
+    uint32_t addr = ((uint32_t)(CPU_ES) << 4) + CPU_BX;
     return int13_transfer_lba(cpu, &d, lba, count, addr, write, verify);
 }
 
@@ -473,14 +473,12 @@ static bool bios_13h_08h(CPU* cpu)
 
     if (drive & 0x80) {
         CPU_DL = pload8(BDA_HDD_COUNT);
-        //CPU_ES = 0x0000;
-        cpu->ext_accessors->set_seg16(cpu, SEG_ES, 0);
+        SET_ES( 0);
         CPU_DI = 0x0000;
     } else {
         CPU_DL = 2;       /* BDA equipment word currently advertises two floppy drives. */
         CPU_BL = fdds_types() >> (drive ? 4 : 0);
-        //CPU_ES = (FLOPPY_DPT_ADDR >> 4) & 0xFFFF;
-        cpu->ext_accessors->set_seg16(cpu, SEG_ES, (FLOPPY_DPT_ADDR >> 4) & 0xFFFF);
+        SET_ES ((FLOPPY_DPT_ADDR >> 4) & 0xFFFF);
         CPU_DI = FLOPPY_DPT_ADDR & 0x000F;
     }
 
@@ -573,7 +571,7 @@ static bool bios_13h_41h(CPU* cpu)
  */
 static bool int13_decode_dap(CPU* cpu, uint32_t *lba, uint16_t *count, uint32_t *addr)
 {
-    uint32_t dap = ((uint32_t)(cpu->ext_accessors->get_seg16(cpu, SEG_DS)) << 4) + CPU_SI;
+    uint32_t dap = ((uint32_t)(CPU_DS) << 4) + CPU_SI;
     uint8_t size = read86(dap + 0);
 
     if (size < 0x10)
@@ -753,7 +751,7 @@ static bool bios_13h_48h(CPU* cpu)
 {
     BiosDisk d;
     uint8_t  drive = CPU_DL;
-    uint32_t p     = ((uint32_t)(cpu->ext_accessors->get_seg16(cpu, SEG_DS)) << 4) + CPU_SI;
+    uint32_t p     = ((uint32_t)(CPU_DS) << 4) + CPU_SI;
     uint16_t caller_size = readw86(p);
 
     if (!(drive & 0x80) || !int13_get_disk(drive, &d)) {

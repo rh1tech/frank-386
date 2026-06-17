@@ -846,8 +846,7 @@ static bool bios_10h_1130h(CPU* cpu) {
             break;
     }
 
-//    CPU_ES = BIOS_FONT_SEG;
-    cpu->ext_accessors->set_seg16(cpu, SEG_ES, BIOS_FONT_SEG);
+    SET_ES(BIOS_FONT_SEG);
     CPU_BP = off;
     cf = 0;
     return true;

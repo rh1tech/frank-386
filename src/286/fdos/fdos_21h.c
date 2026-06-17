@@ -28,9 +28,6 @@ seg ASM cu_psp;
 
 dos_far_ptr dta;
 
-#define FP_DS_DX (MK_FP(cpu->ext_accessors->get_seg16(cpu, SEG_DS), CPU_DX))
-#define FP_ES_DI (MK_FP(cpu->ext_accessors->get_seg16(cpu, SEG_ES), CPU_DI))
-
 //#include <stdio.h>
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined");
@@ -262,7 +259,7 @@ bool fdos_21h(CPU* _cpu) {
         // get DTA
       case 0x2f:
         CPU_BX = FP_OFF(dta);
-        _cpu->ext_accessors->set_seg16(_cpu, SEG_ES, FP_SEG(dta));
+        SET_ES(FP_SEG(dta));
         break;
         /* Set PSP                                                      */
       case 0x50:

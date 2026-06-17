@@ -11,6 +11,10 @@
 
 static uint32_t segregs32[6];
 
+#undef CPU_CS
+#undef CPU_DS
+#undef CPU_ES
+#undef CPU_SS
 #define CPU_CS    segregs[regcs << 1]
 #define CPU_DS    segregs[regds << 1]
 #define CPU_ES    segregs[reges << 1]
