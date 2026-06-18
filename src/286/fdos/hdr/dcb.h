@@ -36,6 +36,7 @@ static BYTE *clock_hRcsId =
 #endif
 
 /* Internal drive parameter block                               */
+#pragma pack(push, 1)
 struct dpb {
   BYTE dpb_unit;                /* unit for error reporting     */
   BYTE dpb_subunit;             /* the sub-unit for driver      */
@@ -49,11 +50,11 @@ struct dpb {
   UWORD dpb_size;               /* # of clusters+1 on media     */
   UWORD dpb_fatsize;            /* # of sectors / FAT           */
   UWORD dpb_dirstrt;            /* start sec. of root dir       */
-  struct dhdr FAR *             /* pointer to device header     */
-    dpb_device;
+  /*struct dhdr FAR */ dos_far_ptr
+    dpb_device;                 /* pointer to device header     */
   UBYTE dpb_mdb;                /* media descr. byte            */
   BYTE dpb_flags;               /* -1 = force MEDIA CHK         */
-  struct dpb FAR *              /* next dpb in chain            */
+  /*struct dpb FAR */ dos_far_ptr /* next dpb in chain            */
     dpb_next;                   /* -1 = end                     */
   UWORD dpb_cluster;            /* cluster # of first free      */
   /* -1 if not known              */
@@ -85,6 +86,7 @@ struct dpb {
   /* -1 if not known              */
 #endif
 };
+#pragma pack(pop)
 
 #define UNKNCLUSTER      0x0000 /* see RBIL INT 21/AH=52 entry */
 #define XUNKNCLSTFREE    0xffffffffl    /* unknown for DOS */

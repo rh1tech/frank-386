@@ -8,11 +8,6 @@
 
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
 
-#ifndef PSRAM_BASE_ADDR
-#define PSRAM_BASE_ADDR   0x11000000
-#endif
-#define X86_RAM_BASE ((uint8_t*)PSRAM_BASE_ADDR)
-
 static CPU* cpu;
 
 #define MAX_HARD_DRIVE  4
@@ -43,13 +38,59 @@ static CPU* cpu;
 #include "proto.h"
 #include "globals.h"
 #include "hdr/debug.h"
+#include "config.h"
 
+struct config Config = { 0 };
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
+COUNT UmbState BSS_INIT(0);
+STATIC seg base_seg BSS_INIT(0);
+STATIC seg umb_base_seg BSS_INIT(0);
+UWORD umb_start BSS_INIT(0), UMB_top BSS_INIT(0);
 dos_far_ptr lpTop;
 COUNT nUnits BSS_INIT(0);
 dos_far_ptr InitDiskTransferBuffer = MK_FP(0x8000, 0x0000); // 512b
 dos_far_ptr x86_dap = MK_FP(0x8000, 0x0200); // + 512
+/*
+ 00000H 000FFH 00100H PSP                PSP
+ 00100H 004E1H 003E2H _TEXT              CODE
+ 004E2H 007A7H 002C6H _IO_TEXT           CODE
+ 007A8H 008E5H 0013EH _IO_FIXED_DATA     CODE
+ 008F0H 0139FH 00AB0H _FIXED_DATA        DATA
+ 013A0H 019F3H 00654H _DATA              DATA
+ 019F4H 0240DH 00A1AH _BSS               BSS
+*/
+dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0060:0000–0060:00FF
+#define x86_DTA MK_FP(DOS_PSP, 0x0080) // Disk Transfer Area
+#define x86_IO_FIXED_DATA MK_FP(DOS_PSP, 0x07A8) // _IO_FIXED_DATA -> con_dev
+#define x86_FIXED_DATA MK_FP(DOS_PSP, 0x08F0) // _FIXED_DATA -> LoL
+#define x86_DATA MK_FP(DOS_PSP, 0x13A0) // _DATA
+
+const dos_far_ptr x86_con_dev = MK_FP(DOS_PSP, 0x07A8); // _IO_FIXED_DATA -> con_dev
+const dos_far_ptr x86_prn_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr));
+const dos_far_ptr x86_aux_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 2);
+const dos_far_ptr x86_lpt1_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 3);
+const dos_far_ptr x86_lpt2_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 4);
+const dos_far_ptr x86_lpt3_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 5);
+const dos_far_ptr x86_com1_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 6);
+const dos_far_ptr x86_com2_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 7);
+const dos_far_ptr x86_com3_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 8);
+const dos_far_ptr x86_com4_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 9);
+const dos_far_ptr x86_clk_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 10);
+const dos_far_ptr x86_blk_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 11);
+struct dhdr* con_dev;// = (struct dhdr*)ARM_PTR(x86_con_dev);
+struct dhdr* prn_dev;// = (struct dhdr*)ARM_PTR(x86_prn_dev);
+struct dhdr* aux_dev;//...
+struct dhdr* lpt1_dev;
+struct dhdr* lpt2_dev;
+struct dhdr* lpt3_dev;
+struct dhdr* com1_dev;
+struct dhdr* com2_dev;
+struct dhdr* com3_dev;
+struct dhdr* com4_dev;
+struct dhdr* clk_dev;
+struct dhdr* blk_dev;
+struct lol* LoL;// = (struct lol*)ARM_PTR(x86_FIXED_DATA);
 
 #define NENTRY          26      /* total size of dispatch table */
 
@@ -336,7 +377,6 @@ static void ClkEntry(request FAR *rq) {
     }
 }
 
-static struct dhdr blk_dev; // forward declaration
 static void BlkEntry(request FAR *rq) {
     /*
      * Internal block-device interrupt entry.
@@ -351,7 +391,7 @@ static void BlkEntry(request FAR *rq) {
          * Internal block device: dh_name[0] is unit count, not ASCII name.
          * dsk_init() later should replace this with the real detected count.
          */
-        rq->r_nunits = blk_dev.dh_name[0];
+        rq->r_nunits = blk_dev->dh_name[0];
         rq_done(rq);
         break;
 
@@ -390,107 +430,108 @@ static void NulIntr(request FAR *rq) {
     }
 }
 
-static struct dhdr blk_dev = {
+const static struct dhdr _blk_dev = {
     .dh_next = MK_FP(-1, -1),
     .dh_attr = 0x08c2 | ATTR_NATIVE,
     .arm.dh_interrupt = BlkEntry,
     .dh_name = { 4, 0, 0, 0, 0, 0, 0, 0 },
-    .next = NULL
 };
 
-static struct dhdr clk_dev = {
-    .dh_next = MK_FP(-1, -1),
+const static struct dhdr _clk_dev = {
+    .dh_next = x86_blk_dev,
     .dh_attr = 0x8008 | ATTR_NATIVE,
     .arm.dh_interrupt = ClkEntry,
-    .dh_name = "CLOCK$  ",
-    .next = &blk_dev,
+    .dh_name = "CLOCK$  "
 };
 
-static struct dhdr com4_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &clk_dev,
+const static struct dhdr _com4_dev = {
+    .dh_next = x86_clk_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com4Intr,
     .dh_name = "COM4    "
 };
 
-static struct dhdr com3_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &com4_dev,
+const static struct dhdr _com3_dev = {
+    .dh_next = x86_com4_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com3Intr,
     .dh_name = "COM3    "
 };
 
-static struct dhdr com2_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &com3_dev,
+const static struct dhdr _com2_dev = {
+    .dh_next = x86_com3_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com2Intr,
     .dh_name = "COM2    "
 };
 
-static struct dhdr com1_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &com2_dev,
+const static struct dhdr _com1_dev = {
+    .dh_next = x86_com2_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = AuxIntr,
     .dh_name = "COM1    "
 };
 
-static struct dhdr lpt3_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &com1_dev,
+const static struct dhdr _lpt3_dev = {
+    .dh_next = x86_com1_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt3Intr,
     .dh_name = "LPT3    "
 };
 
-static struct dhdr lpt2_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &lpt3_dev,
+const static struct dhdr _lpt2_dev = {
+    .dh_next = x86_lpt3_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt2Intr,
     .dh_name = "LPT2    "
 };
 
-static struct dhdr lpt1_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &lpt2_dev,
+const static struct dhdr _lpt1_dev = {
+    .dh_next = x86_lpt2_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt1Intr,
     .dh_name = "LPT1    "
 };
 
-static struct dhdr aux_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &lpt1_dev,
+const static struct dhdr _aux_dev = {
+    .dh_next = x86_lpt1_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = AuxIntr,
     .dh_name = "AUX     "
 };
 
-static struct dhdr prn_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &aux_dev,
+const static struct dhdr _prn_dev = {
+    .dh_next = x86_aux_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = PrnIntr,
     .dh_name = "PRN     "
 };
 
-static struct dhdr con_dev = {
-    .dh_next = MK_FP(-1, -1),
-    .next = &prn_dev,
+const static struct dhdr _con_dev = {
+    .dh_next = x86_prn_dev,
     .dh_attr = 0x8013 | ATTR_NATIVE,
     .arm.dh_interrupt = ConIntr,
     .dh_name = "CON     "
 };
 
-static struct lol lol = {
-    .DPBp        = (struct dpb far *)-1,
+const static struct lol lol = {
+    .dos_data = 0,              /* 0x00  abs / -0x26 rel: SDA format byte (0=DOS3.x, 1=DOS4+) */
+    .kernel_start_off = 0,      /* 0x01  abs / -0x25 rel: offset of kernel_start TODO: some compartibale value*/
+    ._pad0 = 0,                 /* 0x03  abs / -0x23 rel: padding */
+    .version_style = 1,         /* 0x04  abs / -0x22 rel: 1 = MS-DOS 4.0+ style */
+//    ._pad1[8] = {0,0,0,0,0,0,0,0},/* 0x06  abs / -0x20 rel: padding to NetBios */
+    .NetBios = 0,               /* 0x0E  abs / -0x18 rel: NetBios Number */
+//    ._pad2[10] = { 0 },       /* 0x10  abs / -0x16 rel: padding to NetRetry */
+    .NetRetry = 3,              /* 0x1A  abs / -0x0C rel: network retry count */
+    .NetDelay = 1,              /* 0x1C  abs / -0x0A rel: network delay count */
+    .DskBuffer = MK_FP(-1,-1),  /* 0x1E  abs / -0x08 rel: current dos disk buffer */
+    .inputptr = 0,              /* 0x22  abs / -0x04 rel: unread CON input */
+    .first_mcb = 0,             /* 0x24  abs / -0x02 rel: start of user memory */
+    /* === MARK0026H, offset 0x26 === */
+    .DPBp        = MK_FP(-1,-1),
     .sfthead     = 0,
-    .clock       = &clk_dev,
-    .syscon      = &con_dev,
+    .clock       = x86_clk_dev,
+    .syscon      = x86_con_dev,
     .maxsecsize  = 512,
     .CDSp        = 0,
     .FCBp        = 0,
@@ -499,8 +540,7 @@ static struct lol lol = {
     .lastdrive   = 0,
 
     .nul_dev = {
-        .dh_next = MK_FP(-1, -1),
-        .next = &con_dev,
+        .dh_next = x86_con_dev,
         .dh_attr = 0x8004 | ATTR_NATIVE,
         .arm.dh_interrupt = NulIntr,
         .dh_name = "NUL     "
@@ -521,6 +561,7 @@ static struct lol lol = {
     .deblock_buf = 0,
 
     .uppermem_root = 0xffff,
+    .last_para = 0,
 
     .os_setver_minor = 0,
     .os_setver_major = 5,
@@ -528,9 +569,13 @@ static struct lol lol = {
     .os_major        = 5,
     .rev_number      = 0,
     .version_flags   = 0,
-    .os_release      = KERNEL_VERSION /* near ptr на строку os_release */
+#ifdef WIN31SUPPORT
+    .os_release      = 2 + sizeof(unsigned long) + sizeof(unsigned short) * 2,
+#else
+    .os_release      = 2, /* near ptr на строку os_release */
+#endif
+    .os_release_str  = KERNEL_VERSION
 };
-struct lol* LoL = &lol;
 
 static void x86_execrh() {
   /// TODO: see execrh.asm
@@ -538,7 +583,8 @@ static void x86_execrh() {
         while(1);
 }
 
-WORD ASMPASCAL execrh(request FAR * rq, struct dhdr FAR * dhp) {
+WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp) {
+  struct dhdr* dhp = (struct dhdr*)ARM_PTR(_dhp);
   if (dhp->dh_attr & ATTR_NATIVE) {
       dhp->arm.dh_interrupt(rq);
   } else {
@@ -547,22 +593,105 @@ WORD ASMPASCAL execrh(request FAR * rq, struct dhdr FAR * dhp) {
   return rq->r_status;
 }
 
-void FAR * KernelAllocPara(size_t nPara, char type, char *name, int mode) {
+dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
+{
+  seg base, start;
+  /*struct submcb*/ dos_far_ptr p;
+
+  /* if no umb available force low allocation */
+  if (UmbState != 1)
+    mode = 0;
+
+  if (mode)
+  {
+    base = umb_base_seg;
+    start = umb_start;
+  }
+  else
+  {
+    base = base_seg;
+    start = LoL->first_mcb;
+  }
+
+  /* create the special DOS data MCB if it doesn't exist yet */
+  CfgDbgPrintf(("kernelallocpara: %x %x %x %c %d\n", start, base, nPara, type, mode));
+
   /// TODO:
         print_line("KERNEL INIT TODO (KernelAllocPara)", 1);
         while(1);
+    #if 0  
+  if (base == start)
+  {
+    /*mcb*/ dos_far_ptr p = para2far(base);
+    base++;
+    mcb_init(base, p->m_size - 1, p->m_type);
+    mumcb_init(FP_SEG(p), 0);
+    p->m_name[1] = 'D';
+  }
 
-  return NULL;
+  nPara++;
+  mcb_init(base + nPara, para2far(base)->m_size - nPara, para2far(base)->m_type);
+  para2far(start)->m_size += nPara;
+
+  p = (struct submcb FAR *)para2far(base);
+  p->type = type;
+  p->start = FP_SEG(p)+1;
+  p->size = nPara-1;
+  if (name)
+    fmemcpy(p->name, name, 8);
+  base += nPara;
+  if (mode)
+    umb_base_seg = base;
+  else
+    base_seg = base;
+    #endif
+  return MK_FP(FP_SEG(p)+1, 0);
 }
 
-/* check for a block device and update  device control block    */
-STATIC VOID update_dcb(struct dhdr FAR * dhp)
+STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)
 {
+  UWORD uSegVal;
+
+  /* First, convert the segmented pointer to linear address       */
+  uSegVal = FP_SEG(lpPtr);
+  uSegVal += (FP_OFF(lpPtr) + 0xf) >> 4;
+  if (FP_OFF(lpPtr) > 0xfff0)
+    uSegVal += 0x1000;          /* handle overflow */
+
+  /* and return an adddress adjusted to the nearest paragraph     */
+  /* boundary.                                                    */
+  return MK_FP(uSegVal, 0);
+}
+
+dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode)
+{
+  dos_far_ptr p;
+  size_t nPara = (nBytes + 15)/16;
+
+  if (LoL->first_mcb == 0)
+  {
+    /* prealloc */
+    lpTop = MK_FP(FP_SEG(lpTop) - nPara, FP_OFF(lpTop));
+    p = AlignParagraph(lpTop);
+  }
+  else
+  {
+    p = KernelAllocPara(nPara, type, NULL, mode);
+  }
+  fmemset(p, 0, nBytes);
+  return p;
+}
+dos_far_ptr DynAlloc(char *what, unsigned num, unsigned size);
+
+/* check for a block device and update  device control block    */
+STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
+{
+  struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
   REG COUNT Index;
   COUNT nunits = dhp->dh_name[0];
    // Drive Parameter Block: описание одного DOS-диска/логического drive unit.
    // Через DPB DOS связывает букву диска с конкретным block-device driver и его subunit.
-  struct dpb FAR *dpb;
+  dos_far_ptr x86_dpb;
 
   /* printf("nblkdev = %i\n", LoL->nblkdev); */
   
@@ -570,62 +699,66 @@ STATIC VOID update_dcb(struct dhdr FAR * dhp)
   if (nunits == 0) return;
 
   /* allocate memory for new device control blocks, insert into chain [at end], and update our pointer to new end */
-  dpb = (struct dpb FAR *)calloc(nunits, sizeof(struct dpb));
-  /* it was:
-  if ( LoL->first_mcb ) {
-    dpb = (struct dpb FAR *)KernelAlloc(nunits * sizeof(struct dpb), 'E', Config.cfgDosDataUmb);
+  if ( LoL->first_mcb ) { // MCB exist, use KernelAlloc
+    x86_dpb = KernelAlloc(nunits * sizeof(struct dpb), 'E', Config.cfgDosDataUmb);
   }
-  else {
-    dpb = DynAlloc("DPBp", blk_dev.dh_name[0], sizeof(struct dpb));
+  else { // no MCB, use temporaty flow (TODO: ensure)
+    x86_dpb = DynAlloc("DPBp", blk_dev->dh_name[0], sizeof(struct dpb));
   }
-  */
+  struct dpb FAR *dpb = (struct dpb*)ARM_PTR(x86_dpb);
 
   /* find end of dpb chain or initialize root if needed */
   if (LoL->nblkdev == 0)
   {
     /* update root pointer to new end (our just allocated block) */
-    LoL->DPBp = dpb;
+    LoL->DPBp = x86_dpb;
   }  
   else
   {
     struct dpb FAR *tmp_dpb;
     /* find current end of dpb chain by following next pointers to end */
-    for (tmp_dpb = LoL->DPBp; (ULONG) tmp_dpb->dpb_next != 0xFFFFFFFFl; tmp_dpb = tmp_dpb->dpb_next)
+    for (
+        tmp_dpb = (struct dpb*)ARM_PTR(LoL->DPBp);
+        FP_SEG(tmp_dpb->dpb_next) != 0xFFFF && FP_OFF(tmp_dpb->dpb_next) != 0xFFFF;
+        tmp_dpb = (struct dpb*)ARM_PTR(tmp_dpb->dpb_next)
+    )
       ;
     /* insert into chain [at end] */
-    tmp_dpb->dpb_next = dpb;
+    tmp_dpb->dpb_next = x86_dpb;
   }
   /* dpb points to last block, one just allocated */
 
   for (Index = 0; Index < nunits; Index++)
   {		
     /* printf("processing unit %i of %i nunits\n", Index, nunits); */
-    dpb->dpb_next = dpb + 1;  /* memory allocated as array, so next is just next element */
+    dpb->dpb_next = MK_FP(FP_SEG(x86_dpb), FP_OFF(x86_dpb) + sizeof(struct dpb));  /* memory allocated as array, so next is just next element */
     dpb->dpb_unit = LoL->nblkdev;
     dpb->dpb_subunit = Index;
-    dpb->dpb_device = dhp;
+    dpb->dpb_device = x86_dhp;
     dpb->dpb_flags = M_CHANGED;
     // LoL->CDSp: Current Directory Structure
-    if ((LoL->CDSp != 0) && (LoL->nblkdev < LoL->lastdrive))
+    if ((FP_SEG(LoL->CDSp) != 0) && (LoL->nblkdev < LoL->lastdrive))
     {
-      LoL->CDSp[LoL->nblkdev].cdsDpb = dpb;
-      LoL->CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
+      struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp);
+      CDSp[LoL->nblkdev].cdsDpb = dpb;
+      CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
     }
 	
     ++dpb;  /* dbp = dbp->dpb_next; */
     ++LoL->nblkdev;
   }
   /* note that always at least 1 valid dpb due to above early exit if nunits==0 */
-  (dpb - 1)->dpb_next = (void FAR *)0xFFFFFFFFl;
+  (dpb - 1)->dpb_next = MK_FP(-1, -1);
 
   /* printf("processed %i nunits\n", nunits); */
 }
 
 /* If cmdLine is NULL, this is an internal driver */
 
-BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
+BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
                  dos_far_ptr * r_top)
 {
+  struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
   request rq = { 0 };
   char name[8];
 
@@ -660,7 +793,7 @@ BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
   rq.r_bpbptr = (void FAR *)(cmdLine ? cmdLine : "\n");
   rq.r_firstunit = LoL->nblkdev;
 
-  execrh((request FAR *) & rq, dhp);
+  execrh((request FAR *) & rq, x86_dhp);
 
 /*
  *  Added needed Error handle
@@ -671,13 +804,13 @@ BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
   if (cmdLine)
   {
     /* Don't link in device drivers which do not take up memory */
-    if (EFFECTIVE(rq.r_endaddr) == EFFECTIVE(dhp->this))
+    if ((struct dhdr*)ARM_PTR(rq.r_endaddr) == dhp)
       return TRUE;
 
     /* Don't link in block device drivers which indicate no units */
     if (!(dhp->dh_attr & ATTR_CHAR) && !rq.r_nunits)
     {
-      rq.r_endaddr = dhp->this;
+      rq.r_endaddr = x86_dhp;
       return TRUE;
     }
 
@@ -687,13 +820,8 @@ BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
     /*   only the END ADDRESS returned by the last INIT call should be */
     /*   the used.  It is recommended that all the device drivers in   */
     /*   the file return the same address                              */
-
-    if (FP_OFF(dhp->dh_next) == 0xffff)
-    {
-        print_line("KERNEL INIT TODO (KernelAllocPara)", 1);
-        while(1);
- /// TODO:     KernelAllocPara(FP_SEG(rq.r_endaddr) + (FP_OFF(rq.r_endaddr) + 15)/16
- ///                     - FP_SEG(dhp), 'D', name, mode);
+    if (FP_OFF(dhp->dh_next) == 0xffff) {
+        KernelAllocPara(FP_SEG(rq.r_endaddr) + (FP_OFF(rq.r_endaddr) + 15)/16 - FP_SEG(x86_dhp), 'D', name, mode);
     }
 
     /* Another fix for multisegmented device drivers:                  */
@@ -708,27 +836,28 @@ BOOL init_device(struct dhdr FAR * dhp, char *cmdLine, COUNT mode,
   if (!(dhp->dh_attr & ATTR_CHAR) && (rq.r_nunits != 0))
   {
     dhp->dh_name[0] = rq.r_nunits;
-    update_dcb(dhp);
+    update_dcb(x86_dhp);
   }
 
   if (dhp->dh_attr & ATTR_CONIN)
-    LoL->syscon = dhp;
+    LoL->syscon = x86_dhp;
   else if (dhp->dh_attr & ATTR_CLOCK)
-    LoL->clock = dhp;
+    LoL->clock = x86_dhp;
 
   return FALSE;
 }
 
 STATIC void InitIO()
 {
-  struct dhdr far *device = &LoL->nul_dev;
-
-  /* Initialize driver chain                                      */
-  do {
-    init_device(device, NULL, 0, &lpTop);
-    device = device->next;
-  }
-  while (device != NULL);
+    dos_far_ptr x86_device = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev);
+    struct dhdr* device = (struct dhdr*)ARM_PTR(x86_device);
+    /* Initialize driver chain                                      */
+    do {
+        init_device(x86_device, NULL, 0, &lpTop);
+        x86_device = device->dh_next;
+        device = (struct dhdr*)ARM_PTR(x86_device);
+    }
+    while (FP_OFF(x86_device) != 0xffff);
 }
 
 static void init_PSPSet(u16 psp) {
@@ -751,8 +880,7 @@ static dos_far_ptr getvec(uint8_t intno) {
 
 STATIC void PSPInit(void)
 {
-  dos_far_ptr p_x86 = MK_FP(DOS_PSP, 0);
-  psp far *p = (psp far *) ARM_PTR(p_x86);
+  psp far *p = (psp far *) ARM_PTR(x86_PSP);
 
   /* Clear out new psp first                              */
   memset(p, 0, sizeof(psp));
@@ -772,7 +900,7 @@ STATIC void PSPInit(void)
 
   /* Now for parent-child relationships                   */
   /* parent psp segment                                   */
-  p->ps_parent = FP_SEG(p_x86);
+  p->ps_parent = FP_SEG(x86_PSP);
   /* previous psp pointer                                 */
   p->ps_prevpsp = MK_FP(0xffff,0xffff);
 
@@ -946,7 +1074,6 @@ void* fmemset(dos_far_ptr p, int v, unsigned int sz) {
 void fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n) {
     memcpy(ARM_PTR(d), ARM_PTR(s), n);
 }
-
 
 dos_far_ptr DynAlloc(char *what, unsigned num, unsigned size)
 {
@@ -2045,8 +2172,6 @@ void ReadAllPartitionTables(void)
     }
   }
   
-/// TODO:
-#if 0 
   if (InitKernelConfig.Verbose >= 0)
   {
     unsigned foundPartitionsCount = 0;
@@ -2058,22 +2183,12 @@ void ReadAllPartitionTables(void)
     /* printf("Found %i partitions\n", foundPartitionsCount); */
     if (!foundPartitionsCount) printf("No supported partitions found.\n");
   }
-#endif
 }
 
 /* disk initialization: returns number of units */
 COUNT dsk_init()
 {
-///  if (InitKernelConfig.Verbose >= 1) printf("\nInitDisk\n");
-
-#if defined(DEBUG) && !defined(DOSEMU) && !defined(DEBUG_PRINT_COMPORT)
-  {
-    iregs regs;
-    CPU_AX = 0x1112;          /* select 43 line mode - more space for partinfo */
-    CPU_BX = 0;
-    init_call_intr(0x10, &regs);
-  }
-#endif
+  if (InitKernelConfig.Verbose >= 1) printf("\nInitDisk\n");
 
   /* Reset the drives                                             */
   BIOS_drive_reset(0);
@@ -2081,6 +2196,42 @@ COUNT dsk_init()
   ReadAllPartitionTables();
 
   return nUnits;
+}
+
+BYTE HMAState BSS_INIT(0);
+#define HMA_NONE 0              /* do nothing */
+#define HMA_REQ 1               /* DOS = HIGH detected */
+#define HMA_DONE 2              /* Moved kernel to HMA */
+#define HMA_LOW 3               /* Definitely LOW */
+
+/* Do first time initialization.  Store last so that we can reset it    */
+/* later.                                                               */
+void PreConfig(void)
+{
+  /* Initialize the base memory pointers                          */
+
+  CfgDbgPrintf(("SDA located at 0x%p\n", internal_data));
+  /* Begin by initializing our system buffers                     */
+  /* DebugPrintf(("Preliminary %d buffers allocated at 0x%p\n", Config.cfgBuffers, buffers));*/
+  LoL->sfthead = MK_FP(FP_SEG(x86_FIXED_DATA), 0xcc); /* &(LoL->firstsftt) */
+  /* LoL->FCBp = (sfttbl FAR *)&FcbSft; */
+  /* LoL->FCBp = (sfttbl FAR *)
+     KernelAlloc(sizeof(sftheader)
+     + Config.cfgFiles * sizeof(sft)); */
+
+/// TODO:
+///  config_init_buffers(Config.cfgBuffers);
+
+  LoL->CDSp = KernelAlloc(sizeof(struct cds) * LoL->lastdrive, 'L', 0);
+
+/*  CfgDbgPrintf((" FCB table 0x%p\n",LoL->FCBp));*/
+  CfgDbgPrintf((" sft table 0x%p\n", LoL->sfthead));
+  CfgDbgPrintf((" CDS table 0x%p\n", LoL->CDSp));
+  CfgDbgPrintf((" DPB table 0x%p\n", LoL->DPBp));
+
+  /* Done.  Now initialize the MCB structure                      */
+  /* This next line is 8086 and 80x86 real mode specific          */
+  CfgDbgPrintf(("Preliminary  allocation completed: top at %p\n", lpTop));
 }
 
 STATIC void init_kernel()
@@ -2119,10 +2270,10 @@ STATIC void init_kernel()
     /*  WARNING: dsk_init() must be called prior to update_dcb() to ensure
         _Dyn (start of Dynamic memory block) is the start of drive data table (see getddt() in dsk.c)
      */
-    blk_dev.dh_name[0] = dsk_init();
+    blk_dev->dh_name[0] = dsk_init();
 
-///  PreConfig();
-
+    PreConfig();
+/// TODO:
   /* Number of units * /
   if (blk_dev.dh_name[0] > 0)
     update_dcb(&blk_dev);
@@ -2157,6 +2308,34 @@ STATIC void init_kernel()
 
 void kernel(CPU* _cpu) {
     cpu = _cpu;
+    con_dev = (struct dhdr*)ARM_PTR(x86_con_dev);
+    memcpy(con_dev, &_con_dev, sizeof(struct dhdr));
+    prn_dev = (struct dhdr*)ARM_PTR(x86_prn_dev);
+    memcpy(prn_dev, &_prn_dev, sizeof(struct dhdr));
+    aux_dev = (struct dhdr*)ARM_PTR(x86_aux_dev);
+    memcpy(aux_dev, &_aux_dev, sizeof(struct dhdr));
+    lpt1_dev = (struct dhdr*)ARM_PTR(x86_lpt1_dev);
+    memcpy(lpt1_dev, &_lpt1_dev, sizeof(struct dhdr));
+    lpt2_dev = (struct dhdr*)ARM_PTR(x86_lpt2_dev);
+    memcpy(lpt2_dev, &_lpt2_dev, sizeof(struct dhdr));
+    lpt3_dev = (struct dhdr*)ARM_PTR(x86_lpt3_dev);
+    memcpy(lpt3_dev, &_lpt3_dev, sizeof(struct dhdr));
+    com1_dev = (struct dhdr*)ARM_PTR(x86_com1_dev);
+    memcpy(com1_dev, &_com1_dev, sizeof(struct dhdr));
+    com2_dev = (struct dhdr*)ARM_PTR(x86_com2_dev);
+    memcpy(com2_dev, &_com2_dev, sizeof(struct dhdr));
+    com3_dev = (struct dhdr*)ARM_PTR(x86_com3_dev);
+    memcpy(com3_dev, &_com3_dev, sizeof(struct dhdr));
+    com4_dev = (struct dhdr*)ARM_PTR(x86_com4_dev);
+    memcpy(com4_dev, &_com4_dev, sizeof(struct dhdr));
+    clk_dev = (struct dhdr*)ARM_PTR(x86_clk_dev);
+    memcpy(clk_dev, &_clk_dev, sizeof(struct dhdr));
+    blk_dev = (struct dhdr*)ARM_PTR(x86_blk_dev);
+    memcpy(blk_dev, &_blk_dev, sizeof(struct dhdr));
+
+    LoL = (struct lol*)ARM_PTR(x86_FIXED_DATA);
+    memcpy(LoL, &lol, sizeof(struct lol));
+
     // adjust boot drive to DOS format
     LoL->BootDrive  = CPU_BL + 1;
     if (LoL->BootDrive > 0x80) {

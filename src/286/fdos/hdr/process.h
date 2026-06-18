@@ -35,6 +35,7 @@
 #define P_NOWAIT  1             /* both concurrent -- not implemented */
 #define P_OVERLAY 2             /* child replaces parent, parent no longer exists */
 
+#pragma pack(push, 1)
 typedef struct {
   union {
     struct {
@@ -103,6 +104,7 @@ typedef struct {
     } _u3;
   } _u;
 } psp;
+#pragma pack(pop)
 
 #define ps_fcb1 _u._u1._ps_fcb1
 #define ps_fcb2 _u._u2._ps_fcb2

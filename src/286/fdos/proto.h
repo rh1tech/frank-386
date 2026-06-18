@@ -59,7 +59,7 @@ void handle_break(struct dhdr FAR **pdev, int sft_out);
 
 /* chario.c */
 struct dhdr FAR *sft_to_dev(sft FAR *sft);
-long BinaryCharIO(struct dhdr FAR **pdev, size_t n, void FAR * bp,
+long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, void FAR * bp,
                   unsigned command);
 int ndread(struct dhdr FAR **pdev);
 int StdinBusy(void);

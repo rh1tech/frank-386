@@ -114,7 +114,7 @@
 struct request;
 /* Device header */
 struct dhdr {
-    dos_far_ptr dh_next; // for x86 drivers only
+    /*struct dhdr*/ dos_far_ptr dh_next; // for x86 drivers only
     UWORD dh_attr;
     union {
       struct {
@@ -126,11 +126,6 @@ struct dhdr {
       } x86;
     };
     UBYTE dh_name[8];
-    // out of real dhd:
-#ifdef ARM_M33
-    struct dhdr *next; // real
-    dos_far_ptr this; // for mixed addressing, in case the driver is stored in x86 RAM
-#endif
 };
 
 #define ATTR_SUBST      0x8000
@@ -512,7 +507,7 @@ WORD ASMCFUNC FAR clk_driver(rqptr rp);
 WORD execrh(request FAR *, struct dhdr FAR *);
 #pragma aux execrh "^" __parm __reverse __routine [] __modify [__ax __bx __cx __dx __es __fs __gs]
 #else
-WORD ASMPASCAL execrh(request FAR *, struct dhdr FAR *);
+WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp);
 #endif
 
 /*

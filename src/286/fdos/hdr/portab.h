@@ -185,11 +185,17 @@ extern char DosDataSeg[];
 
 #ifdef ARM_M33
 
+#ifndef PSRAM_BASE_ADDR
+#define PSRAM_BASE_ADDR   0x11000000
+#endif
+#define X86_RAM_BASE ((uint8_t*)PSRAM_BASE_ADDR)
+
 #pragma pack(push, 1)
 typedef struct dos_far_ptr {
     uint16_t offset;
     uint16_t segment;
 } dos_far_ptr;
+typedef int16_t dos_short_ptr;
 #pragma pack(pop)
 typedef char dos_far_ptr_size_check[ // like static assert
     sizeof(dos_far_ptr) == 4 ? 1 : -1
@@ -208,8 +214,11 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define FP_SEG(fp)             ((fp).segment)
 #define FP_OFF(fp)             ((fp).offset)
 #define DHDR_END ((void*)(uintptr_t)-1)
-#define EFFECTIVE(a) (((uint32_t)a.segment << 4) + a.offset)
+#define EFFECTIVE(a) (((uint32_t)(a).segment << 4) + (a).offset)
 #define ARM_PTR(p_x86) ( X86_RAM_BASE + EFFECTIVE(p_x86) )
+// N.B. use it only for addresses are stored in x86 RAM (PSRAM), M33 SRAM/FLASH is not mapped there
+#define x86_FAR_PTR(s, arm_addr) \
+    MK_FP((s), (uint16_t)(((uintptr_t)(arm_addr) - (uintptr_t)X86_RAM_BASE) - ((uint32_t)(s) << 4)))
 
 #define FP_DS_DX (MK_FP(CPU_DS, CPU_DX))
 #define FP_ES_DI (MK_FP(CPU_ES, CPU_DI))

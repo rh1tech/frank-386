@@ -10,5 +10,4 @@ void _boot(CPU* cpu) {
    CPU_SP = CPU_BP - 0x60;
    u16 drive = CPU_DL;
    CPU_BL = drive; // FreeDOS expects drive there
-   // TODO: load FAT?
 }

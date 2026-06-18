@@ -49,14 +49,14 @@ COUNT char_error(request * rq, struct dhdr FAR * lpDevice)
                        0, rq->r_status & S_MASK, lpDevice);
 }
 
-STATIC int CharRequest(struct dhdr FAR **pdev, unsigned command)
+STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
 {
-  struct dhdr FAR *dev = *pdev;
+  struct dhdr* dev = (struct dhdr*)ARM_PTR(*pdev);
   CharReqHdr.r_command = command;
   CharReqHdr.r_unit = 0;
   CharReqHdr.r_status = 0;
   CharReqHdr.r_length = sizeof(request);
-  execrh(&CharReqHdr, dev);
+  execrh(&CharReqHdr, *pdev);
   if (CharReqHdr.r_status & S_ERROR)
   {
     for (;;) {
@@ -76,7 +76,7 @@ STATIC int CharRequest(struct dhdr FAR **pdev, unsigned command)
   return SUCCESS;
 }
 
-long BinaryCharIO(struct dhdr FAR **pdev, size_t n, void FAR * bp,
+long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, void FAR * bp,
                   unsigned command)
 {
   int err;
@@ -189,7 +189,7 @@ int DosSetDate(CPU* cpu)
   ExecuteClockDriverRequest(C_OUTPUT);
 
   if (ClkReqHdr.r_status & S_ERROR)
-    return char_error(&ClkReqHdr, LoL->clock);
+    return char_error(&ClkReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
   return SUCCESS;
 }
 
@@ -222,7 +222,7 @@ int DosSetTime(CPU* cpu)
   ExecuteClockDriverRequest(C_OUTPUT);
 
   if (ClkReqHdr.r_status & S_ERROR)
-    return char_error(&ClkReqHdr, LoL->clock);
+    return char_error(&ClkReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
   return SUCCESS;
 }
 
@@ -265,8 +265,9 @@ bool fdos_21h(CPU* _cpu) {
       case 0x50:
         cu_psp = CPU_BX;
         break;
-      //  TODO: provide DOS copartible replica of real data
-      // case 0x51: DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
+// 51h — Get PSP Segment, 52h — Get List Of Lists, 53h — Translate BIOS
+      //  TODO: LoL + 0x26 (то есть адрес поля DPBp).
+      // case 0x52: DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
 
         /* Get PSP                                                      */
       case 0x51:
