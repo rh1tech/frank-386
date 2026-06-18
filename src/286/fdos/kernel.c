@@ -38,6 +38,7 @@ static CPU* cpu;
 #include "proto.h"
 #include "globals.h"
 #include "hdr/debug.h"
+#include "hdr/buffer.h"
 #include "config.h"
 
 struct config Config = { 0 };
@@ -65,7 +66,10 @@ dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0
 #define x86_IO_FIXED_DATA MK_FP(DOS_PSP, 0x07A8) // _IO_FIXED_DATA -> con_dev
 #define x86_FIXED_DATA MK_FP(DOS_PSP, 0x08F0) // _FIXED_DATA -> LoL
 #define x86_DATA MK_FP(DOS_PSP, 0x13A0) // _DATA
+#define x86_BSS MK_FP(DOS_PSP, 0x19F4) // _BSS
 
+/*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer = x86_BSS; // BSS
+/*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 const dos_far_ptr x86_con_dev = MK_FP(DOS_PSP, 0x07A8); // _IO_FIXED_DATA -> con_dev
 const dos_far_ptr x86_prn_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr));
 const dos_far_ptr x86_aux_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 2);
@@ -2199,10 +2203,118 @@ COUNT dsk_init()
 }
 
 BYTE HMAState BSS_INIT(0);
+UWORD HMAFree BSS_INIT(0);            /* first byte in HMA not yet used      */
+BYTE DosLoadedInHMA BSS_INIT(FALSE);  /* set to TRUE if loaded HIGH          */
+
 #define HMA_NONE 0              /* do nothing */
 #define HMA_REQ 1               /* DOS = HIGH detected */
 #define HMA_DONE 2              /* Moved kernel to HMA */
 #define HMA_LOW 3               /* Definitely LOW */
+
+/*
+    this allocates some bytes from the HMA area
+    only available if DOS=HIGH was successful
+*/
+dos_far_ptr HMAalloc(COUNT bytesToAllocate)
+{
+  if (!DosLoadedInHMA)
+    return MK_FP(0, 0);
+
+  if (HMAFree > 0xfff0 - bytesToAllocate)
+    return MK_FP(0, 0);
+
+  dos_far_ptr HMAptr = MK_FP(0xffff, HMAFree);
+
+  /* align on 16 byte boundary */
+  HMAFree = (HMAFree + bytesToAllocate + 0xf) & 0xfff0;
+
+  /*printf("HMA allocated %d byte at %x\n", bytesToAllocate, HMAptr); */
+
+  fmemset(HMAptr, 0, bytesToAllocate);
+
+  return HMAptr;
+}
+
+STATIC void config_init_buffers(int wantedbuffers)
+{
+  unsigned buffers = 0;
+
+  /* fill HMA with buffers if BUFFERS count >=0 and DOS in HMA        */
+  if (wantedbuffers < 0)
+    wantedbuffers = -wantedbuffers;
+  else if (HMAState == HMA_DONE)
+    buffers = (0xfff0 - HMAFree) / sizeof(struct buffer);
+
+  if (wantedbuffers < 6)         /* min 6 buffers                     */
+    wantedbuffers = 6;
+  if (wantedbuffers > 99)        /* max 99 buffers                    */
+  {
+    printf("BUFFERS=%u not supported, reducing to 99\n", wantedbuffers);
+    wantedbuffers = 99;
+  }
+  if (wantedbuffers > buffers)   /* more specified than available -> get em */
+    buffers = wantedbuffers;
+
+  LoL->nbuffers = buffers;
+  LoL->inforecptr = LoL->firstbuf;
+  struct buffer *pbuffer;
+  dos_far_ptr x86_buffer;
+  {
+    size_t bytes = sizeof(struct buffer) * buffers;
+    x86_buffer = HMAalloc(bytes);
+
+    if (!FP_SEG(x86_buffer) && !FP_OFF(x86_buffer))
+    {
+      x86_buffer = KernelAlloc(bytes, 'B', 0);
+      if (HMAState == HMA_DONE)
+        x86_firstAvailableBuf = MK_FP(0xffff, HMAFree);
+    }
+    else
+    {
+      LoL->bufloc = LOC_HMA;
+      /* space in HMA beyond requested buffers available as user space */
+      x86_firstAvailableBuf = MK_FP(FP_SEG(x86_buffer), FP_OFF(x86_buffer) + wantedbuffers);
+    }
+    pbuffer = (struct buffer*)ARM_PTR(x86_buffer);
+  }
+  LoL->deblock_buf = DiskTransferBuffer;
+  LoL->firstbuf = x86_buffer;
+
+  CfgDbgPrintf(("init_buffers (size %u) at", sizeof(struct buffer)));
+  CfgDbgPrintf((" (%p)", LoL->firstbuf));
+
+  buffers--;
+  pbuffer->b_prev = FP_OFF(x86_buffer) + buffers * sizeof(struct buffer);
+  {
+    int i = buffers;
+    do
+    {
+      pbuffer->b_next = FP_OFF(x86_buffer) + sizeof(struct buffer);
+      pbuffer++;
+      pbuffer->b_prev = FP_OFF(x86_buffer) - sizeof(struct buffer);
+    }
+    while (--i);
+  }
+  pbuffer->b_next = FP_OFF(x86_buffer) - buffers * sizeof(struct buffer);
+
+    /* now, we can have quite some buffers in HMA
+       -- up to 50 for KE38616.
+       so we fill the HMA with buffers
+       but not if the BUFFERS count is negative ;-)
+     */
+
+  CfgDbgPrintf((" done\n"));
+
+  if (FP_SEG(x86_buffer) == 0xffff)
+  {
+    buffers++;
+    if (InitKernelConfig.Verbose >= 0) 
+    {
+      printf("Kernel: allocated %d Diskbuffers = %u Bytes in HMA\n",
+           buffers, buffers * sizeof(struct buffer));
+    }
+  }
+}
 
 /* Do first time initialization.  Store last so that we can reset it    */
 /* later.                                                               */
@@ -2219,8 +2331,7 @@ void PreConfig(void)
      KernelAlloc(sizeof(sftheader)
      + Config.cfgFiles * sizeof(sft)); */
 
-/// TODO:
-///  config_init_buffers(Config.cfgBuffers);
+  config_init_buffers(Config.cfgBuffers);
 
   LoL->CDSp = KernelAlloc(sizeof(struct cds) * LoL->lastdrive, 'L', 0);
 

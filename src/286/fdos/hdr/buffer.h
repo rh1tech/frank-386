@@ -40,6 +40,7 @@ static BYTE *buffer_hRcsId =
 #include "dsk.h"                /* only for MAX_SEC_SIZE        */
 #define BUFFERSIZE MAX_SEC_SIZE
 
+#pragma pack(push, 1)
 struct buffer {
   UWORD b_next;                 /* next buffer in LRU list      */
   UWORD b_prev;                 /* previous buffer in LRU list  */
@@ -49,11 +50,13 @@ struct buffer {
   UBYTE b_copies;               /* number of copies to write    */
   UWORD b_offset;               /* offset in sectors between copies
                                    to write for FAT sectors     */
-  struct dpb FAR *b_dpbp;       /* pointer to DPB               */
+  /*struct dpb*/ dos_far_ptr
+    b_dpbp;                     /* pointer to DPB               */
   UWORD b_remotesz;             /* size of remote buffer if remote */
   BYTE b_padding;
   UBYTE b_buffer[BUFFERSIZE];   /* 512 byte sectors for now     */
 };
+#pragma pack(pop)
 
 #define BFR_DIRTY       0x40    /* buffer modified              */
 #define BFR_VALID       0x20    /* buffer contains valid data   */
