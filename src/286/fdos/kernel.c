@@ -41,6 +41,9 @@ static CPU* cpu;
 #include "hdr/buffer.h"
 #include "config.h"
 
+#define x86_para2far(seg) (MK_FP((seg), 0))
+#define para2far(seg) ((mcb*)ARM_PTR(MK_FP((seg), 0)))
+
 struct config Config = { 0 };
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
@@ -65,8 +68,11 @@ dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0
 #define x86_DTA MK_FP(DOS_PSP, 0x0080) // Disk Transfer Area
 #define x86_IO_FIXED_DATA MK_FP(DOS_PSP, 0x07A8) // _IO_FIXED_DATA -> con_dev
 #define x86_FIXED_DATA MK_FP(DOS_PSP, 0x08F0) // _FIXED_DATA -> LoL
+#define x86_INTERNAL_DATA MK_FP(DOS_PSP, 0x08F0 + 0x01FB) // internal_data
 #define x86_DATA MK_FP(DOS_PSP, 0x13A0) // _DATA
 #define x86_BSS MK_FP(DOS_PSP, 0x19F4) // _BSS
+
+_Static_assert(sizeof(struct lol) <= 0x01FB, "LoL overlaps internal_data");
 
 /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer = x86_BSS; // BSS
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
@@ -95,6 +101,7 @@ struct dhdr* com4_dev;
 struct dhdr* clk_dev;
 struct dhdr* blk_dev;
 struct lol* LoL;// = (struct lol*)ARM_PTR(x86_FIXED_DATA);
+struct dos_data* internal_data;// (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
 
 #define NENTRY          26      /* total size of dispatch table */
 
@@ -104,10 +111,6 @@ UWORD LBA_WRITE_VERIFY = 0x4302;
 #define LBA_VERIFY       0x4400
 #define LBA_FORMAT       0xffff /* fake number for FORMAT track
                                    (only for NON-LBA floppies now!) */
-
-COUNT ASM CritErrCode = 0;          // 04 - DOS format error Code
-request ASM CharReqHdr;             // 3A - Device driver request header
-struct ClockRecord ASM ClkRecord;   // 96 - CLOCK$ transfer record
 
 static KernelConfig InitKernelConfig = {
     .CONFIG = {'C','O','N','F','I','G'},
@@ -573,11 +576,7 @@ const static struct lol lol = {
     .os_major        = 5,
     .rev_number      = 0,
     .version_flags   = 0,
-#ifdef WIN31SUPPORT
-    .os_release      = 2 + sizeof(unsigned long) + sizeof(unsigned short) * 2,
-#else
-    .os_release      = 2, /* near ptr на строку os_release */
-#endif
+    .os_release      = offsetof(struct lol, os_release_str), /* near ptr на строку os_release */
     .os_release_str  = KERNEL_VERSION
 };
 
@@ -597,10 +596,44 @@ WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp) {
   return rq->r_status;
 }
 
+STATIC VOID mcb_init_copy(UCOUNT seg, UWORD size, mcb *near_mcb)
+{
+  near_mcb->m_size = size;
+  memcpy(ARM_PTR(MK_FP(seg, 0)), near_mcb, sizeof(mcb));
+}
+
+STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type)
+{
+  static mcb near_mcb BSS_INIT({0}); /// TODO: _BSS
+  near_mcb.m_type = type;
+  mcb_init_copy(seg, size, &near_mcb);
+}
+
+STATIC VOID mumcb_init(UCOUNT seg, UWORD size)
+{
+  static mcb near_mcb = {
+    MCB_NORMAL,
+    8, 0,
+    {0,0,0},
+    {"SC"}
+  };
+  mcb_init_copy(seg, size, &near_mcb);
+}
+
+#pragma pack(push, 1)
+struct submcb
+{
+  char type;
+  unsigned short start;
+  unsigned short size;
+  char unused[3];
+  char name[8];
+};
+#pragma pack(pop)
+
 dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
 {
   seg base, start;
-  /*struct submcb*/ dos_far_ptr p;
 
   /* if no umb available force low allocation */
   if (UmbState != 1)
@@ -620,16 +653,13 @@ dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
   /* create the special DOS data MCB if it doesn't exist yet */
   CfgDbgPrintf(("kernelallocpara: %x %x %x %c %d\n", start, base, nPara, type, mode));
 
-  /// TODO:
-        print_line("KERNEL INIT TODO (KernelAllocPara)", 1);
-        while(1);
-    #if 0  
   if (base == start)
   {
-    /*mcb*/ dos_far_ptr p = para2far(base);
+    /*mcb*/ dos_far_ptr x86_p = x86_para2far(base);
+    mcb* p = (mcb*)ARM_PTR(x86_p);
     base++;
     mcb_init(base, p->m_size - 1, p->m_type);
-    mumcb_init(FP_SEG(p), 0);
+    mumcb_init(FP_SEG(x86_p), 0);
     p->m_name[1] = 'D';
   }
 
@@ -637,19 +667,19 @@ dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
   mcb_init(base + nPara, para2far(base)->m_size - nPara, para2far(base)->m_type);
   para2far(start)->m_size += nPara;
 
-  p = (struct submcb FAR *)para2far(base);
+  struct submcb* p = (struct submcb*)para2far(base);
   p->type = type;
-  p->start = FP_SEG(p)+1;
+  p->start = base + 1;
   p->size = nPara-1;
   if (name)
-    fmemcpy(p->name, name, 8);
+    memcpy(p->name, name, 8);
   base += nPara;
   if (mode)
     umb_base_seg = base;
   else
     base_seg = base;
-    #endif
-  return MK_FP(FP_SEG(p)+1, 0);
+
+  return MK_FP(base+1, 0);
 }
 
 STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)
@@ -2344,6 +2374,71 @@ void PreConfig(void)
   /* This next line is 8086 and 80x86 real mode specific          */
   CfgDbgPrintf(("Preliminary  allocation completed: top at %p\n", lpTop));
 }
+int init_setdrive(int drive) {
+    CPU_AH = 0x0e;
+    CPU_DX = drive;
+    fdos_21h(cpu);
+    return drive;
+}
+STATIC VOID FsConfig(VOID)
+{
+  struct dpb* dpb = (struct dpb*)ARM_PTR(LoL->DPBp);
+  int i;
+
+  /* Initialize the current directory structures    */
+  for (i = 0; i < LoL->lastdrive; i++)
+  {
+    struct cds* pcds_table = (struct cds*)ARM_PTR(LoL->CDSp) + i;
+
+    memcpy(pcds_table->cdsCurrentPath, "A:\\\0", 4);
+
+    pcds_table->cdsCurrentPath[0] += i;
+
+    if (i < LoL->nblkdev && dpb != (struct dpb*)ARM_PTR(MK_FP(-1, -1)))
+    {
+      pcds_table->cdsDpb = dpb;
+      pcds_table->cdsFlags = CDSPHYSDRV;
+      dpb = (struct dpb*)ARM_PTR(dpb->dpb_next);
+    }
+    else
+    {
+      pcds_table->cdsFlags = 0;
+    }
+    pcds_table->cdsStrtClst = 0xffff;
+    pcds_table->cdsParam = 0xffff;
+    pcds_table->cdsStoreUData = 0xffff;
+    pcds_table->cdsJoinOffset = 2;
+  }
+
+  /* Log-in the default drive. */
+  init_setdrive(LoL->BootDrive - 1);
+
+  /* The system file tables need special handling and are "hand   */
+  /* built. Included is the stdin, stdout, stdaux and stdprn. */
+  /* a little bit of shuffling is necessary for compatibility */
+/// TODO:
+#if 0
+  /* sft_idx=0 is /dev/aux                                        */
+  open("AUX", O_RDWR);
+
+  /* handle 1, sft_idx=1 is /dev/con (stdout) */
+  open("CON", O_RDWR);
+
+  /* 3 is /dev/aux                */
+  dup2(STDIN, STDAUX);
+
+  /* 0 is /dev/con (stdin)        */
+  dup2(STDOUT, STDIN);
+
+  /* 2 is /dev/con (stdin)        */
+  dup2(STDOUT, STDERR);
+
+  /* 4 is /dev/prn                                                */
+  open("PRN", O_WRONLY);
+#endif
+  /* Initialize the disk buffer management functions */
+  /* init_call_init_buffers(); done from CONFIG.C   */
+}
 
 STATIC void init_kernel()
 {
@@ -2384,14 +2479,14 @@ STATIC void init_kernel()
     blk_dev->dh_name[0] = dsk_init();
 
     PreConfig();
-/// TODO:
-  /* Number of units * /
-  if (blk_dev.dh_name[0] > 0)
-    update_dcb(&blk_dev);
-*/
-  /* Now config the temporary file system */
-///  FsConfig();
+    /* Number of units */
+    if (blk_dev->dh_name[0] > 0)
+        update_dcb(x86_blk_dev);
 
+    /* Now config the temporary file system */
+    FsConfig();
+
+/// TODO:
   /* Now process CONFIG.SYS     * /
   DoConfig(0);
   DoConfig(1);
@@ -2446,6 +2541,25 @@ void kernel(CPU* _cpu) {
 
     LoL = (struct lol*)ARM_PTR(x86_FIXED_DATA);
     memcpy(LoL, &lol, sizeof(struct lol));
+
+    internal_data = (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
+    memset(internal_data, 0, sizeof(struct dos_data));
+    internal_data->switchar = '/';
+    internal_data->net_set_count = 1;
+    internal_data->CritPatchPad = 0x90; // NOP pad byte
+    internal_data->break_ena = 1;
+    internal_data->DayOfMonth = 1;
+    internal_data->Month = 1;
+    internal_data->daysSince1980 = 0xFFFF;
+    internal_data->DayOfWeek = 2;
+    internal_data->dosidle_flag = 1;
+    internal_data->last_component = 0xffff; // 296 - 0xffff or offset of last component in filename
+    memset(
+        internal_data->sda_tmp_dm_ren,
+        0x90,
+        sizeof(internal_data->sda_tmp_dm_ren) + sizeof(internal_data->SearchDir_ren) + sizeof(internal_data->api_stacks) +
+        sizeof(internal_data->error_tos) + sizeof(internal_data->disk_api_tos) + sizeof(internal_data->char_api_tos)
+    );
 
     // adjust boot drive to DOS format
     LoL->BootDrive  = CPU_BL + 1;

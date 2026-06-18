@@ -30,7 +30,7 @@ enum {LOC_CONV=0, LOC_HMA=1};
 
 /* note: we start at DOSDS:0, but the "official" list of lists starts a
    little later at DOSDS:26 (this is what is returned by int21/ah=52) */
-
+#pragma pack(push, 1)
 struct lol {
 /* it was char filler[0x22];
 segment _FIXED_DATA
@@ -138,3 +138,171 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   // TODO:
   char os_release_str[8];
 };
+
+#define STACK_SIZE (384/2) // stack allocated in words
+
+/*
+; Some references seem to indicate that this data should start at 01fbh in
+; order to maintain 100% MS-DOS compatibility.
+*/
+// MARK01FBH
+struct dos_data {
+    BYTE local_buffer[LINEBUFSIZECON]; // local_buffer is 256 bytes long, so it overflows into kb_buf!!
+    // only when kb_buf is used, local_buffer is limited to 128 bytes.
+    keyboard kb_buf;
+/*
+;
+; Variables that follow are documented as part of the DOS 4.0-6.X swappable
+; data area in Ralf Browns Interrupt List #56
+;
+; this byte is used for ^P support
+*/
+    BYTE PrinterEcho;          // -34 0 = no printer echo, ~0 echo
+    BYTE verify_ena;           // -33 ~0, write with verify
+    BYTE scr_pos;              // -32 Current Cursor Column
+    char switchar;             // -31 switch char
+    BYTE mem_access_mode;      /* -30 memory allocation strategy */
+    BYTE sharing_flag;         /* -29 00 = sharing module not loaded... */
+    BYTE net_set_count;        /* -28 count the name below was set */
+    char net_name[16];         /* -27..-12 */
+    UWORD CritPatch[5];        /* -11..-2 */
+    BYTE CritPatchPad;         /* -1, 90h */
+// _internal_data:              ; <-- Address returned by INT21/5D06
+    BYTE ErrorMode;          /* 00 Critical Error Flag*/
+    BYTE InDOS;              /* 01 Indos Flag */
+    BYTE CritErrDrive;       /* 02 Drive on write protect error */
+    BYTE CritErrLocus;       /* 03 Error Locus */
+    UWORD CritErrCode;       /* 04 DOS format error Code */
+    BYTE CritErrAction;      /* 06 Error Action Code */
+    BYTE CritErrClass;       /* 07 Error Class */
+    dos_far_ptr CritErrDev;  /* 08 Failing Device Address */
+    dos_far_ptr dta;         /* 0C current DTA */
+    UWORD cu_psp;            /* 10 Current PSP */
+    UWORD break_sp;          /* 12 used in int 23 */
+    UWORD return_code;       /* 14 return code from process */
+    BYTE default_drive;      /* 16 Current Drive */
+    BYTE break_ena;          /* 17 Break Flag (default TRUE) */
+    BYTE flag18;             // 18 flag, code page switching
+    BYTE flag19;             // 19 flag, copy of 18 on int 24h abort
+// _swap_always:
+    UWORD Int21AX;           // 1A - AX from last Int 21
+    UWORD owning_psp;        // 1C - owning PSP
+    UWORD MachineId;         // 1E - remote machine ID
+    UWORD first_mcb;         // 20 - First usable MCB
+    UWORD best_mcb;          // 22 - Best usable MCB
+    UWORD last_mcb;          // 24 - Last usable MCB
+    UWORD mem_size_para;     // 26 - memory size in paragraphs
+    UWORD unk28;             // 28 - unknown
+    BYTE  unk2A;             // 2A - unknown
+    BYTE  unk2B;             // 2B - unknown
+    BYTE  unk2C;             // 2C - unknown
+    BYTE  break_flg;         // 2D - Program aborted by ^C
+    BYTE  unk2E;             // 2E - unknown
+    BYTE  unk2F;             // 2F - not referenced
+
+    BYTE  DayOfMonth;        // 30 - day of month
+    BYTE  Month;             // 31 - month
+    UWORD YearsSince1980;    // 32 - year since 1980
+    UWORD daysSince1980;     // 34 - number of days since epoch
+    BYTE  DayOfWeek;         // 36 - day of week
+    BYTE  console_swap;      // 37 - console swapped during read from dev
+    BYTE  dosidle_flag;      // 38 - safe to call int28 if nonzero
+    BYTE  abort_progress;    // 39 - abort in progress
+
+    request ClkReqHdr;       // 3A - Device driver request header
+    dos_far_ptr clk_driver;  // 58 - pointer to driver entry
+
+    BYTE  MediaReqHdr[22];   // 5C - Device driver request header
+    BYTE  IoReqHdr[30];      // 72 - Device driver request header
+    BYTE  unk90[6];          // 90 - unknown
+    struct ClockRecord
+          ClkRecord;         // 96 - CLOCK$ transfer record
+    UWORD unk9C;             // 9C - unknown
+
+    BYTE  PriPathBuffer[0x80]; // 9E - buffer for file name
+    BYTE  SecPathBuffer[0x80]; // 11E - buffer for file name
+
+    BYTE  sda_tmp_dm[21];    // 19E - 21 byte search state
+    BYTE  SearchDir[32];     // 1B3 - 32 byte dir entry
+    BYTE  TempCDS[88];       // 1D3 - Temporary CDS buffer
+    BYTE  DirEntBuffer[32];  // 22B - space enough for 1 dir entry
+
+    UWORD wAttr;             // 24B - extended FCB file attribute
+    BYTE  SAttr;             // 24D - Attribute Mask for Dir Search
+    BYTE  OpenMode;          // 24E - File Open Attribute
+
+    BYTE  pad24F[3];         // 24F
+    BYTE  Server_Call;       // 252 - Server call Func 5D sub 0
+    BYTE  pad253;            // 253
+    BYTE  pad254[0x25C - 0x254];
+
+    BYTE  term_type;         // 25C - termination type
+    BYTE  pad25D;            // 25D
+    UWORD term_psp;          // 25E
+    dos_far_ptr int24_esbp;  // 260 - pointer to criticalerr DPB
+
+    dos_far_ptr user_r;      // 264 - pointer to int21h stack frame
+    UWORD critical_sp;       // 268 - critical error internal stack
+    dos_far_ptr current_ddsc;// 26A - pointer to DPB
+
+    UWORD diskbuf_seg;       // 26E - segment of disk buffer
+    DWORD unk270;            // 270 - saving partial cluster number?
+    UWORD unk274;            // 274
+    UWORD unk276;            // 276 - temp word
+    BYTE  media_id;          // 278 - media id returned by AH=1Bh,1Ch
+    BYTE  unused279;         // 279
+
+    dos_far_ptr current_device; // 27A - ptr to device header if filename is char device
+    dos_far_ptr lpCurSft;       // 27E - Current SFT
+    dos_far_ptr current_ldt;    // 282 - Current CDS
+    dos_far_ptr sda_lpFcb;      // 286 - pointer to caller's FCB
+    UWORD current_sft_idx;      // 28A - SFT index for next open
+    UWORD temp_file_handler;    // 28C
+    dos_far_ptr jft_entry;      // 28E - pointer to JFT entry
+
+    UWORD sda_WFP_START;        // 292 - offset of first filename argument
+    UWORD sda_REN_WFP;          // 294 - offset of second filename argument
+    UWORD last_component;       // 296 - 0xffff or offset of last component
+
+    BYTE  pad298[0x2AE - 0x298];
+
+    DWORD current_filepos;      // 2AE - current offset in file
+
+    BYTE  pad2B2[0x2CA - 0x2B2];
+
+    UWORD save_BX;              // 2CA - Win3.x compatibility
+    UWORD save_DS;              // 2CC
+    UWORD save_unk;             // 2CE
+
+    dos_far_ptr prev_user_r;    // 2D0 - pointer to previous int21 frame
+
+    BYTE  pad2D4[0x2DD - 0x2D4];
+
+    UWORD ext_open_action;      // 2DD - extended open action
+    UWORD ext_open_attrib;      // 2DF - extended open attrib
+    UWORD ext_open_mode;        // 2E1 - extended open mode
+    dos_far_ptr open_filename;  // 2E3 - pointer to filename for AX=6C00h
+
+    BYTE  pad2E7[0x300 - 0x2E7];
+
+    BYTE  sda_tmp_dm_ren[21];   // 300 - 21 byte search state for rename
+    BYTE  SearchDir_ren[32];    // 315 - 32 byte dir entry for rename
+
+    BYTE  api_stacks[STACK_SIZE * 2 - 0x35]; // 335.. before _error_tos
+
+    UWORD error_tos[STACK_SIZE];     // 300 - Error Processing Stack
+    UWORD disk_api_tos[STACK_SIZE];  // 480 - Disk Function Stack
+    UWORD char_api_tos[STACK_SIZE];  // 600 - Char Function Stack
+// apistk_top: ^
+    BYTE  device_lookahead;    // 780 device driver look-ahead (printer), see ah=64h
+    BYTE  VolChange;           // 781 volume change
+    BYTE  VirtOpen;            // 782 virtual open flag
+
+    BYTE  pad783[0x78C - 0x783];
+
+    BYTE  fat32_ext[0x7BB - 0x78C];// 78C - FAT32 SDA extended
+    BYTE  absrdwrflg;              // 7BB
+    UWORD high_words[12];          // 7BC..7D3
+    UWORD unk7D4[3];
+};
+#pragma pack(pop)

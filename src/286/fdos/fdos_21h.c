@@ -23,12 +23,6 @@
 
 static CPU* cpu; /// TODO: refactoring
 
-UWORD ASM Int21AX;
-seg ASM cu_psp;
-
-dos_far_ptr dta;
-
-//#include <stdio.h>
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined");
 while(1); // remove it
@@ -44,7 +38,7 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError, struct dhd
 /* Abort, retry or fail for character devices                   */
 COUNT char_error(request * rq, struct dhdr FAR * lpDevice)
 {
-  CritErrCode = (rq->r_status & S_MASK) + 0x13;
+  internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
   return CriticalError(EFLG_CHAR | EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE,
                        0, rq->r_status & S_MASK, lpDevice);
 }
@@ -92,7 +86,7 @@ long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, void FAR * bp,
 /* common - call the clock driver */
 void ExecuteClockDriverRequest(BYTE command)
 {
-  BinaryCharIO(&LoL->clock, sizeof(struct ClockRecord), &ClkRecord, command);
+  BinaryCharIO(&LoL->clock, sizeof(struct ClockRecord), &internal_data->ClkRecord, command);
 }
 
 const UWORD days[2][13] = {
@@ -125,10 +119,10 @@ unsigned char DosGetDate(CPU* cpu)
 
   ExecuteClockDriverRequest(C_INPUT);
 
-  if (ClkReqHdr.r_status & S_ERROR)
+  if (CharReqHdr.r_status & S_ERROR)
     return 0;
 
-  for (Year = 1980, c = ClkRecord.clkDays;;)
+  for (Year = 1980, c = internal_data->ClkRecord.clkDays;;)
   {
     pdays = is_leap_year_monthdays(Year);
     if (c >= pdays[12])
@@ -155,7 +149,7 @@ unsigned char DosGetDate(CPU* cpu)
   /* Day of week is simple. Take mod 7, add 2 (for Tuesday        */
   /* 1-1-80) and take mod again                                   */
 
-  return (ClkRecord.clkDays + 2) % 7;
+  return (internal_data->ClkRecord.clkDays + 2) % 7;
 }
 
 UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth)
@@ -184,12 +178,12 @@ int DosSetDate(CPU* cpu)
 
   ExecuteClockDriverRequest(C_INPUT);
 
-  ClkRecord.clkDays = DaysFromYearMonthDay(Year, Month, DayOfMonth);
+  internal_data->ClkRecord.clkDays = DaysFromYearMonthDay(Year, Month, DayOfMonth);
 
   ExecuteClockDriverRequest(C_OUTPUT);
 
-  if (ClkReqHdr.r_status & S_ERROR)
-    return char_error(&ClkReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
+  if (CharReqHdr.r_status & S_ERROR)
+    return char_error(&CharReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
   return SUCCESS;
 }
 
@@ -197,13 +191,13 @@ void DosGetTime(CPU* cpu)
 {
   ExecuteClockDriverRequest(C_INPUT);
 
-  if (ClkReqHdr.r_status & S_ERROR)
+  if (CharReqHdr.r_status & S_ERROR)
     return;
 
-  CPU_CH = ClkRecord.clkHours;
-  CPU_CL = ClkRecord.clkMinutes;
-  CPU_DH = ClkRecord.clkSeconds;
-  CPU_DL = ClkRecord.clkHundredths;
+  CPU_CH = internal_data->ClkRecord.clkHours;
+  CPU_CL = internal_data->ClkRecord.clkMinutes;
+  CPU_DH = internal_data->ClkRecord.clkSeconds;
+  CPU_DL = internal_data->ClkRecord.clkHundredths;
 }
 
 int DosSetTime(CPU* cpu)
@@ -214,16 +208,27 @@ int DosSetTime(CPU* cpu)
   /* for ClkRecord.clkDays */
   ExecuteClockDriverRequest(C_INPUT);
 
-  ClkRecord.clkHours = CPU_CH;
-  ClkRecord.clkMinutes = CPU_CL;
-  ClkRecord.clkSeconds = CPU_DH;
-  ClkRecord.clkHundredths = CPU_DL;
+  internal_data->ClkRecord.clkHours = CPU_CH;
+  internal_data->ClkRecord.clkMinutes = CPU_CL;
+  internal_data->ClkRecord.clkSeconds = CPU_DH;
+  internal_data->ClkRecord.clkHundredths = CPU_DL;
 
   ExecuteClockDriverRequest(C_OUTPUT);
 
-  if (ClkReqHdr.r_status & S_ERROR)
-    return char_error(&ClkReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
+  if (CharReqHdr.r_status & S_ERROR)
+    return char_error(&CharReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
   return SUCCESS;
+}
+
+UBYTE DosSelectDrv(UBYTE drv)
+{
+  /**TODO:
+  current_ldt = get_cds(drv);
+
+  if (current_ldt != NULL)
+ */
+    internal_data->default_drive = drv;
+  return drv;/// lastdrive;
 }
 
 /*
@@ -231,10 +236,14 @@ DOS 1+ - main DOS handler
 */
 bool fdos_21h(CPU* _cpu) {
     cpu = _cpu;
-    Int21AX = CPU_AX;
+    internal_data->Int21AX = CPU_AX;
     switch (CPU_AH) {
+      case 0x0E: // set drive
+        CPU_AL = DosSelectDrv(CPU_DL);
+        break;
+
       case 0x1A: // set DTA
-        dta = FP_DS_DX;
+        internal_data->dta = FP_DS_DX;
         break;
 
         /* Get Date                                                     */
@@ -258,12 +267,12 @@ bool fdos_21h(CPU* _cpu) {
         break;
         // get DTA
       case 0x2f:
-        CPU_BX = FP_OFF(dta);
-        SET_ES(FP_SEG(dta));
+        CPU_BX = FP_OFF(internal_data->dta);
+        SET_ES(FP_SEG(internal_data->dta));
         break;
         /* Set PSP                                                      */
       case 0x50:
-        cu_psp = CPU_BX;
+        internal_data->cu_psp = CPU_BX;
         break;
 // 51h — Get PSP Segment, 52h — Get List Of Lists, 53h — Translate BIOS
       //  TODO: LoL + 0x26 (то есть адрес поля DPBp).
@@ -273,7 +282,7 @@ bool fdos_21h(CPU* _cpu) {
       case 0x51:
         /* UNDOCUMENTED: return current psp                             */
       case 0x62:
-        CPU_BX = cu_psp;
+        CPU_BX = internal_data->cu_psp;
         break;
       default:
         no_handler(_cpu);

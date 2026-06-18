@@ -26,11 +26,8 @@
 /* write to the Free Software Foundation, 675 Mass Ave,         */
 /* Cambridge, MA 02139, USA.                                    */
 /****************************************************************/
-extern UWORD ASM Int21AX;
-extern seg ASM cu_psp;              /* current psp segment                  */
 extern struct lol* LoL;
-extern struct ClockRecord ASM ClkRecord;
-extern COUNT ASM CritErrCode;
+extern struct dos_data* internal_data;
 COUNT ASMCFUNC
     CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
                            struct dhdr FAR * lpDevice);

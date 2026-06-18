@@ -489,8 +489,8 @@ typedef BYTE FAR *byteptr;
 typedef struct dhdr FAR *dhdrptr;
 
 extern request                  /* I/O Request packets                  */
-  ASM CharReqHdr, ASM IoReqHdr, ASM MediaReqHdr;
-#define ClkReqHdr CharReqHdr
+  ASM IoReqHdr, ASM MediaReqHdr;
+#define CharReqHdr (internal_data->ClkReqHdr)
 
 /* dsk.c */
 COUNT ASMCFUNC FAR blk_driver(rqptr rp);

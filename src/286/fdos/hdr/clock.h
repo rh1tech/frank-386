@@ -37,6 +37,7 @@ static BYTE *clock_hRcsId =
 #endif
 #endif
 
+#pragma pack(push, 1)
 struct ClockRecord {
   UWORD clkDays;                /* days since Jan 1, 1980.              */
   UBYTE clkMinutes;             /* residual minutes.                    */
@@ -44,4 +45,4 @@ struct ClockRecord {
   UBYTE clkHundredths;          /* residual hundredths of a second.     */
   UBYTE clkSeconds;             /* residual seconds.                    */
 };
-
+#pragma pack(pop)
