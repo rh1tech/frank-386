@@ -1165,34 +1165,8 @@ static void point2iret(u32 intno) {
 	pstore16(intno*4, 0x0006);
 	pstore16(intno*4 + 2, 0xFFF0);
 }
-#endif
 
-void load_bios_and_reset(PC *pc)
-{
-	int bios_size = 0;
-	if (pc->bios && pc->bios[0])
-		bios_size = load_rom(PC_RAM, pc->bios, 0x100000, 1);
-
-	// Only load VGA BIOS if main BIOS doesn't overlap with 0xC0000
-	// 256KB BIOS starts at 0xC0000, so VGA BIOS would overwrite it
-	int bios_start = 0x100000 - bios_size;
-	if (pc->vga_bios && pc->vga_bios[0] && bios_start >= 0xC8000) {
-		load_rom(PC_RAM, pc->vga_bios, 0xc0000, 0);
-	} else if (pc->vga_bios && pc->vga_bios[0]) {
-		printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
-	}
-	sn76489_reset();
-
-#ifndef I386_MODE
-// fast IRET cases:
-	for (int i = 0; i < 256; ++i) { // initially all them just pointed to IRET
-		point2iret(i);
-	}
-#endif
-
-	cpu_reset(pc->cpu);
-
-#ifndef I386_MODE
+void bios_post(PC *pc) {
 // POST
 	// TODO:
 	uint32_t ext_ram = phys_mem_size <= (1024 << 10) ? 0 : (phys_mem_size - (1024 << 10)) >> 10;
@@ -1434,7 +1408,35 @@ void load_bios_and_reset(PC *pc)
 	kernel(pc->cpu);
 // unblock IRQs
 	pc->cpu->ext_accessors->set_flag(pc->cpu, IF, 1);
+}
+#else
+void bios_post(PC *pc) {}
 #endif
+
+void load_bios_and_reset(PC *pc)
+{
+	int bios_size = 0;
+	if (pc->bios && pc->bios[0])
+		bios_size = load_rom(PC_RAM, pc->bios, 0x100000, 1);
+
+	// Only load VGA BIOS if main BIOS doesn't overlap with 0xC0000
+	// 256KB BIOS starts at 0xC0000, so VGA BIOS would overwrite it
+	int bios_start = 0x100000 - bios_size;
+	if (pc->vga_bios && pc->vga_bios[0] && bios_start >= 0xC8000) {
+		load_rom(PC_RAM, pc->vga_bios, 0xc0000, 0);
+	} else if (pc->vga_bios && pc->vga_bios[0]) {
+		printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
+	}
+	sn76489_reset();
+
+#ifndef I386_MODE
+// fast IRET cases:
+	for (int i = 0; i < 256; ++i) { // initially all them just pointed to IRET
+		point2iret(i);
+	}
+#endif
+
+	cpu_reset(pc->cpu);
 }
 
 static long parse_mem_size(const char *value)

@@ -1066,7 +1066,7 @@ int main(void) {
             DBG_PRINT("HDMI DMA priority raised\n");
         }
     }
-
+#if WELCOME_SCREEN
     // Show welcome screen
     DBG_PRINT("\nAbout to show welcome screen...\n");
     if(*(uint32_t*)(0x20000000 + (512ul << 10) - 32) != 0x1927fa52) // magic to fast reboot
@@ -1074,7 +1074,7 @@ int main(void) {
     DBG_PRINT("Welcome screen done.\n");
 
     DBG_PRINT("\nStarting emulation...\n");
-
+#endif
 #if THROTTLING
     // Frame rate throttling for audio sync
     // Target ~60fps to match audio processing rate (16666us per frame)
@@ -1085,6 +1085,8 @@ int main(void) {
 #endif
     // Retrace-based frame submission state
     static int last_vga_mode = -1;
+
+    bios_post(pc); // actually for 286 mode only
 
     // Main emulation loop (Core 0)
     while (true) {

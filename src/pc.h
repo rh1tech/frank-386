@@ -122,6 +122,7 @@ void pc_step(PC *pc);
 int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value);
 void load_bios_and_reset(PC *pc);
+void bios_post(PC *pc);
 
 int16_t midi_sample(void);
 

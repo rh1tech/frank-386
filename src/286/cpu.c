@@ -171,13 +171,17 @@ void cpu_init_286(CPU* cpu) {
         handlers[i] = no_handler;
     }
     handlers[0x08] = bios_08h; // IRQ0: Timer
+    handlers[0x09] = bios_09h; // IRQ1: Keyboard
     handlers[0x10] = bios_10h; // VIDEO
     handlers[0x11] = bios_11h; // EQUIPMENT LIST
     handlers[0x12] = bios_12h; // Conventional RAM count
     handlers[0x13] = bios_13h; // DISK
+    handlers[0x14] = bios_14h; // SERIAL
+    handlers[0x16] = bios_16h; // KEYBOARD
     handlers[0x1A] = bios_1Ah; // CMOS TIME
     handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.
+    handlers[0x77] = bios_09h_phase2; // KEYBOARD W/A TODO: other way
     /*
 00h  divide error
 01h  single step

@@ -1,7 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 
 #define BDA_BASE        0x400u
 #define BDA_KBD_FLAGS1  0x417u
@@ -53,7 +53,7 @@ bool bios_16h_store_key(uint16_t ax)
     return true;
 }
 
-bool bios_16h(void)
+bool bios_16h(CPU* cpu)
 {
     switch (CPU_AH) {
     case 0x00: /* read keystroke */

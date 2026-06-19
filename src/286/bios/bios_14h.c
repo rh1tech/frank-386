@@ -1,8 +1,7 @@
-#include <stdio.h>
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 
-static bool no_handler() {
+static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "SERIAL ERROR: no handler defined");
 while(1); // remove it
     return true;
@@ -27,14 +26,14 @@ Bit(s)  Description     (Table 00300)
 2      stop bits (set = 2, clear = 1)
 1-0    data bits (00 = 5, 01 = 6, 10 = 7, 11 = 8)
 */
-bool bios_14h(void)
+bool bios_14h(CPU* cpu)
 {
     uint8_t fn = CPU_AH;
     uint8_t al = CPU_AL;
     uint16_t port_no = CPU_DX & 0xFFFF;
 
     if (fn != 0x00)
-        return no_handler();
+        return no_handler(cpu);
 
     if (port_no >= 4) {
         CPU_AH = 0x80; // timeout/error, условно

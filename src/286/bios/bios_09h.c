@@ -1,7 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 
 #define BDA_KBD_FLAGS1  0x417u
 #define BDA_KBD_FLAG1   0x496u   /* kbd_flag1: KF1_LAST_E0, KF1_LAST_E1, KF1_RCTRL, KF1_RALT */
@@ -84,7 +84,7 @@ static char scan_to_ascii(uint8_t scan, bool shift, bool ctrl, bool caps)
 /* Phase 2: called via INT 77h after INT 15h/4Fh returns from guest.
  * CF and CPU_AL are the result of the INT 15h/4Fh call.
  * Continues scan code processing. */
-bool bios_09h_phase2(void)
+bool bios_09h_phase2(CPU* cpu)
 {
     uint8_t scan;
     if (!cf) {
@@ -167,7 +167,7 @@ bool bios_09h_phase2(void)
             && (flags & KBD_FLAG_CTRL)
             && (flags & KBD_FLAG_ALT)) {
             writew86(0x472, 0x1234);  /* soft_reset_flag = warm boot */
-            CPU_CS = 0xFFFF;
+            SET_CS ( 0xFFFF );
             CPU_IP = 0x0000;          /* jump to reset vector */
             return true;
         }
@@ -214,7 +214,7 @@ eoi_return:
 
 /* Phase 1: read scan code, save in scratch, redirect to INT 15h/4Fh stub.
  * Returns false → main loop continues execution at stub (CS:IP set here). */
-bool bios_09h(void)
+bool bios_09h(CPU* cpu)
 {
     /* Check OBF (Output Buffer Full) in i8042 status register.
      * If clear — spurious IRQ1, nothing to read. */
@@ -239,7 +239,7 @@ bool bios_09h(void)
     pstore8(IRQ1_SCRATCH, code);
 
     /* Redirect to INT 15h/4Fh stub in ROM */
-    CPU_CS = IRQ1_STUB_CS;
+    SET_CS ( IRQ1_STUB_CS );
     CPU_IP = IRQ1_STUB_IP;
     return false;
 }
