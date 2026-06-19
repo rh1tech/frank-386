@@ -18,6 +18,7 @@
 #include "hdr/lol.h"
 #include "hdr/tail.h"
 #include "hdr/process.h"
+#include "hdr/cds.h"
 #include "proto.h"
 #include "globals.h"
 
@@ -220,15 +221,32 @@ int DosSetTime(CPU* cpu)
   return SUCCESS;
 }
 
+/* get current directory structure for drive
+   return NULL if the CDS is not valid or the
+   drive is not within range */
+/*struct cds*/ dos_far_ptr get_cds(unsigned drive)
+{
+  if (drive >= LoL->lastdrive)
+    return MK_FP(0, 0);
+
+  struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp) + drive;
+  unsigned flags = CDSp->cdsFlags;
+  /* Entry is disabled or JOINed drives are accessable by the path only */
+  if (!(flags & CDSVALID) || (flags & CDSJOINED) != 0)
+    return MK_FP(0, 0);
+  if (!(flags & CDSNETWDRV) && CDSp->cdsDpb == NULL)
+    return MK_FP(0, 0);
+  return x86_FAR_PTR(DOS_PSP, CDSp);
+}
+
 UBYTE DosSelectDrv(UBYTE drv)
 {
-  /**TODO:
-  current_ldt = get_cds(drv);
+  internal_data->current_ldt = get_cds(drv);
 
-  if (current_ldt != NULL)
- */
+  if (EFFECTIVE(internal_data->current_ldt))
     internal_data->default_drive = drv;
-  return drv;/// lastdrive;
+  
+  return LoL->lastdrive;
 }
 
 /*
