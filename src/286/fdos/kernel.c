@@ -523,7 +523,7 @@ const static struct dhdr _con_dev = {
 
 const static struct lol lol = {
     .dos_data = 0,              /* 0x00  abs / -0x26 rel: SDA format byte (0=DOS3.x, 1=DOS4+) */
-    .kernel_start_off = 0,      /* 0x01  abs / -0x25 rel: offset of kernel_start TODO: some compartibale value*/
+    .kernel_start_off = 0,      /* 0x01  abs / -0x25 rel: offset of kernel_start, may be 0x0100?, in case somebody reads it*/
     ._pad0 = 0,                 /* 0x03  abs / -0x23 rel: padding */
     .version_style = 1,         /* 0x04  abs / -0x22 rel: 1 = MS-DOS 4.0+ style */
 //    ._pad1[8] = {0,0,0,0,0,0,0,0},/* 0x06  abs / -0x20 rel: padding to NetBios */
@@ -534,7 +534,7 @@ const static struct lol lol = {
     .DskBuffer = MK_FP(-1,-1),  /* 0x1E  abs / -0x08 rel: current dos disk buffer */
     .inputptr = 0,              /* 0x22  abs / -0x04 rel: unread CON input */
     .first_mcb = 0,             /* 0x24  abs / -0x02 rel: start of user memory */
-    /* === MARK0026H, offset 0x26 === */
+    /* === MARK0026H, offset 0x26 = offsetof(struct lol, DPBp) */
     .DPBp        = MK_FP(-1,-1),
     .sfthead     = 0,
     .clock       = x86_clk_dev,

@@ -81,7 +81,7 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   dos_far_ptr  DskBuffer;       /* 0x1E  abs / -0x08 rel: current dos disk buffer */
   dos_short_ptr inputptr;       /* 0x22  abs / -0x04 rel: unread CON input */
   uint16_t     first_mcb;       /* 0x24  abs / -0x02 rel: start of user memory */
-  /* === MARK0026H, offset 0x26 === */
+/* === MARK0026H, offset 0x26 === */
   /* 0x26 abs /  0x00 rel: First Drive Parameter Block */
   /*struct dpb*/ dos_far_ptr DPBp;      /*  0 First drive Parameter Block          */
   /*struct sfttbl*/ dos_far_ptr sfthead;/*  4 System File Table head               */
@@ -138,6 +138,8 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   // TODO:
   char os_release_str[8];
 };
+_Static_assert(offsetof(struct lol, DPBp) == 0x26, "LoL start offset looks incorrect, DPBp should be on +0x26");
+
 
 #define STACK_SIZE (384/2) // stack allocated in words
 

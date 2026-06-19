@@ -274,14 +274,16 @@ bool fdos_21h(CPU* _cpu) {
       case 0x50:
         internal_data->cu_psp = CPU_BX;
         break;
-// 51h — Get PSP Segment, 52h — Get List Of Lists, 53h — Translate BIOS
-      //  TODO: LoL + 0x26 (то есть адрес поля DPBp).
-      // case 0x52: DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
 
+      case 0x52: { // DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
+          SET_ES (DOS_PSP);
+          CPU_BX = 0x08F0 + 0x26; // see MARK0026H
+        }
+        break;
+// 53h — Translate BIOS
         /* Get PSP                                                      */
-      case 0x51:
-        /* UNDOCUMENTED: return current psp                             */
-      case 0x62:
+      case 0x51: // DOS 2+ internal - GET CURRENT PROCESS ID (GET PSP ADDRESS)
+      case 0x62: // DOS 3.0+ - GET CURRENT PSP ADDRESS
         CPU_BX = internal_data->cu_psp;
         break;
       default:
