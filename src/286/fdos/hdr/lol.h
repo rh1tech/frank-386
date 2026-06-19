@@ -135,8 +135,10 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   unsigned long  winStartupInfo[4];
   unsigned short instanceTable[5];
 #endif
-  // TODO:
   char os_release_str[8];
+  char aux_str[4];
+  char con_str[4];
+  char prn_str[4];
 };
 _Static_assert(offsetof(struct lol, DPBp) == 0x26, "LoL start offset looks incorrect, DPBp should be on +0x26");
 

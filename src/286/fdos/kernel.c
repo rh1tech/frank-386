@@ -39,10 +39,13 @@ static CPU* cpu;
 #include "globals.h"
 #include "hdr/debug.h"
 #include "hdr/buffer.h"
+#include "hdr/file.h"
 #include "config.h"
 
 #define x86_para2far(seg) (MK_FP((seg), 0))
 #define para2far(seg) ((mcb*)ARM_PTR(MK_FP((seg), 0)))
+
+#define open        init_DosOpen
 
 struct config Config = { 0 };
 BYTE HaltCpuWhileIdle = 0;
@@ -577,7 +580,10 @@ const static struct lol lol = {
     .rev_number      = 0,
     .version_flags   = 0,
     .os_release      = offsetof(struct lol, os_release_str), /* near ptr на строку os_release */
-    .os_release_str  = KERNEL_VERSION
+    .os_release_str  = KERNEL_VERSION,
+    .aux_str = "AUX",
+    .con_str = "CON",
+    .prn_str = "PRN",
 };
 
 static void x86_execrh() {
@@ -2374,12 +2380,32 @@ void PreConfig(void)
   /* This next line is 8086 and 80x86 real mode specific          */
   CfgDbgPrintf(("Preliminary  allocation completed: top at %p\n", lpTop));
 }
+
 int init_setdrive(int drive) {
     CPU_AH = 0x0e;
     CPU_DX = drive;
     fdos_21h(cpu);
-    return drive;
+    return CPU_AL;          /* number of potentially valid drives */
 }
+
+int init_DosOpen(dos_far_ptr pathname, int flags) {
+    SET_DS (FP_SEG(pathname));
+    CPU_DX = FP_OFF(pathname);
+    CPU_AL = flags & 0xff;
+    CPU_AH = 0x3d;          /* DOS open */
+    fdos_21h(cpu);
+    return cf ? -1 : CPU_AX;          /* file handle */
+}
+
+int dup2(int oldfd, int newfd)
+{
+    CPU_AH = 0x46;      /* Force duplicate file handle */
+    CPU_BX = oldfd;
+    CPU_CX = newfd;
+    fdos_21h(cpu);
+    return cf ? -1 : CPU_AX;
+}
+
 STATIC VOID FsConfig(VOID)
 {
   struct dpb* dpb = (struct dpb*)ARM_PTR(LoL->DPBp);
@@ -2416,13 +2442,12 @@ STATIC VOID FsConfig(VOID)
   /* The system file tables need special handling and are "hand   */
   /* built. Included is the stdin, stdout, stdaux and stdprn. */
   /* a little bit of shuffling is necessary for compatibility */
-/// TODO:
-#if 0
+
   /* sft_idx=0 is /dev/aux                                        */
-  open("AUX", O_RDWR);
+  open(x86_FAR_PTR(DOS_PSP, LoL->aux_str), O_RDWR);
 
   /* handle 1, sft_idx=1 is /dev/con (stdout) */
-  open("CON", O_RDWR);
+  open(x86_FAR_PTR(DOS_PSP, LoL->con_str), O_RDWR);
 
   /* 3 is /dev/aux                */
   dup2(STDIN, STDAUX);
@@ -2434,8 +2459,8 @@ STATIC VOID FsConfig(VOID)
   dup2(STDOUT, STDERR);
 
   /* 4 is /dev/prn                                                */
-  open("PRN", O_WRONLY);
-#endif
+  open(x86_FAR_PTR(DOS_PSP, LoL->prn_str), O_WRONLY);
+
   /* Initialize the disk buffer management functions */
   /* init_call_init_buffers(); done from CONFIG.C   */
 }

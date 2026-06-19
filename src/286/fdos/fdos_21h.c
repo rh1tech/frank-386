@@ -288,6 +288,15 @@ bool fdos_21h(CPU* _cpu) {
         CPU_BX = FP_OFF(internal_data->dta);
         SET_ES(FP_SEG(internal_data->dta));
         break;
+
+      case 0x3d: // DOS 2+ - OPEN - OPEN EXISTING FILE
+      /// TODO:
+        break;
+
+      case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
+      /// TODO:
+        break;
+
         /* Set PSP                                                      */
       case 0x50:
         internal_data->cu_psp = CPU_BX;
