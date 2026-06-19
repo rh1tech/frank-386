@@ -1,5 +1,5 @@
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 #include "disk.h"
 #include <ff.h>
 
@@ -17,24 +17,27 @@ static int read_boot_sector(FIL *f)
     return readw86(BOOT_ADDR + 510) == 0xAA55;
 }
 
-static void boot_from(uint8_t dl)
+void boot_from(CPU* cpu, uint8_t dl)
 {
     CPU_DL = dl;
     /* IBM PC compatible entry point: physical 0000:7C00.
      * Some BIOSes use 07C0:0000; 0000:7C00 is the usual safe form. */
-    CPU_CS = 0x0000;
+    SET_CS ( 0x0000 );
     CPU_IP = 0x7C00;
+// like after POST (bios-less solution):
+    SET_SS ( 0x0000 );
+    CPU_SP = 0x7C00;
 }
 
-bool bios_19h() {
+bool bios_19h(CPU* cpu) {
     /* Classic boot order used here: floppy A:, then first fixed disk C:.
      * No POST is done here; INT 19h is only bootstrap. */
     if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
-        boot_from(0x00);
+        boot_from(cpu, 0x00);
         return false;
     }
     if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
-        boot_from(0x80);
+        boot_from(cpu, 0x80);
         return false;
     }
 
@@ -54,7 +57,7 @@ INT 19h:
     wait/reboot/halt
      */
     // загрузчик не найден / boot sector невалиден / чтение не удалось
-    return bios_18h(); // ROM Basic, or System halted
+    return bios_18h(cpu); // ROM Basic, or System halted
 }
 
 /*

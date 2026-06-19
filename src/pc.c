@@ -1403,6 +1403,8 @@ void bios_post(PC *pc) {
 	vga_bios_baner(pc->cpu);
 //  do not trap custom timer (to be overriden by DOS)
 	point2iret(0x1C);
+
+	bios_19h(pc->cpu);
 // FreeDOS kernel
 	_boot(pc->cpu);
 	kernel(pc->cpu);

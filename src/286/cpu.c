@@ -53,31 +53,8 @@ static void IRAM_ATTR set_flags(CPU* cpu, uword set_mask, uword clear_mask)
 }
 void cpu_enable_fpu(CPU* cpu);
 
-static void boot_from(CPU* cpu, uint8_t dl)
-{
-    CPU_DL = dl;
-    /* IBM PC compatible entry point: physical 0000:7C00.
-     * Some BIOSes use 07C0:0000; 0000:7C00 is the usual safe form. */
-    CPU_CS = 0x0000;
-    CPU_IP = 0x7C00;
-}
-
 #include "disk.h"
 #include "ff.h"
-
-#define BOOT_ADDR 0x07C00u
-
-static int read_boot_sector(FIL *f)
-{
-    UINT br = 0;
-    if (!f || !f->obj.fs)
-        return 0;
-    if (f_lseek(f, 0) != FR_OK)
-        return 0;
-    if (f_read(f, PC_RAM + BOOT_ADDR, 512, &br) != FR_OK || br != 512)
-        return 0;
-    return readw86(BOOT_ADDR + 510) == 0xAA55;
-}
 
 static INLINE void push(CPU* cpu, uint16_t pushval) {
     CPU_SP = CPU_SP - 2;
@@ -93,19 +70,6 @@ static void reset(CPU* cpu) {
         CPU_IP = 0x0000;
     }
     cpu->flags.value = 2;
-// like after POST (bios-less solution):
-    CPU_SS = 0x0000;
-    CPU_SP = 0x7C00;
-// like int 19h
-    if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
-        boot_from(cpu, 0x00);
-    }
-    else if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
-        boot_from(cpu, 0x80);
-    }
-    else {
-        // TODO: int 18h
-    }
 }
 
 #include "./fpu.h"
@@ -178,6 +142,8 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x13] = bios_13h; // DISK
     handlers[0x14] = bios_14h; // SERIAL
     handlers[0x16] = bios_16h; // KEYBOARD
+    handlers[0x18] = bios_18h; // BASIC
+    handlers[0x19] = bios_19h; // BOOTSTRAP
     handlers[0x1A] = bios_1Ah; // CMOS TIME
     handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.

@@ -5,6 +5,8 @@
 #include <stdarg.h>
 #include "i386.h"
 
+#define BOOT_ADDR 0x07C00u
+
 bool bios_00h(CPU*); // Division by zero, etc...
 bool bios_05h(CPU*); // PRINT SCREEN / BOUND RANGE EXCEEDED
 bool bios_08h(CPU*); // IRQ0 timer tick
@@ -21,6 +23,7 @@ bool bios_18h(CPU*); // Call internal Basic
 bool bios_19h(CPU*); // Bootstrap
 bool bios_1Ah(CPU*); // Time/Date services
 
+void boot_from(CPU* cpu, uint8_t dl); // INT 19h support
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9
 void bios_10h_install_rom_fonts(CPU*); // INT 10h support
 void vga_bios_baner(CPU* cpu);
