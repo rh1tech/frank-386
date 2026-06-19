@@ -115,7 +115,7 @@ UWORD LBA_WRITE_VERIFY = 0x4302;
 #define LBA_FORMAT       0xffff /* fake number for FORMAT track
                                    (only for NON-LBA floppies now!) */
 
-static KernelConfig InitKernelConfig = {
+const static KernelConfig InitKernelConfig = {
     .CONFIG = {'C','O','N','F','I','G'},
     .ConfigSize = sizeof(KernelConfig) - 8, // без signature[6] и config_size
 
@@ -132,7 +132,7 @@ static KernelConfig InitKernelConfig = {
     .Version_Release = 1,
 
     .CheckDebugger = 0,
-    .Verbose = 0,
+    .Verbose = 1, /// TODO: turn it off
 
     .PartitionMode = 0x1F
 };
@@ -397,12 +397,8 @@ static void BlkEntry(request FAR *rq) {
      */
     switch (rq->r_command) {
     case C_INIT:
-        /*
-         * Internal block device: dh_name[0] is unit count, not ASCII name.
-         * dsk_init() later should replace this with the real detected count.
-         */
-        rq->r_nunits = blk_dev->dh_name[0];
-        rq_done(rq);
+        /* disk init is done, so this should never be called */
+        rq_error(rq, E_CMD);
         break;
 
     default:
@@ -780,7 +776,7 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
     if ((FP_SEG(LoL->CDSp) != 0) && (LoL->nblkdev < LoL->lastdrive))
     {
       struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp);
-      CDSp[LoL->nblkdev].cdsDpb = dpb;
+      CDSp[LoL->nblkdev].cdsDpb = x86_dpb;
       CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
     }
 	
@@ -2408,7 +2404,8 @@ int dup2(int oldfd, int newfd)
 
 STATIC VOID FsConfig(VOID)
 {
-  struct dpb* dpb = (struct dpb*)ARM_PTR(LoL->DPBp);
+  dos_far_ptr x86_dpb = LoL->DPBp;
+  struct dpb* dpb = (struct dpb*)ARM_PTR(x86_dpb);
   int i;
 
   /* Initialize the current directory structures    */
@@ -2422,9 +2419,10 @@ STATIC VOID FsConfig(VOID)
 
     if (i < LoL->nblkdev && dpb != (struct dpb*)ARM_PTR(MK_FP(-1, -1)))
     {
-      pcds_table->cdsDpb = dpb;
+      pcds_table->cdsDpb = x86_dpb;
       pcds_table->cdsFlags = CDSPHYSDRV;
-      dpb = (struct dpb*)ARM_PTR(dpb->dpb_next);
+      x86_dpb = dpb->dpb_next;
+      dpb = (struct dpb*)ARM_PTR(x86_dpb);
     }
     else
     {
@@ -2505,8 +2503,9 @@ STATIC void init_kernel()
 
     PreConfig();
     /* Number of units */
-    if (blk_dev->dh_name[0] > 0)
+    if (blk_dev->dh_name[0] > 0) {
         update_dcb(x86_blk_dev);
+    }
 
     /* Now config the temporary file system */
     FsConfig();

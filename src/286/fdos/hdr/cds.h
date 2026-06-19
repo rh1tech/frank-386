@@ -29,13 +29,15 @@
 
 #define MAX_CDSPATH 67
 
+#pragma pack(push, 1)
 struct cds {
   BYTE cdsCurrentPath[MAX_CDSPATH];
   UWORD cdsFlags;           /* see below */
-  struct dpb FAR *cdsDpb;   /* if != 0, associated DPB */
+  /*struct dpb*/
+      dos_far_ptr cdsDpb;   /* if != 0, associated DPB */
 
   union {
-    BYTE FAR *_cdsRedirRec; /* IFS record */
+    dos_far_ptr _cdsRedirRec; /* IFS record */
     struct {
       UWORD _cdsStrtClst;   /* if local path (Flags & CDSPHYSDRV): 
                                start cluster of CWD; root == 0,
@@ -56,10 +58,11 @@ struct cds {
                            */
 
   BYTE cdsNetFlag1;        /* According to PCDOS 7 Tech Ref: IFS drive, 2=IFS, 4=NetUse */
-  BYTE FAR *cdsIfs;        /* Pointer to Installable File System Header */
+  dos_far_ptr cdsIfs;      /* Pointer to Installable File System Header */
   UWORD cdsNetFlags2;      /* File System specific data */
 
 };
+#pragma pack(pop)
 
 #define cdsStrtClst _cdsUnion._cdsRedir._cdsStrtClst
 #define cdsRedirRec _cdsUnion._cdsRedirRec

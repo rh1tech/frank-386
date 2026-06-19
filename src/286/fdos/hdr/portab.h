@@ -213,7 +213,8 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define MK_FP(seg, off) ((dos_far_ptr){ .offset = (off), .segment = (seg)  })
 #define FP_SEG(fp)             ((fp).segment)
 #define FP_OFF(fp)             ((fp).offset)
-#define DHDR_END ((void*)(uintptr_t)-1)
+#define ADD_OFF(p, n) MK_FP(FP_SEG(p), FP_OFF(p) + (n))
+///#define DHDR_END ((void*)(uintptr_t)-1)
 #define EFFECTIVE(a) (((uint32_t)(a).segment << 4) + (a).offset)
 #define ARM_PTR(p_x86) ( X86_RAM_BASE + EFFECTIVE(p_x86) )
 // N.B. use it only for addresses are stored in x86 RAM (PSRAM), M33 SRAM/FLASH is not mapped there

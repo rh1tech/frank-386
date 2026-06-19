@@ -234,7 +234,7 @@ int DosSetTime(CPU* cpu)
   /* Entry is disabled or JOINed drives are accessable by the path only */
   if (!(flags & CDSVALID) || (flags & CDSJOINED) != 0)
     return MK_FP(0, 0);
-  if (!(flags & CDSNETWDRV) && CDSp->cdsDpb == NULL)
+  if (!(flags & CDSNETWDRV) && EFFECTIVE(CDSp->cdsDpb) == 0)
     return MK_FP(0, 0);
   return x86_FAR_PTR(DOS_PSP, CDSp);
 }
