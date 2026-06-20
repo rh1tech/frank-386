@@ -1575,7 +1575,7 @@ int Read1LBASector(struct DriveParamS *driveParam, unsigned drive,
 STATIC dos_far_ptr linear_to_far(const BYTE *p)
 {
   uint32_t lin = (uint32_t)(p - (intptr_t)X86_RAM_BASE);
-  if (lin < 0x100000ul || lin >= 0x100000ul)
+  if (lin > EFFECTIVE(MK_FP(-1, -1)))
   {
     printf("PANIC: linear_to_far out of x86 guest RAM range %p\n", (const void *)p);
     for (;;) ;
@@ -2954,6 +2954,164 @@ STATIC sft *get_free_sft(COUNT *sft_idx)
   }
   /* If not found, return an error                */
   return (sft *)-1;
+}
+
+/*
++    fnode[] - internal scratch file nodes used while servicing a single
++    DOS API call (open/read/write/seek/close/etc). See the comment on
++    f_dpb/f_dmp in fnode.h for why these stay as plain native ARM
++    structures/pointers, unlike sft/cds: no guest code or DOS API ever
++    holds a reference to an f_node, only to the SFT index that
++    sft_to_fnode()/fnode_to_sft() below translate to/from one.
++
++    Migrated from globals.h (GLOBAL struct f_node fnode[2]). fnode[0]
++    is used for ordinary single-file operations; fnode[1] is only
++    needed by operations that touch two files at once (rename, and
++    DOS's "move within filesystem"), neither of which is implemented
++    yet - but the second slot is kept here so later code matches the
++    original's indexing (&fnode[0] / &fnode[1]) instead of needing a
++    separate single-entry special case.
++*/
+struct f_node fnode[2];
+
+/*
+    get_dpb(dsk) - return a pointer to the DPB for logical drive "dsk"
+    (0=A:, 1=B:, ...), or NULL if the drive isn't a valid, non-network
+    drive.
+
+    Migrated from fatfs.c. Unlike the original (struct dpb FAR *), the
+    return type here is a native ARM pointer: get_dpb() is only ever
+    used internally (by code in this file, eventually including
+    dos_open() et al.), never exposed across the DOS API, so there is
+    no reason to keep it in dos_far_ptr form - see fnode.h.
+*/
+struct dpb *get_dpb(COUNT dsk)
+{
+  dos_far_ptr x86_cdsp = get_cds(dsk);
+  struct cds *cdsp;
+
+  if (far_is_null(x86_cdsp))
+    return NULL;
+
+  cdsp = (struct cds *)ARM_PTR(x86_cdsp);
+  if (cdsp->cdsFlags & CDSNETWDRV)
+    return NULL;
+  return (struct dpb *)ARM_PTR(cdsp->cdsDpb);
+}
+
+/*
+    clus2phys(cl_no, dpbp) - convert a cluster number into the absolute
+    sector number of its first sector.
+
+    Migrated from fatfs.c verbatim (dpbp is already a native pointer
+    here, see get_dpb()/fnode.h above).
+*/
+ULONG clus2phys(CLUSTER cl_no, struct dpb *dpbp)
+{
+  CLUSTER data =
+#ifdef WITHFAT32
+      ISFAT32(dpbp) ? dpbp->dpb_xdata :
+#endif
+      dpbp->dpb_data;
+  return ((ULONG)(cl_no - 2) << dpbp->dpb_shftcnt) + data;
+}
+
+/*
+    getdstart(dpbp)/setdstart(dpbp, dentry, value) - get/set a
+    directory entry's starting cluster number, taking the FAT32
+    high-word split (dir_start + dir_start_high) into account when the
+    volume is FAT32.
+
+    Migrated from fatfs.c verbatim.
+*/
+CLUSTER getdstart(struct dpb *dpbp, struct dirent *dentry)
+{
+#ifdef WITHFAT32
+  if (!ISFAT32(dpbp))
+    return dentry->dir_start;
+  return (((CLUSTER)dentry->dir_start_high << 16) | dentry->dir_start);
+#else
+  UNREFERENCED_PARAMETER(dpbp);
+  return dentry->dir_start;
+#endif
+}
+
+void setdstart(struct dpb *dpbp, struct dirent *dentry, CLUSTER value)
+{
+  dentry->dir_start = (UWORD)value;
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+    dentry->dir_start_high = (UWORD)(value >> 16);
+#else
+  UNREFERENCED_PARAMETER(dpbp);
+#endif
+}
+
+/*
+    sft_to_fnode(fd)/fnode_to_sft(fnp) - copy an open file's state
+    between its SFT entry (guest-visible, dos_far_ptr-based) and
+    fnode[0] (native scratch struct used while servicing the call).
+
+    Migrated from fatfs.c. sft_dcb/f_dpb need an explicit ARM_PTR()/
+    x86_FAR_PTR() conversion on the way in/out (see fnode.h) - in the
+    original this is a plain pointer assignment, since sft_dcb and
+    f_dpb are both "struct dpb FAR *" there. We recover the dpb's
+    guest segment from LoL->DPBp, since all dpb entries are allocated
+    as one contiguous array sharing a single segment (see update_dcb()/
+    FsConfig() above).
+*/
+STATIC f_node_ptr sft_to_fnode(int fd)
+{
+  sft FAR *sftp = idx_to_sft(fd);
+  f_node_ptr fnp = &fnode[0];
+
+  fnp->f_sft_idx = (UBYTE)fd;
+
+  fnp->f_flags = sftp->sft_flags;
+
+  fnp->f_dir.dir_attrib = sftp->sft_attrib;
+  memcpy(fnp->f_dir.dir_name, sftp->sft_name, FNAME_SIZE + FEXT_SIZE);
+  fnp->f_dir.dir_time = sftp->sft_time;
+  fnp->f_dir.dir_date = sftp->sft_date;
+  fnp->f_dir.dir_size = sftp->sft_size;
+  fnp->f_dpb = (struct dpb *)ARM_PTR(sftp->sft_dcb);
+  setdstart(fnp->f_dpb, &fnp->f_dir, sftp->sft_stclust);
+
+  fnp->f_diridx = sftp->sft_diridx;
+  fnp->f_dirsector = sftp->sft_dirsector;
+  fnp->f_offset = sftp->sft_posit;
+  fnp->f_cluster = sftp->sft_cuclust;
+#ifdef WITHFAT32
+  fnp->f_cluster_offset = sftp->sft_relclust |
+    ((ULONG)sftp->sft_relclust_high << 16);
+#else
+  fnp->f_cluster_offset = sftp->sft_relclust;
+#endif
+  return fnp;
+}
+
+STATIC void fnode_to_sft(f_node_ptr fnp)
+{
+  sft FAR *sftp = idx_to_sft(fnp->f_sft_idx);
+
+  sftp->sft_flags = fnp->f_flags;
+
+  sftp->sft_attrib = fnp->f_dir.dir_attrib;
+  memcpy(sftp->sft_name, fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE);
+  sftp->sft_time = fnp->f_dir.dir_time;
+  sftp->sft_date = fnp->f_dir.dir_date;
+  sftp->sft_size = fnp->f_dir.dir_size;
+  sftp->sft_stclust = getdstart(fnp->f_dpb, &fnp->f_dir);
+
+  sftp->sft_diridx = fnp->f_diridx;
+  sftp->sft_dirsector = fnp->f_dirsector;
+  sftp->sft_dcb = x86_FAR_PTR(FP_SEG(LoL->DPBp), fnp->f_dpb);
+  sftp->sft_posit = fnp->f_offset;
+  sftp->sft_cuclust = fnp->f_cluster;
+  sftp->sft_relclust = (UWORD)fnp->f_cluster_offset;
+#ifdef WITHFAT32
+  sftp->sft_relclust_high = (UWORD)(fnp->f_cluster_offset >> 16);
+#endif
 }
 
 STATIC VOID FsConfig(VOID)
