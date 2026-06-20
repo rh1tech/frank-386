@@ -130,11 +130,9 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   unsigned char rev_number;    /* 6e DOS revision#, only 3 bits           */
   unsigned char version_flags; /* 6f DOS version flags                    */
   dos_short_ptr os_release;    /* 70 near pointer to os_release string    */
-#ifdef WIN31SUPPORT
   unsigned short winInstanced; /* WinInit called                          */
   unsigned long  winStartupInfo[4];
   unsigned short instanceTable[5];
-#endif
   char os_release_str[6];
   char aux_str[4];
   char con_str[4];
@@ -164,10 +162,15 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   */
   sftheader firstsftt;
   sft sft_table[5];
+  /// adjust to sizeof(struct lol) to 1FBh, just to show reusable bytes
+  BYTE _free_pad[2];
 };
 _Static_assert(offsetof(struct lol, DPBp) == 0x26, "LoL start offset looks incorrect, DPBp should be on +0x26");
 _Static_assert(offsetof(struct lol, firstsftt) == 0xCC, "firstsftt start offset looks incorrect, firstsftt should be on +0xCC");
-
+_Static_assert(sizeof(sft) == 59, "sft size must match original 59-byte SFT entry");
+_Static_assert(sizeof(sftheader) == 6, "sftheader must be 6 bytes");
+_Static_assert(offsetof(struct lol, sft_table) == 0xCC + sizeof(sftheader), "built-in SFT table must follow firstsftt header");
+_Static_assert(sizeof(struct lol) <= 0x01FB, "LoL overlaps internal_data");
 
 #define STACK_SIZE (384/2) // stack allocated in words
 

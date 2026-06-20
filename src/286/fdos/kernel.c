@@ -75,8 +75,6 @@ dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0
 #define x86_DATA MK_FP(DOS_PSP, 0x13A0) // _DATA
 #define x86_BSS MK_FP(DOS_PSP, 0x19F4) // _BSS
 
-_Static_assert(sizeof(struct lol) <= 0x01FB, "LoL overlaps internal_data");
-
 /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer = x86_BSS; // BSS
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 const dos_far_ptr x86_con_dev = MK_FP(DOS_PSP, 0x07A8); // _IO_FIXED_DATA -> con_dev
