@@ -39,6 +39,7 @@ static BYTE *sft_hRcsId =
 #include "dtime.h"
 #include "ddate.h"
 
+#pragma pack(push, 1)
 /* Handle Definition entry                                              */
 typedef struct {
   WORD sft_count;               /* 00 - reference count                      */
@@ -56,8 +57,8 @@ typedef struct {
 
   union                         /* 07 */
   {
-    struct dpb FAR *_sft_dcb;   /* The device control block     */
-    struct dhdr FAR *_sft_dev;  /* device driver for char dev   */
+    /*struct dpb FAR */ dos_far_ptr _sft_dcb;   /* The device control block     */
+    /*struct dhdr FAR */ dos_far_ptr _sft_dev;  /* device driver for char dev   */
   } sft_dcb_or_dev;
 #ifdef WITHFAT32
   UWORD sft_relclust_high;      /* 0b - High part of relative cluster        */
@@ -75,7 +76,7 @@ typedef struct {
 #ifdef WITHFAT32
   CLUSTER sft_stclust;          /* 2b - Starting cluster                     */
 #else
-  BYTE FAR *sft_bshare;         /* 2b - backward link of file sharing sft    */
+  dos_far_ptr sft_bshare;         /* 2b - backward link of file sharing sft    */
 #endif
   WORD sft_mach;                /* 2f - machine number - network apps        */
   WORD sft_psp;                 /* 31 - owner psp                            */
@@ -84,26 +85,27 @@ typedef struct {
 #ifdef WITHFAT32
   UWORD sft_pad;
 #else
-  BYTE FAR *sft_ifsptr;         /* 37 - pointer to IFS driver for file, 0000000h if native DOS */
+  dos_far_ptr sft_ifsptr;         /* 37 - pointer to IFS driver for file, 0000000h if native DOS */
 #endif
 } sft;
 
 /* SFT Table header definition                                          */
 typedef struct _sftheader {
-  struct sfttbl FAR *           /* link to next table in list   */
+  /*struct sfttbl FAR */dos_far_ptr /* link to next table in list   */
     sftt_next;
-  WORD sftt_count;              /* # of handle definition       */
+  WORD sftt_count;                  /* # of handle definition       */
   /* entries, this table          */
 } sftheader;
 
 /* System File Definition List                                          */
 typedef struct sfttbl {
-  struct sfttbl FAR *           /* link to next table in list   */
-    sftt_next;
+  /*struct sfttbl FAR */           /* link to next table in list   */
+    dos_far_ptr sftt_next;
   WORD sftt_count;              /* # of handle definition       */
   /* entries, this table          */
   sft sftt_table[SFTMAX];       /* The array of sft for block   */
 } sfttbl;
+#pragma pack(pop)
 
 /* defines for sft use                                                  */
 #define SFT_MASK        0x0060  /* splits device data           */

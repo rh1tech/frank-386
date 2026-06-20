@@ -136,11 +136,38 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   unsigned short instanceTable[5];
 #endif
   char os_release_str[8];
+  /*
+      The original kernel ships a built-in, 5-entry SFT block
+      ("_firstsftt" in kernel.asm) baked into the kernel's static data
+      at a fixed offset (0xCC from the start of this structure), with
+      sftt_next already set to the end-of-list terminator (-1) and
+     sftt_count already set to 5 at link time - i.e. it never needs
+      runtime initialization in the original, because the assembler
+      wrote the terminator/count bytes directly into the kernel image.
+
+      This codebase has no equivalent assembled-in data segment, so we
+      give it an explicit field here instead of pointing LoL->sfthead
+      at a magic offset computed by hand. The 0xCC offset itself is
+      kept (rather than just appending the field wherever it lands),
+      since some original code/tooling may still expect to find the
+      built-in SFT block there; _pad_to_firstsftt below pads out to
+      that exact offset, and the _Static_assert further down makes
+      sure no future edit silently shifts it. It still needs to be
+      filled in explicitly at runtime (see PreConfig()) - a plain
+      memset(0) would leave sftt_next == 0 instead of the -1
+      terminator, which idx_to_sft_()/get_free_sft() would
+      misinterpret as "more SFT blocks follow, starting at guest
+      address 0000:0000".
+  */
+  char _pad_to_firstsftt[10];
+  sftheader firstsftt;
+
   char aux_str[4];
   char con_str[4];
   char prn_str[4];
 };
 _Static_assert(offsetof(struct lol, DPBp) == 0x26, "LoL start offset looks incorrect, DPBp should be on +0x26");
+_Static_assert(offsetof(struct lol, firstsftt) == 0xCC, "firstsftt start offset looks incorrect, firstsftt should be on +0xCC");
 
 
 #define STACK_SIZE (384/2) // stack allocated in words

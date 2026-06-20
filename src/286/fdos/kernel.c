@@ -587,6 +587,8 @@ const static struct lol lol = {
     .version_flags   = 0,
     .os_release      = offsetof(struct lol, os_release_str), /* near ptr на строку os_release */
     .os_release_str  = KERNEL_VERSION,
+    .firstsftt.sftt_next  = MK_FP(-1, -1),
+    .firstsftt.sftt_count = 5,
     .aux_str = "AUX",
     .con_str = "CON",
     .prn_str = "PRN",
@@ -1559,10 +1561,27 @@ int Read1LBASector(struct DriveParamS *driveParam, unsigned drive,
     in bios_13h.c), it does not emulate the real-8086 same-segment offset
     wraparound that the original 64K DMA boundary check in dsk.c exists
     to avoid, so a tight, boundary-safe normalization here is sufficient.
+
+    SAFETY: p must point inside the 1MB guest RAM window
+    [X86_RAM_BASE, X86_RAM_BASE + 0x100000). If p is outside that
+    range (e.g. a stray native/kernel pointer reached here instead of
+    a guest buffer), (uint16_t) truncation below would silently wrap
+    around and hand back a seg:off pair that points at some unrelated
+    guest address - bios_13h would then read/write through it as if
+    it were the caller's buffer, corrupting guest memory instead of
+    failing loudly. We assert() in debug builds and, since assert()
+    compiles to nothing in release builds (see debug.h), additionally
+    panic-halt unconditionally so a bad pointer can never silently
+    turn into "write somewhere in guest RAM" in any build.
 */
 STATIC dos_far_ptr linear_to_far(const BYTE *p)
 {
   uint32_t lin = (uint32_t)(p - (intptr_t)X86_RAM_BASE);
+  if (lin < 0x100000ul || lin >= 0x100000ul)
+  {
+    printf("PANIC: linear_to_far out of x86 guest RAM range %p\n", (const void *)p);
+    for (;;) ;
+  }
   return MK_FP((UWORD)(lin >> 4), (UWORD)(lin & 0xF));
 }
 
@@ -1716,6 +1735,12 @@ STATIC int LBA_Transfer(ddt *pddt, UWORD mode, BYTE *buffer,
   UWORD bytes_sector = pddt->ddt_bpb.bpb_nbyte;   /* bytes per sector, usually 512 */
 
   *transferred = 0;
+
+  /* buffer is range-checked lazily: DMA_max_transfer() and
+     linear_to_far() below both call linear_to_far() on every loop
+     iteration before buffer is ever loaded into a CPU register, so
+     an out-of-range buffer is caught (panic-halt, see linear_to_far())
+     before any guest memory access happens. */
 
   /// TODO: low-level track format (LBA_FORMAT) is not implemented yet.
   if (mode == LBA_FORMAT)
@@ -2731,7 +2756,7 @@ void PreConfig(void)
   CfgDbgPrintf(("SDA located at 0x%p\n", internal_data));
   /* Begin by initializing our system buffers                     */
   /* DebugPrintf(("Preliminary %d buffers allocated at 0x%p\n", Config.cfgBuffers, buffers));*/
-  LoL->sfthead = MK_FP(FP_SEG(x86_FIXED_DATA), 0xcc); /* &(LoL->firstsftt) */
+  LoL->sfthead = MK_FP(FP_SEG(x86_FIXED_DATA), FP_OFF(x86_FIXED_DATA) + 0xcc); /* &(LoL->firstsftt) */
   /* LoL->FCBp = (sfttbl FAR *)&FcbSft; */
   /* LoL->FCBp = (sfttbl FAR *)
      KernelAlloc(sizeof(sftheader)
@@ -2774,6 +2799,163 @@ int dup2(int oldfd, int newfd)
     CPU_CX = newfd;
     fdos_21h(cpu);
     return cf ? -1 : CPU_AX;
+}
+
+static inline bool far_is_null(dos_far_ptr p)
+{
+    return FP_SEG(p) == 0 && FP_OFF(p) == 0;
+}
+
+static inline bool far_is_end(dos_far_ptr p)
+{
+    return FP_SEG(p) == 0xffff && FP_OFF(p) == 0xffff;
+}
+
+/*
+    idx_to_sft_(SftIndex) - walk the SFT block list (LoL->sfthead) and
+    set DD->lpCurSft to the SFT entry at SftIndex, regardless of
+    whether that entry is currently open (sft_count == 0 is valid here).
+
+    Returns SftIndex unchanged on success, -1 if SftIndex is out of
+    range. Migrated from dosfns.c (also called from INT 2Fh/AX=1216h
+    in the original; that entry point is not implemented here yet).
+*/
+int idx_to_sft_(int SftIndex)
+{
+  sfttbl *sp;
+
+  internal_data->lpCurSft = MK_FP(0xffff, 0xffff);
+  if (SftIndex < 0)
+    return -1;
+
+  /* Get the SFT block that contains the SFT      */
+  for (sp = (sfttbl *)ARM_PTR(LoL->sfthead); !far_is_end(LoL->sfthead);
+       sp = (sfttbl *)ARM_PTR(LoL->sfthead))
+  {
+    if (SftIndex < sp->sftt_count)
+    {
+      /* finally, point to the right entry            */
+      internal_data->lpCurSft = MK_FP(FP_SEG(LoL->sfthead),
+                             FP_OFF(LoL->sfthead) + offsetof(sfttbl, sftt_table)
+                               + SftIndex * sizeof(sft));
+      return SftIndex;
+    }
+    SftIndex -= sp->sftt_count;
+    LoL->sfthead = sp->sftt_next;
+  }
+
+  /* If not found, return an error                */
+  return -1;
+}
+
+/*
+    idx_to_sft(SftIndex) - same as idx_to_sft_(), but only for
+    internal callers: returns a pointer to the SFT entry, and treats
+    an entry with sft_count == 0 (not currently open) as not found,
+    same as the original.
+
+    NOTE: idx_to_sft_() above walks (and overwrites) LoL->sfthead as
+    it follows sftt_next, mirroring how the original walks its local
+    "sp" variable started from the *global* sfthead - in the original
+    sfthead itself is never modified by this walk (only the local
+    copy "sp" is advanced). Doing the same here without disturbing
+    LoL->sfthead would require a separate cursor; since LoL->sfthead
+    always points back to the first (built-in) SFT block before any
+    call into this function and idx_to_sft_() does not persist its
+    walk across calls, every walk restarts from the right place, but
+    plays it safe with a save/restore around the walk so LoL->sfthead
+    is never observably changed by callers.
+*/
+sft *idx_to_sft(int SftIndex)
+{
+  dos_far_ptr saved_head = LoL->sfthead;
+  sft *result;
+
+  SftIndex = idx_to_sft_(SftIndex);
+  LoL->sfthead = saved_head;
+
+  /* if not opened, the SFT is useless            */
+  if (SftIndex == -1)
+    return (sft *)-1;
+
+  result = (sft *)ARM_PTR(internal_data->lpCurSft);
+  if (result->sft_count == 0)
+    return (sft *)-1;
+  return result;
+}
+
+/*
+    get_sft_idx(hndl) - translate a DOS file handle (as seen by the
+    guest program, e.g. via AH=3Eh/3Fh/40h) into an SFT index, by
+    looking it up in the current process's handle table
+    (psp->ps_filetab[hndl]).
+
+    Migrated from dosfns.c.
+*/
+int get_sft_idx(unsigned hndl)
+{
+  psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  int idx;
+
+  if (hndl >= p->ps_maxfiles)
+    return DE_INVLDHNDL;
+
+  idx = p->ps_filetab[hndl];
+  return idx == 0xff ? DE_INVLDHNDL : idx;
+}
+
+/*
+    get_sft(hndl) - translate a DOS file handle into a pointer to its
+    SFT entry. Returns (sft *)-1 if hndl is not a currently open
+    handle for the current process.
+
+    Migrated from dosfns.c.
+*/
+sft *get_sft(UCOUNT hndl)
+{
+  /* Get the SFT block that contains the SFT      */
+  return idx_to_sft(get_sft_idx(hndl));
+}
+
+/*
+    get_free_sft(sft_idx) - find the first unused SFT entry (one with
+    sft_count == 0) across all SFT blocks reachable from
+    LoL->sfthead, and return a pointer to it; *sft_idx receives its
+    global index (suitable for storing into a process's
+    ps_filetab[]).
+
+    Migrated from dosfns.c. The MS-NET hook (extern current_sft_idx)
+    is preserved since LoL->current_sft_idx already exists in this
+    codebase (see lol.h); nothing else in this iteration reads it yet.
+*/
+STATIC sft *get_free_sft(COUNT *sft_idx)
+{
+  COUNT sys_idx = 0;
+  dos_far_ptr x86_sp = LoL->sfthead;
+
+  for (; !far_is_end(x86_sp); )
+  {
+    sfttbl *sp = (sfttbl *)ARM_PTR(x86_sp);
+    REG COUNT i = sp->sftt_count;
+    sft *sfti = sp->sftt_table;
+
+    for (; --i >= 0; sys_idx++, sfti++)
+    {
+      if (sfti->sft_count == 0)
+      {
+        *sft_idx = sys_idx;
+
+        /* MS NET uses this on open/creat TE */
+        internal_data->current_sft_idx = sys_idx;
+
+        return sfti;
+      }
+    }
+
+    x86_sp = sp->sftt_next;
+  }
+  /* If not found, return an error                */
+  return (sft *)-1;
 }
 
 STATIC VOID FsConfig(VOID)
