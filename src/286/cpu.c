@@ -130,6 +130,8 @@ void cpu_init_286(CPU* cpu) {
     cpue->raise_irq = raise_irq;
     cpue->setexc = setexc;
     cpue->abort = i286_abort;
+    cpue->bios_callback = bios_no_callback;
+
 
     for(int i = 0; i < 256; ++i) {
         handlers[i] = no_handler;
@@ -142,6 +144,7 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x12] = bios_12h; // Conventional RAM count
     handlers[0x13] = bios_13h; // DISK
     handlers[0x14] = bios_14h; // SERIAL
+    handlers[0x15] = bios_15h; // TSR
     handlers[0x16] = bios_16h; // KEYBOARD
     handlers[0x18] = bios_18h; // BASIC
     handlers[0x19] = bios_19h; // BOOTSTRAP
@@ -149,12 +152,11 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.
     handlers[0x77] = bios_09h_phase2; // KEYBOARD W/A TODO: other way
-    /*
+/*
 00h  divide error
 01h  single step
 03h  breakpoint
 06h  invalid opcode
-19h  bootstrap/reboot hook
 1Bh — BIOS Ctrl-Break hook.
 20h  terminate program
 22h  terminate address

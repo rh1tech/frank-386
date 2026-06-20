@@ -1,23 +1,23 @@
 #include <pico.h>
 #include <pico/time.h>
-#include "i286.h"
-#include "bios.h"
+#include "../cpu.h"
+#include "../bios.h"
 
 // A20 GATE
-static bool bios_15h_24h() {
+static bool bios_15h_24h(CPU* cpu) {
     switch (CPU_AL) {
     case 0x00:              /* disable A20 */
-        a20_enabled = 0;
+        cpu_set_a20(cpu, 0);
         CPU_AH = 0x00;
         cf = 0;
         return true;
     case 0x01:              /* enable A20 */
-        a20_enabled = 1;
+        cpu_set_a20(cpu, 1);
         CPU_AH = 0x00;
         cf = 0;
         return true;
     case 0x02:              /* get A20 status */
-        CPU_AL = (uint8_t)a20_enabled;
+        CPU_AL = (uint8_t)cpu_get_a20(cpu);
         CPU_AH = 0x00;
         cf = 0;
         return true;
@@ -65,7 +65,7 @@ Bit(s)  Description     (Table 00463)
 4      1=port address, 0=user byte
 5-7    reserved
 */
-static bool bios_15h_41h() {
+static bool bios_15h_41h(CPU* cpu) {
     u8 cond_type = CPU_AL;
     u8 wait4 = cond_type & 0b00000111;
     if (!wait4) { // let say, "any" was happen
@@ -120,7 +120,7 @@ the copy with interrupts enabled. On the PS/2 30-286 & "Tortuga" this function d
 but instead uses the keyboard controller (8042). Reportedly this may cause the system to crash when access to the 8042
 is disabled in password server mode (see also PORT 0064h,#P0398). This function is incompatible with the OS/2 compatibility box
 */
-static bool bios_15h_87h(void)
+static bool bios_15h_87h(CPU* cpu)
 {
     /* ES:SI → 48-byte GDT table:
      *   +00h: null descriptor
@@ -148,8 +148,8 @@ static bool bios_15h_87h(void)
                  | ((uint32_t)pload8(tbl + 0x18 + 4) << 16);
 
     /* Enable A20 for access above 1MB */
-    int prev_a20 = a20_enabled;
-    a20_enabled = 1;
+    int prev_a20 = cpu_get_a20(cpu);
+    cpu_set_a20(cpu, 1);
 
     /* Copy CX words */
     for (uint16_t i = 0; i < count; i++) {
@@ -157,7 +157,7 @@ static bool bios_15h_87h(void)
         pstore16(dst + i * 2, w);
     }
 
-    a20_enabled = prev_a20;
+    cpu_set_a20(cpu, prev_a20);
 
     CPU_AH = 0x00;
     cf = 0;
@@ -184,9 +184,9 @@ a mechanism other than calling the function and testing CF. Due to applications 
 Windows 3.0 has problems when this function reports more than 15 MB. Some releases of HIMEM.SYS are therefore limited to use only 15 MB,
 even when this function reports more.
 */
-static bool bios_15h_88h() {
+static bool bios_15h_88h(CPU* cpu) {
     cf = 0;
-    CPU_AX = (uint16_t)cmos_read(0x17) | ((uint16_t)cmos_read(0x18) << 8);
+    CPU_AX = (uint16_t)cmos_read(cpu, 0x17) | ((uint16_t)cmos_read(cpu, 0x18) << 8);
     return true;
 }
 
@@ -256,7 +256,7 @@ Bit(s)  Description     (Table 00510)
 
 See Also: #00509 - #00511
 */
-static bool bios_15h_C0h() {
+static bool bios_15h_C0h(CPU* cpu) {
     /*
      * INT 15h / AH=C0h - GET CONFIGURATION
      *
@@ -280,18 +280,18 @@ static bool bios_15h_C0h() {
      * @See: load_bios_and_reset
      */
     CPU_AH = 0x00;
-    CPU_ES = 0xFFF0;
+    SET_ES ( 0xFFF0 );
     CPU_BX = 0x0010;
     cf = 0;
     return true;
 }
 
-bool bios_15h() {
+bool bios_15h(CPU* cpu) {
     switch(CPU_AH) {
         case 0x24:
-            return bios_15h_24h(); // A20 GATE
+            return bios_15h_24h(cpu); // A20 GATE
         case 0x41:
-            return bios_15h_41h(); // WAIT ON EXTERNAL EVENT (CONVERTIBLE and some others)
+            return bios_15h_41h(cpu); // WAIT ON EXTERNAL EVENT (CONVERTIBLE and some others)
         case 0x4F:  /* keyboard intercept — not hooked, pass through */
             cf = 1;  /* не перехватывать, AH не трогаем */
             return true;
@@ -325,28 +325,28 @@ bool bios_15h() {
         }
 
         case 0x87:
-            return bios_15h_87h(); // COPY EXTENDED MEMORY
+            return bios_15h_87h(cpu); // COPY EXTENDED MEMORY
         case 0x88:
-            return bios_15h_88h(); // GET EXTENDED MEMORY SIZE (286+)
+            return bios_15h_88h(cpu); // GET EXTENDED MEMORY SIZE (286+)
         case 0x90:  /* DEVICE BUSY — no-op (SeaBIOS: empty handler) */
         case 0x91:  /* INTERRUPT COMPLETE — no-op (SeaBIOS: empty handler) */
             return true;
         case 0xC0:
-            return bios_15h_C0h(); // GET CONFIGURATION
+            return bios_15h_C0h(cpu); // GET CONFIGURATION
         case 0xC1: { /* GET EBDA SEGMENT */
             uint16_t ebda = pload16(0x40E);
             if (ebda == 0x0000) {
                 cf = 1;  /* no EBDA */
                 return true;
             }
-            CPU_ES = ebda;
+            SET_ES ( ebda );
             cf = 0;
             return true;
         }            
         case 0xE8: {
             switch (CPU_AL) {
             case 0x01: { /* GET EXTENDED MEMORY (>16MB support) */
-                uint32_t ext_kb = (uint16_t)cmos_read(0x17) | ((uint16_t)cmos_read(0x18) << 8);
+                uint32_t ext_kb = (uint16_t)cmos_read(cpu, 0x17) | ((uint16_t)cmos_read(cpu, 0x18) << 8);
                 uint32_t rs = (1024 + ext_kb) * 1024u; /* total RAM in bytes */
                 if (rs > 16*1024*1024) {
                     CPU_CX = 15 * 1024;

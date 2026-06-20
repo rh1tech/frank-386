@@ -72,6 +72,8 @@ typedef void (*cpu_raise_irq_t)(struct CPU* cpu);
 typedef void (*cpu_setexc_t)(struct CPU* cpu, int excno, uword excerr);
 typedef void (*cpu_abort_t)(struct CPU* cpu, int code);
 
+typedef bool (*bios_callback_t)(struct CPU* cpu, void* any);
+
 typedef struct CPU_ext_accessors {
 	get_reg8_t get_reg8;
 	get_reg16_t get_reg16;
@@ -90,6 +92,8 @@ typedef struct CPU_ext_accessors {
 	cpu_raise_irq_t raise_irq;
 	cpu_setexc_t setexc;
 	cpu_abort_t abort;
+    bios_callback_t bios_callback;
+	void* bios_callback_data;
 } CPU_ext_accessors_t;
 
 typedef union {

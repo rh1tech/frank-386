@@ -29,7 +29,34 @@ void boot_from(CPU* cpu, uint8_t dl)
     CPU_SP = 0x7C00;
 }
 
+/* TODO:
+| Клавиша | Назначение                    |
+| ------- | ----------------------------- |
+| DEL     | вход в Setup                  |
+| F2      | вход в Setup (часто ноутбуки) |
+| F12     | Boot Menu                     |
+| F11     | Boot Menu (часто MSI)         |
+| F8      | Boot Menu (часто ASUS)        |
+| ESC     | Boot Menu (часто HP)          |
+*/
+
+bool bios_19h_waiter(CPU* cpu, void* any) {
+    /// TODO: print 1,2,3
+    print_line("1", 2);
+    ifl = 1; // allow IRQ
+    return false; // in a loop on the same CS:IP, no IRET required there
+}
+
 bool bios_19h(CPU* cpu) {
+    #if 0 /// TODO:
+    print_line("Press Win+F11 to enter Setup", 1);
+    SET_CS ( 0xFFE0 );
+    CPU_IP = 0x00FF;
+    cpu->ext_accessors->bios_callback = bios_19h_waiter;
+    ifl = 1; // allow IRQ
+    return false; // exact CS:IP, no IRET required there
+    #endif
+    /// TODO:
     /* Classic boot order used here: floppy A:, then first fixed disk C:.
      * No POST is done here; INT 19h is only bootstrap. */
     if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
