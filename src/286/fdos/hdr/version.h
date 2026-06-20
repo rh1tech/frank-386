@@ -41,7 +41,7 @@
 
 /* Used for version information displayed to user at boot (& stored in os_release string) */
 #ifndef KERNEL_VERSION
-#define KERNEL_VERSION "RP2350"
+#define KERNEL_VERSION "Pico2"
 #endif
 
 /* actual version string */

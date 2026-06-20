@@ -779,7 +779,7 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
   for (Index = 0; Index < nunits; Index++)
   {		
     /* printf("processing unit %i of %i nunits\n", Index, nunits); */
-    dpb->dpb_next = MK_FP(FP_SEG(x86_dpb), FP_OFF(x86_dpb) + sizeof(struct dpb));  /* memory allocated as array, so next is just next element */
+    dpb->dpb_next = ADD_OFF(x86_dpb, Index * sizeof(struct dpb));  /* memory allocated as array, so next is just next element */
     dpb->dpb_unit = LoL->nblkdev;
     dpb->dpb_subunit = Index;
     dpb->dpb_device = x86_dhp;

@@ -135,7 +135,10 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   unsigned long  winStartupInfo[4];
   unsigned short instanceTable[5];
 #endif
-  char os_release_str[8];
+  char os_release_str[6];
+  char aux_str[4];
+  char con_str[4];
+  char prn_str[4];
   /*
       The original kernel ships a built-in, 5-entry SFT block
       ("_firstsftt" in kernel.asm) baked into the kernel's static data
@@ -159,12 +162,8 @@ _first_mcb      dw      0               ;-0002 Start of user memory
       misinterpret as "more SFT blocks follow, starting at guest
       address 0000:0000".
   */
-  char _pad_to_firstsftt[10];
   sftheader firstsftt;
-
-  char aux_str[4];
-  char con_str[4];
-  char prn_str[4];
+  sft sft_table[5];
 };
 _Static_assert(offsetof(struct lol, DPBp) == 0x26, "LoL start offset looks incorrect, DPBp should be on +0x26");
 _Static_assert(offsetof(struct lol, firstsftt) == 0xCC, "firstsftt start offset looks incorrect, firstsftt should be on +0xCC");
