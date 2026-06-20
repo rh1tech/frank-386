@@ -44,10 +44,8 @@ bool bios_08h(CPU* cpu)
     out 20h, 20h
     iret    
     */
-//    { char buf[32]; snprintf(buf, sizeof(buf), "08h SS=%04x SP=%04x", CPU_SS, CPU_SP); print_line(buf, 13); }
- 
-    //CPU_CS = 0xFFF0;
-    SET_CS(0xFFF0);
+
+    SET_CS ( 0xFFF0 );
     CPU_IP = 0x0000;
 
     return false;

@@ -1297,11 +1297,9 @@ void bios_post(PC *pc) {
     pstore8(0xFFF76, 0xF9); // STC  — CF=1: do not intercept by default
     pstore8(0xFFF77, 0xCD); // INT 15h
     pstore8(0xFFF78, 0x15);
-    pstore8(0xFFF79, 0xCD); // INT 77h — callback to bios_09h_phase2
-    pstore8(0xFFF7A, 0x77);
+    pstore8(0xFFF79, 0xCD); // INT FFh — callback
+    pstore8(0xFFF7A, 0xFF);
     pstore8(0xFFF7B, 0xCF); // IRET — fallback if phase2 returns false
-    // + IVT: INT 77h → callback handler (fake BIOS area, IP=0x77)
-    // already set by general IVT init loop (0xFFE0:0x77)
 /*
 	point2iret(0x00); // CPU-generated - DIVIZION BY ZERO
 	point2iret(0x01); // CPU-generated - SINGLE STEP
@@ -1403,13 +1401,11 @@ void bios_post(PC *pc) {
 	vga_bios_baner(pc->cpu);
 //  do not trap custom timer (to be overriden by DOS)
 	point2iret(0x1C);
+	point2iret(0x77);
 
-	bios_19h(pc->cpu);
-// FreeDOS kernel
-	_boot(pc->cpu);
-	kernel(pc->cpu);
-// unblock IRQs
-	pc->cpu->ext_accessors->set_flag(pc->cpu, IF, 1);
+//	bios_19h(pc->cpu);
+    pstore8(0xFFFF0, 0xCD); // INT 19h - bootstrap
+    pstore8(0xFFFF1, 0x19);
 }
 #else
 void bios_post(PC *pc) {}

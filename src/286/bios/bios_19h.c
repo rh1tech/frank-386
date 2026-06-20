@@ -1,5 +1,6 @@
 #include "../cpu.h"
 #include "../bios.h"
+#include "../fdos.h"
 #include "disk.h"
 #include <ff.h>
 
@@ -27,6 +28,10 @@ void boot_from(CPU* cpu, uint8_t dl)
 // like after POST (bios-less solution):
     SET_SS ( 0x0000 );
     CPU_SP = 0x7C00;
+
+// FreeDOS kernel
+	_boot(cpu);
+	kernel(cpu);
 }
 
 /* TODO:
@@ -41,129 +46,40 @@ void boot_from(CPU* cpu, uint8_t dl)
 */
 
 bool bios_19h_waiter(CPU* cpu, void* any) {
-    /// TODO: print 1,2,3
-    print_line("1", 2);
+    uint32_t ticks = pload32(0x046C);
+    if (cpu->ext_accessors->bios_callback_data == (void*)ticks) {
+        goto ex;
+    }
+    cpu->ext_accessors->bios_callback_data = (void*)ticks;
+    if (ticks < 18) {
+        print_line("1", 2);
+    } else if (ticks < 36) {
+        print_line("2", 2);
+    } else {
+        print_line(" ", 2);
+
+        /* Classic boot order used here: floppy A:, then first fixed disk C:.
+        * No POST is done here; INT 19h is only bootstrap. */
+        if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
+            boot_from(cpu, 0x00);
+            return false;
+        }
+        if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
+            boot_from(cpu, 0x80);
+            return false;
+        }
+        return bios_18h(cpu); // ROM Basic, or System halted
+    }
+ex:
     ifl = 1; // allow IRQ
     return false; // in a loop on the same CS:IP, no IRET required there
 }
 
 bool bios_19h(CPU* cpu) {
-    #if 0 /// TODO:
-    print_line("Press Win+F11 to enter Setup", 1);
-    SET_CS ( 0xFFE0 );
-    CPU_IP = 0x00FF;
+    print_line("Press Win+F12 to enter Setup", 1);
+    SET_CS ( 0xFFF0 ); // -> FFF79: INT FFh
+    CPU_IP = 0x0079;
     cpu->ext_accessors->bios_callback = bios_19h_waiter;
-    ifl = 1; // allow IRQ
+    cpu->ext_accessors->bios_callback_data = 0;
     return false; // exact CS:IP, no IRET required there
-    #endif
-    /// TODO:
-    /* Classic boot order used here: floppy A:, then first fixed disk C:.
-     * No POST is done here; INT 19h is only bootstrap. */
-    if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
-        boot_from(cpu, 0x00);
-        return false;
-    }
-    if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
-        boot_from(cpu, 0x80);
-        return false;
-    }
-
-    /*
-INT 19h:
-    try_read A: sector 0/0/1 to 0000:7C00
-    if success and signature 55AA:
-        DL = 00h
-        JMP 0000:7C00
-
-    try_read C: sector 0/0/1 to 0000:7C00
-    if success and signature 55AA:
-        DL = 80h
-        JMP 0000:7C00
-
-    print error
-    wait/reboot/halt
-     */
-    // загрузчик не найден / boot sector невалиден / чтение не удалось
-    return bios_18h(cpu); // ROM Basic, or System halted
 }
-
-/*
-void bios_int19h(void)
-{
-    // 1. Обычно прерывания запрещаются на время критической части
-    cli();
-
-    // 2. BIOS выбирает boot device
-    // На старых PC/XT/AT это обычно:
-    //   A: floppy first
-    //   затем fixed disk
-    //
-    // В более поздних BIOS порядок задаётся CMOS / setup / boot menu.
-
-    for (device in boot_order) {
-
-        if (!device_present(device))
-            continue;
-
-        // 3. Сброс устройства перед чтением
-        bios_disk_reset(device);
-
-        // 4. Попытка прочитать первый сектор
-        //
-        // floppy:
-        //   cylinder = 0
-        //   head     = 0
-        //   sector   = 1
-        //
-        // HDD:
-        //   CHS 0/0/1 или соответствующая BIOS-логика
-        //
-        // destination:
-        //   0000:7C00
-        //
-        ok = bios_int13_read_sector(
-            device,
-            cylinder = 0,
-            head     = 0,
-            sector   = 1,
-            count    = 1,
-            dest_seg = 0x0000,
-            dest_off = 0x7C00
-        );
-
-        if (!ok)
-            continue;
-
-        // 5. Проверка сигнатуры boot sector
-        if (mem16[0x7C00 + 510] != 0xAA55)
-            continue;
-
-        // 6. Передача управления boot sector
-        //
-        // Классически:
-        //   CS:IP = 0000:7C00
-        //
-        // Некоторые BIOS передают как:
-        //   07C0:0000
-        //
-        // Физический адрес одинаковый: 0x7C00.
-        //
-        // DL обычно содержит номер boot drive:
-        //   00h = A:
-        //   80h = first HDD
-
-        jump_to_boot_sector(
-            cs = 0x0000,
-            ip = 0x7C00,
-            dl = device.bios_drive_number
-        );
-
-        // сюда управление не возвращается
-    }
-
-    // 7. Если загрузиться не удалось
-    print("No bootable device");
-    halt_or_retry();
-}
-
-*/

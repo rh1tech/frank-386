@@ -101,6 +101,6 @@ void cpu_err_msg(CPU* cpu, const char* msg);
 #define CPU_DS cpu->ext_accessors->get_seg16(cpu, SEG_DS)
 
 #define SET_ES(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))
-#define SET_CS(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))
-#define SET_SS(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))
-#define SET_DS(x) cpu->ext_accessors->set_seg16(cpu, SEG_ES, (x))
+#define SET_CS(x) cpu->ext_accessors->set_seg16(cpu, SEG_CS, (x))
+#define SET_SS(x) cpu->ext_accessors->set_seg16(cpu, SEG_SS, (x))
+#define SET_DS(x) cpu->ext_accessors->set_seg16(cpu, SEG_DS, (x))

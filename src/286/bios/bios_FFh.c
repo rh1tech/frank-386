@@ -6,7 +6,6 @@
 // in case such address in CS:IP, it means: it was restored from x86 stack,
 // pushed by some bios_XXh function to return back
 bool bios_FFh(CPU* cpu) { // W/A BIOS callback
-    print_line("bios_FF", 2);
     if (!cpu->ext_accessors->bios_callback) {
         cpu_err_msg(cpu, "ERROR: null bios callback defined");
 while(1); // remove it
