@@ -146,13 +146,14 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x14] = bios_14h; // SERIAL
     handlers[0x15] = bios_15h; // TSR
     handlers[0x16] = bios_16h; // KEYBOARD
-    handlers[0x16] = bios_17h; // PRINTERS
+    handlers[0x17] = bios_17h; // PRINTERS
     handlers[0x18] = bios_18h; // BASIC
     handlers[0x19] = bios_19h; // BOOTSTRAP
     handlers[0x1A] = bios_1Ah; // CMOS TIME
     handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.
-    handlers[0x77] = bios_09h_phase2; // KEYBOARD W/A TODO: other way
+///    handlers[0x77] = bios_09h_phase2; // KEYBOARD W/A TODO: other way
+    handlers[0xFF] = bios_FFh; // W/A BIOS callback
 /*
 00h  divide error
 01h  single step
@@ -940,19 +941,20 @@ static bool rp2350_bios_handler(CPU* cpu) {
         // some handlers should turn IF = 1, some - not
         // some patch stack, other - not
     }
+    return normal_iret_flow;
 }
 
 static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
     static uint16_t firstip;
     static bool was_TF;
 
-	if ((cpu->flags.value & IF) && cpu->intr) {
-		cpu->intr = false;
-        int no = cpu->cb.pic_read_irq(cpu->cb.pic);
-        intcall86(cpu, no);
-    }
-
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
+        if ((cpu->flags.value & IF) && cpu->intr) {
+            cpu->intr = false;
+            int no = cpu->cb.pic_read_irq(cpu->cb.pic);
+            intcall86(cpu, no);
+        }
+
         if (fake_bios_area(cpu)) {
             if (rp2350_bios_handler(cpu)) { // normal flow IRET is expected
                 CPU_IP = 0x0006;

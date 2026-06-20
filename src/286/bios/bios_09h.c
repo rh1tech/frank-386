@@ -22,9 +22,9 @@
 #define KF1_RALT     0x08u
 
 /* ROM scratch and stub addresses (pc.c load_bios_and_reset) */
-#define IRQ1_SCRATCH  0xFFF70u   /* 1 byte: scan code for INT 15h/4Fh */
-#define IRQ1_STUB_CS  0xFFF0u
-#define IRQ1_STUB_IP  0x0071u    /* CS:IP = 0xFFF0:0071 → phys 0xFFF71 */
+///#define IRQ1_SCRATCH  0xFFF70u   /* 1 byte: scan code for INT 15h/4Fh */
+///#define IRQ1_STUB_CS  0xFFF0u
+///#define IRQ1_STUB_IP  0x0071u    /* CS:IP = 0xFFF0:0071 → phys 0xFFF71 */
 
 static char scan_to_ascii(uint8_t scan, bool shift, bool ctrl, bool caps)
 {
@@ -84,7 +84,7 @@ static char scan_to_ascii(uint8_t scan, bool shift, bool ctrl, bool caps)
 /* Phase 2: called via INT 77h after INT 15h/4Fh returns from guest.
  * CF and CPU_AL are the result of the INT 15h/4Fh call.
  * Continues scan code processing. */
-bool bios_09h_phase2(CPU* cpu)
+bool bios_09h_phase2(CPU* cpu, void* any)
 {
     uint8_t scan;
     if (!cf) {
@@ -92,7 +92,7 @@ bool bios_09h_phase2(CPU* cpu)
         scan = CPU_AL;
     } else {
         /* not intercepted: restore original scan from scratch */
-        scan = pload8(IRQ1_SCRATCH);
+        scan = (intptr_t)any;
     }
 
     if (scan == 0) {
@@ -102,7 +102,7 @@ bool bios_09h_phase2(CPU* cpu)
 
     uint8_t flags  = read86(BDA_KBD_FLAGS1);
     uint8_t flags1 = read86(BDA_KBD_FLAG1);
-    bool is_up = (pload8(IRQ1_SCRATCH) & 0x80u) != 0;  /* original break bit */
+    bool is_up = ((intptr_t)any & 0x80u) != 0;  /* original break bit */
 
     switch (scan) {
     case 0x2A: /* L Shift */
@@ -235,11 +235,15 @@ bool bios_09h(CPU* cpu)
         return true;
     }
 
+#if 0 // TBA
     /* Save raw code (with break bit) in scratch for phase2 */
-    pstore8(IRQ1_SCRATCH, code);
-
-    /* Redirect to INT 15h/4Fh stub in ROM */
+    cpu->ext_accessors->bios_callback_data = (void*)(uint32_t)code
+    cpu->ext_accessors->bios_callback = bios_09h_phase2;
+    /* Redirect to INT 15h/4Fh stub in ROM */ ??? TODO: update stack to save FFE0:00FF as return addr
     SET_CS ( IRQ1_STUB_CS );
     CPU_IP = IRQ1_STUB_IP;
     return false;
+#else
+    return true;
+#endif
 }
