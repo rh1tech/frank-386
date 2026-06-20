@@ -3017,6 +3017,38 @@ STATIC VOID FsConfig(VOID)
   /* init_call_init_buffers(); done from CONFIG.C   */
 }
 
+/*
+       Initialize all printers
+ 
+       this should work. IMHO, this might also be done on first use
+       of printer, as I never liked the noise by a resetting printer, and
+       I usually much more often reset my system, then I print :-)
+ */
+
+STATIC VOID InitPrinters(VOID)
+{
+  bios_11h(cpu);     /* get equipment list */
+  int num_printers = (CPU_AX >> 14) & 3;     /* bits 15-14 */
+  for (int i = 0; i < num_printers; i++)
+  {
+    CPU_AX = 0x0100;             /* initialize printer */
+    CPU_DX = i;
+    bios_17h(cpu);
+  }
+}
+
+STATIC VOID InitSerialPorts(VOID)
+{
+  bios_11h(cpu);     /* get equipment list */
+  int serial_ports = (CPU_AX >> 9) & 7;      /* bits 11-9 */
+  for (int i = 0; i < serial_ports; i++)
+  {
+    CPU_AX = 0xA3;               /* initialize serial port to 2400,n,8,1 */
+    CPU_DX = i;
+    bios_14h(cpu);
+  }
+}
+
 STATIC void init_kernel()
 {
     COUNT i;
@@ -3033,9 +3065,8 @@ STATIC void init_kernel()
     /* Initialize IO subsystem                                      */
     InitIO();
 
-    // no printers and COM-ports for now
-//  InitPrinters();
-//  InitSerialPorts();
+    InitPrinters();
+    InitSerialPorts();
 
     init_PSPSet(DOS_PSP);
     set_DTA(MK_FP(DOS_PSP, 0x80));

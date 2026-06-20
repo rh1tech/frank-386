@@ -146,6 +146,7 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x14] = bios_14h; // SERIAL
     handlers[0x15] = bios_15h; // TSR
     handlers[0x16] = bios_16h; // KEYBOARD
+    handlers[0x16] = bios_17h; // PRINTERS
     handlers[0x18] = bios_18h; // BASIC
     handlers[0x19] = bios_19h; // BOOTSTRAP
     handlers[0x1A] = bios_1Ah; // CMOS TIME
