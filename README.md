@@ -354,3 +354,42 @@ This project is based on the following open-source projects:
 - **Author:** Raspberry Pi (Trading) Ltd. (2020)
 - **License:** BSD 3-Clause
 - **Description:** PIO SPI driver for SD card communication.
+
+### Memory map (tba)
+000000-000400h: IVT, 256 vectors; в POST все указывают на FFE0:00xx
+000400-000500h: BDA
+000500-000600h: BIOS/DOS scratch, частично используется: 0500 PrtSc status, 05E0 boot-drive compat
+000600-000700h: DOS kernel PSP, 0060:0000
+000680-000700h: DTA внутри PSP, 0060:0080
+000700-000AE2h: DOS kernel _TEXT
+000AE2-000DA8h: DOS kernel _IO_TEXT
+000DA8-000EF0h: DOS kernel _IO_FIXED_DATA, device headers CON..BLK
+000EF0-0019A0h: DOS kernel _FIXED_DATA, LoL/DATASTART
+0010EB-001?xxh: internal_data/SDA внутри _FIXED_DATA
+0019A0-001FF4h: DOS kernel _DATA
+001FF4-002A0Eh: DOS kernel _BSS; DiskTransferBuffer начинается тут
+002A0E-007C00h: свободно/не размечено явно 20978b
+007C00-007E00h: boot sector load buffer - removable
+007E00-80000h: свободно/обычная conventional RAM, кроме будущих MCB/KernelAlloc сверху вниз
+080000-080200h: InitDiskTransferBuffer, 8000:0000, 512 bytes
+080200-0802xxh: x86_dap, 8000:0200
+
+080300-08FFFFh: свободно/не размечено явно 64767b
+
+090000-09FFFFh: DynAlloc area, 9000:0000; 9000:0000..0001 = DynS.Allocated, дальше DDT/DPB/etc
+0A0000-0BFFFFh: VGA window / iomem, 128 KiB
+0B0000-0B7FFFh: MDA text window, режим 07h
+0B8000-0BFFFFh: CGA/VGA text/window
+0C0000-0DFFFFh: option ROM / UMB area — явно не занята в найденном коде
+0E0000-0FFFFFh: ROM/BIOS area
+0EFC70-0EFC7Ah: floppy DPT, F000:EFC7
+0FA000-0FAFFFh: ROM font 8x16, F000:A000
+0FB000-0FBD7Fh: ROM font 8x14, F000:B000
+0FBE00-0FC5FFh: ROM font 8x8, F000:BE00
+0FFE00-0FFEFFh: fake BIOS handler area; IVT points here as FFE0:00xx
+0FFF00-0FFF06h: IRQ0 stub + reusable IRET
+0FFF50-0FFF5Fh: DPTE drive 80h
+0FFF60-0FFF6Fh: DPTE drive 81h
+0FFF70-0FFF7Bh: IRQ1 INT15/4F keyboard stub
+0FFFF0-0FFFFFh: reset-vector area
+100000+       : extended RAM if phys_mem_size > 1 MiB
