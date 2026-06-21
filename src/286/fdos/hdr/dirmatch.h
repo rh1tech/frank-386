@@ -52,3 +52,33 @@ typedef struct {
   ULONG dm_size;                /* file size                    */
   BYTE dm_name[FNAME_SIZE + FEXT_SIZE + 2];     /* file name    */
 } dmatch;
+
+/*
+    sda_tmp_dm/sda_tmp_dm_ren are SDA fields in the original (extern
+    ASM, see kernel.asm: _sda_tmp_dm/_sda_tmp_dm_ren), reserved there
+    as a fixed 21-byte block each (see lol.h for the matching
+    BYTE[21] fields here) - NOT sizeof(dmatch) (43 bytes with
+    WITHFAT32 active, same as without it - CLUSTER growing from 2 to
+    4 bytes exactly offsets the "reserved" field that only exists
+    when WITHFAT32 is off).
+
+    This is not a bug to fix: 21 bytes is exactly dm_drive + dm_name_pat
+    + dm_attr_srch + dm_entry + dm_dircluster + reserved2, i.e. every
+    field dir_open()/dir_init_fnode()/map_cluster() (the code that
+    actually walks fnp->f_dmp) touches. The remaining fields
+    (dm_attr_fnd/dm_time/dm_date/dm_size/dm_name) are only filled in
+    later by dos_findfirst()/dos_findnext() - and in the original,
+    *not* through sda_tmp_dm at all: see dosfns.c, which fills a
+    separate "SearchDir" variable and copies its fields into the
+    caller's dmatch one at a time, never writing dm_attr_fnd et al.
+    through &sda_tmp_dm directly. So as long as a dmatch* aliasing
+    this 21-byte field is only ever used the same way (struct fields
+    up to and including reserved2), nothing past the reserved region
+    is ever touched, exactly as in the original.
+
+    Named with a trailing D, like IoReqHdrD/MediaReqHdrD in device.h,
+    so the macro doesn't expand recursively into itself wherever
+    internal_data->sda_tmp_dm/sda_tmp_dm_ren is written.
+*/
+#define sda_tmp_dmD (*(dmatch *)&internal_data->sda_tmp_dm)
+#define sda_tmp_dm_renD (*(dmatch *)&internal_data->sda_tmp_dm_ren)

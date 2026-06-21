@@ -44,7 +44,19 @@ struct f_node {
   ULONG f_dirsector;            /* the sector containing dir entry*/
   UBYTE f_diridx;               /* offset/32 of dir entry in sec*/
   /* when dir is not root         */
-  struct dpb FAR *f_dpb;        /* the block device for file    */
+
+  /* f_dpb/f_dmp are plain native ARM pointers, not dos_far_ptr, unlike
+     sft_dcb/cdsDpb. f_node (the fnode[] array, see kernel.c) is purely
+     an internal scratch structure used while servicing a single DOS
+     API call - no guest code/DOS API ever sees an f_node or holds a
+     pointer to one, so there is nothing for it to need a far pointer
+     for. Contrast with sft (sft.h) and cds (cds.h), which guest-visible
+     INT 21h/2Fh handles and tables actually point into, and so must
+     stay in dos_far_ptr form. f_dpb itself still points at a struct
+     dpb that lives in guest memory (allocated via KernelAlloc()/
+     DynAlloc()) - sft_to_fnode()/fnode_to_sft() below convert between
+     this native pointer and sft_dcb's dos_far_ptr form explicitly. */
+  struct dpb *f_dpb;             /* the block device for file    */
 
   ULONG f_offset;               /* byte offset for next op      */
   CLUSTER f_cluster_offset;     /* relative cluster number within file */

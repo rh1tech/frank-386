@@ -4216,6 +4216,190 @@ COUNT dir_read(REG f_node_ptr fnp)
   return (fnp->f_dir.dir_name[0] != '\0');
 }
 
+/* Description.
+ *  Initialize a fnode so that it will point to the directory with 
+ *  dirstart starting cluster; in case of passing dirstart == 0
+ *  fnode will point to the start of a root directory
+
+    Migrated from fatdir.c verbatim. &sda_tmp_dm/&sda_tmp_dm_ren become
+    &sda_tmp_dmD/&sda_tmp_dm_renD - see dirmatch.h for why these are
+    macros (SDA fields, named with a trailing D so they don't expand
+    recursively into themselves) rather than plain variables.
+*/
+VOID dir_init_fnode(f_node_ptr fnp, CLUSTER dirstart)
+{
+  /* reset the directory flags    */
+  fnp->f_sft_idx = 0xff;
+  fnp->f_dmp = &sda_tmp_dmD;
+  if (fnp == &fnode[1])
+    fnp->f_dmp = &sda_tmp_dm_renD;
+  fnp->f_offset = 0l;
+  fnp->f_cluster_offset = 0;
+
+  /* root directory */
+#ifdef WITHFAT32
+  if (dirstart == 0)
+    if (ISFAT32(fnp->f_dpb))
+      dirstart = fnp->f_dpb->dpb_xrootclst;
+#endif
+  fnp->f_cluster = fnp->f_dmp->dm_dircluster = dirstart;
+}
+
+/*
+    dir_open(dirname, split, fnp) - walk a fully-qualified path
+    (drive letter + ':' + '\\'-separated components) one component at
+    a time, starting from the root directory, ending up with fnp
+    pointing at either:
+      - the directory the path names (split == FALSE), or
+      - the directory containing the last component (split == TRUE,
+        used by split_path() below to peel the filename off so the
+        caller can search for it separately).
+
+    Migrated from fatdir.c verbatim - dirname/fcbname are plain native
+    char* strings throughout (see ConvertNameSZToName83() above), so
+    no address-translation changes are needed here.
+*/
+f_node_ptr dir_open(register const char *dirname, BOOL split, f_node_ptr fnp)
+{
+  int i;
+  char *fcbname;
+
+  /* determine what drive and dpb we are using...                 */
+  fnp->f_dpb = get_dpb(dirname[0]-'A');
+  /* Perform all directory common handling after all special      */
+  /* handling has been performed.                                 */
+
+  /* truename() already did a media check()                       */
+
+  /* Walk the directory tree to find the starting cluster         */
+  /*                                                              */
+  /* Start from the root directory (dirstart = 0)                 */
+
+  /* The CDS's cdsStartCls may be used to shorten the search
+     beginning at the CWD, see mapPath() and CDS.H in order
+     to enable this behaviour there.
+           -- 2001/09/04 ska*/
+
+  dir_init_fnode(fnp, 0);
+  fnp->f_dmp->dm_entry = 0;
+
+  dirname += 2;               /* Assume FAT style drive       */
+  fcbname = fnp->f_dmp->dm_name_pat;
+  while(*dirname != '\0')
+  {
+    /* skip the path seperator                              */
+    ++dirname;
+
+    /* don't continue if we're at the end: this check is    */
+    /* for root directories, the only fully-qualified path  */
+    /* names that end in a \                                */
+    if (*dirname == '\0')
+      break;
+
+    /* Convert the name into an absolute name for           */
+    /* comparison...                                        */
+
+    dirname = ConvertNameSZToName83(fcbname, dirname);
+
+    /* do not continue if we split the filename off and are */
+    /* at the end                                           */
+    if (split && *dirname == '\0')
+      break;
+
+    /* Now search through the directory to  */
+    /* find the entry...                    */
+    i = FALSE;
+
+    while (dir_read(fnp) == 1)
+    {
+      if (!(fnp->f_dir.dir_attrib & D_VOLID) &&
+          fcbmatch(fcbname, fnp->f_dir.dir_name))
+      {
+        i = TRUE;
+        break;
+      }
+      fnp->f_dmp->dm_entry++;
+    }
+
+    if (!i || !(fnp->f_dir.dir_attrib & D_DIR))
+    {
+      return (f_node_ptr) 0;
+    }
+    else
+    {
+      /* make certain we've moved off */
+      /* root                         */
+      dir_init_fnode(fnp, getdstart(fnp->f_dpb, &fnp->f_dir));
+      fnp->f_dmp->dm_entry = 0;
+    }
+  }
+  return fnp;
+}
+
+/*                                                                      */
+/* split a path into it's component directory and file name             */
+/*                                                                      */
+/*
+    Migrated from fatfs.c verbatim. The #ifdef DEBUG block needs an
+    ARM_PTR() that the original doesn't: get_cds() here returns a
+    dos_far_ptr (see fdos_21h.c), not a directly-dereferenceable
+    pointer like the original's "struct cds FAR *".
+*/
+f_node_ptr split_path(const char * path, f_node_ptr fnp)
+{
+  /* check if the path ends in a backslash                        */
+  if (path[strlen(path) - 1] == '\\')
+    return (f_node_ptr) 0;
+
+/*  11/29/99 jt
+   * Networking and Cdroms. You can put in here a return.
+   * Maybe a return of 0xDEADBEEF or something for Split or Dir_open.
+   * Just to let upper level Fdos know its a sft, CDS function.
+   * Right now for Networking there is no support for Rename, MkDir
+   * RmDir & Delete.
+
+   <insert code here or in dir_open. I would but it in Dir_open.
+   Do the redirection in Network.c>
+
+ */
+#ifdef DEBUG
+  if (((struct cds *)ARM_PTR(get_cds(path[0]-'A')))->cdsFlags & CDSNETWDRV)
+  {
+    printf("split path called for redirected file: `%s'\n", path);
+    return (f_node_ptr) 0;
+  }
+#endif
+
+  /* Translate the path into a useful pointer                     */
+  return dir_open(path, TRUE, fnp);
+}
+
+/*
+    find_fname(path, attr, fnp) - find the directory entry for "path"
+    (full path including filename), with the given attribute mask
+    applied the same way DOS's FindFirst does.
+
+    Migrated from fatfs.c verbatim.
+*/
+STATIC int find_fname(const char *path, int attr, f_node_ptr fnp)
+{
+  /* check for leading backslash and open the directory given that */
+  /* contains the file given by path.                              */
+  if ((fnp = split_path(path, fnp)) == NULL)
+    return DE_PATHNOTFND;
+
+  while (dir_read(fnp) == 1)
+  {
+    if (fcbmatch(fnp->f_dir.dir_name, fnp->f_dmp->dm_name_pat)
+        && (fnp->f_dir.dir_attrib & ~(D_RDONLY | D_ARCHIVE | attr)) == 0)
+    {
+      return SUCCESS;
+    }
+    fnp->f_dmp->dm_entry++;
+  }
+  return DE_FILENOTFND;
+}
+
 /*
     sft_to_fnode(fd)/fnode_to_sft(fnp) - copy an open file's state
     between its SFT entry (guest-visible, dos_far_ptr-based) and
