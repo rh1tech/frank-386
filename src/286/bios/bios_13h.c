@@ -75,6 +75,22 @@ static uint8_t int13_get_last_status(uint8_t drive)
  * No size-based geometry guessing is done here: insertdisk() already chose
  * cyl/head/sector values and exposes them via fdd_get_*()/ata_get_*().
  */
+static uint8_t cd_lock_count[4];
+
+static bool int13_get_atapi_cd(uint8_t drive, uint8_t *cd)
+{
+    if (!(drive & 0x80))
+        return false;
+
+    uint8_t n = drive & 0x7F;
+    if (n >= 4 || !ata_is_cdrom(n))
+        return false;
+
+    if (cd)
+        *cd = n;
+    return true;
+}
+
 static bool int13_get_disk(uint8_t drive, BiosDisk *d)
 {
     d->f = NULL;
@@ -726,6 +742,78 @@ static bool bios_13h_44h(CPU* cpu)
     return int13_transfer_lba(cpu, &d, lba, count, addr, 0, 1);
 }
 
+static bool bios_13h_45h(CPU* cpu)
+{
+    uint8_t cd;
+
+    if (!int13_get_atapi_cd(CPU_DL, &cd)) {
+        int13_set_status(cpu, CPU_DL, INT13_ST_NOT_REMOVABLE);
+        return true;
+    }
+
+    switch (CPU_AL) {
+    case 0x00:
+        if (cd_lock_count[cd] == 0xFF) {
+            int13_set_status(cpu, CPU_DL, INT13_ST_ETOOMANYLOCKS);
+            return true;
+        }
+        cd_lock_count[cd]++;
+        int13_set_status(cpu, CPU_DL, INT13_ST_OK);
+        return true;
+
+    case 0x01:
+        if (!cd_lock_count[cd]) {
+            int13_set_status(cpu, CPU_DL, INT13_ST_ENOTLOCKED);
+            return true;
+        }
+        cd_lock_count[cd]--;
+        int13_set_status(cpu, CPU_DL, INT13_ST_OK);
+        return true;
+
+    case 0x02:
+        int13_set_status(cpu, CPU_DL, cd_lock_count[cd] ? INT13_ST_ELOCKED : INT13_ST_OK);
+        return true;
+
+    default:
+        int13_set_status(cpu, CPU_DL, INT13_ST_BAD_COMMAND);
+        return true;
+    }
+}
+
+static bool bios_13h_46h(CPU* cpu)
+{
+    uint8_t cd;
+
+    if (!int13_get_atapi_cd(CPU_DL, &cd)) {
+        int13_set_status(cpu, CPU_DL, INT13_ST_NOT_REMOVABLE);
+        return true;
+    }
+
+    if (cd_lock_count[cd]) {
+        int13_set_status(cpu, CPU_DL, INT13_ST_ELOCKED);
+        return true;
+    }
+
+    if (ata_is_inserted(cd))
+        ejectdisk(cd, false);
+
+    int13_set_status(cpu, CPU_DL, INT13_ST_OK);
+    return true;
+}
+
+static bool bios_13h_49h(CPU* cpu)
+{
+    uint8_t cd;
+
+    if (!int13_get_atapi_cd(CPU_DL, &cd)) {
+        int13_set_status(cpu, CPU_DL, INT13_ST_NOT_REMOVABLE);
+        return true;
+    }
+
+    int13_set_status(cpu, CPU_DL, ata_is_inserted(cd) ? INT13_ST_OK : INT13_ST_ECHANGED);
+    return true;
+}
+
 /*
 DISK - GET EXTENDED DRIVE PARAMETERS
 AH = 48h
@@ -894,19 +982,10 @@ bool bios_13h(CPU* cpu) {
             res = bios_13h_44h(cpu); // IBM/MS INT 13 Extensions - VERIFY SECTORS
             break;
         case 0x45:  /* LOCK/UNLOCK DRIVE — no removable media support TODO: */
-            int13_set_status(cpu, CPU_DL, INT13_ST_OK);
+            res = bios_13h_45h(cpu);
             break;
-        case 0x46: {  /* EJECT MEDIA — not supported TODO: ensure */
-            BiosDisk d;
-            if (!int13_get_disk(CPU_DL, &d)) {
-                int13_set_status(cpu, CPU_DL, INT13_ST_TIMEOUT);
-            } else if (d.hdd && ata_is_cdrom(CPU_DL & 0x7F)) {
-                /* CD-ROM: нет реального эжекта — сообщаем locked */
-                int13_set_status(cpu, CPU_DL, INT13_ST_ELOCKED);
-            } else {
-                /* HDD/FDD: SeaBIOS ENOTREMOVABLE */
-                int13_set_status(cpu, CPU_DL, INT13_ST_NOT_REMOVABLE);
-            }
+        case 0x46: {  /* EJECT MEDIA */
+            res = bios_13h_46h(cpu);
             break;
         }
         case 0x47: { /* EXTENDED SEEK — no-op for file-backed emulator */
@@ -923,17 +1002,7 @@ bool bios_13h(CPU* cpu) {
             res = bios_13h_48h(cpu); // GET EXTENDED DRIVE PARAMETERS
             break;
         case 0x49: { /* EXTENDED MEDIA CHANGE */
-            BiosDisk d;
-            if (!int13_get_disk(CPU_DL, &d)) {
-                int13_set_status(cpu, CPU_DL, INT13_ST_TIMEOUT);
-            } else if (d.hdd && ata_is_cdrom((CPU_DL & 0x7F))) {
-                /* CD-ROM: SeaBIOS всегда возвращает ECHANGED (0x06) */
-                CPU_AH = INT13_ST_ECHANGED;
-                cf = 1;
-            } else {
-                /* HDD/FDD: SeaBIOS всегда SUCCESS */
-                int13_set_status(cpu, CPU_DL, INT13_ST_OK);
-            }
+            res = bios_13h_49h(cpu); // EXTENDED MEDIA CHANGE
             break;
         }
         case 0x4E: /* SET HARDWARE CONFIGURATION (SeaBIOS disk_134e) */
@@ -946,10 +1015,7 @@ bool bios_13h(CPU* cpu) {
                 break;
             }
             break;
-        case 0xE3: // TODO: what is this ???            
-            break;
         default:
-// BIOS INT 13h is covered, all other - not related
             int13_set_status(cpu, CPU_DL, INT13_ST_BAD_COMMAND);
     }
     return res;
