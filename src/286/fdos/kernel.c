@@ -3920,7 +3920,35 @@ struct dpb *get_dpb(COUNT dsk)
 }
 
 /*
-    clus2phys(cl_no, dpbp) - convert a cluster number into the absolute
+    media_check(dpbp) - check whether removable media in drive dpbp
+    may have been swapped since the last access, and if so, rebuild
+    the DPB's BPB-derived fields from the new media.
+
+    /// TODO: stub for this iteration. The original sends a
+    /// C_MEDIACHK request (and, if needed, C_BLDBPB) to the block
+    /// device driver - neither is implemented by BlkEntry() yet (see
+    /// the "/// TODO: C_MEDIACHK / C_BUILDBPB / ..." comment on
+    /// BlkEntry() above). This codebase's only block device is a
+    /// fixed disk image (see LBA_Transfer()/dskxfer() - there is no
+    /// floppy-style removable media, and nothing changes the disk
+    /// image out from under the running kernel), so unconditionally
+    /// reporting "media not changed" is the honest answer for every
+    /// drive this kernel can currently mount, not a shortcut around
+    /// real behaviour - but it does mean a real C_MEDIACHK/C_BLDBPB
+    /// round-trip (and BPB rebuilding) would need to be added before
+    /// this kernel could ever support a real removable drive.
+
+    Migrated from fatfs.c (signature only; body replaced as above).
+*/
+COUNT media_check(struct dpb *dpbp)
+{
+  if (dpbp == NULL)
+    return DE_INVLDDRV;
+
+  return SUCCESS;
+}
+
+/*    clus2phys(cl_no, dpbp) - convert a cluster number into the absolute
     sector number of its first sector.
 
     Migrated from fatfs.c verbatim (dpbp is already a native pointer
@@ -4077,6 +4105,181 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
   }
 
   return SUCCESS;
+}
+
+/*
+    get_root(fname) - return a pointer to the last path component
+    (filename) in fname, i.e. whatever follows the last '/', '\\', or
+    ':' - or fname itself if it contains none of those.
+
+    Migrated from dosfns.c verbatim. fname/the return value are plain
+    native char* here (see dos_open()'s "path" parameter for why), so
+    the original's fstrlen()/FAR pointer arithmetic becomes ordinary
+    strlen()/pointer arithmetic - no other change.
+*/
+const char *get_root(const char *fname)
+{
+  /* find the end                                 */
+  register unsigned length = strlen(fname);
+  char c;
+
+  /* now back up to first path seperator or start */
+  fname += length;
+  while (length)
+  {
+    length--;
+    c = *--fname;
+    if (c == '/' || c == '\\' || c == ':') {
+      fname++;
+      break;
+    }
+  }
+  return fname;
+}
+
+/*
+    -----------------------------------------------------------------
+    DosUpChar/DosUpString/DosUpMem/DosUpFChar/DosUpFString/DosUpFMem
+    -----------------------------------------------------------------
+
+    /// TODO: the original (nls.c) routes every one of these through
+    /// nlsInfo (struct nlsInfoBlock), a fully pluggable national
+    /// language support layer: COUNTRY.SYS-style codepage tables,
+    /// DBCS lead-byte awareness, and a "FUpMem" variant specifically
+    /// for filenames that differs from plain DosUpMem by codepage-
+    /// specific rules. None of that (nlsInfo, xUpMem(), nlsFUpMem(),
+    /// muxUpMem(), codepage switching, DBCS) is implemented in this
+    /// codebase. What's below is a plain US-ASCII 'a'-'z' -> 'A'-'Z'
+    /// uppercase, nothing else - correct only for unaccented ASCII
+    /// names. Any non-ASCII/extended/DBCS byte is passed through
+    /// unchanged rather than miscased, but true codepage-aware
+    /// upcasing (accented Latin-1 letters, etc, as a real COUNTRY.SYS
+    /// would do) is simply not there. Needed now because truename()
+    /// (below) uppercases every path component as part of canonicalizing
+    /// a path, same as the original.
+*/
+STATIC unsigned char ascii_upchar(unsigned char ch)
+{
+  if (ch >= 'a' && ch <= 'z')
+    return (unsigned char)(ch - 'a' + 'A');
+  return ch;
+}
+
+VOID DosUpMem(VOID *str, unsigned len)
+{
+  unsigned char *p = (unsigned char *)str;
+  while (len--)
+  {
+    *p = ascii_upchar(*p);
+    p++;
+  }
+}
+
+unsigned char DosUpChar(unsigned char ch)
+{
+  return ascii_upchar(ch);
+}
+
+VOID DosUpString(char *str)
+{
+  DosUpMem(str, strlen(str));
+}
+
+VOID DosUpFMem(VOID *str, unsigned len)
+{
+  DosUpMem(str, len);
+}
+
+unsigned char DosUpFChar(unsigned char ch)
+{
+  return ascii_upchar(ch);
+}
+
+VOID DosUpFString(char *str)
+{
+  DosUpFMem(str, strlen(str));
+}
+
+/* check for a device
+   returns device header if match, else returns NULL
+   can only match character devices (as only they have names)
+
+    Migrated from dosfns.c. The device chain (dh_next) is walked via
+    dos_far_ptr/ARM_PTR()/far_is_end(), the same way the device table
+    built earlier in this file (see update_dcb()) already is, instead
+    of following a native "struct dhdr FAR *" chain directly - dh_next
+    is a dos_far_ptr in this codebase (see device.h), not a directly
+    dereferenceable pointer like the original's "struct dhdr FAR *".
+*/
+struct dhdr *IsDevice(const char *fname)
+{
+  dos_far_ptr x86_dhp;
+  struct dhdr *dhp;
+  const char *froot = get_root(fname);
+  int i;
+
+/* /// BUG!!! This is absolutely wrong.  A filename of "NUL.LST" must be
+       treated EXACTLY the same as a filename of "NUL".  The existence or
+       content of the extension is irrelevent in determining whether a
+       filename refers to a device.
+       - Ron Cemer
+  // if we have an extension, can't be a device <--- WRONG.
+  if (*froot != '.')
+  {
+*/
+
+/*  BUGFIX: MSCD000<00> should be handled like MSCD000<20> TE 
+    ie the 8 character device name may be padded with spaces ' ' or NULs '\0'
+
+    Note: fname is assumed an ASCIIZ string (ie not padded, unknown length)
+    but the name in the device header is assumed FNAME_SIZE and padded.  KJD
+*/
+
+
+  /* check for names that will never be devices to avoid checking all device headers.
+     only the file name (not path nor extension) need be checked, "" == root or empty name
+   */
+  if ( (*froot == '\0') ||
+       ((*froot=='.') && ((*(froot+1)=='\0') || (*(froot+2)=='\0' && *(froot+1)=='.')))
+     )
+  {
+    return NULL;
+  }
+
+  /* cycle through all device headers checking for match */
+  for (x86_dhp = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev); !far_is_end(x86_dhp);
+       x86_dhp = dhp->dh_next)
+  {
+    dhp = (struct dhdr *)ARM_PTR(x86_dhp);
+
+    if (!(dhp->dh_attr & ATTR_CHAR))  /* if this is block device, skip */
+      continue;
+
+    for (i = 0; i < FNAME_SIZE; i++)
+    {
+      unsigned char c1 = (unsigned char)froot[i];
+      /* ignore extensions and handle filenames shorter than FNAME_SIZE */
+      if (c1 == '.' || c1 == '\0')
+      {
+        /* check if remainder of device name consists of spaces or nulls */
+        for (; i < FNAME_SIZE; i++)
+        {
+          unsigned char c2 = dhp->dh_name[i];
+          if (c2 != ' ' && c2 != '\0')
+            break;
+        }
+        break;
+      }
+      if (DosUpFChar(c1) != DosUpFChar(dhp->dh_name[i]))
+        break;
+    }
+
+    /* if found a match then return device header */
+    if (i == FNAME_SIZE)
+      return dhp;
+  }
+
+  return NULL;
 }
 
 /*
@@ -4375,6 +4578,16 @@ f_node_ptr split_path(const char * path, f_node_ptr fnp)
 }
 
 /*
+    dir_exists(path) - true if "path" names an existing directory.
+
+    Migrated from fatfs.c verbatim.
+*/
+BOOL dir_exists(char * path)
+{
+  return split_path(path, &fnode[0]) != NULL;
+}
+
+/*
     find_fname(path, attr, fnp) - find the directory entry for "path"
     (full path including filename), with the given attribute mask
     applied the same way DOS's FindFirst does.
@@ -4465,6 +4678,31 @@ STATIC void fnode_to_sft(f_node_ptr fnp)
 #ifdef WITHFAT32
   sftp->sft_relclust_high = (UWORD)(fnp->f_cluster_offset >> 16);
 #endif
+}
+
+/*
+    dos_cd(PathName) - change the current directory (the part of
+    CHDIR that updates the CDS once the new directory has been
+    confirmed to exist).
+
+    Migrated from fatfs.c. cdsp is a dos_far_ptr here (get_cds()
+    returns one in this codebase, see fdos_21h.c), so the original's
+    direct "cdsp->cdsStrtClst = ..." needs an ARM_PTR() first.
+*/
+int dos_cd(char *PathName)
+{
+  f_node_ptr fnp;
+  struct cds *cdsp;
+
+  /* now test for its existance. If it doesn't, return an error.  */
+  if ((fnp = dir_open(PathName, FALSE, &fnode[0])) == NULL)
+    return DE_PATHNOTFND;
+
+  /* problem: RBIL table 01643 does not give a FAT32 field for the
+     CDS start cluster. But we are not using this field ourselves */
+  cdsp = (struct cds *)ARM_PTR(get_cds(PathName[0] - 'A'));
+  cdsp->cdsStrtClst = (UWORD)fnp->f_dmp->dm_dircluster;
+  return SUCCESS;
 }
 
 /* Open a file given the path. Flags is 0 for read, 1 for write and 2   */

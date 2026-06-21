@@ -1236,7 +1236,7 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
         pstore8 (addr + 0x09, 0x00);          /* reserved */
         pstore8 (addr + 0x0A, 0x00);          /* reserved */
         pstore8 (addr + 0x0B, 0x00);          /* reserved */
-		pstore16(addr + 0x0C, cyls - 1);                  /* landing zone */
+		pstore16(addr + 0x0C, cyls ? (cyls - 1) : 0);     /* landing zone */
         pstore8 (addr + 0x0E, (uint8_t)sects);/* sectors per track */
         pstore8 (addr + 0x0F, 0x00);          /* reserved */
     }
@@ -1328,7 +1328,7 @@ void bios_post(PC *pc) {
 	pstore8 (0x488, 0xF9);                               /* switches */
 	pstore8 (0x489, 0x00);                               /* VGA flags */
 	pstore8 (0x48E, 0x77);                               /* fdd */
-	pstore8 (0x496, 0x10);                               // enhanced keyboard present
+	pstore8 (0x496, 0x00);                               /* kbd_flag1: E0/E1/RCtrl/RAlt state */
 
 // init PIC (i8259) — IBM PC/AT sequence
 	// Master PIC: base vector 0x08 (IRQ0→INT 08h … IRQ7→INT 0Fh)
@@ -1420,7 +1420,7 @@ void bios_post(PC *pc) {
 	bit 1 = Micro Channel bus вместо ISA
 	bit 0 = dual bus: Micro Channel + ISA
 	*/
-    pstore8 (table + 0x05, 0b01111000);   /* feature byte 1: slave PIC + RTC + INT 15h/AH=4Fh + INT 15h/AH=41h  */
+    pstore8 (table + 0x05, 0b01111000);   /* feature byte 1: slave PIC + RTC + INT15/4Fh + INT15/41h */
 	/*
 7      32-bit DMA supported
 6      INT 16/AH=09h (keyboard functionality) supported (see #00585)

@@ -68,18 +68,36 @@ Bit(s)  Description     (Table 00463)
 5-7    reserved
 */
 static bool bios_15h_41h(CPU* cpu) {
+    static int old = -1; // -1 means, we have no prev. state
+    static u32 start_us = 0;
     u8 cond_type = CPU_AL;
     u8 wait4 = cond_type & 0b00000111;
-    if (!wait4) { // let say, "any" was happen
-        return true;
-    }
     u8 comp_with = CPU_BH;
-    u32 time_out_ms = 55ul * CPU_BL; // TODO: timout support
+    u32 timeout_us = 55000ul * CPU_BL;
     u8 v;
     if (cond_type & 0b00010000) {  // port
         v = cpu_portin8(CPU_DX);
     } else { // address
         v = read86(((u32)CPU_ES << 4) + CPU_DI);
+    }
+    if (!wait4) {
+        if (old == -1) {
+            old = v;
+            start_us = time_us_32();
+        }
+        if (old != -1 && old != v) {
+            old = -1; // cleanup saved value
+            goto ok;
+        }
+        if (timeout_us != 0 && (u32)(time_us_32() - start_us) >= timeout_us) {
+             cf = 1; // timed out
+            CPU_AH = 0x80;
+            old = -1;
+            start_us = 0;
+            return true;
+        }
+        ifl = 1; // allow interrupt me by IRQ on next step
+        return false;
     }
     bool res = true;
     switch (wait4) {
@@ -97,10 +115,23 @@ static bool bios_15h_41h(CPU* cpu) {
         break;
     }
     if (!res) {
-        // execute me again, by continue on i286_step
+        if (old == -1) {
+            old = 0;              /* mark wait started */
+            start_us = time_us_32();
+        }
+        if (timeout_us != 0 && (u32)(time_us_32() - start_us) >= timeout_us) {
+            cf = 1;
+            CPU_AH = 0x80;
+            old = -1;
+            start_us = 0;
+            return true;
+        }
         ifl = 1; // allow interrupt me by IRQ on next step
         return res;
     }
+ok:
+    old = -1;
+    start_us = 0;
     cf = 0;
     CPU_AH = 0;
     return res;
@@ -271,13 +302,14 @@ static bool bios_15h_C0h(CPU* cpu) {
      *   model        = FCh  IBM PC AT
      *   submodel     = 00h
      *   BIOS rev     = 00h
-     *   feature byte = 8259 slave + RTC
+     *   feature byte 1 is built by bios_post()
      *
      * Feature byte 1:
      *   bit 6 = second interrupt controller installed
      *   bit 5 = RTC installed
+     *   bit 4 = INT 15h/AH=4Fh called by INT 09h
+     *   bit 3 = INT 15h/AH=41h wait for external event supported
      *
-     * We do NOT set bit 3, because INT 15h/AH=41h is currently unsupported.
      * We do NOT set bit 2, because EBDA segment at BDA 0040:000E is zero.
      * @See: load_bios_and_reset
      */
