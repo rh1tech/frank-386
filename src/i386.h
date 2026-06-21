@@ -286,7 +286,7 @@ static inline uint8_t cmos_read(CPU* cpu, uint8_t reg)
 static inline void cmos_write(CPU* cpu, uint8_t reg, uint8_t val)
 {
 	cpu->cb.io_write8(cpu->cb.io, 0x70, reg);
-	cpu->cb.io_write8(cpu->cb.io, 0x70, val);
+	cpu->cb.io_write8(cpu->cb.io, 0x71, val);
 }
 
 
