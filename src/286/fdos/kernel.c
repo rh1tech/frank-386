@@ -4535,5 +4535,5 @@ void kernel(CPU* _cpu) {
     SET_CS ( 0xF000 ); // -> FFEFFh (bios callback)
     CPU_IP = 0xFEFF;
     cpu->ext_accessors->set_bios_callback(cpu, &params);
-    printf("FreeDOS impl. is incomplete. Nothing to do for now");
+    printf("FreeDOS impl. is incomplete. Nothing to do for now...\n");
 }

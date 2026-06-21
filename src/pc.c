@@ -1289,17 +1289,12 @@ void bios_post(PC *pc) {
 //   0xFFF70 = scratch byte (scan code, written by bios_09h phase1)
 //   0xFFF71 = stub entry point
     pstore8(0xFFF70, 0x00); // scratch: scan code placeholder
-    pstore8(0xFFF71, 0xB4); // MOV AH, 4Fh
-    pstore8(0xFFF72, 0x4F);
-    pstore8(0xFFF73, 0xA0); // MOV AL, [0xFFF70]  — load scan from scratch
-    pstore8(0xFFF74, 0x70); //   offset lo
-    pstore8(0xFFF75, 0xFF); //   offset hi (DS=0, physical 0xFFF70)
-    pstore8(0xFFF76, 0xF9); // STC  — CF=1: do not intercept by default
-    pstore8(0xFFF77, 0xCD); // INT 15h
-    pstore8(0xFFF78, 0x15);
-    pstore8(0xFFF79, 0xCD); // INT FFh — callback
-    pstore8(0xFFF7A, 0xFF);
-    pstore8(0xFFF7B, 0xCF); // IRET — fallback if phase2 returns false
+    pstore8(0xFFF71, 0xF9); // STC  — CF=1: do not intercept by default
+    pstore8(0xFFF72, 0xCD); // INT 15h
+    pstore8(0xFFF73, 0x15);
+    pstore8(0xFFF74, 0xCD); // INT FFh — callback
+    pstore8(0xFFF75, 0xFF);
+    pstore8(0xFFF76, 0xCF); // IRET — fallback if phase2 returns false
 /*
 	point2iret(0x00); // CPU-generated - DIVIZION BY ZERO
 	point2iret(0x01); // CPU-generated - SINGLE STEP

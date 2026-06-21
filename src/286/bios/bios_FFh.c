@@ -44,7 +44,7 @@ bool set_bios_callback(CPU* cpu, bios_callback_params_t* params) {
             return true;
         }
         if (node->chain->expected_cs == params->expected_cs && node->chain->expected_ip == params->expected_ip) {
-            printf("[set_bios_callback] replaces handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
+            printf("[set_bios_callback] replaces BIOD handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
             params->chain = node->chain->chain;
             node->chain->chain = 0;
             node->chain = params;
@@ -52,6 +52,7 @@ bool set_bios_callback(CPU* cpu, bios_callback_params_t* params) {
         }
         node = node->chain;
     }
+    printf("[set_bios_callback] new BIOS handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
     node->chain = params;
     return true;
 }

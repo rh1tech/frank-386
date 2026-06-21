@@ -3,6 +3,8 @@
 #include "../cpu.h"
 #include "../bios.h"
 
+#define printf(...) bios_printf(cpu, __VA_ARGS__)
+
 // A20 GATE
 static bool bios_15h_24h(CPU* cpu) {
     switch (CPU_AL) {

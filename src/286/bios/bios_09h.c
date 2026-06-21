@@ -3,6 +3,8 @@
 #include "../cpu.h"
 #include "../bios.h"
 
+#define printf(...) bios_printf(cpu, __VA_ARGS__)
+
 #define BDA_KBD_FLAGS1  0x417u
 #define BDA_KBD_FLAG1   0x496u   /* kbd_flag1: KF1_LAST_E0, KF1_LAST_E1, KF1_RCTRL, KF1_RALT */
 
@@ -94,6 +96,7 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* ignore)
         /* not intercepted: restore original scan from scratch */
         scan = read86(IRQ1_SCRATCH);
     }
+    ///printf("[09] scan: %02xh\n", scan);
 
     if (scan == 0) {
         cpu_portout8(0x20, 0x20);
@@ -104,6 +107,8 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* ignore)
     uint8_t flags1 = read86(BDA_KBD_FLAG1);
     bool is_up = (read86(IRQ1_SCRATCH) & 0x80u) != 0;  /* original break bit */
 
+    ///printf("[09] raw=%02X scan=%02X flags=%02X flags1=%02X cf=%d al=%02X\n",
+    ///   read86(IRQ1_SCRATCH), scan, flags, flags1, cf, CPU_AL);
     switch (scan) {
     case 0x2A: /* L Shift */
         if (flags1 & KF1_LAST_E0) break;  /* ignore fake shift (SeaBIOS) */
@@ -228,7 +233,7 @@ bool bios_09h(CPU* cpu)
     }
 
     uint8_t code = cpu_portin8(0x60);
-
+    ///printf("[09p1] code=%02X st=%02X csip=%04X:%04X\n", code, cpu_portin8(0x64), CPU_CS, CPU_IP);
     /* E0/E1 prefix: store in kbd_flag1 (BDA 0x496), SeaBIOS-compatible */
     if (code == 0xE0 || code == 0xE1) {
         uint8_t f1 = read86(BDA_KBD_FLAG1);
@@ -241,7 +246,7 @@ bool bios_09h(CPU* cpu)
     /* Save raw code (with break bit) in scratch for phase2 */
     write86(IRQ1_SCRATCH, code);
     cpu->ext_accessors->set_bios_callback(cpu, &params);
-
+    CPU_AX = 0x4F00 | code; // prepare for int 15h 4Fh
     SET_CS ( IRQ1_STUB_CS );
     CPU_IP = IRQ1_STUB_IP;
     return false;
