@@ -3811,6 +3811,118 @@ void setdstart(struct dpb *dpbp, struct dirent *dentry, CLUSTER value)
 }
 
 /*
+    extend(fnp) - extend a directory or file by exactly one cluster,
+    allocating a free one from the FAT and chaining it in.
+
+    /// TODO: stub for this iteration. The original calls
+    /// find_fat_free(fnp) to locate a free cluster - not migrated yet,
+    /// since nothing exercising the write path (map_cluster(fnp,
+    /// XFR_WRITE), i.e. writing past the current end of a file) is
+    /// migrated yet either. Always reports the disk as full, which is
+    /// what map_cluster() does with a real extend() that can't find a
+    /// free cluster - this just means writes that would grow a file
+    /// fail for now instead of allocating, while reads (XFR_READ)
+    /// never call this at all (see map_cluster() below).
+*/
+STATIC CLUSTER extend(f_node_ptr fnp)
+{
+  UNREFERENCED_PARAMETER(fnp);
+  return LONG_LAST_CLUSTER;
+}
+
+/* Description.
+ *    Finds the cluster which contains byte at the fnp->f_offset offset and
+ *  stores its number to the fnp->f_cluster. The search begins from the start of
+ *  a file or a directory depending on whether the SFT index is valid
+ *  and continues through the FAT chain until the target cluster is found.
+ *  The mode can have only XFR_READ or XFR_WRITE values.
+ *    In the XFR_WRITE mode map_cluster extends the FAT chain by creating
+ *  new clusters upon necessity.
+ * Return value.
+ *  DE_HNDLDSKFULL - [XFR_WRITE mode only] unable to find free cluster
+ *                   for extending the FAT chain, the disk is full.
+ *                   The fnode is released from memory.
+ *  DE_SEEK        - [XFR_READ mode only] byte at f_offset lies outside of
+ *                   the FAT chain. The fnode is not released.
+ * Notes.
+ *  If we are moving forward, then use the relative cluster number offset
+ *  that we are at now (f_cluster_offset) to start, instead of starting
+ *  at the beginning.
+
+    Migrated from fatfs.c verbatim.
+*/
+COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
+{
+  CLUSTER relcluster, cluster;
+
+  if (fnp->f_cluster == FREE)
+  {
+    /* If this is a read but the file still has zero bytes return   */
+    /* immediately....                                              */
+    if (mode == XFR_READ)
+      return DE_SEEK;
+
+    /* If someone did a seek, but no writes have occured, we will   */
+    /* need to initialize the fnode.                                */
+    /*  (mode == XFR_WRITE) */
+    /* If there are no more free fat entries, then we are full! */
+    cluster = extend(fnp);
+    if (cluster == LONG_LAST_CLUSTER)
+    {
+      return DE_HNDLDSKFULL;
+    }
+    fnp->f_cluster = cluster;
+  }
+
+  relcluster = (CLUSTER)((fnp->f_offset / fnp->f_dpb->dpb_secsize) >>
+                         fnp->f_dpb->dpb_shftcnt);
+  if (relcluster < fnp->f_cluster_offset)
+  {
+    /* If seek is to earlier in file than current position, */
+    /* we have to follow chain from the beginning again...  */
+    /* Set internal index and cluster size.                 */
+    fnp->f_cluster = fnp->f_sft_idx == 0xff ? fnp->f_dmp->dm_dircluster :
+        getdstart(fnp->f_dpb, &fnp->f_dir);
+    fnp->f_cluster_offset = 0;
+  }
+
+  /* Now begin the linear search. The relative cluster is         */
+  /* maintained as part of the set of physical indices. It is     */
+  /* also the highest order index and is mapped directly into     */
+  /* physical cluster. Our search is performed by pacing an index */
+  /* up to the relative cluster position where the index falls    */
+  /* within the cluster.                                          */
+
+  while (fnp->f_cluster_offset != relcluster)
+  {
+    /* get next cluster in the chain */
+    cluster = next_cluster(fnp->f_dpb, fnp->f_cluster);
+    if (cluster <= 1) /* 1/error or 0/FREE chain into the void */
+      return DE_SEEK;
+
+    /* If this is a read and the next is a LAST_CLUSTER,               */
+    /* then we are going to read past EOF, return zero read            */
+    /* or expand the list if we're going to write and have run into    */
+    /* the last cluster marker.                                        */
+    if (cluster == LONG_LAST_CLUSTER)
+    {
+      if (mode == XFR_READ)
+        return DE_SEEK;
+
+      /* mode == XFR_WRITE */
+      cluster = extend(fnp);
+      if (cluster == LONG_LAST_CLUSTER)
+        return DE_HNDLDSKFULL;
+    }
+
+    fnp->f_cluster = cluster;
+    fnp->f_cluster_offset++;
+  }
+
+  return SUCCESS;
+}
+
+/*
     sft_to_fnode(fd)/fnode_to_sft(fnp) - copy an open file's state
     between its SFT entry (guest-visible, dos_far_ptr-based) and
     fnode[0] (native scratch struct used while servicing the call).
