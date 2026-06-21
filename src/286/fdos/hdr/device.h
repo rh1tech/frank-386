@@ -186,6 +186,12 @@ typedef struct {
 
 #define N_RETRY         5       /* number of retries permitted  */
 
+/* dskxfer() function parameters, migrated from globals.h */
+#define DSKWRITE        1
+#define DSKREAD         2
+#define DSKWRITEINT26   3
+#define DSKREADINT25    4
+
 #include "dsk.h"
 
 #define LBA_READ         0x4200
@@ -488,8 +494,8 @@ typedef bpb FAR *bpbptr;
 typedef BYTE FAR *byteptr;
 typedef struct dhdr FAR *dhdrptr;
 
-extern request                  /* I/O Request packets                  */
-  ASM IoReqHdr, ASM MediaReqHdr;
+#define IoReqHdrD (*(request *)&internal_data->IoReqHdr)
+#define MediaReqHdrD (*(request *)&internal_data->MediaReqHdr)
 #define CharReqHdr (internal_data->ClkReqHdr)
 
 /* dsk.c */

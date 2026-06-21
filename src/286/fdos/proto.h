@@ -44,7 +44,7 @@ BOOL flush(void);
 BOOL fill(REG struct buffer FAR * bp, ULONG blkno, COUNT dsk);
 BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mode);
 /* *** Changed on 9/4/00  BER */
-UWORD dskxfer(COUNT dsk, ULONG blkno, VOID FAR * buf, UWORD numblocks,
+UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE * buf, UWORD numblocks,
               COUNT mode);
 /* *** End of change */
 void AllocateHMASpace (size_t lowbuffer, size_t highbuffer);

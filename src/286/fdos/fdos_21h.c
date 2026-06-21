@@ -39,9 +39,21 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError, struct dhd
 /* Abort, retry or fail for character devices                   */
 COUNT char_error(request * rq, struct dhdr FAR * lpDevice)
 {
+  /// TODO:
   internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
   return CriticalError(EFLG_CHAR | EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE,
                        0, rq->r_status & S_MASK, lpDevice);
+}
+
+/* Abort, retry or fail for block devices                       */
+COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice,
+                  int mode)
+{
+  /// TODO:
+  internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
+  return CriticalError(EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE |
+                       (mode == DSKWRITE ? EFLG_WRITE : 0),
+                       nDrive, rq->r_status & S_MASK, lpDevice);
 }
 
 STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
