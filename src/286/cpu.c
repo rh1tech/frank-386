@@ -87,6 +87,7 @@ typedef bool (*handler_t)(CPU*);
 static handler_t handlers[256];
 
 #include <stdio.h>
+#define printf(...) bios_printf(cpu, __VA_ARGS__)
 void cpu_err_msg(CPU* cpu, const char* msg) {
     print_line(msg, 1);
     char buf[10];
@@ -130,7 +131,7 @@ void cpu_init_286(CPU* cpu) {
     cpue->raise_irq = raise_irq;
     cpue->setexc = setexc;
     cpue->abort = i286_abort;
-    cpue->bios_callback = bios_no_callback;
+    cpue->set_bios_callback = set_bios_callback;
 
 
     for(int i = 0; i < 256; ++i) {
@@ -920,15 +921,8 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
     }
 }
 
-// 0xFFE00..0xFFEFF
-inline static bool fake_bios_area(CPU* cpu) {
-    u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP) >> 8;
-    return ip32 == 0xFFE;
-}
-
-static bool rp2350_bios_handler(CPU* cpu) {
+static bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
     print_line2("BIOS", 0, 8);
-    uint8_t intnum = CPU_IP;
     bool normal_iret_flow = handlers[intnum](cpu);
     uint16_t flags_on_stack = getmem16(CPU_SS, CPU_SP + 4);
     if (normal_iret_flow) {
@@ -954,9 +948,9 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
             int no = cpu->cb.pic_read_irq(cpu->cb.pic);
             intcall86(cpu, no);
         }
-
-        if (fake_bios_area(cpu)) {
-            if (rp2350_bios_handler(cpu)) { // normal flow IRET is expected
+        u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP);
+        if ((ip32 >> 8) == 0xFFE) {
+            if (rp2350_bios_handler(cpu, (uint8_t)ip32)) { // normal flow IRET is expected
                 CPU_IP = 0x0006;
                 CPU_CS = 0xFFF0; // reusable IRET (pc.c)
             }

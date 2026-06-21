@@ -84,7 +84,7 @@ static char scan_to_ascii(uint8_t scan, bool shift, bool ctrl, bool caps)
 /* Phase 2: called via INT 77h after INT 15h/4Fh returns from guest.
  * CF and CPU_AL are the result of the INT 15h/4Fh call.
  * Continues scan code processing. */
-static bool bios_09h_phase2(CPU* cpu, void* ignore)
+static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* ignore)
 {
     uint8_t scan;
     if (!cf) {
@@ -212,6 +212,12 @@ eoi_return:
     return true;
 }
 
+static bios_callback_params_t params = {
+    .callback = bios_09h_phase2,
+    .expected_cs = 0xFFE0,
+    .expected_ip = 0x00FF
+};
+
 /* Phase 1: read scan code, save in scratch, redirect to INT 15h/4Fh stub.
  * Returns false → main loop continues execution at stub (CS:IP set here). */
 bool bios_09h(CPU* cpu)
@@ -234,14 +240,11 @@ bool bios_09h(CPU* cpu)
         cpu_portout8(0x20, 0x20);
         return true;
     }
-#if 0 /// TODO:
     /* Save raw code (with break bit) in scratch for phase2 */
     write86(IRQ1_SCRATCH, code);
-    cpu->ext_accessors->bios_callback = bios_09h_phase2;
+    cpu->ext_accessors->set_bios_callback(cpu, &params);
+
     SET_CS ( IRQ1_STUB_CS );
     CPU_IP = IRQ1_STUB_IP;
     return false;
-#else
-    return true;
-#endif
 }

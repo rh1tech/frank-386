@@ -23,7 +23,7 @@ bool bios_18h(CPU*); // Call internal Basic
 bool bios_19h(CPU*); // Bootstrap
 bool bios_1Ah(CPU*); // Time/Date services
 bool bios_FFh(CPU*); // W/A BIOS callback
-bool bios_no_callback(CPU*, void*); // default callback for the bios_FFh
+bool set_bios_callback(CPU*, bios_callback_params_t*);
 
 void boot_from(CPU* cpu, uint8_t dl); // INT 19h support
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9

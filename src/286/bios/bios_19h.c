@@ -45,12 +45,12 @@ void boot_from(CPU* cpu, uint8_t dl)
 | ESC     | Boot Menu (часто HP)          |
 */
 
-static bool bios_19h_waiter(CPU* cpu, void* any) {
+static bool bios_19h_waiter(CPU* cpu, bios_callback_params_t* params) {
     uint32_t ticks = pload32(0x046C);
-    if (cpu->ext_accessors->bios_callback_data == (void*)ticks) {
+    if (params->data == (void*)ticks) {
         goto ex;
     }
-    cpu->ext_accessors->bios_callback_data = (void*)ticks;
+    params->data = (void*)ticks;
     if (ticks < 18) {
         print_line("1", 2);
     } else if (ticks < 36) {
@@ -75,11 +75,16 @@ ex:
     return false; // in a loop on the same CS:IP, no IRET required there
 }
 
+static bios_callback_params_t params = {
+    .callback = bios_19h_waiter,
+    .expected_cs = 0xFFEF,
+    .expected_ip = 0x000F
+};
+
 bool bios_19h(CPU* cpu) {
     print_line("Press Win+F12 to enter Setup", 1);
-    SET_CS ( 0xFFF0 ); // -> FFF79: INT FFh
-    CPU_IP = 0x0079;
-    cpu->ext_accessors->bios_callback = bios_19h_waiter;
-    cpu->ext_accessors->bios_callback_data = 0;
+    SET_CS ( 0xFFEF ); // -> FFEFF
+    CPU_IP = 0x000F;
+    cpu->ext_accessors->set_bios_callback(cpu, &params);
     return false; // exact CS:IP, no IRET required there
 }

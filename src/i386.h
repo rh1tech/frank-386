@@ -72,7 +72,16 @@ typedef void (*cpu_raise_irq_t)(struct CPU* cpu);
 typedef void (*cpu_setexc_t)(struct CPU* cpu, int excno, uword excerr);
 typedef void (*cpu_abort_t)(struct CPU* cpu, int code);
 
-typedef bool (*bios_callback_t)(struct CPU* cpu, void* any);
+struct bios_callback_params;
+typedef bool (*bios_callback_t)(struct CPU* cpu, struct bios_callback_params* params);
+typedef struct bios_callback_params {
+	bios_callback_t callback;
+	void* data;
+	u16 expected_cs;
+	u16 expected_ip;
+	struct bios_callback_params* chain;
+} bios_callback_params_t;
+typedef bool (*set_bios_callback_t)(struct CPU* cpu, bios_callback_params_t* params);
 
 typedef struct CPU_ext_accessors {
 	get_reg8_t get_reg8;
@@ -92,8 +101,7 @@ typedef struct CPU_ext_accessors {
 	cpu_raise_irq_t raise_irq;
 	cpu_setexc_t setexc;
 	cpu_abort_t abort;
-    bios_callback_t bios_callback;
-	void* bios_callback_data;
+    set_bios_callback_t set_bios_callback;
 } CPU_ext_accessors_t;
 
 typedef union {
