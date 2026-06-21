@@ -52,7 +52,7 @@ bool set_bios_callback(CPU* cpu, bios_callback_params_t* params) {
         }
         node = node->chain;
     }
-    printf("[set_bios_callback] new BIOS handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
+    ///printf("[set_bios_callback] new BIOS handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
     node->chain = params;
     return true;
 }

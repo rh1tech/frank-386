@@ -4467,6 +4467,113 @@ STATIC void fnode_to_sft(f_node_ptr fnp)
 #endif
 }
 
+/* Open a file given the path. Flags is 0 for read, 1 for write and 2   */
+/* for update.                                                          */
+/* Returns an long where the high word is a status code and the low     */
+/* word is an integer file descriptor or a negative error code          */
+/* see DosOpenSft(), dosfns.c for an explanation of the flags bits      */
+/* directory opens are allowed here; these are not allowed by DosOpenSft*/
+
+/*
+    Migrated from fatfs.c verbatim, except for the O_TRUNC and
+    DE_FILENOTFND-with-O_CREAT branches:
+      - O_TRUNC needs wipe_out() (release the existing file's FAT
+        chain and truncate to zero) - not migrated yet.
+      - O_CREAT (the file doesn't exist) needs alloc_find_free()
+        (allocate a free directory slot/cluster for a brand-new file)
+        and init_direntry()/dir_write() to write it out - none of
+        which are migrated yet either.
+    Both report a clear, deliberate "not implemented" error
+    (DE_ACCESS - there is no specific "not implemented" DOS error
+    code) instead of silently doing nothing or corrupting state, so
+    they fail loudly rather than pretending to succeed. The O_OPEN
+    (open existing file) path - this iteration's actual goal - is
+    migrated in full, including the shared tail (merge_file_changes()/
+    fnode_to_sft()) that runs after any of the three branches.
+*/
+int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
+{
+  REG f_node_ptr fnp = sft_to_fnode(fd);
+  int status = find_fname(path, D_ALL | attrib, fnp);
+
+  /* Check that we don't have a duplicate name, so if we  */
+  /* find one, truncate it (O_CREAT).                     */
+  if (status == SUCCESS)
+  {
+    unsigned char dir_attrib = fnp->f_dir.dir_attrib;
+    if (flags & O_TRUNC)
+    {
+      /* The only permissable attribute is archive,   */
+      /* check for any other bit set. If it is, give  */
+      /* an access error.                             */
+      if ((dir_attrib & (D_RDONLY | D_DIR | D_VOLID))
+          || (dir_attrib & ~D_ARCHIVE & ~attrib))
+        return DE_ACCESS;
+
+      /// TODO: wipe_out(fnp) (release the existing file's FAT chain
+      /// and truncate it to zero) is not implemented yet.
+      printf("dos_open: O_TRUNC not implemented yet\n");
+      return DE_ACCESS;
+    }
+    else if (flags & O_OPEN)
+    {
+      /* force r/o open for FCB if the file is read-only */
+      if ((flags & O_FCB) && (dir_attrib & D_RDONLY))
+        flags = (flags & ~3) | O_RDONLY;
+
+      /* Check permissions. -- JPP
+         (do not allow to open volume labels/directories,
+          and do not allow writing to r/o files) */
+      if ((dir_attrib & (D_DIR | D_VOLID)) ||
+          ((dir_attrib & D_RDONLY) && ((flags & O_ACCMODE) != O_RDONLY)))
+        return DE_ACCESS;
+      status = S_OPENED;
+    }
+    else
+    {
+      return DE_FILEEXISTS;
+    }
+  }
+  else if (status == DE_FILENOTFND && (flags & O_CREAT))
+  {
+    /// TODO: alloc_find_free(fnp, path) (allocate a free directory
+    /// slot/cluster for a brand-new file) is not implemented yet.
+    printf("dos_open: O_CREAT (new file) not implemented yet\n");
+    return DE_ACCESS;
+  }
+  else
+  {
+    /* open: If we can't find the file, just return a not    */
+    /* found error.                                          */
+    return status;
+  }
+
+  /* Now change to file                                   */
+  fnp->f_sft_idx = fd;
+  fnp->f_offset = 0l;
+  fnp->f_cluster_offset = 0;
+
+  fnp->f_flags &= ~SFT_FDATE;
+  /* use FCLEAN even on replaced/created files: the bit is reset */
+  /* if the file is written to later                             */
+  fnp->f_flags |= SFT_FCLEAN;
+  if (status != S_OPENED)
+  {
+    /// TODO: init_direntry()/dir_write() are not implemented yet -
+    /// unreachable for now, since both branches that set status to
+    /// anything other than S_OPENED return early above instead.
+    printf("PANIC: dos_open reached the O_CREAT/O_TRUNC tail unexpectedly\n");
+    for (;;) ;
+  }
+
+  merge_file_changes(fnp, status == S_OPENED); /* /// Added - Ron Cemer */
+  /* /// Moved from above.  - Ron Cemer */
+  fnp->f_cluster = getdstart(fnp->f_dpb, &fnp->f_dir);
+
+  fnode_to_sft(fnp);
+  return status;
+}
+
 STATIC VOID FsConfig(VOID)
 {
   dos_far_ptr x86_dpb = LoL->DPBp;
