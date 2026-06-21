@@ -1248,12 +1248,15 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
 
 void bios_post(PC *pc) {
 // POST
-	// TODO:
 	uint32_t ext_ram = phys_mem_size <= (1024 << 10) ? 0 : (phys_mem_size - (1024 << 10)) >> 10;
 	if (ext_ram > 0xFFFF)
 		ext_ram = 0xFFFF;
 	cmos_write(pc->cpu, 0x17, (uint8_t)(ext_ram & 0xFF)); // low byte extended memory KB
 	cmos_write(pc->cpu, 0x18, (uint8_t)((ext_ram >> 8) & 0xFF)); // high byte
+// fast IRET cases:
+	for (int i = 0; i < 256; ++i) { // initially all them just pointed to IRET
+		point2iret(i);
+	}
 // init BDA
 	for (uint32_t a = 0x400; a < 0x500; ++a)
 		pstore8(a, 0);
@@ -1467,6 +1470,8 @@ void bios_post(PC *pc) {}
 
 void load_bios_and_reset(PC *pc)
 {
+	/// TODO: 286 AT BIOS support
+#ifdef I386_MODE
 	int bios_size = 0;
 	if (pc->bios && pc->bios[0])
 		bios_size = load_rom(PC_RAM, pc->bios, 0x100000, 1);
@@ -1479,14 +1484,8 @@ void load_bios_and_reset(PC *pc)
 	} else if (pc->vga_bios && pc->vga_bios[0]) {
 		printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
 	}
-	sn76489_reset();
-
-#ifndef I386_MODE
-// fast IRET cases:
-	for (int i = 0; i < 256; ++i) { // initially all them just pointed to IRET
-		point2iret(i);
-	}
 #endif
+	sn76489_reset();
 
 	cpu_reset(pc->cpu);
 }

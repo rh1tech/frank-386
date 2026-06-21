@@ -137,6 +137,38 @@ ok:
     return res;
 }
 
+static bool get_286_desc(CPU* cpu, uint32_t addr, uint32_t* base, uint32_t* limit)
+{
+    uint16_t lim = pload16(addr + 0);
+    uint32_t bas = (uint32_t)pload8(addr + 2)
+                 | ((uint32_t)pload8(addr + 3) << 8)
+                 | ((uint32_t)pload8(addr + 4) << 16);
+    uint8_t access = pload8(addr + 5);
+
+    /*
+     * 286 data segment descriptor, present.
+     *
+     * P bit      = 0x80
+     * S bit      = 0x10, code/data descriptor
+     * type bit3  = 0 data, 1 code
+     *
+     * Разрешаем data read-only/read-write:
+     * access примерно 90h/92h/93h/96h/97h.
+     */
+    if ((access & 0x80) == 0)
+        return false;          /* not present */
+
+    if ((access & 0x10) == 0)
+        return false;          /* system descriptor, not data/code */
+
+    if (access & 0x08)
+        return false;          /* code segment, not data */
+
+    *base = bas;
+    *limit = lim;
+    return true;
+}
+
 /*
 SYSTEM - COPY EXTENDED MEMORY
 AH = 87h
@@ -164,21 +196,30 @@ static bool bios_15h_87h(CPU* cpu)
      *   +28h: SS descriptor (filled by BIOS)
      */
     uint32_t tbl = (uint32_t)CPU_ES * 16 + CPU_SI;
-    uint16_t count = CPU_CX;  /* number of WORDS to copy */
+    uint32_t count = CPU_CX;  /* number of WORDS to copy */
     if (count > 0x8000u) {
         CPU_AH = 0x01;  /* invalid parameter */
         cf = 1;
         return true;
     }
-
-    /* Read 24-bit base from descriptor: bytes 2,3,4 */
-    uint32_t src = (uint32_t)pload8(tbl + 0x10 + 2)
-                 | ((uint32_t)pload8(tbl + 0x10 + 3) << 8)
-                 | ((uint32_t)pload8(tbl + 0x10 + 4) << 16);
-
-    uint32_t dst = (uint32_t)pload8(tbl + 0x18 + 2)
-                 | ((uint32_t)pload8(tbl + 0x18 + 3) << 8)
-                 | ((uint32_t)pload8(tbl + 0x18 + 4) << 16);
+    if (!count) {
+        CPU_AH = 0;
+        cf = 0;
+        return true;
+    }
+    uint32_t src, dst, src_limit, dst_limit;
+    if (!get_286_desc(cpu, tbl + 0x10, &src, &src_limit) ||
+        !get_286_desc(cpu, tbl + 0x18, &dst, &dst_limit)) {
+        CPU_AH = 0x01;
+        cf = 1;
+        return true;
+    }
+    u32 bytes = count << 1;
+    if (src_limit + 1u < bytes || dst_limit + 1u < bytes) {
+        CPU_AH = 0x01;
+        cf = 1;
+        return true;
+    }    
 
     /* Enable A20 for access above 1MB */
     int prev_a20 = cpu_get_a20(cpu);
