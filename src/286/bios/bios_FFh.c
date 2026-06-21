@@ -33,7 +33,7 @@ while(1); // remove it
             return node->callback(cpu, node);
         }
     }
-    return node->callback(cpu, node);
+    return bios_no_callback(cpu, &root);
 }
 
 bool set_bios_callback(CPU* cpu, bios_callback_params_t* params) {

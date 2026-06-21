@@ -163,12 +163,10 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* ignore)
         }
         break;
     case 0x53: /* Delete — Ctrl+Alt+Del = reboot */
-        if (!is_up
-            && (flags & KBD_FLAG_CTRL)
-            && (flags & KBD_FLAG_ALT)) {
-            writew86(0x472, 0x1234);  /* soft_reset_flag = warm boot */
-            SET_CS ( 0xFFFF );
-            CPU_IP = 0x0000;          /* jump to reset vector */
+        if (!is_up && (flags & KBD_FLAG_CTRL) && (flags & KBD_FLAG_ALT)) {
+            writew86(0x472, 0x1234);  /* warm boot flag */
+            cpu_portout8(0x20, 0x20); /* EOI */
+            cpu_portout8(0x64, 0xFE); /* reset via keyboard controller */
             return true;
         }
         break;

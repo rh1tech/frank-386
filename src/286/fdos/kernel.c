@@ -8,6 +8,18 @@
 
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
 
+static bool waiter(CPU* cpu, bios_callback_params_t* any) {
+    // actually do nothing, since reboot only is allowed in this case
+    ifl = 1; // allow IRQ
+    return false; // in a loop on the same CS:IP, no IRET required there
+}
+
+static bios_callback_params_t params = {
+    .callback = waiter,
+    .expected_cs = 0xF000,
+    .expected_ip = 0xFEFF
+};
+
 static CPU* cpu;
 
 #define MAX_HARD_DRIVE  4
@@ -4519,6 +4531,9 @@ void kernel(CPU* _cpu) {
         sleep_ms(23);
         gpio_put(PICO_DEFAULT_LED_PIN, false);
     }
-    // stop it before complete impl.
-    while(1);
+    // allow it to wait for keyboard 
+    SET_CS ( 0xF000 ); // -> FFEFFh (bios callback)
+    CPU_IP = 0xFEFF;
+    cpu->ext_accessors->set_bios_callback(cpu, &params);
+    printf("FreeDOS impl. is incomplete. Nothing to do for now");
 }
