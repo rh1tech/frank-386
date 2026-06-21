@@ -1255,16 +1255,16 @@ void bios_post(PC *pc) {
 // init BDA
 	for (uint32_t a = 0x400; a < 0x500; ++a)
 		pstore8(a, 0);
-
+// Zero-valued BDA fields are omitted below: the whole BDA was cleared above.
 	/* BIOS Data Area, IBM PC/AT compatible minimum. */
 	pstore16(0x400, pc->enable_serial ? 0x03F8 : 0x0000); /* COM1 base */
-	pstore16(0x402, 0x0000);                              /* COM2 base */
-	pstore16(0x404, 0x0000);                              /* COM3 base */
-	pstore16(0x406, 0x0000);                              /* COM4 base */
-	pstore16(0x408, 0x0000);                              /* LPT1 base */
-	pstore16(0x40A, 0x0000);                              /* LPT2 base */
-	pstore16(0x40C, 0x0000);                              /* LPT3 base */
-	pstore16(0x40E, 0x0000);                              /* EBDA segment: none */
+//	pstore16(0x402, 0x0000);                              /* COM2 base */
+//	pstore16(0x404, 0x0000);                              /* COM3 base */
+//	pstore16(0x406, 0x0000);                              /* COM4 base */
+//	pstore16(0x408, 0x0000);                              /* LPT1 base */
+//	pstore16(0x40A, 0x0000);                              /* LPT2 base */
+//	pstore16(0x40C, 0x0000);                              /* LPT3 base */
+//	pstore16(0x40E, 0x0000);                              /* EBDA segment: none */
 
 	uint16_t equipment = 0x0000;
 	equipment |= 0x0001;                                  /* diskette subsystem present */
@@ -1279,56 +1279,61 @@ void bios_post(PC *pc) {
 		: (uint16_t)(phys_mem_size >> 10);
 	pstore16(0x413, conventional_kb);                    /* INT 12h value */
 
-	pstore8 (0x417, 0x00);                               /* keyboard flags */
-	pstore8 (0x418, 0x00);
+//	pstore8 (0x417, 0x00);                               /* keyboard flags */
+//	pstore8 (0x418, 0x00);
 	pstore16(0x41A, 0x001E);                             /* kbd buffer head */
 	pstore16(0x41C, 0x001E);                             /* kbd buffer tail */
 
 	/* Diskette BIOS work area.  INT 13h keeps the last FDD status here. */
-	pstore8 (0x43E, 0x00);                               /* diskette recalibration/status */
-	pstore8 (0x43F, 0x00);                               /* diskette motor status */
-	pstore8 (0x440, 0x00);                               /* diskette motor timeout */
-	pstore8 (0x441, 0x00);                               /* last diskette status */
-	for (uint32_t a = 0x442; a <= 0x448; ++a)
-		pstore8(a, 0x00);                                  /* FDC result/status bytes */
+//	pstore8 (0x43E, 0x00);                               /* diskette recalibration/status */
+//	pstore8 (0x43F, 0x00);                               /* diskette motor status */
+//	pstore8 (0x440, 0x00);                               /* diskette motor timeout */
+//	pstore8 (0x441, 0x00);                               /* last diskette status */
+//	for (uint32_t a = 0x442; a <= 0x448; ++a)
+//		pstore8(a, 0x00);                                  /* FDC result/status bytes */
+//	pstore8 (0x48B, 0x00);                               /* diskette media state 0/1 */
+//	pstore8 (0x490, 0x00);                               /* diskette drive 0 media type */
+//	pstore8 (0x491, 0x00);                               /* diskette drive 1 media type */
+//	pstore8 (0x494, 0x00);                               /* diskette current track drive 0 */
+//	pstore8 (0x495, 0x00);                               /* diskette current track drive 1 */
 
 	pstore8 (0x449, 0x03);                               /* current video mode */
 	pstore16(0x44A, 80);                                 /* columns */
 	pstore16(0x44C, 0x1000);                             /* video page size (4096, IBM AT std for mode 3) */
-	pstore16(0x44E, 0x0000);                             /* active page offset */
-	for (uint32_t a = 0x450; a < 0x460; a += 2)
-		pstore16(a, 0x0000);                              /* cursor positions */
+//	pstore16(0x44E, 0x0000);                             /* active page offset */
+//	for (uint32_t a = 0x450; a < 0x460; a += 2)
+//		pstore16(a, 0x0000);                              /* cursor positions */
 	pstore16(0x460, 0x0607);                             /* cursor shape */
-	pstore8 (0x462, 0x00);                               /* active page */
+//	pstore8 (0x462, 0x00);                               /* active page */
 	pstore16(0x463, 0x03D4);                             /* color CRTC base */
 	pstore8 (0x465, 0x60);                               /* video_ctl: cursor emulation on, no blink */
-	pstore8 (0x466, 0x00);                               /* CGA palette */
+//	pstore8 (0x466, 0x00);                               /* CGA palette */
 
-	pstore8 (0x46B, 0x00);                               /* ctrl-break flag */
-	pstore32(0x46C, 0x00000000);                         /* timer ticks */
-	pstore8 (0x470, 0x00);                               /* midnight flag */
-	pstore8 (0x471, 0x00);                               /* break flag */
-	pstore16(0x472, 0x0000);                             /* reset flag */
-	pstore8 (0x474, 0x00);                               /* last HDD status */
+//	pstore8 (0x46B, 0x00);                               /* ctrl-break flag */
+//	pstore32(0x46C, 0x00000000);                         /* timer ticks */
+//	pstore8 (0x470, 0x00);                               /* midnight flag */
+//	pstore8 (0x471, 0x00);                               /* break flag */
+//	pstore16(0x472, 0x0000);                             /* reset flag */
+//	pstore8 (0x474, 0x00);                               /* last HDD status */
 	pstore8 (0x475, hdcount > 0 ? hdcount : 0);           /* fixed disk count */
 	pstore8 (0x476, 0xC0);                               /* HDD control byte */
-	pstore8 (0x477, 0x00);                               /* HDD I/O port offset */
-	pstore8 (0x478, 0x00);                               /* LPT timeouts */
-	pstore8 (0x479, 0x00);
-	pstore8 (0x47A, 0x00);
+//	pstore8 (0x477, 0x00);                               /* HDD I/O port offset */
+//	pstore8 (0x478, 0x00);                               /* LPT timeouts */
+//	pstore8 (0x479, 0x00);
+//	pstore8 (0x47A, 0x00);
 	pstore8 (0x47C, 0x01);                               /* COM1 timeout */
-	pstore8 (0x47D, 0x00);
-	pstore8 (0x47E, 0x00);
-	pstore8 (0x47F, 0x00);
+//	pstore8 (0x47D, 0x00);
+//	pstore8 (0x47E, 0x00);
+//	pstore8 (0x47F, 0x00);
 	pstore16(0x480, 0x001E);                             /* keyboard buffer start */
 	pstore16(0x482, 0x003E);                             /* keyboard buffer end */
 	pstore8 (0x484, 24);                                 /* rows minus one */
 	pstore16(0x485, 16);                                 /* char height */
-	pstore8 (0x487, 0x00);                               /* video control */
+//	pstore8 (0x487, 0x00);                               /* video control */
 	pstore8 (0x488, 0xF9);                               /* switches */
-	pstore8 (0x489, 0x00);                               /* VGA flags */
+//	pstore8 (0x489, 0x00);                               /* VGA flags */
 	pstore8 (0x48E, 0x77);                               /* fdd */
-	pstore8 (0x496, 0x00);                               /* kbd_flag1: E0/E1/RCtrl/RAlt state */
+//	pstore8 (0x496, 0x00);                               /* kbd_flag1: E0/E1/RCtrl/RAlt state */
 
 // init PIC (i8259) — IBM PC/AT sequence
 	// Master PIC: base vector 0x08 (IRQ0→INT 08h … IRQ7→INT 0Fh)
@@ -1375,35 +1380,7 @@ void bios_post(PC *pc) {
     pstore8(0xFFF74, 0xCD); // INT FFh — callback
     pstore8(0xFFF75, 0xFF);
     pstore8(0xFFF76, 0xCF); // IRET — fallback if phase2 returns false
-/*
-	point2iret(0x00); // CPU-generated - DIVIZION BY ZERO
-	point2iret(0x01); // CPU-generated - SINGLE STEP
-	point2iret(0x02); // NMI
-	point2iret(0x03); // Breakpoin
-	point2iret(0x04); // INTO overflow
-	point2iret(0x05); // CPU-generated - BOUND EXCEPTION / PRINT SCREEN (TODO: more strickt impl.)
-	point2iret(0x06); // Invalid opcode
-	point2iret(0x07); // Coprocessor not available
-	point2iret(0x0A); // IRQ2
-	point2iret(0x0B); // IRQ3
-	point2iret(0x0C); // IRQ4
-	point2iret(0x0D); // IRQ5
-	point2iret(0x0E); // IRQ6
-	point2iret(0x0F); // IRQ7 cascade no EOI, if reimpl.
-	point2iret(0x1C); // INT 1Ch: user timer tick hook — no-op until replaced by a TSR 
-	point2iret(0x21); // No DOS functions support on BIOS level
-	point2iret(0x29); // No DOS functions support on BIOS level
-	point2iret(0x2A); // No NETWORK functions support on BIOS level
-	point2iret(0x2F); // No DOS functions support on BIOS level
-	point2iret(0x70); // IRQ8 ? RTC
-	point2iret(0x71); // IRQ9
-	point2iret(0x72); // IRQ10
-	point2iret(0x73); // IRQ11
-	point2iret(0x74); // IRQ12
-	point2iret(0x75); // IRQ13
-	point2iret(0x76); // IRQ14
-// TODO: IRQ1 flow already uses it, to be fixed /	point2iret(0x77); // IRQ15
-*/
+
 // INT 15h support:
     const uint32_t table = 0xFFF10;
     pstore16(table + 0x00, 0x0008); /* number of bytes following */
