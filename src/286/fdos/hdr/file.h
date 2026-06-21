@@ -81,3 +81,4 @@ static BYTE *file_hRcsId =
 /* status for extended open */
 enum {S_OPENED = 1, S_CREATED = 2, S_REPLACED = 3};
 
+#define RDONLY          0
