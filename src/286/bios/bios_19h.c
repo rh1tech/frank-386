@@ -45,7 +45,7 @@ void boot_from(CPU* cpu, uint8_t dl)
 | ESC     | Boot Menu (часто HP)          |
 */
 
-bool bios_19h_waiter(CPU* cpu, void* any) {
+static bool bios_19h_waiter(CPU* cpu, void* any) {
     uint32_t ticks = pload32(0x046C);
     if (cpu->ext_accessors->bios_callback_data == (void*)ticks) {
         goto ex;
