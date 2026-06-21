@@ -137,6 +137,7 @@ void cpu_init_286(CPU* cpu) {
     for(int i = 0; i < 256; ++i) {
         handlers[i] = no_handler;
     }
+    handlers[0x00] = bios_00h; // DIVIDE BY ZERO
     handlers[0x05] = bios_05h; // PRINT SCREEN / BOUND EXCEPTION
     handlers[0x08] = bios_08h; // IRQ0: Timer
     handlers[0x09] = bios_09h; // IRQ1: Keyboard

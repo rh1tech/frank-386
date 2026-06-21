@@ -226,6 +226,7 @@ set(EMU_CORE_SOURCES
     src/286/fpu.c
 
     # 286 BIOS
+    src/286/bios/bios_00h.c
     src/286/bios/bios_05h.c
     src/286/bios/bios_08h.c
     src/286/bios/bios_09h.c
