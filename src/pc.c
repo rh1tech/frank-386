@@ -1166,6 +1166,86 @@ static void point2iret(u32 intno) {
 	pstore16(intno*4 + 2, 0xFFF0);
 }
 
+static void install_dpte(int idx, uint32_t addr)
+{
+    if (!ata_is_inserted(idx) || ata_is_cdrom(idx)) {
+        for (int i = 0; i < 16; i++)
+            pstore8(addr + i, 0x00);
+        return;
+    }
+	// Primary IDE: 0x1F0, Secondary: 0x170
+    uint16_t iobase  = (idx < 2) ? 0x01F0 : 0x0170;
+    uint16_t ctlbase = (idx < 2) ? 0x03F6 : 0x0376;
+//    uint8_t  devhead = (idx & 1) ? 0xB0 : 0xA0; // slave/master
+	uint8_t  devhead = (idx & 1) ? 0xF0 : 0xE0; // With LBA
+
+    uint8_t buf[16] = {0};
+    buf[0]  = (uint8_t)(iobase & 0xFF);
+    buf[1]  = (uint8_t)(iobase >> 8);
+    buf[2]  = (uint8_t)(ctlbase & 0xFF);
+    buf[3]  = (uint8_t)(ctlbase >> 8);
+    buf[4]  = devhead;
+    buf[5]  = 0x00;   // host bus/interface type: ISA-compatible ATA
+    buf[6]  = 0x00;   // flags: no CHS translation/DMA assumptions
+    buf[7]  = 0x02;   // PIO mode 2
+    buf[8]  = 0x00;   // DMA mode: none
+    buf[9]  = 0x0B;   // PIO cycle timing, conservative default
+    buf[10] = 0x00;
+    buf[11] = 0x00;   // DMA channel
+    buf[12] = 0x00;
+    buf[13] = 0x00;
+    buf[14] = 0x00;
+    buf[15] = 0x00;   // checksum placeholder
+
+    // checksum: сумма байт 0..14, результат = (-sum) & 0xFF
+    uint8_t sum = 0;
+    for (int i = 0; i < 15; i++) sum += buf[i];
+    buf[15] = (uint8_t)((-sum) & 0xFF);
+
+    for (int i = 0; i < 16; i++)
+        pstore8(addr + i, buf[i]);
+}
+
+static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
+{
+    // Вектор INT 41h = 0x104, INT 46h = 0x118
+    uint32_t vec = (idx == 0) ? 0x41 * 4 : 0x46 * 4;
+
+    if (!ata_is_inserted(idx) || ata_is_cdrom(idx)) {
+        // Нет диска — вектор указывает на нули, не на fake BIOS
+        // Просто обнулить таблицу и поставить вектор
+        for (int i = 0; i < 16; i++)
+            pstore8(addr + i, 0x00);
+        pstore16(vec, 0x0000);
+        pstore16(vec + 2, 0x0000);
+        return;
+	} else {
+        uint16_t cyls  = ata_get_cyls(idx);
+        uint16_t heads = ata_get_heads(idx);
+        uint16_t sects = ata_get_sects(idx);
+
+        // Fixed Disk Parameter Table, 16 bytes (INT 41h/46h format)
+        pstore16(addr + 0x00, cyls);          /* max cylinders */
+        pstore8 (addr + 0x02, (uint8_t)heads);/* max heads */
+        pstore8 (addr + 0x03, 0x00);          /* reserved (XT: starting reduced write current cyl low) */
+        pstore8 (addr + 0x04, 0x00);          /* reserved (XT: starting reduced write current cyl high) */
+
+		pstore16(addr + 0x05, 0xFFFF);                    /* write precomp: disabled */
+		pstore8 (addr + 0x07, 0x0B);                      /* max ECC burst length */
+		pstore8 (addr + 0x08, heads > 8 ? 0x08 : 0x00);  /* drive control */
+        pstore8 (addr + 0x09, 0x00);          /* reserved */
+        pstore8 (addr + 0x0A, 0x00);          /* reserved */
+        pstore8 (addr + 0x0B, 0x00);          /* reserved */
+		pstore16(addr + 0x0C, cyls - 1);                  /* landing zone */
+        pstore8 (addr + 0x0E, (uint8_t)sects);/* sectors per track */
+        pstore8 (addr + 0x0F, 0x00);          /* reserved */
+    }
+
+    // Вектор → таблица (в любом случае, даже если нули)
+    pstore16(vec,     (uint16_t)(addr - 0xF0000)); /* offset */
+    pstore16(vec + 2, 0xF000);                     /* segment */	
+}
+
 void bios_post(PC *pc) {
 // POST
 	// TODO:
@@ -1386,11 +1466,11 @@ void bios_post(PC *pc) {
 // INT 1Eh Diskette Parameter Table: F000:EFC7
 	install_floppy_dpt();
 // INT 41h/46h support: 0xFFF30-0xFFF4F
-///    install_hdd_dpt(pc, 0, 0xFFF30);  // INT 41h → первый HDD
-///    install_hdd_dpt(pc, 1, 0xFFF40);  // INT 46h → второй HDD
+    install_hdd_dpt(pc, 0, 0xFFF30);  // INT 41h → первый HDD
+    install_hdd_dpt(pc, 1, 0xFFF40);  // INT 46h → второй HDD
 // 0xFFF50-0xFFF6F
-///	install_dpte(0, DPTE_ADDR_0);
-///	install_dpte(1, DPTE_ADDR_1);
+	install_dpte(0, DPTE_ADDR_0);
+	install_dpte(1, DPTE_ADDR_1);
 
 // like VGA BIOS banner:
 	vga_bios_baner(pc->cpu);
