@@ -35,6 +35,7 @@ static BYTE *dirmatch_hRcsId =
 #endif
 #endif
 
+#pragma pack(push, 1)
 typedef struct {
   UBYTE dm_drive;
   BYTE dm_name_pat[FNAME_SIZE + FEXT_SIZE];
@@ -52,6 +53,16 @@ typedef struct {
   ULONG dm_size;                /* file size                    */
   BYTE dm_name[FNAME_SIZE + FEXT_SIZE + 2];     /* file name    */
 } dmatch;
+#pragma pack(pop)
+
+/* see the comment on sda_tmp_dmD/sda_tmp_dm_renD below: the built-in
+   21-byte SDA field only ever needs to hold dm_drive..reserved2 -
+   this assert exists so a future change that grows that prefix is
+   caught at compile time instead of silently corrupting whatever SDA
+   field follows sda_tmp_dm/sda_tmp_dm_ren in struct dos_data. */
+_Static_assert(offsetof(dmatch, dm_attr_fnd) == 21,
+                "dmatch's dm_drive..reserved2 prefix no longer fits in the 21-byte sda_tmp_dm/sda_tmp_dm_ren SDA fields, see lol.h");
+_Static_assert(sizeof(dmatch) == 43, "sizeof(dmatch) changed - re-check every fmemcpy()/sizeof(dmatch) use site");
 
 /*
     sda_tmp_dm/sda_tmp_dm_ren are SDA fields in the original (extern

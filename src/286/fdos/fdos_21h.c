@@ -18,6 +18,7 @@
 #include "hdr/lol.h"
 #include "hdr/tail.h"
 #include "hdr/process.h"
+#include "hdr/file.h"
 #include "hdr/cds.h"
 #include "proto.h"
 #include "globals.h"
@@ -302,7 +303,25 @@ bool fdos_21h(CPU* _cpu) {
         break;
 
       case 0x3d: // DOS 2+ - OPEN - OPEN EXISTING FILE
-      /// TODO:
+      {
+        /* DS:DX = ASCIIZ pathname, AL = access mode.
+           Migrated from inthndlr.c's "case 0x3d" (DosOpen(FP_DS_DX,
+           O_LEGACY | O_OPEN | lr.AL, 0)). On success: CF=0, AX=handle.
+           On failure: CF=1, AX=DOS error code (negated, per the
+           kernel-wide convention - see init_DosOpen()/dup2() above,
+           which already expect this). */
+        long result = DosOpen(FP_DS_DX, O_LEGACY | O_OPEN | CPU_AL, 0);
+        if (result < SUCCESS)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-result);
+        }
+        else
+        {
+          cf = 0;
+          CPU_AX = (UWORD)result;
+        }
+      }
         break;
 
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE

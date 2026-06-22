@@ -89,11 +89,11 @@ long DosRWSft(int sft_idx, size_t n, void FAR * bp, int mode);
 #define DosRead(hndl, n, bp) DosRWSft(get_sft_idx(hndl), n, bp, XFR_READ)
 #define DosWrite(hndl, n, bp) DosRWSft(get_sft_idx(hndl), n, bp, XFR_WRITE)
 ULONG DosSeek(unsigned hndl, LONG new_pos, COUNT mode, int *rc);
-long DosOpen(char FAR * fname, unsigned flags, unsigned attrib);
+long DosOpen(dos_far_ptr fname, unsigned flags, unsigned attrib);
 COUNT CloneHandle(unsigned hndl);
 long DosDup(unsigned Handle);
 COUNT DosForceDup(unsigned OldHandle, unsigned NewHandle);
-long DosOpenSft(char FAR * fname, unsigned flags, unsigned attrib);
+long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib);
 COUNT DosClose(COUNT hndl);
 COUNT DosCloseSft(int sft_idx, BOOL commitonly);
 #define DosCommit(hndl) DosCloseSft(get_sft_idx(hndl), TRUE)

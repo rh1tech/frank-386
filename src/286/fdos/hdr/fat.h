@@ -95,6 +95,7 @@ static BYTE *fat_hRcsId =
 #define ISFAT12(dpbp)   ((((dpbp)->dpb_size)-1)<FAT_MAGIC)
 /* dpb_size == 0 for FAT32, hence doing -1 here */
 
+#pragma pack(push, 1)
 /* FAT file system directory entry                                      */
 struct dirent {
   char dir_name[FNAME_SIZE + FEXT_SIZE];   /* Filename + extension in FCB format */
@@ -122,6 +123,19 @@ struct lfn_entry {
   UWORD lfn_reserved2;
   UNICODE lfn_name11_12[2];     /* Last 2 characters of LFN                */
 };
+#pragma pack(pop)
+
+/* This codebase has no native architecture where these structs would
+   pack tightly by default (see DIR_ATTRIB/DIR_RESERVED/DIR_START_HIGH
+   below, which assume exact byte offsets into struct dirent for raw
+   on-disk access) - #pragma pack(push, 1) above is required, not
+   cosmetic. These asserts exist so that ever changes anything here,
+   a stale assumption is caught at compile time instead of silently
+   misreading/miswriting every directory entry on disk. */
+_Static_assert(sizeof(struct dirent) == 32,
+                "sizeof(struct dirent) must match the 32-byte on-disk FAT directory entry size (DIRENT_SIZE, defined later in this file)");
+_Static_assert(sizeof(struct lfn_entry) == 32,
+                "sizeof(struct lfn_entry) must match the 32-byte on-disk FAT directory entry size (DIRENT_SIZE, defined later in this file)");
 
 /*                                                                      */
 /* filesystem sizeof(dirent) - may be different from core               */

@@ -19,11 +19,75 @@
  */
 #define BIOS10_DCC_VGA_COLOR_ANALOG  0x08
 
+ /*
+ * INT 10h/AH=12h/BL=10h GET EGA/VGA INFORMATION constants.
+ */
+#define BIOS10_EGA_INFO_COLOR_IO      0x00  /* active CRTC is 3Dxh */
+#define BIOS10_EGA_INFO_MONO_IO       0x01  /* active CRTC is 3Bxh */
+
+/*
+ * INT 10h/AH=12h/BL=10h memory-size code returned in BL.
+ *
+ * 00h =  64 KiB
+ * 01h = 128 KiB
+ * 02h = 192 KiB
+ * 03h = 256 KiB
+ *
+ * Plain VGA has 256 KiB addressable video RAM.
+ */
+#define BIOS10_EGA_INFO_MEM_256K      0x03
+
+/*
+ * EGA/VGA switch byte fallback for BDA 40:88.
+ *
+ * 09h is the usual VGA/EGA enhanced color configuration value after mode set:
+ * primary EGA/VGA color display, enhanced mode.
+ */
+#define BIOS10_EGA_SWITCHES_COLOR_ENH 0x09
+
 /*
  * INT 10h/AH=13h write-string mode bits in AL.
  */
 #define BIOS10_WRITE_STRING_UPDATE_CURSOR  0x01
 #define BIOS10_WRITE_STRING_HAS_ATTRS      0x02
+
+/*
+ * VGA Attribute Controller ports/registers.
+ *
+ * 3DAh read resets the Attribute Controller flip-flop to "index" state.
+ * 3C0h is then used first as index port, then as data port.
+ * 3C1h reads the selected Attribute Controller register.
+ */
+#define VGA_INPUT_STATUS_1_COLOR_PORT  0x3DA
+#define VGA_ATTR_INDEX_DATA_PORT       0x3C0
+#define VGA_ATTR_DATA_READ_PORT        0x3C1
+
+#define VGA_ATTR_ENABLE_DISPLAY        0x20
+#define VGA_ATTR_MODE_CONTROL_REG      0x10
+#define VGA_ATTR_OVERSCAN_COLOR_REG    0x11
+
+/*
+ * INT 10h/AH=0Bh/BH=01h CGA palette selector bits.
+ *
+ * BL bit 0 selects the CGA 320x200 4-color palette:
+ *   0 = green / red     / brown
+ *   1 = cyan  / magenta / white
+ *
+ * BL bit 1 selects high-intensity variant.
+ */
+#define BIOS10_CGA_PALETTE_ALT         0x01
+#define BIOS10_CGA_PALETTE_INTENSE     0x02
+
+/*
+ * VGA Attribute Controller palette indexes corresponding to classic CGA
+ * 320x200 4-color palettes.
+ */
+#define BIOS10_CGA_PAL0_COLOR1         0x02
+#define BIOS10_CGA_PAL0_COLOR2         0x04
+#define BIOS10_CGA_PAL0_COLOR3         0x06
+#define BIOS10_CGA_PAL1_COLOR1         0x03
+#define BIOS10_CGA_PAL1_COLOR2         0x05
+#define BIOS10_CGA_PAL1_COLOR3         0x07
 
 /*
  * Update hardware text-mode cursor through the VGA CRT Controller.
@@ -1258,6 +1322,101 @@ static bool bios_10h_0Eh(CPU* cpu) {
 }
 
 /*
+ * Read one VGA Attribute Controller register.
+ *
+ * The Attribute Controller has an internal index/data flip-flop.  Reading
+ * input-status register 3DAh resets it to index state before writing the
+ * register number to 3C0h.
+ */
+static uint8_t bios_10h_attr_read(CPU* cpu, uint8_t reg)
+{
+    (void)cpu_portin8(VGA_INPUT_STATUS_1_COLOR_PORT);
+    cpu_portout8(VGA_ATTR_INDEX_DATA_PORT, reg & 0x1F);
+    return cpu_portin8(VGA_ATTR_DATA_READ_PORT);
+}
+
+/*
+ * Write one VGA Attribute Controller register and re-enable display output.
+ *
+ * After Attribute Controller access, bit 5 must be written to 3C0h to leave
+ * the controller in normal display-enabled state.
+ */
+static void bios_10h_attr_write(CPU* cpu, uint8_t reg, uint8_t value)
+{
+    (void)cpu_portin8(VGA_INPUT_STATUS_1_COLOR_PORT);
+    cpu_portout8(VGA_ATTR_INDEX_DATA_PORT, reg & 0x1F);
+    cpu_portout8(VGA_ATTR_INDEX_DATA_PORT, value);
+    cpu_portout8(VGA_ATTR_INDEX_DATA_PORT, VGA_ATTR_ENABLE_DISPLAY);
+}
+
+/*
+ * Apply classic CGA 320x200 4-color palette selection to VGA Attribute
+ * Controller palette registers 1..3.
+ *
+ * This matters mainly for BIOS modes 04h/05h.  Other modes may legally call
+ * AH=0Bh/BH=01h too; for them this write is harmless on a VGA-compatible
+ * adapter and keeps the BIOS state consistent with the requested CGA palette.
+ */
+static void bios_10h_apply_cga_palette(CPU* cpu, uint8_t selector)
+{
+    bool alt = (selector & BIOS10_CGA_PALETTE_ALT) != 0;
+    bool intense = (selector & BIOS10_CGA_PALETTE_INTENSE) != 0;
+    uint8_t intensity = intense ? 0x08 : 0x00;
+
+    uint8_t c1 = alt ? BIOS10_CGA_PAL1_COLOR1 : BIOS10_CGA_PAL0_COLOR1;
+    uint8_t c2 = alt ? BIOS10_CGA_PAL1_COLOR2 : BIOS10_CGA_PAL0_COLOR2;
+    uint8_t c3 = alt ? BIOS10_CGA_PAL1_COLOR3 : BIOS10_CGA_PAL0_COLOR3;
+
+    bios_10h_attr_write(cpu, 0x01, c1 | intensity);
+    bios_10h_attr_write(cpu, 0x02, c2 | intensity);
+    bios_10h_attr_write(cpu, 0x03, c3 | intensity);
+}
+
+/*
+VIDEO - SET BACKGROUND/BORDER COLOR OR CGA PALETTE
+AH = 0Bh
+
+BH = 00h
+BL = border/background color
+
+BH = 01h
+BL = CGA 320x200 4-color palette selector
+
+Return:
+Nothing
+
+Desc:
+BH=00h controls the VGA overscan/border color through Attribute Controller
+register 11h.  This is the VGA-compatible equivalent of the old CGA border
+color BIOS call.
+
+BH=01h selects the classic CGA 4-color palette.  On VGA this is represented
+by Attribute Controller palette registers 1..3.
+*/
+static bool bios_10h_0Bh(CPU* cpu)
+{
+    switch (CPU_BH) {
+    case 0x00:
+        /*
+         * VGA overscan color is a 6-bit palette index.  Masking avoids
+         * leaking unrelated high bits from non-standard callers.
+         */
+        bios_10h_attr_write(cpu, VGA_ATTR_OVERSCAN_COLOR_REG, CPU_BL & 0x3F);
+        cf = 0;
+        return true;
+
+    case 0x01:
+        bios_10h_apply_cga_palette(cpu, CPU_BL);
+        cf = 0;
+        return true;
+
+    default:
+        cf = 1;
+        return true;
+    }
+}
+
+/*
 VIDEO - TOGGLE INTENSITY / BLINKING BIT
 AX = 1003h
 BL = 00h enable intensive background colors
@@ -1280,23 +1439,14 @@ static bool bios_10h_1003h(CPU* cpu)
 
     uint8_t enable_blink = CPU_BL & 0x01;
 
-    /*
-     * Attribute Controller uses an internal address/data flip-flop.
-     * Reading the input-status register resets it to address mode.
-     */
-    (void)cpu_portin8(0x3DA);
-
-    cpu_portout8(0x3C0, 0x10);
-    uint8_t mode_ctl = cpu_portin8(0x3C1);
+    uint8_t mode_ctl = bios_10h_attr_read(cpu, VGA_ATTR_MODE_CONTROL_REG);
 
     if (enable_blink)
         mode_ctl |= 0x08;
     else
         mode_ctl &= ~0x08;
 
-    cpu_portout8(0x3C0, 0x10);
-    cpu_portout8(0x3C0, mode_ctl);
-    cpu_portout8(0x3C0, 0x20);
+    bios_10h_attr_write(cpu, VGA_ATTR_MODE_CONTROL_REG, mode_ctl);
 
     cf = 0;
     return true;
@@ -1317,15 +1467,64 @@ check only AL==1Ah to decide that the BIOS supports display-combination
 reporting.
 
 For this native BIOS there is only one built-in VGA-compatible adapter and
-no second physical display.  Reporting VGA color analog for both BL and BH is
-the safest plain-VGA answer: it tells DOS software "VGA is present" without
-claiming any SVGA/VESA capability.
+no second physical display.
 */
 static bool bios_10h_1A00h(CPU* cpu)
 {
     CPU_AL = 0x1A;
     CPU_BL = BIOS10_DCC_VGA_COLOR_ANALOG;
     CPU_BH = 0;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - ALTERNATE FUNCTION SELECT - GET EGA INFORMATION
+AH = 12h
+BL = 10h
+
+Return:
+BH = video state
+     00h color mode in effect, CRTC base 3Dxh
+     01h mono mode in effect,  CRTC base 3Bxh
+BL = installed adapter memory
+     03h = 256 KiB
+CH = feature connector bits
+CL = switch settings
+
+Desc:
+This is an old EGA/VGA detection call.  Programs use it to distinguish
+CGA-only BIOSes from EGA/VGA BIOSes and to determine adapter RAM size.
+
+The native BIOS exposes a plain VGA-compatible adapter:
+  - standard CGA/EGA/VGA register set;
+  - 256 KiB VGA memory;
+  - no SVGA/VESA claim here.
+
+BDA 40:88 stores the EGA/VGA switch byte. Its high nibble contains feature
+connector bits, while the full byte is returned as CL by this BIOS call.
+If the BDA field was not initialized yet, use the standard color enhanced
+fallback value.
+*/
+static bool bios_10h_1210h(CPU* cpu)
+{
+    uint16_t crtc = readw86(0x463);
+    uint8_t switches = read86(0x488);
+
+    if (crtc == 0)
+        crtc = 0x3D4;
+
+    if (switches == 0)
+        switches = BIOS10_EGA_SWITCHES_COLOR_ENH;
+
+    CPU_BH = (crtc == 0x3B4) ?
+        BIOS10_EGA_INFO_MONO_IO :
+        BIOS10_EGA_INFO_COLOR_IO;
+
+    CPU_BL = BIOS10_EGA_INFO_MEM_256K;
+    CPU_CH = switches >> 4;
+    CPU_CL = switches;
+
     cf = 0;
     return true;
 }
@@ -1421,21 +1620,32 @@ bool bios_10h(CPU* cpu) {
             return bios_10h_09h(cpu); // WRITE CHARACTER AND ATTRIBUTE
         case 0x0A:
             return bios_10h_0Ah(cpu); // WRITE CHARACTER ONLY
+        case 0x0B:
+            return bios_10h_0Bh(cpu); // SET BORDER/BACKGROUND OR CGA PALETTE
         case 0x0E:
             return bios_10h_0Eh(cpu); // TELETYPE OUTPUT
         case 0x0F:
             return bios_10h_0Fh(cpu); // GET CURRENT VIDEO MODE
+        case 0x10:
+            if (CPU_AL == 0x03)
+                return bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
+            break;
+        case 0x11:
+            if (CPU_AL == 0x30)
+                return bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
+            break;
+        case 0x12:
+            if (CPU_BL == 0x10)
+               return bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
+            break;
         case 0x13:
             return bios_10h_13h(cpu); // WRITE STRING
-        default:
-            if (CPU_AX == 0x1003)
-                return bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
-            if (CPU_AX == 0x1A00)
+        case 0x1A:
+            if (CPU_AL == 0x00)
                 return bios_10h_1A00h(cpu); // GET DISPLAY COMBINATION CODE
-            if (CPU_AX == 0x1130)
-                return bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
-//        case 0x74: // ? HUNTER 16 - SET LCD WINDOWS POSITION
-         // unsupported
+            break;
+        default:
+            // unsupported
     }
     cf = 1; // unsuported unknown function
     return true;
