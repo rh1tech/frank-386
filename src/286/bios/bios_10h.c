@@ -7,11 +7,11 @@
 #define BIOS_FONT8X14_OFF   0xB000
 #define BIOS_FONT8X8_OFF    0xBE00
 
-static bool no_handler(CPU* cpu) {
-    cpu_err_msg(cpu, "VIDEO BIOS - ERROR: no handler defined");
-while(1); // remove it
-    return true;
-}
+/*
+ * INT 10h/AH=13h write-string mode bits in AL.
+ */
+#define BIOS10_WRITE_STRING_UPDATE_CURSOR  0x01
+#define BIOS10_WRITE_STRING_HAS_ATTRS      0x02
 
 /*
  * Update hardware text-mode cursor through the VGA CRT Controller.
@@ -430,6 +430,88 @@ static void vga_program_regs(CPU* cpu, const VgaRegs *r, uint16_t crtc_base)
 }
 
 /*
+ * Return true for BIOS text modes backed by character/attribute memory.
+ *
+ * Supported here:
+ *   00h/01h  40x25 color text
+ *   02h/03h  80x25 color text
+ *   07h      80x25 monochrome text
+ *
+ * Graphics modes need font rendering and pixel addressing, so read/write/
+ * scroll helpers below deliberately reject them.
+ */
+static bool bios_10h_is_text_mode(uint8_t mode)
+{
+    return mode <= 0x03 || mode == 0x07;
+}
+
+/*
+ * Return the physical base address of text video RAM for current mode.
+ *
+ * Color text modes use B800:0000.
+ * Monochrome mode 07h uses B000:0000.
+ */
+static uint32_t bios_10h_text_base(uint8_t mode)
+{
+    return (mode == 0x07) ? 0xB0000u : 0xB8000u;
+}
+
+/*
+ * Program VGA CRTC display start address for selected text page.
+ *
+ * BDA 40:4C stores page size in bytes, while CRTC start address is measured
+ * in character cells / words.  Therefore page byte offset is divided by two.
+ *
+ * CRTC registers:
+ *   0Ch = start address high
+ *   0Dh = start address low
+ */
+static void bios_10h_set_display_page(CPU* cpu, uint8_t page)
+{
+    uint16_t page_size = readw86(0x44C);
+    uint16_t crtc = readw86(0x463);
+
+    if (page_size == 0)
+        page_size = 0x1000;
+    if (crtc == 0)
+        crtc = 0x3D4;
+
+    uint16_t start = ((uint16_t)page * page_size) / 2;
+
+    write86(0x462, page);
+
+    cpu_portout8(crtc, 0x0C);
+    cpu_portout8(crtc + 1, start >> 8);
+    cpu_portout8(crtc, 0x0D);
+    cpu_portout8(crtc + 1, start & 0xFF);
+}
+
+/*
+ * Return physical address of text cell at page,row,col.
+ *
+ * Each text cell is two bytes:
+ *   byte 0 = character
+ *   byte 1 = attribute
+ */
+static uint32_t bios_10h_text_cell(uint8_t mode,
+                                   uint8_t page,
+                                   uint8_t row,
+                                   uint8_t col)
+{
+    uint16_t cols = readw86(0x44A);
+    uint16_t page_size = readw86(0x44C);
+
+    if (cols == 0)
+        cols = 80;
+    if (page_size == 0)
+        page_size = 0x1000;
+
+    return bios_10h_text_base(mode) +
+           (uint32_t)page * page_size +
+           ((uint32_t)row * cols + col) * 2u;
+}
+
+/*
 VIDEO - SET VIDEO MODE
 AH = 00h
 AL = desired video mode (see #00010)
@@ -600,6 +682,386 @@ static bool bios_10h_03h(CPU* cpu) {
     CPU_CL = (uint8_t)(shape & 0xFF); /* cursor end scan line   */
     CPU_DH = (uint8_t)(cur >> 8);     /* row */
     CPU_DL = (uint8_t)(cur & 0xFF);   /* column */
+    return true;
+}
+
+/*
+VIDEO - SELECT ACTIVE DISPLAY PAGE
+AH = 05h
+AL = page number
+
+Return:
+Nothing
+
+Desc:
+Selects which text page is displayed.  Cursor coordinates for every page
+are still stored independently in BDA 40:50..5F.
+*/
+static bool bios_10h_05h(CPU* cpu)
+{
+    uint8_t page = CPU_AL;
+    uint8_t mode = read86(0x449);
+
+    if (page > 7) {
+        cf = 1;
+        return true;
+    }
+
+    /*
+     * For graphics modes keep the BIOS call harmless.  Classic BIOSes have
+     * mode-specific rules here; for this native BIOS only text pages are
+     * useful now.
+     */
+    if (!bios_10h_is_text_mode(mode) && page != 0) {
+        cf = 1;
+        return true;
+    }
+
+    bios_10h_set_display_page(cpu, page);
+
+    uint16_t cur = readw86(0x450 + (uint16_t)page * 2);
+    bios_10h_set_crtc_cursor(cpu, page, cur >> 8, cur & 0xFF);
+
+    cf = 0;
+    return true;
+}
+
+/*
+ * Common implementation for INT 10h/AH=06h and AH=07h.
+ *
+ * AH=06h scrolls a rectangular text window up.
+ * AH=07h scrolls it down.
+ *
+ * AL = number of lines to scroll.
+ *      AL=00h means clear the whole window.
+ * BH = attribute used for newly blanked lines.
+ * CH,CL = upper-left row/column.
+ * DH,DL = lower-right row/column.
+ *
+ * Only text modes are handled.  Graphics-mode scrolling requires pixel
+ * operations and is intentionally not emulated here.
+ */
+static bool bios_10h_scroll_window(CPU* cpu, bool down)
+{
+    uint8_t mode = read86(0x449);
+
+    if (!bios_10h_is_text_mode(mode)) {
+        cf = 1;
+        return true;
+    }
+
+    uint16_t cols = readw86(0x44A);
+    uint8_t rows_minus_1 = read86(0x484);
+    uint8_t page = read86(0x462);
+    uint8_t lines = CPU_AL;
+    uint8_t attr = CPU_BH;
+
+    if (cols == 0)
+        cols = 80;
+    if (rows_minus_1 == 0)
+        rows_minus_1 = 24;
+
+    uint8_t max_row = rows_minus_1;
+    uint8_t max_col = cols - 1;
+
+    uint8_t top = CPU_CH;
+    uint8_t left = CPU_CL;
+    uint8_t bottom = CPU_DH;
+    uint8_t right = CPU_DL;
+
+    if (top > max_row)
+        top = max_row;
+    if (bottom > max_row)
+        bottom = max_row;
+    if (left > max_col)
+        left = max_col;
+    if (right > max_col)
+        right = max_col;
+
+    if (top > bottom || left > right) {
+        cf = 0;
+        return true;
+    }
+
+    uint8_t height = bottom - top + 1;
+
+    /*
+     * IBM BIOS convention:
+     *   AL=0 or AL>=window height clears the entire window.
+     */
+    if (lines == 0 || lines >= height)
+        lines = height;
+
+    if (!down) {
+        for (uint8_t r = top; r <= bottom; r++) {
+            uint8_t src_r = r + lines;
+
+            for (uint8_t c = left; c <= right; c++) {
+                uint32_t dst = bios_10h_text_cell(mode, page, r, c);
+
+                if (src_r <= bottom) {
+                    uint32_t src = bios_10h_text_cell(mode, page, src_r, c);
+                    write86(dst + 0, read86(src + 0));
+                    write86(dst + 1, read86(src + 1));
+                } else {
+                    write86(dst + 0, ' ');
+                    write86(dst + 1, attr);
+                }
+            }
+        }
+    } else {
+        for (int r = bottom; r >= top; r--) {
+            int src_r = r - lines;
+
+            for (uint8_t c = left; c <= right; c++) {
+                uint32_t dst = bios_10h_text_cell(mode, page, r, c);
+
+                if (src_r >= top) {
+                    uint32_t src = bios_10h_text_cell(mode, page, src_r, c);
+                    write86(dst + 0, read86(src + 0));
+                    write86(dst + 1, read86(src + 1));
+                } else {
+                    write86(dst + 0, ' ');
+                    write86(dst + 1, attr);
+                }
+            }
+        }
+    }
+
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - READ CHARACTER AND ATTRIBUTE AT CURSOR POSITION
+AH = 08h
+BH = page number
+
+Return:
+AH = attribute
+AL = character
+
+Only text modes are implemented.  Graphics modes would need font/pixel
+reverse mapping and are not useful for normal DOS boot text output.
+*/
+static bool bios_10h_08h(CPU* cpu)
+{
+    uint8_t mode = read86(0x449);
+    uint8_t page = CPU_BH;
+
+    if (page > 7 || !bios_10h_is_text_mode(mode)) {
+        cf = 1;
+        return true;
+    }
+
+    uint16_t cur = readw86(0x450 + (uint16_t)page * 2);
+    uint32_t cell = bios_10h_text_cell(mode, page, cur >> 8, cur & 0xFF);
+
+    CPU_AL = read86(cell + 0);
+    CPU_AH = read86(cell + 1);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - WRITE CHARACTER ONLY AT CURSOR POSITION
+AH = 0Ah
+AL = character
+BH = page
+BL = foreground color in graphics modes; ignored in text modes
+CX = repeat count
+
+Return:
+Nothing
+
+Desc:
+Writes only character bytes, preserving existing attributes.
+Cursor position is not advanced.
+
+This implementation handles text modes only.  That is enough for normal
+DOS text output and matches the rest of the current native BIOS text path.
+*/
+static bool bios_10h_0Ah(CPU* cpu)
+{
+    uint8_t mode = read86(0x449);
+    uint8_t page = CPU_BH;
+    uint16_t cnt = CPU_CX;
+
+    if (cnt == 0) {
+        cf = 0;
+        return true;
+    }
+
+    if (page > 7 || !bios_10h_is_text_mode(mode)) {
+        cf = 1;
+        return true;
+    }
+
+    uint16_t cols = readw86(0x44A);
+    uint8_t rows_minus_1 = read86(0x484);
+
+    if (cols == 0)
+        cols = 80;
+    if (rows_minus_1 == 0)
+        rows_minus_1 = 24;
+
+    uint16_t cur = readw86(0x450 + (uint16_t)page * 2);
+    uint8_t row = cur >> 8;
+    uint8_t col = cur & 0xFF;
+
+    uint32_t pos = (uint32_t)row * cols + col;
+    uint32_t max_cells = (uint32_t)(rows_minus_1 + 1) * cols;
+
+    while (cnt-- && pos < max_cells) {
+        uint8_t r = pos / cols;
+        uint8_t c = pos % cols;
+        uint32_t cell = bios_10h_text_cell(mode, page, r, c);
+
+        write86(cell + 0, CPU_AL);
+        pos++;
+    }
+
+    cf = 0;
+    return true;
+}
+
+/*
+ * Store one text character cell and optionally update its attribute.
+ *
+ * Used by INT 10h/AH=13h.  Kept separate because AH=13h has two string
+ * formats:
+ *
+ *   AL bit1 = 0: string contains characters only, BL supplies attribute
+ *   AL bit1 = 1: string contains character/attribute pairs
+ */
+static void bios_10h_store_string_cell(uint8_t mode,
+                                       uint8_t page,
+                                       uint8_t row,
+                                       uint8_t col,
+                                       uint8_t ch,
+                                       uint8_t attr,
+                                       bool write_attr)
+{
+    uint32_t cell = bios_10h_text_cell(mode, page, row, col);
+
+    write86(cell + 0, ch);
+
+    if (write_attr)
+        write86(cell + 1, attr);
+}
+
+/*
+VIDEO - WRITE STRING
+AH = 13h
+AL = write mode
+     bit 0: update cursor after writing
+     bit 1: string contains character/attribute pairs
+BH = page
+BL = attribute if AL bit 1 is clear
+CX = string length in characters
+DH = row
+DL = column
+ES:BP -> string
+
+Return:
+Nothing
+
+Desc:
+Writes a string directly at DH:DL.  This is a common DOS/application BIOS
+call for faster text output than repeated AH=0Eh calls.
+
+Important:
+When AL bit 1 is set, CX is still the number of CHARACTERS, not the number
+of bytes.  The source then consumes two bytes per character:
+
+    char, attr, char, attr, ...
+
+This implementation does not scroll.  Real BIOS behavior for wrapping and
+scrolling varies between adapters/BIOSes; clipping at the visible text page
+is safer for this native BIOS layer.
+*/
+static bool bios_10h_13h(CPU* cpu)
+{
+    uint8_t mode = read86(0x449);
+    uint8_t page = CPU_BH;
+
+    if (page > 7 || !bios_10h_is_text_mode(mode)) {
+        cf = 1;
+        return true;
+    }
+
+    uint16_t cols = readw86(0x44A);
+    uint8_t rows_minus_1 = read86(0x484);
+
+    if (cols == 0)
+        cols = 80;
+    if (rows_minus_1 == 0)
+        rows_minus_1 = 24;
+
+    uint8_t row = CPU_DH;
+    uint8_t col = CPU_DL;
+
+    if (row > rows_minus_1 || col >= cols) {
+        cf = 0;
+        return true;
+    }
+
+    bool update_cursor = (CPU_AL & BIOS10_WRITE_STRING_UPDATE_CURSOR) != 0;
+    bool has_attrs = (CPU_AL & BIOS10_WRITE_STRING_HAS_ATTRS) != 0;
+    uint8_t default_attr = CPU_BL;
+
+    uint32_t src = ((uint32_t)CPU_ES << 4) + CPU_BP;
+    uint16_t count = CPU_CX;
+
+    while (count--) {
+        uint8_t ch = read86(src++);
+        uint8_t attr = default_attr;
+
+        if (has_attrs)
+            attr = read86(src++);
+
+        bios_10h_store_string_cell(mode, page, row, col, ch, attr, true);
+
+        col++;
+        if (col >= cols) {
+            col = 0;
+            row++;
+            if (row > rows_minus_1)
+                break;
+        }
+    }
+
+    if (update_cursor) {
+        uint16_t cur = ((uint16_t)row << 8) | col;
+
+        writew86(0x450 + (uint16_t)page * 2, cur);
+        bios_10h_set_crtc_cursor(cpu, page, row, col);
+    }
+
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - GET CURRENT VIDEO MODE
+AH = 0Fh
+
+Return:
+AH = number of character columns
+AL = current video mode
+BH = active display page
+*/
+static bool bios_10h_0Fh(CPU* cpu)
+{
+    uint16_t cols = readw86(0x44A);
+
+    if (cols == 0)
+        cols = 80;
+
+    CPU_AH = cols & 0xFF;
+    CPU_AL = read86(0x449);
+    CPU_BH = read86(0x462);
+    cf = 0;
     return true;
 }
 
@@ -784,6 +1246,51 @@ static bool bios_10h_0Eh(CPU* cpu) {
 }
 
 /*
+VIDEO - TOGGLE INTENSITY / BLINKING BIT
+AX = 1003h
+BL = 00h enable intensive background colors
+BL = 01h enable blinking
+BH = 00h, required by many BIOS references
+
+VGA Attribute Controller register 10h:
+  bit 3 = blink enable.
+
+This controls interpretation of text attribute bit 7:
+  blink enabled  -> bit 7 means blink
+  blink disabled -> bit 7 becomes high background intensity
+*/
+static bool bios_10h_1003h(CPU* cpu)
+{
+    if (CPU_BH != 0) {
+        cf = 1;
+        return true;
+    }
+
+    uint8_t enable_blink = CPU_BL & 0x01;
+
+    /*
+     * Attribute Controller uses an internal address/data flip-flop.
+     * Reading the input-status register resets it to address mode.
+     */
+    (void)cpu_portin8(0x3DA);
+
+    cpu_portout8(0x3C0, 0x10);
+    uint8_t mode_ctl = cpu_portin8(0x3C1);
+
+    if (enable_blink)
+        mode_ctl |= 0x08;
+    else
+        mode_ctl &= ~0x08;
+
+    cpu_portout8(0x3C0, 0x10);
+    cpu_portout8(0x3C0, mode_ctl);
+    cpu_portout8(0x3C0, 0x20);
+
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - GET FONT INFORMATION (EGA, MCGA, VGA)
 AX = 1130h
 BH = pointer specifier
@@ -862,15 +1369,30 @@ bool bios_10h(CPU* cpu) {
             return bios_10h_02h(cpu); // SET CURSOR POSITION
         case 0x03:
             return bios_10h_03h(cpu); // GET CURSOR POSITION AND SIZE
+        case 0x05:
+            return bios_10h_05h(cpu); // SELECT ACTIVE DISPLAY PAGE
+        case 0x06:
+            return bios_10h_scroll_window(cpu, false); // SCROLL WINDOW UP
+        case 0x07:
+            return bios_10h_scroll_window(cpu, true); // SCROLL WINDOW DOWN
+        case 0x08:
+            return bios_10h_08h(cpu); // READ CHARACTER AND ATTRIBUTE
         case 0x09:
             return bios_10h_09h(cpu); // WRITE CHARACTER AND ATTRIBUTE
+        case 0x0A:
+            return bios_10h_0Ah(cpu); // WRITE CHARACTER ONLY
         case 0x0E:
             return bios_10h_0Eh(cpu); // TELETYPE OUTPUT
+        case 0x0F:
+            return bios_10h_0Fh(cpu); // GET CURRENT VIDEO MODE
+        case 0x13:
+            return bios_10h_13h(cpu); // WRITE STRING
         default:
+            if (CPU_AX == 0x1003)
+                return bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
             if (CPU_AX == 0x1130)
                 return bios_10h_1130h(cpu);
-            no_handler(cpu);
-        case 0x74: // ? HUNTER 16 - SET LCD WINDOWS POSITION
+//        case 0x74: // ? HUNTER 16 - SET LCD WINDOWS POSITION
          // unsupported
     }
     cf = 1; // unsuported unknown function
