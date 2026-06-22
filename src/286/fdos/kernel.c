@@ -2251,7 +2251,34 @@ BOOL flush(void)
 }
 
 /*
-    -----------------------------------------------------------------
+    DeleteBlockInBufferCache(blknolow, blknohigh, dsk, mode) - drop
+    (XFR_WRITE) or write back (XFR_READ) any cached buffer for drive
+    "dsk" whose block number falls in [blknolow, blknohigh], before a
+    direct (cache-bypassing) multi-sector dskxfer() touches that same
+    range - see rwblock()'s "complete sectors" fast path below.
+
+    Migrated from blockio.c verbatim.
+*/
+BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mode)
+{
+  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+  UWORD firstbp = FP_OFF(LoL->firstbuf);
+  /* Search through buffers to see if the required block  */
+  /* is already in a buffer                               */
+  do {
+    if (blknolow <= bp->b_blkno && bp->b_blkno <= blknohigh && (bp->b_flag & BFR_VALID) && (bp->b_unit == dsk)) {
+      if (mode == XFR_READ)
+        flush1(bp);
+      else
+        bp->b_flag = 0;
+    }
+    bp = b_next(bp);
+  }
+  while (buf_seg_off(bp) != firstbp);
+  return FALSE;
+}
+
+/*    -----------------------------------------------------------------
     Device Driver Interface: dskxfer()
     -----------------------------------------------------------------
 
@@ -3732,6 +3759,8 @@ STATIC sft *get_free_sft(COUNT *sft_idx)
   return (sft *)-1;
 }
 
+STATIC int merge_file_changes(f_node_ptr fnp, int collect);
+
 /* forward declaration: sft_to_fnode() is defined further down in
    this file (near fnode_to_sft()), but dos_merge_file_changes()
    below needs to call it. */
@@ -3786,25 +3815,213 @@ int network_redirector_fp(unsigned cmd, void *s)
   return -1;
 }
 
+/* swap internal and external delete flags */
 /*
-    /// TODO: stub for this iteration. DosCloseSft() (full handle-close
-    /// logic: network redirector close, device-driver C_CLOSE request,
-    /// SHARE deregistration, dos_close()) is not migrated yet. This
-    /// symbol only exists so merge_file_changes()'s collect==-1 branch
-    /// (below) links; that branch is never actually reached by any
-    /// code migrated so far (dos_open() only ever calls
-    /// merge_file_changes() with collect==TRUE/FALSE, never -1) - so
-    /// rather than silently doing the wrong thing if that assumption
-    /// ever stops holding, this panics loudly instead.
+    Migrated from fatdir.c verbatim.
+*/
+STATIC void swap_deleted(char *name)
+{
+  if (name[0] == DELETED || name[0] == EXT_DELETED)
+    name[0] ^= EXT_DELETED - DELETED; /* 0xe0 */
+}
 
-    Migrated from dosfns.c (signature only; body replaced as above).
+/* DosCloseSft() (the real implementation - network redirector close,
+   device-driver C_CLOSE request, SHARE deregistration, dos_close())
+   is defined further down in this file, after dos_open() - it needs
+   sft_to_fnode()/fnode_to_sft()/dos_close(), which aren't defined yet
+   at this point. The prototype in proto.h is enough for the
+   collect==-1 branch in merge_file_changes() above to compile. */
+
+/* Description.
+ *  Write fnp->f_dir entry to disk if "update" arg is FALSE, or it's TRUE and
+ *  the entry has ever been written (modified) according to its flags.
+ * Side effects.
+ *    1. F_DMOD flag if original directory entry was modified.
+ * Return value.
+ *  TRUE  - all OK.
+ *  FALSE - error occured (fnode is released).
+
+    Migrated from fatdir.c. fputbyte()/putdirent() (dos_far_ptr-based
+    macros, see proto.h) become plain *(UBYTE*)=.../memcpy(): bp->b_buffer
+    and fnp->f_dir are both native ARM memory here (see fnode.h's note
+    on f_node not being guest-visible), so there is no far pointer to
+    translate, the same reasoning as dir_read()'s memcpy() above.
+*/
+BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
+{
+  struct buffer *bp;
+  UBYTE *vp;
+
+  /* Update the entry if it was modified by a write or create...  */
+  if (!update || (fnp->f_flags & (SFT_FCLEAN|SFT_FDATE)) != SFT_FCLEAN)
+  {
+    bp = getblock(fnp->f_dirsector, fnp->f_dpb->dpb_unit);
+
+    /* Now that we have a block, transfer the directory      */
+    /* entry into the block.                                */
+    if (bp == NULL)
+      return FALSE;
+
+    swap_deleted(fnp->f_dir.dir_name);
+
+    vp = &bp->b_buffer[fnp->f_diridx * DIRENT_SIZE];
+
+    if (update)
+    {
+      /* only update fields that are also in the SFT, for dos_close/commit */
+      memcpy(&vp[DIR_NAME], fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE);
+      vp[DIR_ATTRIB] = fnp->f_dir.dir_attrib;
+      fputword(&vp[DIR_TIME], fnp->f_dir.dir_time);
+      fputword(&vp[DIR_DATE], fnp->f_dir.dir_date);
+      fputword(&vp[DIR_START], fnp->f_dir.dir_start);
+#ifdef WITHFAT32
+      if (ISFAT32(fnp->f_dpb))
+        fputword(&vp[DIR_START_HIGH], fnp->f_dir.dir_start_high);
+#endif
+      fputlong(&vp[DIR_SIZE], fnp->f_dir.dir_size);
+    }
+    else
+    {
+      memcpy(vp, &fnp->f_dir, sizeof(struct dirent));
+    }
+
+    swap_deleted(fnp->f_dir.dir_name);
+
+    bp->b_flag &= ~(BFR_DATA | BFR_FAT);
+    bp->b_flag |= BFR_DIR | BFR_DIRTY | BFR_VALID;
+  }
+  /* Clear buffers after directory write or DOS close                     */
+  return flush_buffers(fnp->f_dpb->dpb_unit);
+}
+
+/*
+    dos_close(fd) - the FAT-level half of closing a file: stamp the
+    modification time/date if the file was written and the SFT's
+    "date already set" bit isn't set, propagate any in-memory changes
+    to other SFTs pointing at the same file, then write the directory
+    entry back (dir_write_update(), which - see its comment above -
+    only actually writes anything if the file was modified).
+
+    Migrated from fatfs.c verbatim.
+*/
+COUNT dos_close(COUNT fd)
+{
+  /* Translate the fd into a useful pointer                       */
+  f_node_ptr fnp = sft_to_fnode(fd);
+
+  if (!(fnp->f_flags & SFT_FCLEAN))
+  {
+    if (!(fnp->f_flags & SFT_FDATE))
+    {
+      fnp->f_dir.dir_time = dos_gettime();
+      fnp->f_dir.dir_date = dos_getdate();
+    }
+
+    merge_file_changes(fnp, FALSE);     /* /// Added - Ron Cemer */
+  }
+  fnp->f_sft_idx = 0xff;
+
+  return dir_write_update(fnp, TRUE) ? SUCCESS : DE_INVLDHNDL;
+}
+
+/*
+    DosCloseSft(sft_idx, commitonly) - the real implementation behind
+    INT 21h AH=3Eh (close) and the "commit" (AH=68h) call.
+
+    Migrated from dosfns.c. Differences from the original:
+      - sftp->sft_dev is a dos_far_ptr here (see sft.h), so
+        BinaryCharIO() (which takes a pointer to a dos_far_ptr) is
+        called against a local copy of it, the same way
+        DeviceOpenSft() above already does; dh_attr is read through
+        ARM_PTR(sftp->sft_dev) instead of "sftp->sft_dev->dh_attr"
+        directly.
+      - the SFT_FSHARED (network redirector) branch is migrated as-is
+        but unreachable: SFT_FSHARED can only be set by the IS_NETWORK
+        path in DosOpenSft(), which - see its comment - can never be
+        taken in this codebase (no redirector exists to create a
+        network drive). network_redirector_fp() always reports
+        failure (see its definition above) regardless.
+      - the SHARE-installed branch (share_close_file()) is left as a
+        deliberate panic, same reasoning as DosOpenSft()'s SHARE
+        branch above: IsShareInstalled() always returns FALSE, so it
+        is unreachable right now, not silently wrong.
 */
 COUNT DosCloseSft(int sft_idx, BOOL commitonly)
 {
-  UNREFERENCED_PARAMETER(sft_idx);
-  UNREFERENCED_PARAMETER(commitonly);
-  printf("PANIC: DosCloseSft() called but not implemented\n");
-  for (;;) ;
+  sft *sftp = idx_to_sft(sft_idx);
+  int result;
+
+  if (sftp == (sft *) - 1)
+    return DE_INVLDHNDL;
+
+  internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), sftp);
+/*
+   remote sub sft_count.
+ */
+  if (sftp->sft_flags & SFT_FSHARED)
+  {
+    /// unreachable: see the function-level comment above.
+    return network_redirector_fp(commitonly ? REM_FLUSH : REM_CLOSE, sftp);
+  }
+
+  if (sftp->sft_flags & SFT_FDEVICE)
+  {
+    struct dhdr *dev = (struct dhdr *)ARM_PTR(sftp->sft_dev);
+    if (dev->dh_attr & SFT_FOCRM)
+    {
+      /* if Open/Close/RM bit in driver's attribute is set
+       * then issue a Close request to the driver
+       */
+      dos_far_ptr devp = sftp->sft_dev;
+      if (BinaryCharIO(&devp, 0, NULL, C_CLOSE) != SUCCESS)
+        return DE_INVLDHNDL;
+    }
+    /* now just drop the count if a device */
+    if (!commitonly)
+      sftp->sft_count -= 1;
+    return SUCCESS;
+  }
+
+  /* else call file system handler                     */
+  result = dos_close(sft_idx);
+  if (commitonly || result != SUCCESS)
+    return result;
+
+/* /// Added for SHARE *** CURLY BRACES ADDED ALSO!!! ***.  - Ron Cemer */
+  if (sftp->sft_count == 1 && IsShareInstalled(TRUE))
+  {
+    /// unreachable: IsShareInstalled() always returns FALSE in this
+    /// codebase. share_close_file() is not implemented, so this is
+    /// left as a deliberate panic rather than silently doing nothing,
+    /// in case that assumption ever stops holding.
+    printf("PANIC: DosCloseSft reached share_close_file unexpectedly\n");
+    for (;;) ;
+  }
+/* /// End of additions for SHARE.  - Ron Cemer */
+  sftp->sft_count -= 1;
+  return SUCCESS;
+}
+
+/*
+    DosClose(hndl) - INT 21h AH=3Eh: close a DOS file handle for the
+    current process.
+
+    Migrated from dosfns.c. p is a native pointer here (see
+    get_free_hndl() above for the same "psp through
+    internal_data->cu_psp" pattern).
+*/
+COUNT DosClose(COUNT hndl)
+{
+  psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  int sft_idx = get_sft_idx(hndl);
+  if (idx_to_sft(sft_idx) == (sft *) - 1)
+    return DE_INVLDHNDL;
+  /* We must close the (valid) file handle before any critical error */
+  /* may occur, else e.g. ABORT will try to close the file twice,    */
+  /* the second time after stdout is already closed */
+  p->ps_filetab[hndl] = 0xff;
+  /* Get the SFT block that contains the SFT      */
+  return DosCloseSft(sft_idx, FALSE);
 }
 
 /* /// Added - Ron Cemer */
@@ -4355,16 +4572,6 @@ const char *ConvertNameSZToName83(char *fcbname, const char *dirname)
       break;
   }
   return dirname;
-}
-
-/* swap internal and external delete flags */
-/*
-    Migrated from fatdir.c verbatim.
-*/
-STATIC void swap_deleted(char *name)
-{
-  if (name[0] == DELETED || name[0] == EXT_DELETED)
-    name[0] ^= EXT_DELETED - DELETED; /* 0xe0 */
 }
 
 /* Description.
@@ -5275,9 +5482,44 @@ STATIC void set_fcbname(void)
   ConvertPathNameToFCBName(((struct dirent *)internal_data->DirEntBuffer)->dir_name, PriPathName);
 }
 
-///TODO:
-ddate dos_getdate(void) {}
-dtime dos_gettime(void) {}
+/* FAT time notation in the form of hhhh hmmm mmmd dddd (d = double second)
+
+    Migrated from fatfs.c verbatim - t->hour/minute/second become
+    plain CPU register reads (see dos_gettime() below) instead of a
+    "struct dostime *" parameter, since this codebase's DosGetTime()
+    fills CPU registers (CPU_CH/CPU_CL/CPU_DH/CPU_DL), not a C struct
+    (see fdos_21h.c) - so time_encode() is inlined directly into
+    dos_gettime() rather than kept as a separate helper taking a
+    struct dostime this codebase doesn't have.
+*/
+
+/*
+    dos_getdate()/dos_gettime() - the current system date/time,
+    DOS-directory-entry-encoded (ddate/dtime, see ddate.h/dtime.h),
+    for stamping a file's creation/modification date and time.
+
+    Migrated from fatfs.c. The original calls DosGetDate(&dd)/
+    DosGetTime(&dt) (filling a "struct dosdate"/"struct dostime"); this
+    codebase's DosGetDate()/DosGetTime() instead fill CPU registers
+    (see fdos_21h.c) the same way every other DOS-API-shaped function
+    here does, so the date/time fields are read from CPU_CX/CPU_DH/
+    CPU_DL (date) and CPU_CH/CPU_CL/CPU_DH/CPU_DL (time) after calling
+    them, rather than from a struct - same underlying ExecuteClockDriverRequest()/
+    internal_data->ClkRecord data, just read back through the CPU
+    register convention this codebase's DosGetDate()/DosGetTime()
+    already use.
+*/
+ddate dos_getdate(void)
+{
+  DosGetDate(cpu);
+  return DT_ENCODE(CPU_DH, CPU_DL, CPU_CX - EPOCH_YEAR);
+}
+
+dtime dos_gettime(void)
+{
+  DosGetTime(cpu);
+  return (CPU_CH << 11) | (CPU_CL << 5) | (CPU_DH >> 1);
+}
 
 /* initialize SFT fields (for open/creat) for character devices
 

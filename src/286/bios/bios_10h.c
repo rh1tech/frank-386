@@ -67,6 +67,17 @@
 #define VGA_ATTR_OVERSCAN_COLOR_REG    0x11
 
 /*
+ * VGA DAC / PEL ports.
+ *
+ * 3C8h = DAC write index.
+ * 3C9h = DAC data port: red, green, blue, each 6 bits on standard VGA.
+ */
+#define VGA_DAC_WRITE_INDEX_PORT       0x3C8
+#define VGA_DAC_DATA_PORT              0x3C9
+#define VGA_DAC_READ_INDEX_PORT        0x3C7
+#define VGA_PEL_MASK_PORT              0x3C6
+
+/*
  * INT 10h/AH=0Bh/BH=01h CGA palette selector bits.
  *
  * BL bit 0 selects the CGA 320x200 4-color palette:
@@ -103,6 +114,15 @@
 #define VGA_MEM_BASE_CGA               0xB8000u
 #define VGA_MEM_BASE_MDA               0xB0000u
 #define VGA_MEM_BASE_GFX               0xA0000u
+
+/*
+ * INT 10h AX=1013h / AX=101Ah state.
+ *
+ * Plain VGA supports 16 DAC pages when blink is disabled.
+ * BIOS keeps the selected page state here.
+ */
+static uint8_t vga_dac_page_mode;
+static uint8_t vga_dac_page;
 
 /*
  * Update hardware text-mode cursor through the VGA CRT Controller.
@@ -1973,6 +1993,31 @@ static bool bios_10h_1009h(CPU* cpu)
 }
 
 /*
+VIDEO - SET INDIVIDUAL DAC REGISTER
+AX = 1010h
+BX = DAC register index
+DH = red value,   00h..3Fh
+CH = green value, 00h..3Fh
+CL = blue value,  00h..3Fh
+
+Return:
+Nothing
+
+Desc:
+Programs one standard VGA DAC color entry.  Each RGB component is 6 bits.
+The DAC auto-increments internally after the third component write.
+*/
+static bool bios_10h_1010h(CPU* cpu)
+{
+    cpu_portout8(VGA_DAC_WRITE_INDEX_PORT, CPU_BL);
+    cpu_portout8(VGA_DAC_DATA_PORT, CPU_DH & 0x3F);
+    cpu_portout8(VGA_DAC_DATA_PORT, CPU_CH & 0x3F);
+    cpu_portout8(VGA_DAC_DATA_PORT, CPU_CL & 0x3F);
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - GET DISPLAY COMBINATION CODE
 AX = 1A00h
 
@@ -2045,6 +2090,150 @@ static bool bios_10h_1210h(CPU* cpu)
     CPU_CH = switches >> 4;
     CPU_CL = switches;
 
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET BLOCK OF DAC REGISTERS
+AX = 1012h
+BX = starting DAC register index
+CX = number of DAC registers to set
+ES:DX -> RGB table
+
+Table format:
+  byte 0 = red
+  byte 1 = green
+  byte 2 = blue
+  repeated CX times
+
+Return:
+Nothing
+
+Desc:
+Programs a consecutive block of standard VGA DAC entries.  Each component is
+6 bits; values are masked to 00h..3Fh.  The VGA DAC auto-increments after
+each complete RGB triplet.
+*/
+static bool bios_10h_1012h(CPU* cpu)
+{
+    uint32_t table = ((uint32_t)CPU_ES << 4) + CPU_DX;
+    uint16_t count = CPU_CX;
+    cpu_portout8(VGA_DAC_WRITE_INDEX_PORT, CPU_BL);
+    while (count--) {
+        cpu_portout8(VGA_DAC_DATA_PORT, read86(table++) & 0x3F);
+        cpu_portout8(VGA_DAC_DATA_PORT, read86(table++) & 0x3F);
+        cpu_portout8(VGA_DAC_DATA_PORT, read86(table++) & 0x3F);
+    }
+    cf = 0;
+    return true;
+}
+
+
+/*
+VIDEO - SELECT VIDEO DAC COLOR PAGE
+AX = 1013h
+BL = function
+     00h set paging mode
+     01h select page
+BH = value
+*/
+static bool bios_10h_1013h(CPU* cpu)
+{
+    switch (CPU_BL) {
+    case 0x00:
+        vga_dac_page_mode = CPU_BH & 1;
+        cf = 0;
+        return true;
+    case 0x01:
+        vga_dac_page = CPU_BH & 0x0F;
+        cf = 0;
+        return true;
+    default:
+        cf = 1;
+        return true;
+    }
+}
+ 
+/*
+VIDEO - READ INDIVIDUAL DAC REGISTER
+AX = 1015h
+BX = DAC index
+
+Return:
+DH = red
+CH = green
+CL = blue
+*/
+static bool bios_10h_1015h(CPU* cpu)
+{
+    cpu_portout8(VGA_DAC_READ_INDEX_PORT, CPU_BL);
+    CPU_DH = cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F;
+    CPU_CH = cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F;
+    CPU_CL = cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - READ BLOCK OF DAC REGISTERS
+AX = 1017h
+BX = starting DAC index
+CX = count
+ES:DX -> RGB table
+*/
+static bool bios_10h_1017h(CPU* cpu)
+{
+    uint32_t table = ((uint32_t)CPU_ES << 4) + CPU_DX;
+    uint16_t count = CPU_CX;
+    cpu_portout8(VGA_DAC_READ_INDEX_PORT, CPU_BL);
+    while (count--) {
+        write86(table++, cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F);
+        write86(table++, cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F);
+        write86(table++, cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F);
+    }
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET PEL MASK
+AX = 1018h
+BL = mask
+*/
+static bool bios_10h_1018h(CPU* cpu)
+{
+    cpu_portout8(VGA_PEL_MASK_PORT, CPU_BL);
+    cf = 0;
+    return true;
+}
+ 
+/*
+VIDEO - READ PEL MASK
+AX = 1019h
+
+Return:
+BL = current mask
+*/
+static bool bios_10h_1019h(CPU* cpu)
+{
+    CPU_BL = cpu_portin8(VGA_PEL_MASK_PORT);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - GET VIDEO DAC COLOR PAGE STATE
+AX = 101Ah
+
+Return:
+BL = paging mode
+BH = current page
+*/
+static bool bios_10h_101Ah(CPU* cpu)
+{
+    CPU_BL = vga_dac_page_mode;
+    CPU_BH = vga_dac_page;
     cf = 0;
     return true;
 }
@@ -2161,6 +2350,14 @@ bool bios_10h(CPU* cpu) {
             case 7: return bios_10h_1007h(cpu); // READ SINGLE PALETTE REGISTER
             case 8: return bios_10h_1008h(cpu); // READ BORDER / OVERSCAN COLOR
             case 9: return bios_10h_1009h(cpu); // READ ALL PALETTE REGISTERS
+            case 0x10: return bios_10h_1010h(cpu); // SET INDIVIDUAL DAC REGISTER
+            case 0x12: return bios_10h_1012h(cpu); // SET BLOCK OF DAC REGISTERS
+            case 0x13: return bios_10h_1013h(cpu); // SELECT VIDEO DAC COLOR PAGE
+            case 0x15: return bios_10h_1015h(cpu); // READ INDIVIDUAL DAC REGISTER
+            case 0x17: return bios_10h_1017h(cpu); // READ BLOCK OF DAC REGISTERS
+            case 0x18: return bios_10h_1018h(cpu); // SET PEL MASK
+            case 0x19: return bios_10h_1019h(cpu); // READ PEL MASK
+            case 0x1A: return bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE
             }
             break;
         case 0x11:

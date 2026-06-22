@@ -324,6 +324,22 @@ bool fdos_21h(CPU* _cpu) {
       }
         break;
 
+      case 0x3e: // DOS 2+ - CLOSE - CLOSE FILE
+      {
+        /* BX = file handle. Migrated from inthndlr.c's "case 0x3e"
+           (DosClose(lr.BX), "short_check": AX=-rc, CF=1 on error;
+           CF=0, AX unchanged on success - DosClose() itself doesn't
+           return a value the caller cares about on success). */
+        int result = DosClose(CPU_BX);
+        if (result < SUCCESS) {
+          cf = 1;
+          CPU_AX = (UWORD)(-result);
+        } else {
+          cf = 0;
+        }
+      }
+        break;
+
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       /// TODO:
         break;
