@@ -90,6 +90,21 @@
 #define BIOS10_CGA_PAL1_COLOR3         0x07
 
 /*
+ * INT 10h/AH=0Ch WRITE GRAPHICS PIXEL constants.
+ *
+ * AL bit 7 requests XOR drawing for graphics modes except 256-color mode 13h.
+ * In mode 13h all 8 bits of AL are the pixel color.
+ */
+#define BIOS10_PIXEL_XOR               0x80
+
+/*
+ * Physical VGA memory bases used by BIOS graphics modes.
+ */
+#define VGA_MEM_BASE_CGA               0xB8000u
+#define VGA_MEM_BASE_MDA               0xB0000u
+#define VGA_MEM_BASE_GFX               0xA0000u
+
+/*
  * Update hardware text-mode cursor through the VGA CRT Controller.
  *
  * IBM PC compatible VGA/MDA/CGA adapters store the cursor position
@@ -762,6 +777,24 @@ static bool bios_10h_03h(CPU* cpu) {
 }
 
 /*
+VIDEO - READ LIGHT PEN POSITION
+
+No light pen hardware is present.
+
+Return:
+AH = 00h (not triggered)
+*/
+static bool bios_10h_04h(CPU* cpu)
+{
+    CPU_AH = 0x00;
+    CPU_BX = 0x0000;
+    CPU_CX = 0x0000;
+    CPU_DX = 0x0000;
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - SELECT ACTIVE DISPLAY PAGE
 AH = 05h
 AL = page number
@@ -1000,6 +1033,343 @@ static bool bios_10h_0Ah(CPU* cpu)
     cf = 0;
     return true;
 }
+
+/*
+ * Write one pixel in CGA 320x200 4-color modes 04h/05h.
+ *
+ * Guest-visible CGA layout:
+ *   even scanlines: B800:0000
+ *   odd  scanlines: B800:2000
+ *   80 bytes per scanline
+ *   4 pixels per byte, 2 bits per pixel, MSB first
+ *
+ * Low-level VGA renderer stores CGA bytes through VGA odd/even layout:
+ *   vga_addr = ((cga_addr & ~1) << 1) | (cga_addr & 1)
+ *
+ * That formula is already used by render_gfx_line_cga() in the low-level
+ * driver, so BIOS writes the same layout.
+ */
+static void bios_10h_putpixel_cga4(uint16_t x, uint16_t y,
+                                   uint8_t color, bool xor_mode)
+{
+    uint32_t cga_bank = (y & 1) ? 0x2000u : 0x0000u;
+    uint32_t cga_row = y >> 1;
+    uint32_t cga_addr = cga_bank + cga_row * 80u + (x >> 2);
+    uint32_t vga_addr = ((cga_addr & ~1u) << 1) | (cga_addr & 1u);
+    uint32_t addr = VGA_MEM_BASE_CGA + vga_addr;
+
+    uint8_t shift = (uint8_t)((3u - (x & 3u)) * 2u);
+    uint8_t mask = (uint8_t)(0x03u << shift);
+    uint8_t pix = (uint8_t)((color & 0x03u) << shift);
+    uint8_t old = read86(addr);
+
+    if (xor_mode)
+        old ^= pix;
+    else
+        old = (old & ~mask) | pix;
+
+    write86(addr, old);
+}
+
+/*
+ * Write one pixel in CGA 640x200 2-color mode 06h.
+ *
+ * Guest-visible CGA layout is the same even/odd 0/2000h split as mode 04h,
+ * but each byte contains 8 one-bit pixels.
+ *
+ * The low-level renderer reads only VGA plane 0 for this mode and places
+ * every guest byte at offset*4.  Therefore BIOS writes:
+ *
+ *   physical = B8000h + cga_addr * 4
+ */
+static void bios_10h_putpixel_cga2(uint16_t x, uint16_t y,
+                                   uint8_t color, bool xor_mode)
+{
+    uint32_t bank = (y & 1) ? 0x2000u : 0x0000u;
+    uint32_t row = y >> 1;
+    uint32_t cga_addr = bank + row * 80u + (x >> 3);
+    uint32_t addr = VGA_MEM_BASE_CGA + cga_addr * 4u;
+
+    uint8_t mask = (uint8_t)(0x80u >> (x & 7u));
+    uint8_t old = read86(addr);
+
+    if (xor_mode) {
+        if (color & 0x01)
+            old ^= mask;
+    } else {
+        if (color & 0x01)
+            old |= mask;
+        else
+            old &= ~mask;
+    }
+
+    write86(addr, old);
+}
+
+/*
+ * Write one pixel in EGA/VGA planar 16-color modes.
+ *
+ * Low-level renderer reads one uint32_t per 8 pixels:
+ *
+ *   byte 0 = plane 0
+ *   byte 1 = plane 1
+ *   byte 2 = plane 2
+ *   byte 3 = plane 3
+ *
+ * Each plane byte stores the same pixel bit position.  The final 4-bit color
+ * is assembled by render_gfx_line_ega().
+ *
+ * page_base allows old BIOS page numbers in modes where page_size is nonzero.
+ */
+static void bios_10h_putpixel_planar16(const VgaMode *m,
+                                       uint8_t page,
+                                       uint16_t x,
+                                       uint16_t y,
+                                       uint8_t color,
+                                       bool xor_mode)
+{
+    uint32_t page_base = m->page_size ? (uint32_t)page * m->page_size : 0;
+    uint32_t bytes_per_line = m->cols;
+    uint32_t byte_index = page_base + (uint32_t)y * bytes_per_line + (x >> 3);
+    uint32_t addr = VGA_MEM_BASE_GFX + byte_index * 4u;
+
+    uint8_t mask = (uint8_t)(0x80u >> (x & 7u));
+
+    for (uint8_t plane = 0; plane < 4; plane++) {
+        uint8_t old = read86(addr + plane);
+        bool bit = ((color >> plane) & 1u) != 0;
+
+        if (xor_mode) {
+            if (bit)
+                old ^= mask;
+        } else {
+            if (bit)
+                old |= mask;
+            else
+                old &= ~mask;
+        }
+
+        write86(addr + plane, old);
+    }
+}
+
+/*
+ * Write one pixel in VGA 320x200 256-color mode 13h.
+ *
+ * Mode 13h is linear:
+ *
+ *   A000:0000 + y * 320 + x
+ *
+ * AL bit 7 is NOT XOR in 256-color mode; it is part of the 8-bit color.
+ */
+static void bios_10h_putpixel_linear256(uint16_t x, uint16_t y, uint8_t color)
+{
+    write86(VGA_MEM_BASE_GFX + (uint32_t)y * 320u + x, color);
+}
+
+/*
+VIDEO - WRITE GRAPHICS PIXEL
+AH = 0Ch
+AL = pixel color
+     bit 7 = XOR color, except in 256-color mode 13h
+BH = display page
+CX = column / X
+DX = row / Y
+
+Return:
+Nothing
+
+Desc:
+Writes one pixel using the current BIOS video mode.  Text modes are rejected:
+this is a graphics-only BIOS function.
+*/
+static bool bios_10h_0Ch(CPU* cpu)
+{
+    uint8_t mode = read86(0x449);
+    const VgaMode *m = vga_find_mode(mode);
+
+    if (!m || m->text) {
+        cf = 1;
+        return true;
+    }
+
+    uint16_t x = CPU_CX;
+    uint16_t y = CPU_DX;
+
+    if (x >= m->cols * 8u || y >= m->rows_minus_1 + 1u) {
+        cf = 0;
+        return true;
+    }
+
+    if (mode == 0x13) {
+        bios_10h_putpixel_linear256(x, y, CPU_AL);
+        cf = 0;
+        return true;
+    }
+
+    bool xor_mode = (CPU_AL & BIOS10_PIXEL_XOR) != 0;
+    uint8_t color = CPU_AL & 0x7F;
+
+    switch (mode) {
+    case 0x04:
+    case 0x05:
+        bios_10h_putpixel_cga4(x, y, color, xor_mode);
+        break;
+
+    case 0x06:
+        bios_10h_putpixel_cga2(x, y, color, xor_mode);
+        break;
+
+    default:
+        bios_10h_putpixel_planar16(m, CPU_BH, x, y, color, xor_mode);
+        break;
+    }
+
+    cf = 0;
+    return true;
+}
+
+/*
+ * Read one pixel in CGA 320x200 4-color modes 04h/05h.
+ *
+ * This is the inverse of bios_10h_putpixel_cga4(): the guest CGA byte
+ * address is converted to the odd/even VGA byte address used by the renderer,
+ * then the selected 2-bit pixel field is extracted.
+ */
+static uint8_t bios_10h_getpixel_cga4(uint16_t x, uint16_t y)
+{
+    uint32_t cga_bank = (y & 1) ? 0x2000u : 0x0000u;
+    uint32_t cga_row = y >> 1;
+    uint32_t cga_addr = cga_bank + cga_row * 80u + (x >> 2);
+    uint32_t vga_addr = ((cga_addr & ~1u) << 1) | (cga_addr & 1u);
+    uint32_t addr = VGA_MEM_BASE_CGA + vga_addr;
+
+    uint8_t shift = (uint8_t)((3u - (x & 3u)) * 2u);
+    return (read86(addr) >> shift) & 0x03u;
+}
+
+/*
+ * Read one pixel in CGA 640x200 2-color mode 06h.
+ *
+ * The renderer reads plane 0 at cga_addr*4, so the BIOS read uses the same
+ * physical byte and extracts one MSB-first pixel bit.
+ */
+static uint8_t bios_10h_getpixel_cga2(uint16_t x, uint16_t y)
+{
+    uint32_t bank = (y & 1) ? 0x2000u : 0x0000u;
+    uint32_t row = y >> 1;
+    uint32_t cga_addr = bank + row * 80u + (x >> 3);
+    uint32_t addr = VGA_MEM_BASE_CGA + cga_addr * 4u;
+
+    uint8_t mask = (uint8_t)(0x80u >> (x & 7u));
+    return (read86(addr) & mask) ? 0x01 : 0x00;
+}
+
+/*
+ * Read one pixel in EGA/VGA planar 16-color modes.
+ *
+ * The low-level renderer stores the four VGA planes as four consecutive bytes
+ * for each 8-pixel group:
+ *
+ *   A000:byte_index*4 + 0 = plane 0
+ *   A000:byte_index*4 + 1 = plane 1
+ *   A000:byte_index*4 + 2 = plane 2
+ *   A000:byte_index*4 + 3 = plane 3
+ *
+ * The result color is reconstructed as a 4-bit value from the same bit
+ * position in all four planes.
+ */
+static uint8_t bios_10h_getpixel_planar16(const VgaMode *m,
+                                          uint8_t page,
+                                          uint16_t x,
+                                          uint16_t y)
+{
+    uint32_t page_base = m->page_size ? (uint32_t)page * m->page_size : 0;
+    uint32_t bytes_per_line = m->cols;
+    uint32_t byte_index = page_base + (uint32_t)y * bytes_per_line + (x >> 3);
+    uint32_t addr = VGA_MEM_BASE_GFX + byte_index * 4u;
+
+    uint8_t mask = (uint8_t)(0x80u >> (x & 7u));
+    uint8_t color = 0;
+
+    for (uint8_t plane = 0; plane < 4; plane++) {
+        if (read86(addr + plane) & mask)
+            color |= (uint8_t)(1u << plane);
+    }
+
+    return color;
+}
+
+/*
+ * Read one pixel in VGA 320x200 256-color mode 13h.
+ *
+ * Mode 13h uses a linear byte-per-pixel framebuffer at A000:0000.
+ */
+static uint8_t bios_10h_getpixel_linear256(uint16_t x, uint16_t y)
+{
+    return read86(VGA_MEM_BASE_GFX + (uint32_t)y * 320u + x);
+}
+
+/*
+VIDEO - READ GRAPHICS PIXEL
+AH = 0Dh
+BH = display page
+CX = column / X
+DX = row / Y
+
+Return:
+AL = pixel color
+
+Desc:
+Reads one pixel from the current graphics mode using the same video-memory
+layout as INT 10h/AH=0Ch and the low-level VGA renderer.  Text modes are not
+graphics modes; for them this native BIOS reports failure instead of returning
+a meaningless character-cell byte.
+*/
+static bool bios_10h_0Dh(CPU* cpu)
+{
+    uint8_t mode = read86(0x449);
+    const VgaMode *m = vga_find_mode(mode);
+
+    if (!m || m->text) {
+        cf = 1;
+        return true;
+    }
+
+    uint16_t x = CPU_CX;
+    uint16_t y = CPU_DX;
+    uint16_t width = m->cols * 8u;
+    uint16_t height = m->rows_minus_1 + 1u;
+
+    if (x >= width || y >= height) {
+        CPU_AL = 0;
+        cf = 0;
+        return true;
+    }
+
+    switch (mode) {
+    case 0x04:
+    case 0x05:
+        CPU_AL = bios_10h_getpixel_cga4(x, y);
+        break;
+
+    case 0x06:
+        CPU_AL = bios_10h_getpixel_cga2(x, y);
+        break;
+
+    case 0x13:
+        CPU_AL = bios_10h_getpixel_linear256(x, y);
+        break;
+
+    default:
+        CPU_AL = bios_10h_getpixel_planar16(m, CPU_BH, x, y);
+        break;
+    }
+
+    cf = 0;
+    return true;
+}
+
 
 /*
  * Store one text character cell and optionally update its attribute.
@@ -1402,11 +1772,13 @@ static bool bios_10h_0Bh(CPU* cpu)
          * leaking unrelated high bits from non-standard callers.
          */
         bios_10h_attr_write(cpu, VGA_ATTR_OVERSCAN_COLOR_REG, CPU_BL & 0x3F);
+        write86(0x466, CPU_BL);
         cf = 0;
         return true;
 
     case 0x01:
         bios_10h_apply_cga_palette(cpu, CPU_BL);
+        write86(0x467, CPU_BL);
         cf = 0;
         return true;
 
@@ -1414,6 +1786,82 @@ static bool bios_10h_0Bh(CPU* cpu)
         cf = 1;
         return true;
     }
+}
+
+/*
+VIDEO - SET SINGLE PALETTE REGISTER
+AX = 1000h
+BL = Attribute Controller palette register (00h..0Fh)
+BH = palette value (00h..3Fh)
+
+Return:
+Nothing
+
+Desc:
+Writes one VGA Attribute Controller palette register.
+
+Registers 00h..0Fh map logical EGA/VGA colors to DAC entries.
+This is one of the most commonly used VGA palette BIOS services.
+*/
+static bool bios_10h_1000h(CPU* cpu)
+{
+    if (CPU_BL > 0x0F) {
+        cf = 1;
+        return true;
+    }
+    bios_10h_attr_write(cpu, CPU_BL, CPU_BH & 0x3F);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET BORDER / OVERSCAN COLOR
+AX = 1001h
+BH = border / overscan color value, 00h..3Fh
+
+Return:
+Nothing
+
+Desc:
+Writes VGA Attribute Controller register 11h, the overscan color register.
+This is the VGA palette-family equivalent of INT 10h/AH=0Bh/BH=00h.
+
+The value is masked to 6 bits because standard VGA Attribute Controller
+palette indexes select one of 64 DAC entries.
+*/
+static bool bios_10h_1001h(CPU* cpu)
+{
+    bios_10h_attr_write(cpu, VGA_ATTR_OVERSCAN_COLOR_REG, CPU_BH & 0x3F);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET ALL PALETTE REGISTERS
+AX = 1002h
+ES:DX -> 17-byte palette table
+
+Table format:
+  bytes 00h..0Fh = Attribute Controller palette registers 00h..0Fh
+  byte  10h      = overscan / border color register 11h
+
+Return:
+Nothing
+
+Desc:
+Loads the complete VGA Attribute Controller logical palette and border color.
+This does not program DAC RGB values; it only maps logical attribute colors
+to existing DAC indexes.
+*/
+static bool bios_10h_1002h(CPU* cpu)
+{
+    uint32_t table = ((uint32_t)CPU_ES << 4) + CPU_DX;
+    for (uint8_t i = 0; i < 16; i++) {
+        bios_10h_attr_write(cpu, i, read86(table + i) & 0x3F);
+    }
+    bios_10h_attr_write(cpu, VGA_ATTR_OVERSCAN_COLOR_REG, read86(table + 16) & 0x3F);
+    cf = 0;
+    return true;
 }
 
 /*
@@ -1448,6 +1896,78 @@ static bool bios_10h_1003h(CPU* cpu)
 
     bios_10h_attr_write(cpu, VGA_ATTR_MODE_CONTROL_REG, mode_ctl);
 
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - READ SINGLE PALETTE REGISTER
+AX = 1007h
+BL = Attribute Controller palette register (00h..0Fh)
+
+Return:
+BH = palette value
+
+Desc:
+Reads one VGA Attribute Controller logical palette register.
+
+Registers 00h..0Fh map logical EGA/VGA attribute colors to DAC indexes.
+Only the low 6 bits are meaningful on standard VGA.
+*/
+static bool bios_10h_1007h(CPU* cpu)
+{
+    if (CPU_BL > 0x0F) {
+        cf = 1;
+        return true;
+    }
+    CPU_BH = bios_10h_attr_read(cpu, CPU_BL) & 0x3F;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - READ BORDER / OVERSCAN COLOR
+AX = 1008h
+
+Return:
+BH = border / overscan color value
+
+Desc:
+Reads VGA Attribute Controller register 11h, the overscan color register.
+This is the read counterpart of AX=1001h and INT 10h/AH=0Bh/BH=00h.
+
+Only the low 6 bits are meaningful on standard VGA.
+*/
+static bool bios_10h_1008h(CPU* cpu)
+{
+    CPU_BH = bios_10h_attr_read(cpu, VGA_ATTR_OVERSCAN_COLOR_REG) & 0x3F;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - READ ALL PALETTE REGISTERS
+AX = 1009h
+ES:DX -> 17-byte palette table
+
+Table format:
+  bytes 00h..0Fh = Attribute Controller palette registers 00h..0Fh
+  byte  10h      = overscan / border color register 11h
+
+Return:
+Nothing
+
+Desc:
+Reads the complete VGA Attribute Controller logical palette and border color.
+This is the read counterpart of AX=1002h.
+*/
+static bool bios_10h_1009h(CPU* cpu)
+{
+    uint32_t table = ((uint32_t)CPU_ES << 4) + CPU_DX;
+    for (uint8_t i = 0; i < 16; i++) {
+        write86(table + i, bios_10h_attr_read(cpu, i) & 0x3F);
+    }
+    write86(table + 16, bios_10h_attr_read(cpu, VGA_ATTR_OVERSCAN_COLOR_REG) & 0x3F);
     cf = 0;
     return true;
 }
@@ -1608,6 +2128,8 @@ bool bios_10h(CPU* cpu) {
             return bios_10h_02h(cpu); // SET CURSOR POSITION
         case 0x03:
             return bios_10h_03h(cpu); // GET CURSOR POSITION AND SIZE
+        case 0x04:
+            return bios_10h_04h(cpu); // READ LIGHT PEN POSITION
         case 0x05:
             return bios_10h_05h(cpu); // SELECT ACTIVE DISPLAY PAGE
         case 0x06:
@@ -1622,13 +2144,24 @@ bool bios_10h(CPU* cpu) {
             return bios_10h_0Ah(cpu); // WRITE CHARACTER ONLY
         case 0x0B:
             return bios_10h_0Bh(cpu); // SET BORDER/BACKGROUND OR CGA PALETTE
+        case 0x0C:
+            return bios_10h_0Ch(cpu); // WRITE GRAPHICS PIXEL
+        case 0x0D:
+            return bios_10h_0Dh(cpu); // READ GRAPHICS PIXEL
         case 0x0E:
             return bios_10h_0Eh(cpu); // TELETYPE OUTPUT
         case 0x0F:
             return bios_10h_0Fh(cpu); // GET CURRENT VIDEO MODE
         case 0x10:
-            if (CPU_AL == 0x03)
-                return bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
+            switch(CPU_AL) {
+            case 0: return bios_10h_1000h(cpu); // SET SINGLE PALETTE REGISTER
+            case 1: return bios_10h_1001h(cpu); // SET BORDER / OVERSCAN COLOR
+            case 2: return bios_10h_1002h(cpu); // SET ALL PALETTE REGISTERS
+            case 3: return bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
+            case 7: return bios_10h_1007h(cpu); // READ SINGLE PALETTE REGISTER
+            case 8: return bios_10h_1008h(cpu); // READ BORDER / OVERSCAN COLOR
+            case 9: return bios_10h_1009h(cpu); // READ ALL PALETTE REGISTERS
+            }
             break;
         case 0x11:
             if (CPU_AL == 0x30)
