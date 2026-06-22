@@ -53,6 +53,7 @@ static CPU* cpu;
 #include "hdr/buffer.h"
 #include "hdr/file.h"
 #include "config.h"
+#include "hdr/network.h"
 
 #define x86_para2far(seg) (MK_FP((seg), 0))
 #define para2far(seg) ((mcb*)ARM_PTR(MK_FP((seg), 0)))
@@ -3756,6 +3757,36 @@ BOOL IsShareInstalled(BOOL recheck)
 }
 
 /*
+    network_redirector_mx/network_redirector_fp - network redirector
+    multiplex entry points (INT 2Fh AX=11xxh equivalents: QRemote_Fn/
+    remote_rw/remote_getfree/etc, see proto.h for the macros built on
+    top of these).
+
+    /// TODO: there is no network redirector (no NETX/IFS-equivalent
+    /// driver, no UNC path support) in this codebase. These always
+    /// reporting "failed/not handled" is the honest, correct
+    /// behavior for a system with no redirector loaded - exactly what
+    /// real DOS does when called with none loaded - not a shortcut:
+    /// truename() (below) relies on QRemote_Fn() failing here to fall
+    /// through to its local (non-networked) path resolution, the same
+    /// way it would on real DOS with no redirector present.
+*/
+long network_redirector_mx(unsigned cmd, void *s, void *arg)
+{
+  UNREFERENCED_PARAMETER(cmd);
+  UNREFERENCED_PARAMETER(s);
+  UNREFERENCED_PARAMETER(arg);
+  return -1;
+}
+
+int network_redirector_fp(unsigned cmd, void *s)
+{
+  UNREFERENCED_PARAMETER(cmd);
+  UNREFERENCED_PARAMETER(s);
+  return -1;
+}
+
+/*
     /// TODO: stub for this iteration. DosCloseSft() (full handle-close
     /// logic: network redirector close, device-driver C_CLOSE request,
     /// SHARE deregistration, dos_close()) is not migrated yet. This
@@ -4678,6 +4709,524 @@ STATIC void fnode_to_sft(f_node_ptr fnp)
 #ifdef WITHFAT32
   sftp->sft_relclust_high = (UWORD)(fnp->f_cluster_offset >> 16);
 #endif
+}
+
+/* PriPathName/SecPathBuffer are SDA fields in the original (extern
+   ASM _PriPathBuffer._PriPathName, see globals.h), reserved here as
+   internal_data->PriPathBuffer/SecPathBuffer (see lol.h). Named with
+   the original's name (not a trailing-D macro like IoReqHdrD) since,
+   unlike IoReqHdr/sda_tmp_dm, there is no internal_data field of the
+   same name to collide with. */
+#define PriPathName ((char *)internal_data->PriPathBuffer)
+
+#define PATHLEN 128
+
+#define drLetterToNr(dr) ((unsigned char)((dr) - 'A'))
+/* Convert an uppercased drive letter into the drive index */
+#define drNrToLetter(dr) ((dr) + 'A')
+/* the other direction */
+
+#define PATH_ERROR() \
+      strchr(src, '/') == 0 && strchr(src, '\\') == 0 \
+        ? DE_FILENOTFND \
+        : DE_PATHNOTFND
+
+#define PNE_WILDCARD 1
+#define PNE_DOT 2
+
+STATIC const char _DirChars[] = "\"[]:|<>+=;,";
+
+#define DirChar(c)  (((unsigned char)(c)) >= ' ' && \
+                     !strchr(_DirChars, (c)))
+
+/* /// TODO: SFTMAX (128, the number of file handles) is what the
+   original actually uses here too (see newstuff.c) - a path-length
+   limit reusing an unrelated constant looks like a historical typo
+   in the original, but per this project's porting policy, bugs in
+   the original are preserved rather than silently "fixed". */
+#define addChar(c) \
+{ \
+  if (p >= dest + SFTMAX) return PATH_ERROR(); /* path too long */	\
+  *p++ = c; \
+}
+
+/* Map a logical path into a physical one.
+
+	1) Uppercasing path.
+	2) Flipping '/' -> '\\'.
+	3) Removing empty directory components & ".".
+	4) Processing ".." components.
+	5) Convert path components into 8.3 convention.
+	6) Make it fully-qualified.
+	7) Map it to SUBST/UNC.
+        8) Map to JOIN.
+
+   Return:
+   	*cdsItem will be point to the appropriate CDS entry. This will allow
+   	the caller to aquire the DPB or the IFS informtion of this entry.
+   	error number
+   	Return value:
+   		DE_FILENOTFND, or DE_PATHNOTFND (as described in RBIL)
+   	If the output path pnfo->physPath exceeds the length MAX_PATH, the error
+   	DE_FILENOTFND will be returned.
+
+    Migrated from newstuff.c. Differences from the original:
+      - src is a dos_far_ptr here (it comes straight from the guest
+        program via DS:DX, just like the original), copied into a
+        native PATHLEN-sized stack buffer up front via ARM_PTR() so
+        the rest of the function (an exact port of the original's
+        logic) can work with a plain native char* the same way
+        split_path()/dos_open()/etc above already do. There is no
+        adjust_far()-equivalent normalization step: adjust_far()
+        exists to keep a real 16-bit DOS far pointer's offset away
+        from the 0xFFFF wraparound boundary as the original indexes
+        further and further into src - ARM_PTR()/EFFECTIVE() compute
+        a plain linear address with no such 16-bit wraparound to
+        guard against (the same reasoning as linear_to_far()'s
+        comment above), so copying once up front and then doing
+        ordinary pointer arithmetic on a native copy is sufficient.
+      - UNC paths (the "\\\\server\\share" case), the network
+        redirector (QRemote_Fn()), and SHARE/JOIN are all real, live
+        code paths in the original - migrated as-is, but with
+        IsShareInstalled()/network_redirector_mx() always reporting
+        "not present" (see their definitions above), so they correctly
+        fall through to local (non-networked, non-JOINed) path
+        resolution on every call, exactly as real DOS would with no
+        redirector loaded. The JOIN loop further down is similarly
+        live code that simply never matches while LoL->njoined stays 0
+        (nothing in this codebase implements the JOIN command yet).
+      - get_cds() returns a dos_far_ptr in this codebase (not a
+        directly-dereferenceable "struct cds FAR *"), so cdsEntry and
+        current_ldt are handled as dos_far_ptr/native-pointer pairs:
+        x86_cdsEntry holds the dos_far_ptr, cdsEntry is the ARM_PTR()
+        of it; internal_data->current_ldt (a dos_far_ptr field, see
+        lol.h) is what the original's bare "current_ldt = cdsEntry"
+        assignments become.
+      - media_check()/TempCDS.cdsDpb: cdsDpb is a dos_far_ptr (see
+        cds.h), so media_check() (which takes a native struct dpb*)
+        needs an ARM_PTR() first.
+*/
+COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
+{
+  COUNT i;
+  struct dhdr *dhp;
+  const char *froot;
+  COUNT result;
+  unsigned state;
+  dos_far_ptr x86_cdsEntry;
+  struct cds *cdsEntry;
+  char *p = dest;	  /* dynamic pointer into dest */
+  char *rootPos;
+  char src0;
+  char srcbuf[PATHLEN];
+  char *src;
+  struct cds TempCDS;
+
+  /* copy the guest path into a native buffer up front - see the
+     migration note above for why there is no adjust_far() step */
+  {
+    unsigned len;
+    const char *guest_src = (const char *)ARM_PTR(x86_src);
+    for (len = 0; len < sizeof(srcbuf) - 1; len++)
+    {
+      srcbuf[len] = guest_src[len];
+      if (srcbuf[len] == '\0')
+        break;
+    }
+    srcbuf[sizeof(srcbuf) - 1] = '\0';
+  }
+  src = srcbuf;
+
+  /* In opposite of the TRUENAME shell command, an empty string is
+     rejected by MS DOS 6 */
+  src0 = src[0];
+  if (src0 == '\0')
+    return DE_FILENOTFND;
+
+  if (src0 == '\\' && src[1] == '\\') {
+    const char *unc_src = src;
+    /* Flag UNC paths and short circuit processing.  Set current LDT   */
+    /* to sentinel (offset 0xFFFF) for redirector processing.          */
+    do {
+      src0 = unc_src[0];
+      addChar(src0);
+      unc_src++;
+    } while (src0);
+    internal_data->current_ldt = MK_FP(0xFFFF, 0xFFFF);
+    /* Flag as network - drive bits are empty but shouldn't get */
+    /* referenced for network with empty current_ldt.           */
+    return IS_NETWORK;
+  }
+
+  /* Do we have a drive?                                          */
+  if (src[1] == ':')
+    result = drLetterToNr(DosUpFChar(src0));
+  else
+    result = internal_data->default_drive;
+
+  dhp = IsDevice(src);
+
+  x86_cdsEntry = get_cds(result);
+  cdsEntry = far_is_null(x86_cdsEntry) ? NULL : (struct cds *)ARM_PTR(x86_cdsEntry);
+  if (cdsEntry == NULL)
+  {
+    /* If opening a character device, DOS allows device name
+       to be prefixed by [invalid] drive letter and/or optionally
+       \DEV\ directory prefix, however, any other directory
+       including root (\) is an invalid path if drive is not
+       valid and returns such.
+       Whereas truename always fails for invalid drive.
+    */
+    if (dhp && (mode & CDS_MODE_CHECK_DEV_PATH) && (result >= LoL->lastdrive))
+    {
+      /* Note: check for (result >= lastdrive) means invalid drive
+         was provided as otherwise we would have used default_drive
+         so we know src in the form of X:?
+         fail if anything other than no path or path is \DEV\
+      */
+      const char *s = src+2;
+      char c = *s;
+
+      if( c != '\\' && c != '/' ) c = '\0';
+      /* could be 1 letter devicename, don't go scanning random memory */
+      if (*(src+3) != '\0')
+      {
+        s = strchr(src+3, '\\'); /* ?is there \ or / other than immediately after drive: */
+        if (s == NULL) s = strchr(src+3, '/');
+      }
+      else
+      {
+        s = NULL;
+      }
+
+      if (c == '\0')
+      {
+        /* either X:devicename or X:path\devicename */
+        if (s != NULL) goto invalid_path;
+      }
+      else
+      {
+        /* either X:\devicename or X:\path\devicename 
+           only X:\DEV\devicename is valid path
+        */
+        if (s == NULL) goto invalid_path;
+        if (s != src+6) goto invalid_path;
+        if (memcmp(src+3, "DEV", 3) != 0) goto invalid_path;
+        s = strchr(src+7, '\\');
+        if (s == NULL) s = strchr(src+7, '/');
+        if (s != NULL) goto invalid_path;
+      }
+
+      /* use CDS of current drive (MS-DOS may return drive P: for invalid drive.) */
+      result = internal_data->default_drive;
+      x86_cdsEntry = get_cds(result);
+      cdsEntry = far_is_null(x86_cdsEntry) ? NULL : (struct cds *)ARM_PTR(x86_cdsEntry);
+      if (cdsEntry == NULL) goto invalid_path;
+    }
+    else
+    {
+invalid_path:
+        return DE_PATHNOTFND;
+    }
+  }
+
+  memcpy(&TempCDS, cdsEntry, sizeof(TempCDS));
+  /* is the current_ldt thing necessary for compatibly??
+     -- 2001/09/03 ska*/
+  internal_data->current_ldt = x86_cdsEntry;
+  if (TempCDS.cdsFlags & CDSNETWDRV)
+    result |= IS_NETWORK;
+
+  if (dhp)
+    result |= IS_DEVICE;
+
+  /* Try if the Network redirector wants to do it */
+  /* via Qualify Remote Filename call & validate results */
+  memset(dest, 0, 12);  /* enable can verify redirector set result value */
+  /* MUX succeeded and really something */
+  if (!(mode & CDS_MODE_SKIP_PHYSICAL) &&
+      QRemote_Fn(dest, src) == SUCCESS && dest[0] != '\0')
+  {
+    /* don't flag devices such as Z:/NUL as NETWORK devices,
+       where Z: is a network mapped drive, but do flag redirected
+       devices such as LPT# for Lantastic
+     */       
+    if (dest[2] == '/' && (result & IS_DEVICE))
+      result &= ~IS_NETWORK;
+    else
+      result |= IS_NETWORK;
+    return result;
+  }
+
+  /* Redirector interface failed --> proceed with local mapper */
+  dest[0] = drNrToLetter(result & 0x1f);
+  dest[1] = ':';
+
+  /* Do we have a drive? */
+  if (src[1] == ':')
+    src += 2;
+
+/*
+    Code repoff from dosfns.c
+    MSD returns X:/CON for truename con. Not X:\CON
+*/
+  /* check for a device  */
+
+  dest[2] = '\\';
+  if (result & IS_DEVICE)
+  {
+    froot = get_root(src);
+    if (froot == src || froot == src + 5)
+    {
+      if (froot == src + 5)
+      {
+        memcpy(dest + 3, src, 5);
+        DosUpMem(dest + 3, 5);
+        if (dest[3] == '/') dest[3] = '\\';
+        if (dest[7] == '/') dest[7] = '\\';
+      }
+      if (froot == src || memcmp(dest + 3, "\\DEV\\", 5) == 0)
+      {
+        /* /// Bugfix: NUL.LST is the same as NUL.  This is true for all
+           devices.  On a device name, the extension is irrelevant
+           as long as the name matches.
+           - Ron Cemer */
+        dest[2] = '/';
+        result &= ~IS_NETWORK;
+        /* /// DOS will return C:/NUL.LST if you pass NUL.LST in.
+           DOS will also return C:/NUL.??? if you pass NUL.* in.
+           Code added here to support this.
+           - Ron Cemer */
+        src = (char *)froot;
+      }
+    }
+  }
+
+  /* Make fully-qualified logical path */
+  /* register these two used characters and the \0 terminator byte */
+  /* we always append the current dir to stat the drive;
+     the only exceptions are devices without paths */
+  rootPos = p = dest + 2;
+  if (*p != '/') /* i.e., it's a backslash! */
+  {
+    BYTE *cp;
+
+    cp = TempCDS.cdsCurrentPath;
+    /* ensure termination of strcpy */
+    cp[MAX_CDSPATH - 1] = '\0';
+    if ((TempCDS.cdsFlags & CDSNETWDRV) == 0)
+    {
+      if (media_check((struct dpb *)ARM_PTR(TempCDS.cdsDpb)) < 0)
+        return DE_PATHNOTFND;
+
+      /* dos_cd ensures that the path exists; if not, we
+         need to change to the root directory */
+      if (dos_cd((char *)cp) != SUCCESS) {
+        cp[TempCDS.cdsBackslashOffset + 1] =
+          cdsEntry->cdsCurrentPath[TempCDS.cdsBackslashOffset + 1] = '\0';
+        dos_cd((char *)cp);
+      }
+    }
+
+    if (!(mode & CDS_MODE_SKIP_PHYSICAL))
+    {
+/* What to do now: the logical drive letter will be replaced by the hidden
+   portion of the associated path. This is necessary for NETWORK and
+   SUBST drives. For local drives it should not harm.
+   This is actually the reverse mechanism of JOINED drives. */
+
+      strcpy(dest, (char *)cp);
+      if (TempCDS.cdsFlags & CDSSUBST)
+      {
+        /* The drive had been changed --> update the CDS pointer */
+        if (dest[1] == ':')
+        {  /* sanity check if this really is a local drive still */
+          unsigned ii = drLetterToNr(dest[0]);
+
+          /* truename returns the "real", not the "virtual" drive letter! */
+          if (ii < LoL->lastdrive) /* sanity check #2 */
+            result = (result & 0xffe0) | ii;
+        }
+      }
+      rootPos = p = dest + TempCDS.cdsBackslashOffset;
+    }
+    else
+    {
+      cp += TempCDS.cdsBackslashOffset;
+      /* truename must use the CuDir of the "virtual" drive letter! */
+      strcpy(p, (char *)cp);
+    }
+    if (p[0] == '\0')
+      p[1] = p[0];
+    p[0] = '\\'; /* force backslash! */
+
+    if (*src != '\\' && *src != '/')
+      p += strlen(p);
+    else /* skip the absolute path marker */
+      src++;
+    /* remove trailing separator */
+    if (p[-1] == '\\') p--;
+  }
+
+  /* append the path specified in src */
+
+  state = 0;
+  while(*src)
+  {
+    /* New segment.  If any wildcards in previous
+       segment(s), this is an invalid path. */
+    if (state & PNE_WILDCARD)
+      return DE_PATHNOTFND;
+
+    /* append backslash if not already there.
+       MS DOS preserves a trailing '\\', so an access to "C:\\DOS\\"
+       or "CDS.C\\" fails; in that case the last new segment consists of just
+       the \ */
+    if (p[-1] != *rootPos)
+      addChar(*rootPos);
+    /* skip multiple separators (duplicated slashes) */
+    while (*src == '/' || *src == '\\')
+      src++;
+
+    if(*src == '.')
+    {
+      int dots = 1;
+      /* special directory component */
+      ++src;
+      if (*src == '.') /* skip the second dot */
+      {
+        ++src;
+        dots++;
+      }
+      if (*src == '/' || *src == '\\' || *src == '\0')
+      {
+        --p; /* backup the backslash */
+        if (dots == 2)
+        {
+          /* ".." entry */
+          /* remove last path component */
+          while(*--p != '\\')
+            if (p <= rootPos) /* already on root */
+              return DE_PATHNOTFND;
+        }
+        continue;	/* next char */
+      }
+
+      /* ill-formed .* or ..* entries => return error */
+      /* The error is either PATHNOTFND or FILENOTFND
+         depending on if it is not the last component */
+      return PATH_ERROR();
+    }
+
+    /* normal component */
+    /* append component in 8.3 convention */
+
+    /* *** parse name and extension *** */
+    i = FNAME_SIZE;
+    state &= ~PNE_DOT;
+    while(*src != '/' && *src  != '\\' && *src != '\0')
+    {
+      char c = *src++;
+      if (c == '*')
+      {
+        /* register the wildcard, even if no '?' is appended */
+        c = '?';
+        while (i)
+        {
+          --i;
+          addChar(c);
+        }
+      }
+      if (c == '.')
+      {
+        if (state & PNE_DOT) /* multiple dots are ill-formed */
+          return PATH_ERROR();
+        /* strip trailing dot */
+        if (*src == '/' || *src == '\\' || *src == '\0')
+          break;
+        /* we arrive here only when an extension-dot has been found */
+        state |= PNE_DOT;
+        i = FEXT_SIZE + 1;
+      }
+      else if (c == '?')
+        state |= PNE_WILDCARD;
+      if (i) {	/* name length in limits */
+        --i;
+        if (!DirChar(c)) return PATH_ERROR();
+        addChar(c);
+      }
+    }
+    /* *** end of parse name and extension *** */
+  }
+  if (state & PNE_WILDCARD && !(mode & CDS_MODE_ALLOW_WILDCARDS))
+    return DE_PATHNOTFND;
+  if (p == dest + 2)
+  {
+    /* we must always add a seperator if dest = "c:" */
+    addChar('\\');
+  }
+
+  *p = '\0';				/* add the string terminator */
+  DosUpFString(rootPos);	        /* upcase the file/path name */
+
+/** Note:
+    Only the portions passed in by the user are upcased, because it is
+    assumed that the CDS is configured correctly and if it contains
+    lower case letters, it is required so **/
+
+  /* Now, all the steps 1) .. 7) are fullfilled. Join now */
+  /* search, if this path is a joined drive */
+
+  if (dest[2] != '/' && (!(mode & CDS_MODE_SKIP_PHYSICAL)) && LoL->njoined)
+  {
+    dos_far_ptr x86_cdsp = LoL->CDSp;
+    struct cds *cdsp = (struct cds *)ARM_PTR(x86_cdsp);
+    for(i = 0; i < LoL->lastdrive; ++i, ++cdsp)
+    {
+      /* How many bytes must match */
+      size_t j = strlen((char *)cdsp->cdsCurrentPath);
+      /* the last component must end before the backslash offset and */
+      /* the path the drive is joined to leads the logical path */
+      if ((cdsp->cdsFlags & CDSJOINED) && (dest[j] == '\\' || dest[j] == '\0')
+         && memcmp(dest, cdsp->cdsCurrentPath, j) == 0)
+      { /* JOINed drive found */
+        dest[0] = drNrToLetter(i);	/* index is physical here */
+        dest[1] = ':';
+        if (dest[j] == '\0')
+        {	/* Reduce to root direc */
+          dest[2] = '\\';
+          dest[3] = 0;
+          /* move the relative path right behind the drive letter */
+        }
+        else if (j != 2)
+        {
+          strcpy(dest + 2, dest + j);
+        }
+        result = (result & 0xffe0) | i; /* tweak drive letter (JOIN) */
+        internal_data->current_ldt = x86_FAR_PTR(FP_SEG(LoL->CDSp), cdsp);
+        result &= ~IS_NETWORK;
+        if (cdsp->cdsFlags & CDSNETWDRV)
+          result |= IS_NETWORK;
+        return result;
+      }
+    }
+    /* nothing found => continue normally */
+  }
+  if ((mode & CDS_MODE_CHECK_DEV_PATH) &&
+      ((result & (IS_DEVICE|IS_NETWORK)) == IS_DEVICE) &&
+      dest[2] != '/' && !dir_exists(dest))
+    return DE_PATHNOTFND;
+
+  /* Note: Not reached on error or if JOIN or QRemote_Fn (2f.1123) matched */
+  if (mode==CDS_MODE_ALLOW_WILDCARDS) /* DosTruename mode */
+  {
+    /* in other words: result & 0x60 = 0x20...: */
+    /// TODO: os_major is not tracked in this codebase (no real
+    /// "DOS version" concept yet) - always taking the "else" branch
+    /// here (as if os_major were never 6) until that exists.
+    result = 0; /* AL is 00, 2f, 5c, or last-of-TempCDS.cdsCurrentPath? */
+  }
+  return result;
 }
 
 /*

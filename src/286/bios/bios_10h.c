@@ -8,6 +8,18 @@
 #define BIOS_FONT8X8_OFF    0xBE00
 
 /*
+ * INT 10h/AX=1A00h Display Combination Code values.
+ *
+ * 08h = VGA with analog color display.
+ *
+ * The native BIOS exposes a plain VGA-compatible adapter: standard CGA/EGA/VGA
+ * register set, no SVGA/VESA extensions.  Therefore the active and alternate
+ * display are both reported as the same VGA color display.  This is enough for
+ * DOS software that uses AX=1A00h only to detect VGA/EGA capability.
+ */
+#define BIOS10_DCC_VGA_COLOR_ANALOG  0x08
+
+/*
  * INT 10h/AH=13h write-string mode bits in AL.
  */
 #define BIOS10_WRITE_STRING_UPDATE_CURSOR  0x01
@@ -1291,6 +1303,34 @@ static bool bios_10h_1003h(CPU* cpu)
 }
 
 /*
+VIDEO - GET DISPLAY COMBINATION CODE
+AX = 1A00h
+
+Return if supported:
+AL = 1Ah
+BL = active display combination code
+BH = alternate display combination code
+
+Desc:
+This is the standard VGA/EGA detection call.  Programs usually call it and
+check only AL==1Ah to decide that the BIOS supports display-combination
+reporting.
+
+For this native BIOS there is only one built-in VGA-compatible adapter and
+no second physical display.  Reporting VGA color analog for both BL and BH is
+the safest plain-VGA answer: it tells DOS software "VGA is present" without
+claiming any SVGA/VESA capability.
+*/
+static bool bios_10h_1A00h(CPU* cpu)
+{
+    CPU_AL = 0x1A;
+    CPU_BL = BIOS10_DCC_VGA_COLOR_ANALOG;
+    CPU_BH = 0;
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - GET FONT INFORMATION (EGA, MCGA, VGA)
 AX = 1130h
 BH = pointer specifier
@@ -1390,8 +1430,10 @@ bool bios_10h(CPU* cpu) {
         default:
             if (CPU_AX == 0x1003)
                 return bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
+            if (CPU_AX == 0x1A00)
+                return bios_10h_1A00h(cpu); // GET DISPLAY COMBINATION CODE
             if (CPU_AX == 0x1130)
-                return bios_10h_1130h(cpu);
+                return bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
 //        case 0x74: // ? HUNTER 16 - SET LCD WINDOWS POSITION
          // unsupported
     }
