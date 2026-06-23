@@ -132,6 +132,7 @@ struct VGAState {
     uint8_t st00; /* status 0 */
     uint8_t st01; /* status 1 */
     uint8_t dac_state;
+    uint8_t pel_mask;
     uint8_t dac_sub_index;
     uint8_t dac_read_index;
     uint8_t dac_write_index;

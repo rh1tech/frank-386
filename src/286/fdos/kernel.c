@@ -3759,6 +3759,8 @@ STATIC sft *get_free_sft(COUNT *sft_idx)
   return (sft *)-1;
 }
 
+STATIC void fnode_to_sft(f_node_ptr fnp);
+
 STATIC int merge_file_changes(f_node_ptr fnp, int collect);
 
 /* forward declaration: sft_to_fnode() is defined further down in
@@ -4022,6 +4024,501 @@ COUNT DosClose(COUNT hndl)
   p->ps_filetab[hndl] = 0xff;
   /* Get the SFT block that contains the SFT      */
   return DosCloseSft(sft_idx, FALSE);
+}
+
+/*
+    dos_extend(fnp, emptywrite) - grow a file by allocating one more
+    cluster past its current end (write path).
+
+    /// TODO: stub for this iteration. Needs find_fat_free() (not
+    /// migrated, same as extend()'s comment above) to allocate a
+    /// cluster. Always reports the disk as full - rwblock() (below)
+    /// only calls this for XFR_WRITE, which nothing in this codebase
+    /// invokes yet (DosWrite()/AH=40h are not migrated), so this is
+    /// unreachable for now, not silently wrong.
+
+    Migrated from fatfs.c (signature only; body replaced as above).
+*/
+STATIC COUNT dos_extend(f_node_ptr fnp, BOOL emptywrite)
+{
+  UNREFERENCED_PARAMETER(fnp);
+  UNREFERENCED_PARAMETER(emptywrite);
+  return DE_HNDLDSKFULL;
+}
+
+/*
+    shrink_file(fnp) - release every cluster past fnp's current file
+    position, for a write that truncates a file mid-stream.
+
+    /// TODO: stub for this iteration. Needs to walk and free the FAT
+    /// chain past the new end of file - not migrated, same reasoning
+    /// as dos_extend() above (only reachable from a XFR_WRITE caller,
+    /// none of which exist yet in this codebase).
+
+    Migrated from fatfs.c (signature only; body replaced as above).
+*/
+STATIC int shrink_file(f_node_ptr fnp)
+{
+  UNREFERENCED_PARAMETER(fnp);
+  printf("PANIC: shrink_file() called but not implemented\n");
+  for (;;) ;
+}
+
+/*
+    cooked_read/cooked_write/read_line_handle/update_scr_pos - "cooked"
+    (line-buffered, ^Z-EOF-aware, echo-as-you-type) character device
+    I/O, used by rwblock()/DosRWSft() (below) when reading/writing a
+    device opened without SFT_FBINARY (raw/binary mode) - typically
+    CON.
+
+    /// TODO: stubs for this iteration. The original (chario.c) is a
+    /// substantial separate module (line editing, ^C/^Break checking,
+    /// tab expansion, BIOS_inkey()/BIOS_putc() console interaction).
+    /// None of it is migrated yet. This iteration's actual goal
+    /// (reading/closing a fixed file like CONFIG.SYS) never reaches
+    /// these - CONFIG.SYS is opened as a regular file, not a console
+    /// device - so these panic loudly instead of silently behaving
+    /// like an empty/closed console, in case that assumption ever
+    /// stops holding (e.g. something tries to DosRead() from CON).
+
+    Migrated from chario.c (signatures only; bodies replaced as above).
+*/
+long cooked_read(struct dhdr **pdev, size_t n, char *bp)
+{
+  UNREFERENCED_PARAMETER(pdev);
+  UNREFERENCED_PARAMETER(n);
+  UNREFERENCED_PARAMETER(bp);
+  printf("PANIC: cooked_read() called but not implemented\n");
+  for (;;) ;
+}
+
+long cooked_write(struct dhdr **pdev, size_t n, char *bp)
+{
+  UNREFERENCED_PARAMETER(pdev);
+  UNREFERENCED_PARAMETER(n);
+  UNREFERENCED_PARAMETER(bp);
+  printf("PANIC: cooked_write() called but not implemented\n");
+  for (;;) ;
+}
+
+size_t read_line_handle(int sft_idx, size_t n, char *bp)
+{
+  UNREFERENCED_PARAMETER(sft_idx);
+  UNREFERENCED_PARAMETER(n);
+  UNREFERENCED_PARAMETER(bp);
+  printf("PANIC: read_line_handle() called but not implemented\n");
+  for (;;) ;
+}
+
+void update_scr_pos(unsigned char c, unsigned char count)
+{
+  UNREFERENCED_PARAMETER(c);
+  UNREFERENCED_PARAMETER(count);
+  printf("PANIC: update_scr_pos() called but not implemented\n");
+  for (;;) ;
+}
+
+/*
+    rwblock(fd, buffer, count, mode) - the core of DosRead()/DosWrite()
+    for a regular (non-device) file: transfer "count" bytes between
+    "buffer" and the file at fd's current position, advancing it.
+
+    Migrated from fatfs.c. Differences from the original:
+      - buffer is a dos_far_ptr on entry (it comes straight from the
+        guest program via DS:DX, like truename()'s src - see "support
+        both pointer kinds" in fnode.h's notes), converted to a native
+        pointer once up front via ARM_PTR(), the same reasoning as
+        truename()'s migration note: there is no adjust_far()-equivalent
+        normalization step needed here either, since ARM_PTR()/
+        EFFECTIVE() compute a plain linear address with no 16-bit
+        wraparound to guard against. The original's repeated
+        "buffer = adjust_far(buffer + xfr_cnt)" becomes plain native
+        pointer arithmetic ("buffer += xfr_cnt").
+      - fmemcpy() calls become plain memcpy(): bp->b_buffer is native,
+        and buffer is now native too (per the point above), so there
+        is no far pointer left to translate.
+      - dskxfer() already takes a native BYTE* (see its definition
+        above), so the "complete sectors" fast path passes buffer to
+        it directly, same as the original passed its (far) buffer.
+*/
+long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
+{
+  /* Translate the fd into an fnode pointer, since all internal   */
+  /* operations are achieved through fnodes.                      */
+  REG f_node_ptr fnp = sft_to_fnode(fd);
+  REG struct buffer *bp;
+  UCOUNT xfr_cnt = 0;
+  UCOUNT ret_cnt = 0;
+  unsigned secsize;
+  unsigned to_xfer = count;
+  ULONG currentblock;
+  BYTE *buffer = (BYTE *)ARM_PTR(x86_buffer);
+
+  if (mode==XFR_WRITE)
+  {
+    fnp->f_dir.dir_attrib |= D_ARCHIVE;
+    /* mark file as modified and set date not valid any more */
+    fnp->f_flags &= ~(SFT_FCLEAN|SFT_FDATE); 
+    
+    if (dos_extend(fnp, count == 0) != SUCCESS)
+    {
+      /* ecm: control flow may end up here if CX = 0000h and
+                the extending failed to allocate a cluster
+                behind the last needed. in this case, our
+                return here of 0 happens to be correct and
+                indicates the extension succeeded. */
+      fnode_to_sft(fnp);
+      return 0;
+    }
+    /* ecm: if CX = 0000h and seek was on a cluster boundary > size,
+                the dos_extend call will have allocated one cluster
+                too many. this is truncated later without problems.
+                but does this aid fragmentation maybe ?
+            if CX > 0000h then we want to write to the cluster
+                anyway, so extending to the cluster that starts at
+                the boundary is desired. */
+  }
+  
+  /* Test that we are really about to do a data transfer. If the  */
+  /* count is zero and the mode is XFR_READ, just exit. (Any      */
+  /* read with a count of zero is a nop).                         */
+  /*                                                              */
+  /* A write (mode is XFR_WRITE) is a special case.  It sets the  */
+  /* file length to the current length (truncates it).            */
+  /*                                                              */
+  /* NOTE: doing this up front saves a lot of headaches later.    */
+
+  if (count == 0)
+  {
+    /* NOTE: doing this up front made a lot of headaches later :-( TE */
+    /* FAT allocation has to be extended if necessary              TE */
+    /* Now done in dos_extend                                      BO */
+    /* remove all the following allocated clusters in shrink_file     */
+    if (mode == XFR_WRITE)
+    {
+      fnp->f_dir.dir_size = fnp->f_offset;
+      if (shrink_file(fnp) < 0) /* this is the only call to shrink_file... */
+        return DE_ACCESS;
+      /* why does empty write -always- truncate to current offset? */
+    }
+    fnode_to_sft(fnp);
+    return 0;
+  }
+
+  /* prevent overwriting beginning of file when write exceeds 4GB,
+     i.e. when overflow of offset occurs, return error on write   */
+  if (fnp->f_offset + count < fnp->f_offset)   /* unsigned overflow */
+  {                                                                 
+    if (mode == XFR_WRITE)         
+    {
+      /*  can't extend beyond 4G so return '0 byte written, DISK_FULL */
+      return DE_HNDLDSKFULL;
+    }
+    /* else XFR_READ should end automatically at EOF */
+  }               
+
+  /* The variable secsize will be used later.                     */
+  secsize = fnp->f_dpb->dpb_secsize;
+
+  /* Do the data transfer. Use block transfer methods so that we  */
+  /* can utilize memory management in future DOS-C versions.      */
+  while (ret_cnt < count)
+  {
+    unsigned sector, boff;
+
+    /* Do an EOF test and return whatever was transferred   */
+    if (mode == XFR_READ && fnp->f_offset >= fnp->f_dir.dir_size)
+    {
+      fnode_to_sft(fnp);
+      return ret_cnt;
+    }
+
+    /* Position the file to the fnode's pointer position. This is   */
+    /* done by updating the fnode's cluster, block (sector) and     */
+    /* byte offset so that read or write becomes a simple data move */
+    /* into or out of the block data buffer.                        */
+
+    /* The more difficult scenario is the (more common)     */
+    /* file offset case. Here, we need to take the fnode's  */
+    /* offset pointer (f_offset) and translate it into a    */
+    /* relative cluster position, cluster block (sector)    */
+    /* offset (sector) and byte offset (boff). Once we      */
+    /* have this information, we need to translate the      */
+    /* relative cluster position into an absolute cluster   */
+    /* position (f_cluster). This is unfortunate because it */
+    /* requires a linear search through the file's FAT      */
+    /* entries.                                              */
+    if (map_cluster(fnp, mode) != SUCCESS)
+    {
+      fnode_to_sft(fnp);
+      return ret_cnt;
+    }
+    if (mode == XFR_WRITE)
+    {
+      merge_file_changes(fnp, FALSE);   /* /// Added - Ron Cemer */
+    }
+
+    /* Compute the block within the cluster and the offset  */
+    /* within the block.                                    */
+    sector = (UBYTE)(fnp->f_offset / secsize) & fnp->f_dpb->dpb_clsmask;
+    boff = (UWORD)(fnp->f_offset % secsize);
+
+    currentblock = clus2phys(fnp->f_cluster, fnp->f_dpb) + sector;
+
+    /* see comments above */
+
+    if (boff == 0)              /* complete sectors only */
+    {
+      static ULONG startoffset;
+      UCOUNT sectors_to_xfer, sectors_wanted;
+
+      startoffset = fnp->f_offset;
+      sectors_wanted = to_xfer;
+
+      /* avoid EOF problems */
+      if (mode == XFR_READ && to_xfer > fnp->f_dir.dir_size - fnp->f_offset)
+        sectors_wanted = (UCOUNT)(fnp->f_dir.dir_size - fnp->f_offset);
+      
+      sectors_wanted /= secsize;
+
+      if (sectors_wanted == 0)
+        goto normal_xfer;
+
+      sectors_to_xfer = fnp->f_dpb->dpb_clsmask + 1 - sector;
+
+      sectors_to_xfer = min(sectors_to_xfer, sectors_wanted);
+
+      fnp->f_offset += sectors_to_xfer * secsize;
+
+      while (sectors_to_xfer < sectors_wanted)
+      {
+        if (map_cluster(fnp, mode) != SUCCESS)
+          break;
+
+        if (clus2phys(fnp->f_cluster, fnp->f_dpb) !=
+            currentblock + sectors_to_xfer)
+          break;
+
+        sectors_to_xfer += fnp->f_dpb->dpb_clsmask + 1;
+
+        sectors_to_xfer = min(sectors_to_xfer, sectors_wanted);
+
+        fnp->f_offset = startoffset + sectors_to_xfer * secsize;
+
+      }
+
+      xfr_cnt = sectors_to_xfer * secsize;
+
+      /* avoid caching trouble */
+
+      DeleteBlockInBufferCache(currentblock,
+                               currentblock + sectors_to_xfer - 1,
+                               fnp->f_dpb->dpb_unit, mode);
+
+      if (dskxfer(fnp->f_dpb->dpb_unit,
+                  currentblock,
+                  buffer, sectors_to_xfer,
+                  mode == XFR_READ ? DSKREAD : DSKWRITE))
+      {
+        fnp->f_offset = startoffset;
+        fnode_to_sft(fnp);
+        return DE_ACCESS;
+      }
+
+      goto update_pointers;
+    }
+
+    /* normal read: just the old, buffer = sector based read */
+  normal_xfer:
+
+    /* Get the block we need from cache                     */
+    bp = getblock(currentblock, fnp->f_dpb->dpb_unit);
+
+    if (bp == NULL)             /* (struct buffer *)0 --> DS:0 !! */
+    {
+      fnode_to_sft(fnp);
+      return ret_cnt;
+    }
+
+    /* transfer a block                                     */
+    /* Transfer size as either a full block size, or the    */
+    /* requested transfer size, whichever is smaller.       */
+    /* Then compare to what is left, since we can transfer  */
+    /* a maximum of what is left.                           */
+    xfr_cnt = min(to_xfer, secsize - boff);
+    if (mode == XFR_READ)
+      xfr_cnt = (UWORD) min(xfr_cnt, fnp->f_dir.dir_size - fnp->f_offset);
+
+    if (mode == XFR_WRITE)
+    {
+      memcpy(&bp->b_buffer[boff], buffer, xfr_cnt);
+      bp->b_flag |= BFR_DIRTY | BFR_VALID;
+    }
+    else
+    {
+      memcpy(buffer, &bp->b_buffer[boff], xfr_cnt);
+    }
+
+    /* complete buffer transferred ? 
+       probably not reused later
+     */
+    if (xfr_cnt == sizeof(bp->b_buffer) ||
+        (mode == XFR_READ && fnp->f_offset + xfr_cnt == fnp->f_dir.dir_size))
+    {
+      bp->b_flag |= BFR_UNCACHE;
+    }
+
+    /* update pointers and counters                         */
+    fnp->f_offset += xfr_cnt;
+
+  update_pointers:
+    ret_cnt += xfr_cnt;
+    to_xfer -= xfr_cnt;
+    buffer += xfr_cnt;
+    if (mode == XFR_WRITE)
+    {
+      if (fnp->f_offset > fnp->f_dir.dir_size)
+      {
+        fnp->f_dir.dir_size = fnp->f_offset;
+      }
+      merge_file_changes(fnp, FALSE);     /* /// Added - Ron Cemer */
+    }
+  }
+  fnode_to_sft(fnp);
+  return ret_cnt;
+}
+
+/*
+    DosRWSft(sft_idx, n, bp, mode) - the real implementation behind
+    INT 21h AH=3Fh/40h (read/write): dispatch to the network
+    redirector, a character device, or rwblock() (regular files),
+    depending on the SFT's flags.
+
+    Migrated from dosfns.c. Differences from the original:
+      - bp is a dos_far_ptr (it comes straight from the guest program
+        via DS:DX, like rwblock()'s buffer above) - converted to a
+        native pointer only where BinaryCharIO()/cooked_read()/
+        cooked_write() (which all take native void* / char* - see their
+        definitions above) need one; passed straight through
+        (untranslated) to rwblock(), which itself expects a
+        dos_far_ptr.
+      - the SFT_FSHARED (network redirector) branch is migrated as-is
+        but unreachable, same reasoning as DosCloseSft()'s SFT_FSHARED
+        branch above - dta/lpCurSft/current_filepos below are
+        internal_data fields here (see lol.h), not bare "extern ASM"
+        variables.
+      - the SHARE-installed branch (share_access_check()) is left as
+        a deliberate panic, same reasoning as DosOpenSft()'s SHARE
+        branch above.
+*/
+long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
+{
+  /* Get the SFT block that contains the SFT      */
+  sft *s = idx_to_sft(sft_idx);
+
+  if (s == (sft *) - 1)
+  {
+    return DE_INVLDHNDL;
+  }
+  /* If for read and write-only or for write and read-only then exit */
+  if((mode == XFR_READ && (s->sft_mode & O_WRONLY)) ||
+     (mode == XFR_WRITE && (s->sft_mode & O_ACCMODE) == O_RDONLY))
+  {
+    return DE_ACCESS;
+  }
+  if (mode == XFR_FORCE_WRITE)
+    mode = XFR_WRITE;
+    
+/*
+ *   Do remote first or return error.
+ *   must have been opened from remote.
+ */
+  if (s->sft_flags & SFT_FSHARED)
+  {
+    /// unreachable: see the function-level comment above.
+    long XferCount;
+    dos_far_ptr save_dta;
+
+    save_dta = internal_data->dta;
+    internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), s);
+    internal_data->current_filepos = s->sft_posit;     /* needed for MSCDEX */
+    internal_data->dta = bp;
+    XferCount = remote_rw(mode == XFR_READ ? REM_READ : REM_WRITE, s, n);
+    internal_data->dta = save_dta;
+    return XferCount;
+  }
+
+  /* Do a device transfer if device                   */
+  if (s->sft_flags & SFT_FDEVICE)
+  {
+    dos_far_ptr dev = s->sft_dev;
+
+    /* Now handle raw and cooked modes      */
+    if (s->sft_flags & SFT_FBINARY)
+    {
+      long rc = BinaryCharIO(&dev, n, ARM_PTR(bp),
+                             mode == XFR_READ ? C_INPUT : C_OUTPUT);
+      if (mode == XFR_WRITE && rc > 0 && (s->sft_flags & SFT_FCONOUT))
+      {
+        size_t cnt = (size_t)rc;
+        const char *p = (const char *)ARM_PTR(bp);
+        while (cnt--)
+          update_scr_pos(*p++, 1);
+      }
+      return rc;
+    }
+
+    /* cooked mode */
+    if (mode==XFR_READ)
+    {
+      long rc;
+      /* dev (a dos_far_ptr local) cannot be reinterpreted as a
+         "struct dhdr **" - cooked_read()/cooked_write() are
+         unreachable PANIC stubs anyway (see their definitions
+         above), so NULL is passed instead of a meaningless cast. */
+      struct dhdr *unused_dev = NULL;
+
+      /* Test for eof and exit                */
+      /* immediately if it is                 */
+      if (!(s->sft_flags & SFT_FEOF))
+        return 0;
+
+      if (s->sft_flags & SFT_FCONIN)
+        rc = read_line_handle(sft_idx, n, (char *)ARM_PTR(bp));
+      else
+        rc = cooked_read(&unused_dev, n, (char *)ARM_PTR(bp));
+      if (*(char *)ARM_PTR(bp) == CTL_Z)
+        s->sft_flags &= ~SFT_FEOF;
+      return rc;
+    }
+    else
+    {
+      struct dhdr *unused_dev = NULL;
+
+      /* reset EOF state (set to no EOF)      */
+      s->sft_flags |= SFT_FEOF;
+
+      /* if null just report full transfer    */
+      if (s->sft_flags & SFT_FNUL)
+        return n;
+      else
+        return cooked_write(&unused_dev, n, (char *)ARM_PTR(bp));
+    }
+  }
+
+  /* a block transfer                           */
+  /* /// Added for SHARE - Ron Cemer */
+  if (IsShareInstalled(FALSE) && (s->sft_shroff >= 0))
+  {
+    /// unreachable: IsShareInstalled() always returns FALSE in this
+    /// codebase. share_access_check() is not implemented, so this is
+    /// left as a deliberate panic rather than silently doing nothing,
+    /// in case that assumption ever stops holding.
+    printf("PANIC: DosRWSft reached share_access_check unexpectedly\n");
+    for (;;) ;
+  }
+  /* /// End of additions for SHARE - Ron Cemer */
+  return rwblock(sft_idx, bp, n, mode);
 }
 
 /* /// Added - Ron Cemer */

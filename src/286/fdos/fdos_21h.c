@@ -339,6 +339,26 @@ bool fdos_21h(CPU* _cpu) {
         }
       }
         break;
+     case 0x3f: // DOS 2+ - READ - READ FROM FILE OR DEVICE
+      {
+        /* BX = file handle, CX = byte count, DS:DX = buffer.
+           Migrated from inthndlr.c's "case 0x3f" (DosRead(lr.BX,
+           lr.CX, FP_DS_DX)), same long_check convention as case 0x3d
+           above: CF=0/AX=bytes-read on success, CF=1/AX=-rc on
+           error. */
+        long result = DosRead(CPU_BX, CPU_CX, FP_DS_DX);
+        if (result < SUCCESS)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-result);
+        }
+        else
+        {
+          cf = 0;
+          CPU_AX = (UWORD)result;
+        }
+      }
+        break;
 
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       /// TODO:

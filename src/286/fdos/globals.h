@@ -31,3 +31,68 @@ extern struct dos_data* internal_data;
 COUNT ASMCFUNC
     CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
                            struct dhdr FAR * lpDevice);
+
+/*                                                                      */
+/* Convience definitions of TRUE and FALSE                              */
+/*                                                                      */
+#ifndef TRUE
+#define TRUE (1)
+#endif
+#ifndef FALSE
+#define FALSE (0)
+#endif
+
+/*                                                                      */
+/* Constants and macros                                                 */
+/*                                                                      */
+/* Defaults and limits - System wide                                    */
+#define NAMEMAX         MAX_CDSPATH     /* Maximum path for CDS         */
+
+/* internal error from failure or aborted operation                     */
+#define ERROR           -1
+#define OK              0
+
+/* internal transfer direction flags                                    */
+#define XFR_READ        1
+#define XFR_WRITE       2
+#define XFR_FORCE_WRITE 3
+/* flag to update fcb_rndm field */
+#define XFR_FCB_RANDOM  4
+
+#define RDONLY          0
+#define WRONLY          1
+#define RDWR            2
+
+/* special ascii code equates                                           */
+#define SPCL            0x00
+#define CTL_C           0x03
+#define CTL_F           0x06
+#define BELL            0x07
+#define BS              0x08
+#define HT              0x09
+#define LF              0x0a
+#define CR              0x0d
+#define CTL_P           0x10
+#define CTL_Q           0x11
+#define CTL_S           0x13
+#define CTL_Z           0x1a
+#define ESC             0x1b
+#define CTL_BS          0x7f
+
+#define INS             0x5200
+#define DEL             0x5300
+
+#define F1              0x3b00
+#define F2              0x3c00
+#define F3              0x3d00
+#define F4              0x3e00
+#define F5              0x3f00
+#define F6              0x4000
+#define LEFT            0x4b00
+#define RIGHT           0x4d00
+
+/* Blockio constants                                                    */
+#define DSKWRITE        1       /* dskxfr function parameters   */
+#define DSKREAD         2
+#define DSKWRITEINT26   3
+#define DSKREADINT25    4

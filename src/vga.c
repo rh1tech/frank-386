@@ -273,6 +273,8 @@ static int update_palette256(VGAState *s, uint32_t *palette)
     full_update = 0;
     v = 0;
     for(i = 0; i < 256; i++) {
+        int pi = i & s->pel_mask;
+        v = pi * 3;
         if (s->dac_8bit) {
           col = rgb_to_pixel(s->palette[v],
                              s->palette[v + 1],
@@ -286,7 +288,6 @@ static int update_palette256(VGAState *s, uint32_t *palette)
             full_update = 1;
             palette[i] = col;
         }
-        v += 3;
     }
     return full_update;
 }
@@ -303,6 +304,7 @@ static int update_palette16(VGAState *s, uint32_t *palette)
             v = ((s->ar[0x14] & 0xf) << 4) | (v & 0xf);
         else
             v = ((s->ar[0x14] & 0xc) << 4) | (v & 0x3f);
+        v &= s->pel_mask;
         v = v * 3;
         col = (c6_to_8(s->palette[v]) << 16) |
             (c6_to_8(s->palette[v + 1]) << 8) |
@@ -323,6 +325,8 @@ static int update_palette256(VGAState *s, uint32_t *palette)
     full_update = 0;
     v = 0;
     for(i = 0; i < 256; i++) {
+        int pi = i & s->pel_mask;
+        v = pi * 3;
         if (s->dac_8bit) {
             col = ((s->palette[v + 2] >> 3)) |
                 ((s->palette[v + 1] >> 2) << 5) |
@@ -336,7 +340,6 @@ static int update_palette256(VGAState *s, uint32_t *palette)
             full_update = 1;
             palette[i] = col;
         }
-        v += 3;
     }
     return full_update;
 }
@@ -353,6 +356,7 @@ static int update_palette16(VGAState *s, uint32_t *palette)
             v = ((s->ar[0x14] & 0xf) << 4) | (v & 0xf);
         else
             v = ((s->ar[0x14] & 0xc) << 4) | (v & 0x3f);
+        v &= s->pel_mask;
         v = v * 3;
         col = (s->palette[v + 2] >> 1) |
               ((s->palette[v + 1]) << 5) |
@@ -1265,6 +1269,9 @@ uint32_t __not_in_flash_func(vga_ioport_read)(VGAState *s, uint32_t addr)
         case 0x3c7:
             val = s->dac_state;
             break;
+        case 0x3c6:
+            val = s->pel_mask;
+            break;
         case 0x3c8:
             val = s->dac_write_index;
             break;
@@ -1374,6 +1381,10 @@ void __not_in_flash_func(vga_ioport_write)(VGAState *s, uint32_t addr, uint32_t 
         printf("vga: write SR%x = 0x%02x\n", s->sr_index, val);
 #endif
         s->sr[s->sr_index] = val & sr_mask[s->sr_index];
+        break;
+    case 0x3c6:
+        s->pel_mask = val;
+        s->palette_dirty = 1;
         break;
     case 0x3c7:
         s->dac_read_index = val;
@@ -2309,6 +2320,7 @@ static void vga_initmode(VGAState *s)
     for (int i = 0; i < 64*3; i++)
         s->palette[i] = pal_ega[i];
     s->palette_dirty = 1;
+    s->pel_mask = 0xFF;
 
     for (int i = 0; i <= 0x13; i++)
         s->ar[i] = actl[i];

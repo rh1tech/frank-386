@@ -65,6 +65,8 @@
 #define VGA_ATTR_ENABLE_DISPLAY        0x20
 #define VGA_ATTR_MODE_CONTROL_REG      0x10
 #define VGA_ATTR_OVERSCAN_COLOR_REG    0x11
+#define VGA_ATTR_COLOR_SELECT_REG      0x14
+#define VGA_ATTR_MODE_P54S             0x80
 
 /*
  * VGA DAC / PEL ports.
@@ -114,15 +116,6 @@
 #define VGA_MEM_BASE_CGA               0xB8000u
 #define VGA_MEM_BASE_MDA               0xB0000u
 #define VGA_MEM_BASE_GFX               0xA0000u
-
-/*
- * INT 10h AX=1013h / AX=101Ah state.
- *
- * Plain VGA supports 16 DAC pages when blink is disabled.
- * BIOS keeps the selected page state here.
- */
-static uint8_t vga_dac_page_mode;
-static uint8_t vga_dac_page;
 
 /*
  * Update hardware text-mode cursor through the VGA CRT Controller.
@@ -2137,16 +2130,37 @@ BL = function
      00h set paging mode
      01h select page
 BH = value
+
+Paging mode:
+  BH=00h -> 4 pages of 64 colors
+  BH=01h -> 16 pages of 16 colors
+
+Desc:
+Uses VGA Attribute Controller state directly:
+  AC register 10h bit 7 = page mode selector
+  AC register 14h       = Color Select register
 */
 static bool bios_10h_1013h(CPU* cpu)
 {
+    uint8_t mode_ctl = bios_10h_attr_read(cpu, VGA_ATTR_MODE_CONTROL_REG);
+    uint8_t color_select = bios_10h_attr_read(cpu, VGA_ATTR_COLOR_SELECT_REG);
+
     switch (CPU_BL) {
     case 0x00:
-        vga_dac_page_mode = CPU_BH & 1;
+        if (CPU_BH & 0x01)
+            mode_ctl |= VGA_ATTR_MODE_P54S;
+        else
+            mode_ctl &= ~VGA_ATTR_MODE_P54S;
+        bios_10h_attr_write(cpu, VGA_ATTR_MODE_CONTROL_REG, mode_ctl);
         cf = 0;
         return true;
     case 0x01:
-        vga_dac_page = CPU_BH & 0x0F;
+        if (mode_ctl & VGA_ATTR_MODE_P54S) {
+            color_select = (color_select & ~0x0F) | (CPU_BH & 0x0F);
+        } else {
+            color_select = (color_select & ~0x0C) | ((CPU_BH & 0x03) << 2);
+        }
+        bios_10h_attr_write(cpu, VGA_ATTR_COLOR_SELECT_REG, color_select);
         cf = 0;
         return true;
     default:
@@ -2228,12 +2242,25 @@ AX = 101Ah
 
 Return:
 BL = paging mode
-BH = current page
+     00h = 4 pages of 64 colors
+     01h = 16 pages of 16 colors
+BH = current active page
++
+Desc:
+Reads the state from VGA Attribute Controller registers instead of duplicating
+it in BIOS-private variables.
 */
 static bool bios_10h_101Ah(CPU* cpu)
 {
-    CPU_BL = vga_dac_page_mode;
-    CPU_BH = vga_dac_page;
+    uint8_t mode_ctl = bios_10h_attr_read(cpu, VGA_ATTR_MODE_CONTROL_REG);
+    uint8_t color_select = bios_10h_attr_read(cpu, VGA_ATTR_COLOR_SELECT_REG);
+    if (mode_ctl & VGA_ATTR_MODE_P54S) {
+        CPU_BL = 0x01;
+        CPU_BH = color_select & 0x0F;
+    } else {
+        CPU_BL = 0x00;
+        CPU_BH = (color_select >> 2) & 0x03;
+    }
     cf = 0;
     return true;
 }

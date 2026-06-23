@@ -85,7 +85,7 @@ COUNT SftSeek(int sft_idx, LONG new_pos, unsigned mode);
 /*COUNT DosRead(COUNT hndl, UCOUNT n, BYTE FAR * bp, COUNT FAR * err); */
 void BinarySftIO(int sft_idx, void *bp, int mode);
 #define BinaryIO(hndl, bp, mode) BinarySftIO(get_sft_idx(hndl), bp, mode)
-long DosRWSft(int sft_idx, size_t n, void FAR * bp, int mode);
+long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode);
 #define DosRead(hndl, n, bp) DosRWSft(get_sft_idx(hndl), n, bp, XFR_READ)
 #define DosWrite(hndl, n, bp) DosRWSft(get_sft_idx(hndl), n, bp, XFR_WRITE)
 ULONG DosSeek(unsigned hndl, LONG new_pos, COUNT mode, int *rc);
@@ -165,7 +165,7 @@ dtime dos_gettime(void);
 COUNT dos_mkdir(BYTE * dir);
 BOOL last_link(f_node_ptr fnp);
 COUNT map_cluster(REG f_node_ptr fnp, COUNT mode);
-long rwblock(COUNT fd, VOID FAR * buffer, UCOUNT count, int mode);
+long rwblock(COUNT fd, dos_far_ptr buffer, UCOUNT count, int mode);
 COUNT dos_read(COUNT fd, VOID FAR * buffer, UCOUNT count);
 COUNT dos_write(COUNT fd, const VOID FAR * buffer, UCOUNT count);
 CLUSTER dos_free(struct dpb FAR * dpbp);

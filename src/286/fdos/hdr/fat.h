@@ -167,3 +167,4 @@ void setdstart(struct dpb FAR *dpbp, struct dirent *dentry, CLUSTER value);
 /* map_cluster()/dos_extend() transfer mode, migrated from globals.h */
 #define XFR_READ        1
 #define XFR_WRITE       2
+#define XFR_FORCE_WRITE 3
