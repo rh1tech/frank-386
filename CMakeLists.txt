@@ -243,6 +243,8 @@ set(EMU_CORE_SOURCES
     src/286/bios/bios_1Ah.c
     src/286/bios/bios_FFh.c
     src/286/bios/bios_printf.c
+    drivers/vga/font8x8.c
+    drivers/vga/font8x14.c
 
     # FreeDOS kernel
     src/286/fdos/boot.c

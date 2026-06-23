@@ -48,9 +48,9 @@ void debug_log(const char *fmt, ...) {
 #define CPU_BX   _cpu->ext_accessors->get_reg16(_cpu, BX_REG_IDX)
 #define CPU_CX   _cpu->ext_accessors->get_reg16(_cpu, CX_REG_IDX)
 #define CPU_DX   _cpu->ext_accessors->get_reg16(_cpu, DX_REG_IDX)
-#define CPU_ES   _cpu->ext_accessors->get_seg16(_cpu, SEG_ES)
 #define CPU_DI   _cpu->ext_accessors->get_reg16(_cpu, DI_REG_IDX)
 #define CPU_SI   _cpu->ext_accessors->get_reg16(_cpu, SI_REG_IDX)
+#define CPU_ES   _cpu->ext_accessors->get_seg16(_cpu, SEG_ES)
 #define CPU_DS   _cpu->ext_accessors->get_seg16(_cpu, SEG_DS)
 
 /* Setters as lvalue-compatible macros via statement expressions */

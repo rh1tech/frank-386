@@ -2408,8 +2408,9 @@ bool bios_10h(CPU* cpu) {
     return true;
 }
 
+#include "font8x8.h"
+#include "font8x14.h"
 #include "font8x16.h"
-// TODO: other fonts 8x14, 8x8
 
 void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
 {
@@ -2424,23 +2425,17 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
      *   8x8 : rows 4..11
      */
     for (uint32_t ch = 0; ch < 256; ch++) {
-        for (uint32_t y = 0; y < 16; y++) {
-            write86(((uint32_t)BIOS_FONT_SEG << 4) +
-                    BIOS_FONT8X16_OFF + ch * 16 + y,
+        for (uint32_t y = 0; y < 16; y++)
+            pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF + ch * 16 + y,
                     font_8x16[ch * 16 + y]);
-        }
 
-        for (uint32_t y = 0; y < 14; y++) {
-            write86(((uint32_t)BIOS_FONT_SEG << 4) +
-                    BIOS_FONT8X14_OFF + ch * 14 + y,
-                    font_8x16[ch * 16 + y + 1]);
-        }
+        for (uint8_t y = 0; y < 14; y++)
+            pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF + ch * 14 + y,
+                    font_8x14[ch * 14 + y]);
 
-        for (uint32_t y = 0; y < 8; y++) {
-            write86(((uint32_t)BIOS_FONT_SEG << 4) +
-                    BIOS_FONT8X8_OFF + ch * 8 + y,
-                    font_8x16[ch * 16 + y + 4]);
-        }
+        for (uint8_t y = 0; y < 8; y++)
+            pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF + ch * 8 + y,
+                    font_8x8[ch * 8 + y]);
     }
 }
 
