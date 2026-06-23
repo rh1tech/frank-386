@@ -118,6 +118,26 @@
 #define VGA_MEM_BASE_GFX               0xA0000u
 
 /*
+ * VGA text character generator layout used by this emulator.
+ *
+ * Low-level renderer reads font bytes from VGA RAM plane 2:
+ *
+ *   block_base + ch * 32 * 4 + row * 4 + 2
+ *
+ * where:
+ *   32 = maximum VGA character-cell height in bytes;
+ *   *4 = emulator stores VGA planes as four consecutive bytes;
+ *   +2 = plane 2, the standard VGA font plane.
+ *
+ * BL in INT 10h/AX=11xx selects one of eight 8 KiB font blocks.
+ */
+#define BIOS10_FONT_BLOCK_COUNT        8
+#define BIOS10_FONT_CHARS_PER_BLOCK    256
+#define BIOS10_FONT_MAX_HEIGHT         32
+#define BIOS10_FONT_PLANE              2
+#define BIOS10_FONT_BLOCK_BYTES        (BIOS10_FONT_CHARS_PER_BLOCK * BIOS10_FONT_MAX_HEIGHT)
+
+/*
  * Update hardware text-mode cursor through the VGA CRT Controller.
  *
  * IBM PC compatible VGA/MDA/CGA adapters store the cursor position
@@ -2266,6 +2286,175 @@ static bool bios_10h_101Ah(CPU* cpu)
 }
 
 /*
+ * Return physical address of one byte in VGA character-generator RAM.
+ *
+ * This follows the layout expected by vga_text_refresh()/vga_get_font_ptr():
+ * character glyphs are stored in plane 2, with four bytes per VGA memory
+ * address because the emulator keeps planes interleaved.
+ */
+static uint32_t bios_10h_font_plane_addr(uint8_t block,
+                                         uint8_t ch,
+                                         uint8_t row)
+{
+    uint32_t off =
+        (uint32_t)(block & 0x07) * BIOS10_FONT_BLOCK_BYTES * 4u +
+        (uint32_t)ch * BIOS10_FONT_MAX_HEIGHT * 4u +
+        (uint32_t)row * 4u +
+        BIOS10_FONT_PLANE;
+    return VGA_MEM_BASE_GFX + off;
+}
+
+/*
+ * Update active text character height.
+ *
+ * INT 10h AX=11xx font-loading services also define the character-cell
+ * height used by text rendering.  For standard VGA text modes this is done
+ * through CRTC register 09h, low 5 bits = max scan line.
+ *
+ * BDA fields:
+ *   40:84 = rows minus one
+ *   40:85 = character height
+ */
+static void bios_10h_set_text_char_height(CPU* cpu, uint8_t height)
+{
+    if (height == 0 || height > BIOS10_FONT_MAX_HEIGHT)
+        return;
+
+    uint16_t crtc = readw86(0x463);
+    if (crtc == 0)
+        crtc = 0x3D4;
+
+    cpu_portout8(crtc, 0x09);
+    uint8_t reg09 = cpu_portin8(crtc + 1);
+    reg09 = (reg09 & 0xE0) | ((height - 1) & 0x1F);
+    cpu_portout8(crtc, 0x09);
+    cpu_portout8(crtc + 1, reg09);
+    writew86(0x485, height);
+    /*
+     * Current native BIOS standard text modes are 400 scan-line VGA modes.
+     * With 8x8 font they become 50 rows; with 8x14/8x16 they remain 25 rows.
+     */
+    if (height <= 8)
+        write86(0x484, 49);
+    else
+        write86(0x484, 24);
+}
+
+/*
+ * Load a font table into VGA character-generator RAM.
+ *
+ * src points to a compact table:
+ *   char0 row0..rowN, char1 row0..rowN, ...
+ *
+ * destination is the selected VGA font block in plane 2.
+ * Rows above bytes_per_char are cleared up to 32 bytes so switching from a
+ * taller font to a shorter one cannot leave stale glyph scanlines visible.
+ */
+static void bios_10h_load_font_block(uint8_t block,
+                                     uint32_t src,
+                                     uint16_t first_char,
+                                     uint16_t count,
+                                     uint8_t bytes_per_char)
+{
+    if (bytes_per_char == 0 || bytes_per_char > BIOS10_FONT_MAX_HEIGHT)
+        return;
+
+    if (first_char >= BIOS10_FONT_CHARS_PER_BLOCK)
+        return;
+
+    if (count > BIOS10_FONT_CHARS_PER_BLOCK - first_char)
+        count = BIOS10_FONT_CHARS_PER_BLOCK - first_char;
+
+    block &= 0x07;
+
+    for (uint16_t i = 0; i < count; i++) {
+        uint8_t ch = (uint8_t)(first_char + i);
+
+        for (uint8_t row = 0; row < bytes_per_char; row++) {
+            write86(bios_10h_font_plane_addr(block, ch, row),
+                    read86(src + (uint32_t)i * bytes_per_char + row));
+        }
+
+        for (uint8_t row = bytes_per_char; row < BIOS10_FONT_MAX_HEIGHT; row++) {
+            write86(bios_10h_font_plane_addr(block, ch, row), 0x00);
+        }
+    }
+}
+
+/*
+VIDEO - LOAD USER-SPECIFIED TEXT-MODE FONT
+AX = 1100h
+ES:BP -> user font table
+CX = number of characters
+DX = first character code
+BL = font block
+BH = bytes per character
+
+Return:
+Nothing
+*/
+static bool bios_10h_1100h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)CPU_ES << 4) + CPU_BP;
+
+    bios_10h_load_font_block(CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
+    bios_10h_set_text_char_height(cpu, CPU_BH);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - LOAD 8x14 ROM TEXT-MODE FONT
+AX = 1101h
+BL = font block
+
+Return:
+Nothing
+*/
+static bool bios_10h_1101h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 14);
+    bios_10h_set_text_char_height(cpu, 14);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - LOAD 8x8 ROM TEXT-MODE FONT
+AX = 1102h
+BL = font block
+
+Return:
+Nothing
+*/
+static bool bios_10h_1102h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 8);
+    bios_10h_set_text_char_height(cpu, 8);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - LOAD 8x16 ROM TEXT-MODE FONT
+AX = 1104h
+BL = font block
+
+Return:
+Nothing
+*/
+static bool bios_10h_1104h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 16);
+    bios_10h_set_text_char_height(cpu, 16);
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - GET FONT INFORMATION (EGA, MCGA, VGA)
 AX = 1130h
 BH = pointer specifier
@@ -2388,8 +2577,13 @@ bool bios_10h(CPU* cpu) {
             }
             break;
         case 0x11:
-            if (CPU_AL == 0x30)
-                return bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
+            switch(CPU_AL) {
+            case 0: return bios_10h_1100h(cpu); // LOAD USER TEXT-MODE FONT
+            case 1: return bios_10h_1101h(cpu); // LOAD 8x14 ROM FONT
+            case 2: return bios_10h_1102h(cpu); // LOAD 8x8 ROM FONT
+            case 4: return bios_10h_1104h(cpu); // LOAD 8x16 ROM FONT
+            case 0x30: return bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
+            }
             break;
         case 0x12:
             if (CPU_BL == 0x10)
