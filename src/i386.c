@@ -5131,14 +5131,16 @@ static void IRAM_ATTR i386_step(CPU* _cpu, int stepcount)
 		}
 	}
 	if (!(cpu->cr0 & 1)) {
-		u32 phys = ((u32)(cpu->seg[SEG_CS].sel & 0xFFFF) << 4) + (cpu->ip & 0xffffu);
+		u32 phys = ((u32)(cpu->seg[SEG_CS].sel & 0xFFFF) << 4) + (cpu->next_ip & 0xffffu);
+		bios_printf((CPU*)cpu, "                %04x:%04x %x\n", cpu->seg[SEG_CS].sel, cpu->next_ip, phys);
 		if ((phys >> 8) == 0xFFE) {
 			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
 				TRY1(set_seg(cpu, SEG_CS, 0xFFF0));
 				cpu->ip = 0x0006;
-				cpu->next_ip = cpu->ip; PREFETCH_RESET
 			}
-		}			
+            cpu->next_ip = cpu->ip;
+            PREFETCH_RESET
+		}
 	}
 
 	if (cpu->halt) {
@@ -5280,9 +5282,7 @@ static u16 IRAM_ATTR get_seg16(struct CPU* _cpu, u8 segn) {
 }
 static void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
 	register CPUI386* cpu = (CPUI386*)_cpu;
-	cpu->seg[segn].sel = v;
-    cpu->seg[segn].base = (uint32_t)v << 4;
-    cpu->seg[segn].limit = 0xFFFF;
+	set_seg(cpu, segn, v);
 }
 static void IRAM_ATTR set_flag(CPU* _cpu, u32 mask, bool val)
 {

@@ -1,6 +1,7 @@
 #include <pico.h>
 #include <pico/time.h>
 #include <hardware/pio.h>
+#include <ctype.h>
 #include "../cpu.h"
 #include "../bios.h"
 #include "../fdos.h"
@@ -6004,7 +6005,229 @@ UWORD GetBiosKey(int timeout)
 }
 
 /*
-    ConvertPathNameToFCBName/set_fcbname - convert PriPathName's final
+    -----------------------------------------------------------------
+    CONFIG.SYS parser (migrated from config.c)
+    -----------------------------------------------------------------
+
+    State and primitives shared by DoConfig() and the per-directive
+    handlers below. All of this is plain native ARM memory (line
+    buffers, error-tracking bitmaps, file descriptors for the
+    internal open()/read()/close() wrappers above) - nothing here is
+    guest-visible, the same reasoning as fnode[]/f_node in fnode.h.
+*/
+STATIC BYTE szLine[256] BSS_INIT({0});
+STATIC BYTE szBuf[256] BSS_INIT({0});
+STATIC unsigned nCfgLine BSS_INIT(0);
+static UBYTE ErrorAlreadyPrinted[128] BSS_INIT({0});
+BYTE *pLineStart BSS_INIT(0);
+COUNT nFileDesc BSS_INIT(0);
+
+/* CHAIN= support (multiple nested CONFIG.SYS-like files) - the
+   table exists so DoConfig()'s "if (bEof && nCurChain)" check below
+   compiles and behaves correctly, but nCurChain can never become
+   nonzero: CmdChain() (the CHAIN= handler) is CfgNotImplemented() in
+   this iteration (see the command table below), so nothing ever
+   pushes onto cfgFile[]. */
+#define MAX_CHAINS 5
+struct CfgFile {
+  COUNT nFileDesc;
+  COUNT nCfgLine;
+} cfgFile[MAX_CHAINS] BSS_INIT({0});
+COUNT nCurChain BSS_INIT(0);
+
+/* [MENU]/numbered-block ("1?DEVICE=...") CONFIG.SYS menu support -
+   these are real, live state read/written by scan() below (and by
+   CfgMenu()/CfgMenuColor()/etc, all CfgNotImplemented() in this
+   iteration - see the command table below), so they need to exist
+   and behave correctly even though nothing exercises [MENU] yet. */
+STATIC BOOL askThisSingleCommand BSS_INIT(0);
+STATIC BOOL DontAskThisSingleCommand BSS_INIT(0);
+STATIC unsigned MenuLine BSS_INIT(0);
+STATIC unsigned Menus BSS_INIT(0);
+
+/* true if c is a CONFIG.SYS line whitespace character.
+   Migrated from config.c verbatim. */
+STATIC int iswh(unsigned char c)
+{
+  return (c == '\r' || c == '\n' || c == '\t' || c == ' ');
+}
+
+/* skip whitespace, return pointer to the first non-whitespace char.
+   Migrated from config.c verbatim. */
+STATIC BYTE * skipwh(BYTE * s)
+{
+  while (iswh(*s))
+    ++s;
+  return s;
+}
+
+/* Migrated from config.c verbatim. */
+STATIC BOOL isnum(char ch)
+{
+  return (ch >= '0' && ch <= '9');
+}
+
+/* case-insensitive string equality. Migrated from config.c verbatim. */
+STATIC char strcaseequal(const char * d, const char * s)
+{
+  char ch;
+  while ((ch = toupper(*s++)) == toupper(*d++))
+    if (ch == '\0')
+      return 1;
+  return 0;
+}
+
+/*
+    CfgFailure(pLine) - report a CONFIG.SYS syntax error at pLine,
+    pointing at the offending character with a caret, and suppressing
+    repeat reports for the same line number.
+
+    Migrated from config.c verbatim.
+*/
+STATIC VOID CfgFailure(BYTE * pLine)
+{
+  BYTE *pTmp = pLineStart;
+
+  /* suppress multiple printing of same unrecognized lines */
+
+  if (nCfgLine < sizeof(ErrorAlreadyPrinted)*8)
+  {
+    if (ErrorAlreadyPrinted[nCfgLine/8] & (1 << (nCfgLine%8)))
+      return;
+
+    ErrorAlreadyPrinted[nCfgLine/8] |= (1 << (nCfgLine%8));
+  }
+  printf("CONFIG.SYS error in line %d\n", nCfgLine);
+  printf(">>>%s\n   ", pTmp);
+  while (++pTmp != pLine)
+    printf(" ");
+  printf("^\n");
+}
+
+/*
+    scan(s, d, fMenuSelect) - extract the next CONFIG.SYS "verb"
+    (directive name, up to whitespace or '='), upcasing the
+    askThisSingleCommand ('?')/DontAskThisSingleCommand ('!')/numbered-
+    menu-line ("N?") prefixes along the way, into d. Returns a
+    pointer to whatever follows the verb in s (the directive's
+    arguments).
+
+    Migrated from config.c verbatim.
+*/
+STATIC BYTE * scan(BYTE * s, BYTE * d, int fMenuSelect)
+{
+  askThisSingleCommand = FALSE;
+  DontAskThisSingleCommand = FALSE;
+  s = skipwh(s);
+  MenuLine = 0;
+  /* only check at beginning of line, ie when looking for
+     menu selection line applies to.  Fixes issue where
+	 value after = starts with number, eg shell=4dos */
+  /* does the line start with "123?" */
+  if (fMenuSelect && isnum(*s))
+  {
+    unsigned numbers = 0;
+    for ( ; isnum(*s); s++)
+        numbers |= 1 << (*s -'0');
+    if (*s == '?')
+    {
+      MenuLine = numbers;
+      Menus |= numbers;
+      s = skipwh(s+1);
+    }
+  }
+  /* !dos=high,umb    ?? */
+  if (*s == '!')
+  {
+    DontAskThisSingleCommand = TRUE;
+    s = skipwh(s+1);
+  }
+  if (*s == ';')
+  {
+    /* semicolon is a synonym for rem */
+    *d++ = *s++;
+  }
+  else
+    while (*s && !iswh(*s) && *s != '=')
+    {
+      if (*s == '?')
+        askThisSingleCommand = TRUE;
+      else
+        *d++ = *s;
+      s++;
+    }
+  *d = '\0';
+  return s;
+}
+
+/*
+    GetNumArg(p, num)/GetStringArg(pLine, pszString) - parse a
+    directive's numeric (decimal, or hex with a trailing 'x'/'X')
+    argument, or just copy its string argument verbatim.
+
+    Migrated from config.c verbatim.
+*/
+STATIC char *GetNumArg(char *p, int *num)
+{
+  static char digits[] = "0123456789ABCDEF";
+  unsigned char base = 10;
+  int sign = 1;
+  int n = 0;
+  /* look for NUMBER                               */
+  p = (char *)skipwh((BYTE *)p);
+  if (*p == '-')
+  {
+    p++;
+    sign = -1;
+  }
+  else if (!isnum(*p))
+  {
+    CfgFailure((BYTE *)p);
+    return NULL;
+  }
+  for( ; *p; p++)
+  {
+    char ch = toupper(*p);
+    if (ch == 'X')
+      base = 16;
+    else
+    {
+      char *q = strchr(digits, ch);
+      if (q == NULL)
+        break;
+      n = n * base + (q - digits);
+    }
+  }
+  *num = n * sign;
+  return p;
+}
+
+BYTE *GetStringArg(BYTE * pLine, BYTE * pszString)
+{
+  /* just return whatever string is there, including null         */
+  return scan(pLine, pszString, 0);
+}
+
+// TODO: ensure
+struct table {
+    char* entry;
+};
+
+/*
+    LookUp(p, token) - find the command table entry whose name
+    case-insensitively matches token, or the table's terminating
+    (empty-name) entry if none match.
+
+    Migrated from config.c verbatim.
+*/
+STATIC struct table * LookUp(struct table *p, BYTE * token)
+{
+  while (p->entry[0] != '\0' && !strcaseequal((const char *)p->entry, (const char *)token))
+    ++p;
+  return p;
+}
+
+/*    ConvertPathNameToFCBName/set_fcbname - convert PriPathName's final
     component into FCB (8.3, space-padded) form, stashed in
     internal_data->DirEntBuffer (cast to a struct dirent - see lol.h:
     DirEntBuffer is a plain BYTE[32], same as the original's "extern

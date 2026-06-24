@@ -163,6 +163,7 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib);
 ddate dos_getdate(void);
 dtime dos_gettime(void);
 UWORD GetBiosKey(int timeout);
+BYTE *GetStringArg(BYTE * pLine, BYTE * pszString);
 COUNT dos_mkdir(BYTE * dir);
 BOOL last_link(f_node_ptr fnp);
 COUNT map_cluster(REG f_node_ptr fnp, COUNT mode);
