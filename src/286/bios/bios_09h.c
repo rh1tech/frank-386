@@ -245,7 +245,7 @@ bool bios_09h(CPU* cpu)
     }
     /* Save raw code (with break bit) in scratch for phase2 */
     write86(IRQ1_SCRATCH, code);
-    cpu->ext_accessors->set_bios_callback(cpu, &params);
+    set_bios_callback(cpu, &params);
     CPU_AX = 0x4F00 | code; // prepare for int 15h 4Fh
     SET_CS ( IRQ1_STUB_CS );
     CPU_IP = IRQ1_STUB_IP;

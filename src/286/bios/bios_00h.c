@@ -29,6 +29,6 @@ bool bios_00h(CPU* cpu) {
 	printf("\nDivide overflow at %04X:%04X\n", CPU_CS, CPU_IP);
     SET_CS ( 0xFFF0 ); // -> FFF74: INT FFh
     CPU_IP = 0x0074;
-    cpu->ext_accessors->set_bios_callback(cpu, &params);
+    set_bios_callback(cpu, &params);
     return false;
 }

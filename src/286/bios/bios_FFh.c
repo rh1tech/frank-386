@@ -19,11 +19,6 @@ static bios_callback_params_t root = {
 // in case such address in CS:IP, it means: it was restored from x86 stack,
 // pushed by some bios_XXh function to return back
 bool bios_FFh(CPU* cpu) { // W/A BIOS callback
-    if (!cpu->ext_accessors->set_bios_callback) {
-        cpu_err_msg(cpu, "ERROR: bios callback flow is defined");
-while(1); // remove it
-        return true; // IRET
-    }
     u16 cs = CPU_CS;
     u16 ip = CPU_IP;
     bios_callback_params_t* node = &root;

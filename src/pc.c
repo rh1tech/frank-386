@@ -989,7 +989,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->cpu = cpu_new(conf->cpu_gen, &cb);
 	if (conf->fpu)
 		enable_fpu(pc->cpu);
-	pc->bios = conf->bios;
+	pc->bios = 0; /// TODO: support both modes // conf->bios;
 	pc->vga_bios = conf->vga_bios;
 	pc->enable_serial = conf->enable_serial;
 #if !defined(_WIN32) && !defined(__wasm__)
@@ -1157,9 +1157,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	return pc;
 }
 
-#ifndef I386_MODE
 #include "286/bios.h"
-#include "286/fdos.h"
 // IRET is saved on 0xFFF06
 static void point2iret(u32 intno) {
 	pstore16(intno*4, 0x0006);
@@ -1464,29 +1462,25 @@ void bios_post(PC *pc) {
     pstore8(0xFFFF0, 0xCD); // INT 19h - bootstrap
     pstore8(0xFFFF1, 0x19);
 }
-#else
-void bios_post(PC *pc) {}
-#endif
 
 void load_bios_and_reset(PC *pc)
 {
-	/// TODO: 286 AT BIOS support
-#ifdef I386_MODE
 	int bios_size = 0;
-	if (pc->bios && pc->bios[0])
-		bios_size = load_rom(PC_RAM, pc->bios, 0x100000, 1);
+	if (pc->bios && pc->bios[0]) {
+			bios_size = load_rom(PC_RAM, pc->bios, 0x100000, 1);
 
-	// Only load VGA BIOS if main BIOS doesn't overlap with 0xC0000
-	// 256KB BIOS starts at 0xC0000, so VGA BIOS would overwrite it
-	int bios_start = 0x100000 - bios_size;
-	if (pc->vga_bios && pc->vga_bios[0] && bios_start >= 0xC8000) {
-		load_rom(PC_RAM, pc->vga_bios, 0xc0000, 0);
-	} else if (pc->vga_bios && pc->vga_bios[0]) {
-		printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
+		// Only load VGA BIOS if main BIOS doesn't overlap with 0xC0000
+		// 256KB BIOS starts at 0xC0000, so VGA BIOS would overwrite it
+		int bios_start = 0x100000 - bios_size;
+		if (pc->vga_bios && pc->vga_bios[0] && bios_start >= 0xC8000) {
+			load_rom(PC_RAM, pc->vga_bios, 0xc0000, 0);
+		} else if (pc->vga_bios && pc->vga_bios[0]) {
+			printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
+		}
+	} else {
+		bios_post(pc);
 	}
-#endif
 	sn76489_reset();
-
 	cpu_reset(pc->cpu);
 }
 

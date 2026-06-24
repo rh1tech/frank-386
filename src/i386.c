@@ -1,5 +1,6 @@
 #include "mem.h"
 #include "i386.h"
+#include "286/bios.h"
 #include <pico.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -4622,6 +4623,8 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	}
 	#endif
 	if (!(cpu->cr0 & 1)) {
+		u16 prev_cs = cpu->seg[SEG_CS].sel;
+		u16 prev_ip = cpu->ip;
 		/* REAL-ADDRESS-MODE */
 		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
 		OptAddr meml;
@@ -4648,6 +4651,12 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		cpu->next_ip = newip; PREFETCH_RESET
 		cpu->ip = newip;
 		cpu->flags &= ~(IF|TF);
+    {
+        char buf[50];
+        snprintf(buf, 79, "INT %02Xh DOS? %04X:%04X->%04X:%04X AX:%04X  ", no, prev_cs, prev_ip, cpu->seg[SEG_CS].sel, newip, cpu->gprx[0].r16);
+        print_line(buf, 0);
+    }
+
 		return true;
 	}
 
@@ -5121,6 +5130,16 @@ static void IRAM_ATTR i386_step(CPU* _cpu, int stepcount)
 			}
 		}
 	}
+	if (!(cpu->cr0 & 1)) {
+		u32 phys = ((u32)cpu->seg[SEG_CS].sel << 4) + (cpu->ip & 0xffffu);
+		if ((phys >> 8) == 0xFFE) {
+			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
+				TRY1(set_seg(cpu, SEG_CS, 0xFFF0));
+				cpu->ip = 0x0006;
+				cpu->next_ip = cpu->ip; PREFETCH_RESET
+			}
+		}			
+	}
 
 	if (cpu->halt) {
 		usleep(1);
@@ -5338,6 +5357,28 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 			cpu->bios_prof_depth = 0;
 			i386_profile_install_bios_hooks(cpu);
 			#endif
+///    for(int i = 0; i < 256; ++i) {
+///        handlers[i] = no_handler;
+///    }
+    handlers[0x00] = bios_00h; // DIVIDE BY ZERO
+    handlers[0x05] = bios_05h; // PRINT SCREEN / BOUND EXCEPTION
+    handlers[0x08] = bios_08h; // IRQ0: Timer
+    handlers[0x09] = bios_09h; // IRQ1: Keyboard
+    handlers[0x10] = bios_10h; // VIDEO
+    handlers[0x11] = bios_11h; // EQUIPMENT LIST
+    handlers[0x12] = bios_12h; // Conventional RAM count
+    handlers[0x13] = bios_13h; // DISK
+    handlers[0x14] = bios_14h; // SERIAL
+    handlers[0x15] = bios_15h; // TSR
+    handlers[0x16] = bios_16h; // KEYBOARD
+    handlers[0x17] = bios_17h; // PRINTERS
+    handlers[0x18] = bios_18h; // BASIC
+    handlers[0x19] = bios_19h; // BOOTSTRAP
+    handlers[0x1A] = bios_1Ah; // CMOS TIME
+///    handlers[0x21] = fdos_21h; // main DOS handler
+///    handlers[0x29] = fdos_29h; // fast console output.
+    handlers[0xFF] = bios_FFh; // W/A BIOS callback
+
 #else
 			cpu_init_286(cpu);
 #endif

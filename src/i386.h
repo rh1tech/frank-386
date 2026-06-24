@@ -81,7 +81,6 @@ typedef struct bios_callback_params {
 	u16 expected_ip;
 	struct bios_callback_params* chain;
 } bios_callback_params_t;
-typedef bool (*set_bios_callback_t)(struct CPU* cpu, bios_callback_params_t* params);
 
 typedef struct CPU_ext_accessors {
 	get_reg8_t get_reg8;
@@ -101,7 +100,6 @@ typedef struct CPU_ext_accessors {
 	cpu_raise_irq_t raise_irq;
 	cpu_setexc_t setexc;
 	cpu_abort_t abort;
-    set_bios_callback_t set_bios_callback;
 } CPU_ext_accessors_t;
 
 typedef union {
@@ -159,6 +157,10 @@ struct CPU {
 }; // should be the same in all implementations
 
 typedef struct CPU CPU;
+
+bool rp2350_bios_handler(CPU* cpu, uint8_t intnum);
+typedef bool (*handler_t)(CPU*);
+extern handler_t handlers[256];
 
 CPU *cpu_new(int gen, CPU_CB **cb);
 inline static void enable_fpu(CPU *cpu) {
@@ -289,5 +291,17 @@ static inline void cmos_write(CPU* cpu, uint8_t reg, uint8_t val)
 	cpu->cb.io_write8(cpu->cb.io, 0x71, val);
 }
 
+#include "mem.h"
+
+inline static void print_char(char c, int char_row, int char_pos) {
+    pstore8(0xB8000 + char_row * 160 + char_pos * 2, 0x0F00 | c);
+}
+
+inline static void print_line(const char* s, int row) {
+    if (!s) return;
+    for (int col = 0; col < 80 && s[col]; ++col) {
+        print_char(s[col], row, col);
+    }
+}
 
 #endif /* I386_H */

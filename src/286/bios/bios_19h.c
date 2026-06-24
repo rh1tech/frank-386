@@ -85,6 +85,6 @@ bool bios_19h(CPU* cpu) {
     print_line("Press Win+F12 to enter Setup", 1);
     SET_CS ( 0xFFEF ); // -> FFEFF
     CPU_IP = 0x000F;
-    cpu->ext_accessors->set_bios_callback(cpu, &params);
+    set_bios_callback(cpu, &params);
     return false; // exact CS:IP, no IRET required there
 }

@@ -83,8 +83,7 @@ static void i286_abort(CPU* cpu, int code)
 	abort();
 }
 
-typedef bool (*handler_t)(CPU*);
-static handler_t handlers[256];
+handler_t handlers[256];
 
 #include <stdio.h>
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
@@ -131,8 +130,6 @@ void cpu_init_286(CPU* cpu) {
     cpue->raise_irq = raise_irq;
     cpue->setexc = setexc;
     cpue->abort = i286_abort;
-    cpue->set_bios_callback = set_bios_callback;
-
 
     for(int i = 0; i < 256; ++i) {
         handlers[i] = no_handler;
@@ -154,26 +151,8 @@ void cpu_init_286(CPU* cpu) {
     handlers[0x1A] = bios_1Ah; // CMOS TIME
     handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.
-///    handlers[0x77] = bios_09h_phase2; // KEYBOARD W/A TODO: other way
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
-/*
-00h  divide error
-01h  single step
-03h  breakpoint
-06h  invalid opcode
-1Bh — BIOS Ctrl-Break hook.
-20h  terminate program
-22h  terminate address
-24h  critical error
-25h  absolute disk read
-26h  absolute disk write
-27h  TSR terminate
-28h  DOS idle
-2Ah  DOS internal/network/critical section
-2Fh  multiplex
-23h до 3Fh сначала получают empty_handler, то есть простой IRET.
 // TODO: INT 30h как far jump на CP/M entry
-    */
 }
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION
@@ -922,7 +901,7 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
     }
 }
 
-static bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
+bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
     print_line2("BIOS", 0, 8);
     bool normal_iret_flow = handlers[intnum](cpu);
     uint16_t flags_on_stack = getmem16(CPU_SS, CPU_SP + 4);
