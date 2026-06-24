@@ -138,6 +138,48 @@
 #define BIOS10_FONT_BLOCK_BYTES        (BIOS10_FONT_CHARS_PER_BLOCK * BIOS10_FONT_MAX_HEIGHT)
 
 /*
+ * EGA/VGA BIOS Data Area fields used by alternate-select services.
+ */
+#define BIOS10_BDA_VIDEO_MODE_OPTIONS  0x487
+#define BIOS10_BDA_VIDEO_DISPLAY_DATA  0x489
+
+/*
+ * BDA 40:87 bit 0:
+ *   0 = direct cursor scan-line setting
+ *   1 = emulate old 8-scan-line cursor values on taller VGA character cells
+ *
+ * Bit 7 is BIOS-private here: it records that AH=12h/BL=30h explicitly
+ * selected a text scan-line mode, so the next mode set should apply it.
+ */
+#define BIOS10_VMO_CURSOR_EMULATION    0x01
+#define BIOS10_VMO_SCANLINE_SELECTED   0x80
+
+/*
+ * BDA 40:89 scan-line selection bits.
+ *
+ * VGA BIOS convention:
+ *   bits 7,4 = 00b -> 350 scan lines
+ *   bits 7,4 = 01b -> 400 scan lines
+ *   bits 7,4 = 10b -> 200 scan lines
+ */
+#define BIOS10_VDD_VGA_ACTIVE          0x01
+#define BIOS10_VDD_SCANLINE_MASK       0x90
+#define BIOS10_VDD_SCANLINE_350        0x00
+#define BIOS10_VDD_SCANLINE_400        0x10
+#define BIOS10_VDD_SCANLINE_200        0x80
+
+/*
+ * Forward declaration: mode-set scan-line selection needs to load the
+ * corresponding ROM font into VGA plane-2 font RAM.  The full implementation
+ * is below the AX=11xx font services.
+ */
+static void bios_10h_load_font_block(uint8_t block,
+                                     uint32_t src,
+                                     uint16_t first_char,
+                                     uint16_t count,
+                                     uint8_t bytes_per_char);
+
+/*
  * Update hardware text-mode cursor through the VGA CRT Controller.
  *
  * IBM PC compatible VGA/MDA/CGA adapters store the cursor position
@@ -247,120 +289,6 @@ static void bios_10h_set_crtc_cursor(CPU* cpu,
      */
     cpu_portout8(crtc, 0x0F);
     cpu_portout8(crtc + 1, pos & 0xFF);
-}
-
-/*
-VIDEO - SET VIDEO MODE
-AH = 00h
-AL = desired video mode (see #00010)
-
-Return:
-AL = video mode flag (Phoenix, AMI BIOS)
-20h mode > 7
-30h modes 0-5 and 7
-3Fh mode 6
-AL = CRT controller mode byte (Phoenix 386 BIOS v1.10)
-
-Desc: Specify the display mode for the currently active display adapter
-
-InstallCheck:
-For Ahead adapters, the signature "AHEAD" at C000h:0025h.
-For Paradise adapters, the signature "VGA=" at C000h:007Dh.
-For Oak Tech OTI-037/057/067/077 chipsets, the signature "OAK VGA" at
-C000h:0008h.
-For ATI adapters, the signature "761295520" at C000h:0031h; the byte
-at C000h:0043h indicates the chipset revision:
-31h for 18800
-32h for 18800-1
-33h for 18800-2
-34h for 18800-4
-35h for 18800-5
-62h for 68800AX (Mach32) (see also #00732)
-the two bytes at C000h:0040h indicate the adapter type
-"22" EGA Wonder
-"31" VGA Wonder
-"32" EGA Wonder800+
-the byte at C000h:0042h contains feature flags
-
-bit 1:
-Mouse port present
-
-bit 4:
-Programmable video clock
-the byte at C000h:0044h contains additional feature flags if chipset
-byte > 30h (see #00009).
-For Genoa video adapters, the signature 77h XXh 99h 66h at C000h:NNNNh,
-where NNNNh is stored at C000h:0037h and XXh is
-00h for Genoa 6200/6300
-11h for Genoa 6400/6600
-22h for Genoa 6100
-33h for Genoa 5100/5200
-55h for Genoa 5300/5400
-for SuperEGA BIOS v2.41+, C000h:0057h contains the product level
-for Genoa SuperEGA BIOS v3.0+, C000h:0070h contains the signature
-"EXTMODE", indicating support for extended modes
-*/
-static void vga_write_regs_80x25_color(CPU* cpu)
-{
-    static const uint8_t seq[5] = {
-        0x03, 0x00, 0x03, 0x00, 0x02
-    };
-
-    static const uint8_t crtc[25] = {
-        0x5F, 0x4F, 0x50, 0x82, 0x55,
-        0x81, 0xBF, 0x1F, 0x00, 0x4F,
-        0x0D, 0x0E, 0x00, 0x00, 0x00,
-        0x50, 0x9C, 0x0E, 0x8F, 0x28,
-        0x1F, 0x96, 0xB9, 0xA3, 0xFF
-    };
-
-    static const uint8_t gc[9] = {
-        0x00, 0x00, 0x00, 0x00, 0x00,
-        0x10, 0x0E, 0x00, 0xFF
-    };
-
-    static const uint8_t ac[21] = {
-        0x00, 0x01, 0x02, 0x03,
-        0x04, 0x05, 0x14, 0x07,
-        0x38, 0x39, 0x3A, 0x3B,
-        0x3C, 0x3D, 0x3E, 0x3F,
-        0x0C, 0x00, 0x0F, 0x08,
-        0x00
-    };
-
-    cpu_portout8(0x3C2, 0x67);   /* Misc Output: color, 80-col timing */
-
-    for (uint8_t i = 0; i < 5; i++) {
-        cpu_portout8(0x3C4, i);
-        cpu_portout8(0x3C5, seq[i]);
-    }
-
-    /* unlock CRTC regs 00h..07h */
-    cpu_portout8(0x3D4, 0x11);
-    cpu_portout8(0x3D5, crtc[0x11] & ~0x80);
-
-    for (uint8_t i = 0; i < 25; i++) {
-        cpu_portout8(0x3D4, i);
-        cpu_portout8(0x3D5, crtc[i]);
-    }
-
-    for (uint8_t i = 0; i < 9; i++) {
-        cpu_portout8(0x3CE, i);
-        cpu_portout8(0x3CF, gc[i]);
-    }
-
-    /*
-     * Attribute Controller needs flip-flop reset by reading 3DAh.
-     */
-    (void)cpu_portin8(0x3DA);
-
-    for (uint8_t i = 0; i < 21; i++) {
-        cpu_portout8(0x3C0, i);
-        cpu_portout8(0x3C0, ac[i]);
-    }
-
-    /* enable video output */
-    cpu_portout8(0x3C0, 0x20);
 }
 
 typedef struct {
@@ -636,6 +564,87 @@ static uint32_t bios_10h_text_cell(uint8_t mode,
 }
 
 /*
+ * Return character height selected by INT 10h/AH=12h/BL=30h.
+ *
+ * This is used only after that service was explicitly called.  Otherwise
+ * normal mode-table defaults remain in effect.
+ */
+static uint8_t bios_10h_selected_scanline_char_height(void)
+{
+    switch (read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) & BIOS10_VDD_SCANLINE_MASK) {
+    case BIOS10_VDD_SCANLINE_200:
+        return 8;
+    case BIOS10_VDD_SCANLINE_350:
+        return 14;
+    case BIOS10_VDD_SCANLINE_400:
+    default:
+        return 16;
+    }
+}
+
+/*
+ * Apply AH=12h/BL=30h text scan-line selection on the next mode set.
+ *
+ * VGA BIOS semantics: the request does not immediately change the current
+ * mode; it changes how the following text-mode set is initialized.
+ *
+ * For this native BIOS:
+ *   200 scan lines -> 8x8 ROM font, 25 rows
+ *   350 scan lines -> 8x14 ROM font, 25 rows
+ *   400 scan lines -> 8x16 ROM font, 25 rows
+ *
+ * This intentionally differs from AX=1102h font loading, where 8x8 can
+ * produce 50-row text.  AH=12h/BL=30h is a mode-set policy, not a direct
+ * "switch to 50 rows" request.
+ */
+static void bios_10h_apply_selected_text_scanlines(CPU* cpu)
+{
+    if (!(read86(BIOS10_BDA_VIDEO_MODE_OPTIONS) & BIOS10_VMO_SCANLINE_SELECTED))
+        return;
+
+    uint8_t height = bios_10h_selected_scanline_char_height();
+    uint32_t src;
+    uint16_t cursor_shape;
+
+    switch (height) {
+    case 8:
+        src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
+        cursor_shape = 0x0607;
+        break;
+    case 14:
+        src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
+        cursor_shape = 0x0B0C;
+        break;
+    case 16:
+    default:
+        src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
+        cursor_shape = 0x0E0F;
+        break;
+    }
+
+    bios_10h_load_font_block(0, src, 0, 256, height);
+
+    write86(0x484, 24);
+    writew86(0x485, height);
+    writew86(0x460, cursor_shape);
+
+    uint16_t crtc = readw86(0x463);
+    if (crtc == 0)
+        crtc = 0x3D4;
+
+    cpu_portout8(crtc, 0x09);
+    uint8_t reg09 = cpu_portin8(crtc + 1);
+    reg09 = (reg09 & 0xE0) | ((height - 1) & 0x1F);
+    cpu_portout8(crtc, 0x09);
+    cpu_portout8(crtc + 1, reg09);
+
+    cpu_portout8(crtc, 0x0A);
+    cpu_portout8(crtc + 1, cursor_shape >> 8);
+    cpu_portout8(crtc, 0x0B);
+    cpu_portout8(crtc + 1, cursor_shape & 0xFF);
+}
+
+/*
 VIDEO - SET VIDEO MODE
 AH = 00h
 AL = desired video mode (see #00010)
@@ -686,7 +695,10 @@ static bool bios_10h_00h(CPU* cpu)
     /* SeaBIOS vga_set_mode: update video_ctl, video_switches, modeset_ctl */
     write86(0x465, no_clear ? 0xE0 : 0x60);             /* video_ctl: bit7=no_clear (SeaBIOS) */
     write86(0x488, 0xF9);                               /* video_switches */
-    write86(0x489, read86(0x489) & ~0x80);              /* modeset_ctl: clear bit 7 */
+    write86(BIOS10_BDA_VIDEO_DISPLAY_DATA,
+            read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) | BIOS10_VDD_VGA_ACTIVE);
+    if (m->text)
+        bios_10h_apply_selected_text_scanlines(cpu);
 
     if (!no_clear) {
         if (m->text) {
@@ -730,6 +742,36 @@ static bool bios_10h_01h(CPU* cpu)
     /* Save raw CH:CL in BDA 0x460 (SeaBIOS: SET_BDA(cursor_type, CX) — raw) */
     writew86(0x460, ((uint16_t)ch_raw << 8) | CPU_CL);
 
+    /*
+     * Cursor emulation selected by AH=12h/BL=34h.
+     *
+     * Old software often uses 8-scan-line cursor values such as 0607h.
+     * In VGA text modes with 14/16 scan-line cells, BIOS may remap those
+     * values to the active character height while AH=03h still returns the
+     * caller's original CH:CL saved above.
+     */
+    if (!hidden && (read86(BIOS10_BDA_VIDEO_MODE_OPTIONS) & BIOS10_VMO_CURSOR_EMULATION)) {
+        uint8_t height = readw86(0x485);
+
+        if (height > 8 && height <= BIOS10_FONT_MAX_HEIGHT) {
+            uint8_t start = ch_raw & 0x1F;
+            uint8_t end = cl_raw;
+
+            if (start < 8)
+                start = ((uint16_t)start * height + 4) / 8;
+            if (end < 8)
+                end = (((uint16_t)(end + 1) * height + 7) / 8) - 1;
+
+            if (start >= height)
+                start = height - 1;
+            if (end >= height)
+                end = height - 1;
+
+            ch_raw = (ch_raw & 0xE0) | start;
+            cl_raw = end;
+        }
+    }
+    
     /* Program CRTC */
     uint16_t crtc = readw86(0x463);
     if (crtc == 0) crtc = 0x3D4;
@@ -2108,6 +2150,105 @@ static bool bios_10h_1210h(CPU* cpu)
 }
 
 /*
+VIDEO - ALTERNATE FUNCTION SELECT - ALTERNATE PRINT SCREEN
+AH = 12h
+BL = 20h
+
+Return:
+Nothing
+
+Desc:
+Installs a video-BIOS Print Screen handler able to handle EGA/VGA text
+heights other than 25 rows.
+
+The native BIOS currently has no full INT 05h Print Screen renderer, so this
+is accepted as a compatibility no-op.  Keep the TODO because a later INT 05h
+implementation should consume this state.
+*/
+static bool bios_10h_1220h(CPU* cpu)
+{
+    ///TODO: integrate with native INT 05h Print Screen implementation
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - ALTERNATE FUNCTION SELECT - SELECT TEXT SCAN LINES
+AH = 12h
+BL = 30h
+AL = vertical resolution
+     00h 200 scan lines
+     01h 350 scan lines
+     02h 400 scan lines
+
+Return:
+AL = 12h if function supported
+
+Desc:
+Stores the requested text-mode scan-line policy.  VGA applies it on the next
+mode set, not immediately.
+*/
+static bool bios_10h_1230h(CPU* cpu)
+{
+    uint8_t data = read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) & ~BIOS10_VDD_SCANLINE_MASK;
+    uint8_t opts = read86(BIOS10_BDA_VIDEO_MODE_OPTIONS) | BIOS10_VMO_SCANLINE_SELECTED;
+    switch (CPU_AL) {
+    case 0x00:
+        data |= BIOS10_VDD_SCANLINE_200;
+        break;
+    case 0x01:
+        data |= BIOS10_VDD_SCANLINE_350;
+        break;
+    case 0x02:
+        data |= BIOS10_VDD_SCANLINE_400;
+        break;
+    default:
+        cf = 1;
+        return true;
+    }
+    write86(BIOS10_BDA_VIDEO_DISPLAY_DATA, data);
+    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, opts);
+    CPU_AL = 0x12;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - ALTERNATE FUNCTION SELECT - CURSOR EMULATION
+AH = 12h
+BL = 34h
+AL = new state
+     00h enable alphanumeric cursor emulation
+     01h disable alphanumeric cursor emulation
+
+Return:
+AL = 12h if function supported
+
+Desc:
+Controls whether AH=01h remaps old 8-scan-line cursor shapes to the current
+VGA character-cell height.
+*/
+static bool bios_10h_1234h(CPU* cpu)
+{
+    uint8_t opts = read86(BIOS10_BDA_VIDEO_MODE_OPTIONS);
+    switch (CPU_AL) {
+    case 0x00:
+        opts |= BIOS10_VMO_CURSOR_EMULATION;
+        break;
+    case 0x01:
+        opts &= ~BIOS10_VMO_CURSOR_EMULATION;
+        break;
+    default:
+        cf = 1;
+        return true;
+    }
+    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, opts);
+    CPU_AL = 0x12;
+    cf = 0;
+    return true;
+}
+ 
+/*
 VIDEO - SET BLOCK OF DAC REGISTERS
 AX = 1012h
 BX = starting DAC register index
@@ -2265,7 +2406,7 @@ BL = paging mode
      00h = 4 pages of 64 colors
      01h = 16 pages of 16 colors
 BH = current active page
-+
+
 Desc:
 Reads the state from VGA Attribute Controller registers instead of duplicating
 it in BIOS-private variables.
@@ -2762,9 +2903,12 @@ bool bios_10h(CPU* cpu) {
             }
             break;
         case 0x12:
-            if (CPU_BL == 0x10)
-               return bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
-            break;
+            switch(CPU_BL) {
+            case 0x10: return bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
+            case 0x20: return bios_10h_1220h(cpu); // ALTERNATE PRINT SCREEN
+            case 0x30: return bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
+            case 0x34: return bios_10h_1234h(cpu); // CURSOR EMULATION
+            }            break;
         case 0x13:
             return bios_10h_13h(cpu); // WRITE STRING
         case 0x1A:
@@ -2786,13 +2930,8 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
 {
     /*
      * INT 10h/AX=1130h must return a guest-visible ES:BP pointer.
-     * Host pointers to font_8x16/vgafont16 are useless for DOS code,
+     * Host pointers to font arrays are useless for DOS code,
      * so copy compact ROM font tables into emulated F000:xxxx area.
-     *
-     * Source font is 8x16. 8x14 and 8x8 are derived minimally:
-     *   8x16: all 16 rows
-     *   8x14: rows 1..14
-     *   8x8 : rows 4..11
      */
     for (uint32_t ch = 0; ch < 256; ch++) {
         for (uint32_t y = 0; y < 16; y++)
