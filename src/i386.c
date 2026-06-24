@@ -5295,15 +5295,15 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 	CPU* cpu;
 	switch (gen) {
 #ifndef I386_MODE
-	case 0: cpu->flags_mask = EFLAGS_MASK_86; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
-	case 1: cpu->flags_mask = EFLAGS_MASK_186; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
+	case 0: cpu = (CPU*)calloc(sizeof(CPU), 1); cpu->flags_mask = EFLAGS_MASK_86; break;
+	case 1: cpu = (CPU*)calloc(sizeof(CPU), 1); cpu->flags_mask = EFLAGS_MASK_186; break;
 	default:
-	        cpu->flags_mask = EFLAGS_MASK_286; cpu = (CPU*)calloc(sizeof(CPU), 1); break;
+	        cpu = (CPU*)calloc(sizeof(CPU), 1); cpu->flags_mask = EFLAGS_MASK_286; break;
 #else
-	case 3: cpu->flags_mask = EFLAGS_MASK_386; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
-	case 4: cpu->flags_mask = EFLAGS_MASK_486; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
+	case 3: cpu = (CPU*)calloc(sizeof(CPUI386), 1); cpu->flags_mask = EFLAGS_MASK_386; break;
+	case 4: cpu = (CPU*)calloc(sizeof(CPUI386), 1); cpu->flags_mask = EFLAGS_MASK_486; break;
 	default:
-	        cpu->flags_mask = EFLAGS_MASK_586; cpu = (CPU*)calloc(sizeof(CPUI386), 1); break;
+	        cpu = (CPU*)calloc(sizeof(CPUI386), 1); cpu->flags_mask = EFLAGS_MASK_586; break;
 #endif
 	}
 	cpu->gen = gen;
