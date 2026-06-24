@@ -5959,6 +5959,51 @@ int dos_cd(char *PathName)
 }
 
 /*
+    GetBiosKey(timeout) - poll for a keystroke (INT 16h AH=01h/00h),
+    waiting up to "timeout" seconds (or forever if timeout < 0, or
+    just once if timeout == 0) for one to appear.
+
+    timeout < 0: no timeout
+    timeout = 0: poll only once
+    timeout > 0: timeout in seconds
+
+    return
+            0xffff : no key hit
+            0xHHLL : scancode in upper half, ASCII in lower half
+
+    /// TODO: this codebase's C "kernel" runs as code that stands in
+    /// for real x86 instructions, rather than as a guest program
+    /// being interpreted - it is itself what services IRQ0 (timer)/
+    /// IRQ1 (keyboard) on every emulator tick (see kernel.c's
+    /// interrupt handlers). A real wait-for-N-seconds-or-keypress
+    /// loop in C here would block those handlers from ever running
+    /// again, freezing the timer and keyboard for both the guest and
+    /// this loop itself - i.e. it would never see a keypress arrive
+    /// or the timer advance, making a synchronous wait meaningless
+    /// (see the discussion that led to this comment). The "real"
+    /// fix is the same kind of CS:IP-parked BIOS callback this
+    /// codebase's bios_19h.c (INT 19h, F5/F8-equivalent reboot
+    /// timeout) already uses (set_bios_callback(), see i386.h) -
+    /// but that requires unwinding this call back out to the
+    /// emulator's main loop and resuming DoConfig()/SkipLine() later
+    /// (a setjmp()/longjmp() or explicit state-machine
+    /// restructuring), which is an architectural change well beyond
+    /// this iteration's actual goal (loading CONFIG.SYS). So for
+    /// now, this honestly always reports "no key" (the same value a
+    /// real keyboard would eventually report on timeout), ignoring
+    /// the requested timeout entirely - CONFIG.SYS always loads to
+    /// completion with no way to interrupt it via F5/F8, rather than
+    /// hanging or busy-looping pretending to wait.
+
+    Migrated from config.c (signature only; body replaced as above).
+*/
+UWORD GetBiosKey(int timeout)
+{
+  UNREFERENCED_PARAMETER(timeout);
+  return 0xffff;
+}
+
+/*
     ConvertPathNameToFCBName/set_fcbname - convert PriPathName's final
     component into FCB (8.3, space-padded) form, stashed in
     internal_data->DirEntBuffer (cast to a struct dirent - see lol.h:

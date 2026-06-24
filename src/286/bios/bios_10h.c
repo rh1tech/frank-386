@@ -2455,6 +2455,173 @@ static bool bios_10h_1104h(CPU* cpu)
 }
 
 /*
+VIDEO - LOAD USER-SPECIFIED GRAPHICS FONT
+AX = 1110h
+ES:BP -> user font table
+CX = number of characters
+DX = first character code
+BL = font block
+BH = bytes per character
+
+Desc:
+VGA stores text/graphics character generator data in the same plane-2 font
+RAM.  The 1110h service is therefore implemented through the same loader as
+1100h, but kept as a separate BIOS entry point because DOS software may call
+the graphics-font variant explicitly.
+*/
+static bool bios_10h_1110h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)CPU_ES << 4) + CPU_BP;
+    bios_10h_load_font_block(CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
+    bios_10h_set_text_char_height(cpu, CPU_BH);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - LOAD ROM 8x14 GRAPHICS FONT
+AX = 1111h
+BL = font block
+
+Desc:
+Loads the BIOS ROM 8x14 font into VGA character-generator RAM.
+*/
+static bool bios_10h_1111h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 14);
+    bios_10h_set_text_char_height(cpu, 14);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - LOAD ROM 8x8 GRAPHICS FONT
+AX = 1112h
+BL = font block
+
+Desc:
+Loads the BIOS ROM 8x8 font into VGA character-generator RAM.
+*/
+static bool bios_10h_1112h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 8);
+    bios_10h_set_text_char_height(cpu, 8);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - LOAD ROM 8x16 GRAPHICS FONT
+AX = 1114h
+BL = font block
+
+Desc:
+Loads the BIOS ROM 8x16 font into VGA character-generator RAM.
+*/
+static bool bios_10h_1114h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 16);
+    bios_10h_set_text_char_height(cpu, 16);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET ALTERNATE PRINT SCREEN CHARACTERS
+AX = 1120h
+
+Desc:
+IBM/EGA/VGA BIOS function for print-screen character translation.
+The current native BIOS does not implement a real print-screen renderer,
+so there is no internal table to update.  Accept the call as a harmless
+no-op instead of reporting failure to software probing font services.
+*/
+static bool bios_10h_1120h(CPU* cpu)
+{
+    ///TODO:
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET USER GRAPHICS CHARACTERS
+AX = 1121h
+ES:BP -> user font table
+CX = number of characters
+DX = first character code
+BL = font block
+BH = bytes per character
+
+Desc:
+Loads user-supplied graphics character glyphs into VGA plane-2 font RAM.
+*/
+static bool bios_10h_1121h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)CPU_ES << 4) + CPU_BP;
+    bios_10h_load_font_block(CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
+    bios_10h_set_text_char_height(cpu, CPU_BH);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET GRAPHICS 8x14 CHARACTERS
+AX = 1122h
+BL = font block
+
+Desc:
+Loads BIOS ROM 8x14 glyphs into VGA plane-2 font RAM.
+*/
+static bool bios_10h_1122h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 14);
+    bios_10h_set_text_char_height(cpu, 14);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET GRAPHICS 8x8 DOUBLE-DOT CHARACTERS
+AX = 1123h
+BL = font block
+
+Desc:
+Loads BIOS ROM 8x8 glyphs into VGA plane-2 font RAM.
+
+"Double-dot" is adapter terminology for 8x8 graphics character cells.  The
+glyph data itself is still a normal 8-byte-per-character font table.
+*/
+static bool bios_10h_1123h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 8);
+    bios_10h_set_text_char_height(cpu, 8);
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - SET GRAPHICS 8x16 CHARACTERS
+AX = 1124h
+BL = font block
+
+Desc:
+Loads BIOS ROM 8x16 glyphs into VGA plane-2 font RAM.
+*/
+static bool bios_10h_1124h(CPU* cpu)
+{
+    uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
+    bios_10h_load_font_block(CPU_BL, src, 0, 256, 16);
+    bios_10h_set_text_char_height(cpu, 16);
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - GET FONT INFORMATION (EGA, MCGA, VGA)
 AX = 1130h
 BH = pointer specifier
@@ -2582,6 +2749,15 @@ bool bios_10h(CPU* cpu) {
             case 1: return bios_10h_1101h(cpu); // LOAD 8x14 ROM FONT
             case 2: return bios_10h_1102h(cpu); // LOAD 8x8 ROM FONT
             case 4: return bios_10h_1104h(cpu); // LOAD 8x16 ROM FONT
+            case 0x10: return bios_10h_1110h(cpu); // LOAD USER GRAPHICS FONT
+            case 0x11: return bios_10h_1111h(cpu); // LOAD ROM 8x14 GRAPHICS FONT
+            case 0x12: return bios_10h_1112h(cpu); // LOAD ROM 8x8 GRAPHICS FONT
+            case 0x14: return bios_10h_1114h(cpu); // LOAD ROM 8x16 GRAPHICS FONT
+            case 0x20: return bios_10h_1120h(cpu); // SET ALTERNATE PRINT-SCREEN CHARS
+            case 0x21: return bios_10h_1121h(cpu); // SET USER GRAPHICS CHARS
+            case 0x22: return bios_10h_1122h(cpu); // SET GRAPHICS 8x14
+            case 0x23: return bios_10h_1123h(cpu); // SET GRAPHICS 8x8 DOUBLE-DOT
+            case 0x24: return bios_10h_1124h(cpu); // SET GRAPHICS 8x16
             case 0x30: return bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
             }
             break;
