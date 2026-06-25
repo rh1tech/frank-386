@@ -25,6 +25,7 @@ static CPU* cpu;
 
 #define MAX_HARD_DRIVE  4
 #define NDEV            26      /* up to Z:                     */
+#define EOF 0x1a
 
 #include "hdr/kconfig.h"
 #include "hdr/portab.h"
@@ -90,6 +91,7 @@ dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0
 #define x86_BSS MK_FP(DOS_PSP, 0x19F4) // _BSS
 
 /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer = x86_BSS; // BSS
+/*256*/const dos_far_ptr x86_szLine = MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE); // _BSS + MAX_SEC_SIZE
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 const dos_far_ptr x86_con_dev = MK_FP(DOS_PSP, 0x07A8); // _IO_FIXED_DATA -> con_dev
 const dos_far_ptr x86_prn_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr));
@@ -133,7 +135,7 @@ const static KernelConfig InitKernelConfig = {
 
     .DLASortByDriveNo = 0,
     .InitDiskShowDriveAssignment = 1,
-    .SkipConfigSeconds = 2,
+    .SkipConfigSeconds = -1, /// TODO: was 2
     .ForceLBA = 0,
     .GlobalEnableLBAsupport = 1,
     .BootHarddiskSeconds = 0,
@@ -3603,6 +3605,22 @@ int dup2(int oldfd, int newfd)
     return cf ? -1 : CPU_AX;
 }
 
+int read(int fd, dos_far_ptr dst, COUNT sz) {
+    CPU_AH = 0x3F;
+    CPU_BX = fd;
+    CPU_DX = dst.offset;
+    SET_DS ( dst.segment );
+    fdos_21h(cpu);
+    return cf ? -1 : CPU_AX;
+}
+
+int close(int fd) {
+    CPU_AH = 0x3E;
+    CPU_BX = fd;
+    fdos_21h(cpu);
+    return cf ? -1 : CPU_AX;
+}
+
 static inline bool far_is_null(dos_far_ptr p)
 {
     return FP_SEG(p) == 0 && FP_OFF(p) == 0;
@@ -6015,7 +6033,6 @@ UWORD GetBiosKey(int timeout)
     internal open()/read()/close() wrappers above) - nothing here is
     guest-visible, the same reasoning as fnode[]/f_node in fnode.h.
 */
-STATIC BYTE szLine[256] BSS_INIT({0});
 STATIC BYTE szBuf[256] BSS_INIT({0});
 STATIC unsigned nCfgLine BSS_INIT(0);
 static UBYTE ErrorAlreadyPrinted[128] BSS_INIT({0});
@@ -6208,9 +6225,13 @@ BYTE *GetStringArg(BYTE * pLine, BYTE * pszString)
   return scan(pLine, pszString, 0);
 }
 
-// TODO: ensure
+// from kernel/config.c
+typedef void config_sys_func_t(BYTE * pLine);
+
 struct table {
-    char* entry;
+  BYTE *entry;
+  signed char pass;
+  config_sys_func_t *func;
 };
 
 /*
@@ -6759,6 +6780,367 @@ STATIC VOID InitSerialPorts(VOID)
   }
 }
 
+BYTE singleStep BSS_INIT(FALSE);        /* F8 processing */
+BYTE SkipAllConfig BSS_INIT(FALSE);     /* F5 processing */
+BYTE  MenuSelected BSS_INIT(0);
+
+STATIC BOOL SkipLine(char *pLine)
+{
+  short key;
+  COUNT i;
+  signed char originalskipconfigseconds = InitKernelConfig.SkipConfigSeconds;
+
+  if (originalskipconfigseconds >= 0)
+  {
+/// TODO:
+#if 0
+    if (originalskipconfigseconds > 0)
+      printf("Press F8 to trace or F5 to skip CONFIG.SYS/AUTOEXEC.BAT");
+
+    key = GetBiosKey(originalskipconfigseconds);       /* wait 2 seconds */
+
+    InitKernelConfig.SkipConfigSeconds = -1;
+
+    if (key == 0x3f00)          /* F5 */
+    {
+      SkipAllConfig = TRUE;
+    }
+    else if (key == 0x4200)     /* F8 */
+    {
+      singleStep = TRUE;
+    }
+
+    if (originalskipconfigseconds > 0)
+      printf("\r%79s\r", "");     /* clear line */
+
+    if (SkipAllConfig)
+      printf("Skipping CONFIG.SYS/AUTOEXEC.BAT\n");
+#endif
+  }
+
+  if (SkipAllConfig)
+    return TRUE;
+
+  /* 1?device=CDROM.SYS */
+  /* 12?device=OAKROM.SYS */
+  /* 123?device=EMM386.EXE NOEMS */
+  if ( MenuLine != 0 &&
+      (MenuLine & (1 << MenuSelected)) == 0)
+    return TRUE;
+
+  if (DontAskThisSingleCommand)     /* !files=30 */
+    return FALSE;
+
+  if (!askThisSingleCommand && !singleStep)
+    return FALSE;
+
+  for (i = 0; i < nCurChain; i++)
+    printf(" ");
+  printf("%s[Y,N]?", pLine);
+
+  for (;;)
+  {
+    key = GetBiosKey(-1);
+
+    switch (toupper(key & 0x00ff))
+    {
+      case 'N':
+        printf("N\n");
+        return TRUE;
+
+      case 0x1b:               /* don't know where documented
+                                   ESCAPE answers all following questions
+                                   with YES
+                                 */
+        singleStep = FALSE;     /* and fall through */
+
+      case '\r':
+      case '\n':
+      case 'Y':
+        printf("Y\n");
+        return FALSE;
+
+    }
+
+    if (key == 0x3f00)          /* YES, you may hit F5 here, too */
+    {
+      printf("N\n");
+      SkipAllConfig = TRUE;
+      return TRUE;
+    }
+  }
+
+}
+
+/// TODO:
+#if 0
+char kernel_command_line[1] = "";
+size_t kernel_command_line_length = 0;
+#endif
+
+STATIC struct table commands[] = {
+/// TODO:
+#if 0
+  /* first = switches! this one is special; some options will
+     always be ran, others depends on F5/F8 and ? processing */
+  {"SWITCHES", 0, CfgSwitches},
+
+  /* rem is never executed by locking out pass                    */
+  {"REM", 0, CfgIgnore},
+  {";", 0,   CfgIgnore},
+
+  {"MENUCOLOR",0,CfgMenuColor},
+
+  {"MENUDEFAULT", 0, CfgMenuDefault},
+  {"MENU", 0, CfgMenu},         /* lines to print in pass 0 */
+  {"ECHO", 2, CfgMenu},         /* lines to print in pass 2 - install(high) */
+  {"EECHO", 2, CfgMenuEsc},     /* modified ECHO (ea) */
+
+  {"BREAK", 1, CfgBreak},
+  {"BUFFERS", 1, Config_Buffers},
+  {"BUFFERSHIGH", 1, CfgBuffersHigh}, /* as BUFFERS - we use HMA anyway */
+  {"COMMAND", 1, InitPgm},
+  {"COUNTRY", 1, Country},
+  {"DOS", 1, Dosmem},
+  {"DOSDATA", 1, DosData},
+  {"FCBS", 1, Fcbs},
+  {"KEYBUF", 1, CfgKeyBuf},	/* ea */
+  {"FILES", 1, Files},
+  {"FILESHIGH", 1, FilesHigh},
+  {"LASTDRIVE", 1, CfgLastdrive},
+  {"LASTDRIVEHIGH", 1, CfgLastdriveHigh},
+  {"NUMLOCK", 1, Numlock},
+  {"SHELL", 1, InitPgm},
+  {"SHELLHIGH", 1, InitPgmHigh},
+  {"STACKS", 1, Stacks},
+  {"STACKSHIGH", 1, StacksHigh},
+  {"SWITCHAR", 1, CfgSwitchar},
+  {"SCREEN", 1, sysScreenMode},   /* JPP */
+  {"VERSION", 1, sysVersion},     /* JPP */
+  {"ANYDOS", 1, SetAnyDos},       /* tom */
+  {"IDLEHALT", 1, SetIdleHalt},   /* ea  */
+
+  {"DEVICE", 2, Device},
+  {"DEVICEHIGH", 2, DeviceHigh},
+  {"INSTALL", 2, CmdInstall},
+  {"INSTALLHIGH", 2, CmdInstallHigh},
+  {"CHAIN", 2, CmdChain},
+  {"SET", 2, CmdSet},
+#endif
+  /* default action                                               */
+  {"", -1, CfgFailure}
+};
+
+/// TODO:
+STATIC VOID DoMenu(void) {}
+
+VOID DoConfig(int nPass)
+{
+  BOOL bEof = FALSE;
+
+#ifdef MEMDISK_ARGS
+  /* check if MEMDISK used for LoL->BootDrive, if so check for special appended arguments */
+  struct memdiskinfo FAR *mdsk = NULL;
+  BYTE FAR *cLine;
+  /* memdisk check & usage requires 386+, DO NOT invoke if less than 386 */
+  if (LoL->cpu >= 3)
+  {
+    UBYTE drv = (LoL->BootDrive < 3)?0x0:0x80; /* 1=A,2=B,3=C */
+    mdsk = query_memdisk(drv);
+    if (mdsk != NULL)
+    {
+      cLine = ProcessMemdiskLine(mdsk->cmdline);
+    }
+  }
+#endif
+
+  if (nPass==0)
+  {
+    HaltCpuWhileIdle = 0; /* init to "no HLT while idle" */
+
+#ifdef MEMDISK_ARGS
+    if (mdsk != NULL)
+    {
+      printf("MEMDISK version %u.%02u  (%lu sectors)\n", mdsk->version, mdsk->version_minor, mdsk->size);
+      CfgDbgPrintf(("MEMDISK args:{%S}\n", mdsk->cmdline));
+    }
+    else
+    {
+      CfgDbgPrintf(("MEMDISK not detected!\n"));
+    }
+#endif
+  }
+  /// TODO:
+#if 0
+  {
+    char * pp = kernel_command_line;
+    char * cc;
+    unsigned ii;
+    static char commandbuffer[256];
+    char * end = &kernel_command_line[kernel_command_line_length];
+    static char * configfile = "";
+    static char * altconfigfile = "fdconfig.sys";
+    static char * oldconfigfile = "config.sys";
+    static struct { char ** pointer; char const * command; }
+      configcommands[] = {
+        { &configfile, "CONFIG" },
+        { &altconfigfile, "ALTCONFIG" },
+        { &oldconfigfile, "OLDCONFIG" },
+        { NULL, NULL }
+        };
+    for (; pp < end; pp += strlen(pp) + 1) {
+      for (cc = pp; *cc == '\t' || *cc == ' '; ++cc);
+      strcpy(commandbuffer, cc);
+      strupr(commandbuffer);
+      for (ii = 0; configcommands[ii].pointer != NULL; ++ii)
+        if (check_config_commandline(configcommands[ii].pointer,
+          cc, commandbuffer, configcommands[ii].command))
+          break;
+    }
+
+    /* Check to see if we have a config.sys file.  If not, just     */
+    /* exit since we don't force the user to have one (but 1st      */
+    /* also process MEMDISK passed config options if present).      */
+    for (ii = 0; configcommands[ii].pointer != NULL; ++ii) {
+      if (**configcommands[ii].pointer != '\0') {
+        if ((nFileDesc = open(*configcommands[ii].pointer, 0)) >= 0) {
+          CfgDbgPrintf(("Reading \"%s\"...\n", *configcommands[ii].pointer));
+          break;
+        } else {
+          CfgDbgPrintf(("\"%s\" not found\n", *configcommands[ii].pointer));
+        }
+      }
+    }
+    if (configcommands[ii].pointer == NULL) {
+      /* at this point no config file was found, may return early */
+#ifdef MEMDISK_ARGS
+      /* if memdisk in use then only assume end of file reached and proceed, else return early */
+      if (mdsk != NULL)
+        bEof = TRUE;
+      else
+#endif
+        return;
+    }
+  }
+#endif
+  nCfgLine = 0;  /* keep track of which line in file for errors   */
+
+  /* Read each line into the buffer and then parse the line,      */
+  /* do the table lookup and execute the handler for that         */
+  /* function.                                                    */
+
+#ifdef MEMDISK_ARGS
+  for (; !bEof || (mdsk != NULL); nCfgLine++)
+#else
+  for (; !bEof; nCfgLine++)
+#endif
+  {
+    struct table *pEntry;
+    char* szLine = ARM_PTR(x86_szLine);
+    pLineStart = szLine;
+
+#ifdef MEMDISK_ARGS
+    if (!bEof)
+    {
+#endif
+
+    /* read in a single line, \n or ^Z terminated */
+    for (BYTE *pLine = szLine;;)
+    {
+      if (read(nFileDesc, linear_to_far(pLine), 1) == 0)
+      {
+        bEof = TRUE;
+        break;
+      }
+
+      if (pLine >= szLine + sizeof(szLine) - 3)
+      {
+        CfgFailure(pLine);
+        printf("error - line overflow line %d \n", nCfgLine);
+        break;
+      }
+
+      if (*pLine == '\n' || *pLine == EOF)      /* end of line */
+        break;
+
+      if (*pLine != '\r')       /* ignore CR */
+        pLine++;
+    }
+
+#ifdef MEMDISK_ARGS
+    }
+    else if (mdsk != NULL)
+    {
+      cLine = GetNextMemdiskLine(cLine, szLine);
+      /* if end of memdisk command line reached, flag done */
+      if (!*cLine)
+        mdsk = NULL;
+    }
+#endif
+
+    if (bEof && nCurChain) {
+      struct CfgFile *cfg = &cfgFile[--nCurChain];
+      close(nFileDesc);
+      bEof = FALSE;
+      nFileDesc = cfg->nFileDesc;
+      nCfgLine = cfg->nCfgLine;
+      continue;
+    }
+
+    CfgDbgPrintf(("CONFIG=[%s]\n", szLine));
+
+    /* Skip leading white space and get verb.               */
+    BYTE* pLine = scan(szLine, szBuf, 1);
+
+    /* If the line was blank, skip it.  Otherwise, look up  */
+    /* the verb and execute the appropriate function.       */
+    if (*szBuf == '\0')
+      continue;
+
+    pEntry = LookUp(commands, szBuf);
+
+	/* should config command be executed on this pass? */
+    if (pEntry->pass >= 0 && pEntry->pass != nPass)
+      continue;
+
+	/* pass 0 always executed (rem Menu prompt switches) */
+    if (nPass == 0)
+    {
+      pEntry->func(pLine);
+      continue;
+    }
+    else
+    {
+      if (SkipLine(pLineStart))   /* F5/F8/?/! processing */
+        continue;
+    }
+    /// TODO:
+#if 0
+    if ((pEntry->func != CfgMenu) && (pEntry->func != CfgMenuEsc))
+    {
+      /* compatibility "device foo.sys" */
+      if (' ' != *pLine && '\t' != *pLine && '=' != *pLine)
+      {
+        CfgFailure(pLine);
+        continue;
+      }
+      pLine = skipwh(pLine);
+    }
+    if ('=' == *pLine || pEntry->func == CfgMenu || pEntry->func == CfgMenuEsc)
+      pLine = skipwh(pLine+1);
+#endif
+
+    /* YES. DO IT */
+    pEntry->func(pLine);
+  }
+  close(nFileDesc);
+
+  if (nPass == 0)
+  {
+    DoMenu();
+  }
+}
+
 STATIC void init_kernel()
 {
     COUNT i;
@@ -6805,11 +7187,11 @@ STATIC void init_kernel()
     /* Now config the temporary file system */
     FsConfig();
 
-/// TODO:
-  /* Now process CONFIG.SYS     * /
+  /* Now process CONFIG.SYS     */
   DoConfig(0);
   DoConfig(1);
-*/
+
+/// TODO:
   /* initialize near data and MCBs */
 ///  PreConfig2();
   /* and process CONFIG.SYS one last time for device drivers */
