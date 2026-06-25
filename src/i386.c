@@ -3989,6 +3989,21 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 	OptAddr meml;
 	uword addr;
 	for (; stepcount > 0; stepcount--) {
+	if (!(cpu->cr0 & 1)) {
+		u32 phys = cpu->seg[SEG_CS].base + (cpu->next_ip & 0xffffu);
+		if ((phys >> 8) == 0xFFE) {
+			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
+				TRY1(set_seg(cpu, SEG_CS, 0xFFF0));
+				cpu->ip = 0x0006;
+	            cpu->next_ip = cpu->ip;
+    	        PREFETCH_RESET
+			} else {
+				cpu->cycle++;
+				return true;
+			}
+		}
+	}
+
 	bool code16 = cpu->code16;
 	uword sp_mask = cpu->sp_mask;
 
@@ -4619,7 +4634,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	#endif
 	if (!(cpu->cr0 & 1)) {
 		u16 prev_cs = cpu->seg[SEG_CS].base;
-		u16 prev_ip = cpu->ip;
+		u16 prev_ip = cpu->next_ip;
 		/* REAL-ADDRESS-MODE */
 		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
 		OptAddr meml;
@@ -4648,7 +4663,8 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		cpu->flags &= ~(IF|TF);
     {
         char buf[80];
-        snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ", no, prev_cs, prev_ip, cpu->seg[SEG_CS].base, newip, cpu->gprx[0].r16);
+        snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ",
+			no, prev_cs, prev_ip, cpu->seg[SEG_CS].base, newip, cpu->gprx[0].r16);
         print_line(buf, 0);
     }
 
@@ -5125,17 +5141,6 @@ static void IRAM_ATTR i386_step(CPU* _cpu, int stepcount)
 			}
 		}
 	}
-	if (!(cpu->cr0 & 1)) {
-		u32 phys = cpu->seg[SEG_CS].base + (cpu->next_ip & 0xffffu);
-		if ((phys >> 8) == 0xFFE) {
-			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
-				TRY1(set_seg(cpu, SEG_CS, 0xFFF0));
-				cpu->ip = 0x0006;
-			}
-            cpu->next_ip = cpu->ip;
-            PREFETCH_RESET
-		}
-	}
 
 	if (cpu->halt) {
 		usleep(1);
@@ -5305,6 +5310,12 @@ void cpu_enable_fpu(CPU* cpu)
 	cpu->fpu = fpu_new();
 }
 
+static bool no_handler(CPU* cpu) {
+    cpu_err_msg(cpu, "ERROR: no handler defined");
+while(1); // remove it
+    return true;
+}
+
 CPU* cpu_new(int gen, CPU_CB **cb)
 {
 	CPU* cpu;
@@ -5353,9 +5364,9 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 			cpu->bios_prof_depth = 0;
 			i386_profile_install_bios_hooks(cpu);
 			#endif
-///    for(int i = 0; i < 256; ++i) {
-///        handlers[i] = no_handler;
-///    }
+    for(int i = 0; i < 256; ++i) {
+        handlers[i] = no_handler;
+    }
     handlers[0x00] = bios_00h; // DIVIDE BY ZERO
     handlers[0x05] = bios_05h; // PRINT SCREEN / BOUND EXCEPTION
     handlers[0x08] = bios_08h; // IRQ0: Timer

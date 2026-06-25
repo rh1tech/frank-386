@@ -82,8 +82,6 @@ inline static void print_line2(const char* s, int row, int col) {
     }
 }
 
-void cpu_err_msg(CPU* cpu, const char* msg);
-
 #define CPU_ES cpu->ext_accessors->get_seg16(cpu, SEG_ES)
 #define CPU_CS cpu->ext_accessors->get_seg16(cpu, SEG_CS)
 #define CPU_SS cpu->ext_accessors->get_seg16(cpu, SEG_SS)
@@ -96,8 +94,8 @@ void cpu_err_msg(CPU* cpu, const char* msg);
 
 #if I386_MODE
 #define SET_IP(x) do { cpu->ip = (x); cpu->next_ip = (x); PREFETCH_RESET } while(0)
+#define CPU_IP    (*(uint16_t*)&(cpu->next_ip))
 #else
 #define SET_IP(x) cpu->ip = (x)
-#endif
-// getter
 #define CPU_IP    (*(uint16_t*)&(cpu->ip))
+#endif

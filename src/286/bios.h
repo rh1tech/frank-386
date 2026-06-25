@@ -31,6 +31,7 @@ void bios_10h_install_rom_fonts(CPU*); // INT 10h support
 void vga_bios_baner(CPU* cpu);
 void bios_puts(CPU* cpu, const char* str);
 void bios_printf(CPU* cpu, const char *fmt, ...);
+void cpu_err_msg(CPU* cpu, const char* msg);
 // allow it for BIOS/DOS
 int	sprintf (char *__restrict, const char *__restrict, ...)
                __attribute__ ((__format__ (__printf__, 2, 3)));
