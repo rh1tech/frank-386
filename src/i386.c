@@ -4618,7 +4618,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	}
 	#endif
 	if (!(cpu->cr0 & 1)) {
-		u16 prev_cs = cpu->seg[SEG_CS].sel;
+		u16 prev_cs = cpu->seg[SEG_CS].base;
 		u16 prev_ip = cpu->ip;
 		/* REAL-ADDRESS-MODE */
 		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
@@ -4647,8 +4647,8 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		cpu->ip = newip;
 		cpu->flags &= ~(IF|TF);
     {
-        char buf[50];
-        snprintf(buf, 79, "INT %02Xh DOS? %04X:%04X->%04X:%04X AX:%04X  ", no, prev_cs, prev_ip, cpu->seg[SEG_CS].sel, newip, cpu->gprx[0].r16);
+        char buf[80];
+        snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ", no, prev_cs, prev_ip, cpu->seg[SEG_CS].base, newip, cpu->gprx[0].r16);
         print_line(buf, 0);
     }
 
@@ -5126,8 +5126,7 @@ static void IRAM_ATTR i386_step(CPU* _cpu, int stepcount)
 		}
 	}
 	if (!(cpu->cr0 & 1)) {
-		u32 phys = ((u32)(cpu->seg[SEG_CS].sel & 0xFFFF) << 4) + (cpu->next_ip & 0xffffu);
-		bios_printf((CPU*)cpu, "                %04x:%04x %x\n", cpu->seg[SEG_CS].sel, cpu->next_ip, phys);
+		u32 phys = cpu->seg[SEG_CS].base + (cpu->next_ip & 0xffffu);
 		if ((phys >> 8) == 0xFFE) {
 			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
 				TRY1(set_seg(cpu, SEG_CS, 0xFFF0));
