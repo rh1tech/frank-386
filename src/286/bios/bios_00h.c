@@ -28,7 +28,7 @@ Notes:	on an 8086/8088, the return address points to the following instruction
 bool bios_00h(CPU* cpu) {
 	printf("\nDivide overflow at %04X:%04X\n", CPU_CS, CPU_IP);
     SET_CS ( 0xFFF0 ); // -> FFF74: INT FFh
-    CPU_IP = 0x0074;
+    SET_IP ( 0x0074 );
     set_bios_callback(cpu, &params);
     return false;
 }

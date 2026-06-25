@@ -93,3 +93,11 @@ void cpu_err_msg(CPU* cpu, const char* msg);
 #define SET_CS(x) cpu->ext_accessors->set_seg16(cpu, SEG_CS, (x))
 #define SET_SS(x) cpu->ext_accessors->set_seg16(cpu, SEG_SS, (x))
 #define SET_DS(x) cpu->ext_accessors->set_seg16(cpu, SEG_DS, (x))
+
+#if I386_MODE
+#define SET_IP(x) do { cpu->ip = (x); cpu->next_ip = (x); PREFETCH_RESET } while(0)
+#else
+#define SET_IP(x) cpu->ip = (x)
+#endif
+// getter
+#define CPU_IP    (*(uint16_t*)&(cpu->ip))

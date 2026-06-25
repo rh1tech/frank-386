@@ -31,6 +31,16 @@ typedef struct CPUI386 {
 	int excno;
 	uword excerr;
 
+#if PREFETCH_ENABLED
+/* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
+ * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
+ * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
+ * Invalidated automatically when the physical address of next_ip falls outside
+ * the current 4-byte slot */
+	u32 prefetch_base;
+	u8  prefetch[16] __attribute__((aligned(4)));
+#endif
+
 	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
 
 	FPU *fpu;
@@ -75,15 +85,6 @@ typedef struct CPUI386 {
 		int size;
 		struct tlb_entry *tab;
 	} tlb;
-#if PREFETCH_ENABLED
-/* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
- * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
- * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
- * Invalidated automatically when the physical address of next_ip falls outside
- * the current 4-byte slot */
-	u32 prefetch_base;
-	u8  prefetch[16] __attribute__((aligned(4)));
-#endif
 	long cycle;
 
 	struct {
@@ -110,12 +111,6 @@ bool cpu_load16(CPUI386 *cpu, int seg, uword addr, u16 *res);
 bool cpu_store16(CPUI386 *cpu, int seg, uword addr, u16 val);
 bool cpu_load32(CPUI386 *cpu, int seg, uword addr, u32 *res);
 bool cpu_store32(CPUI386 *cpu, int seg, uword addr, u32 val);
-
-#if PREFETCH_ENABLED
-   #define PREFETCH_RESET cpu->prefetch_base = (u32)-1;
-#else
-   #define PREFETCH_RESET
-#endif
 
 #define IRAM_ATTR __not_in_flash()
 #define IRAM_ATTR_CPU_EXEC1 __not_in_flash()

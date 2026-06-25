@@ -24,7 +24,7 @@ void boot_from(CPU* cpu, uint8_t dl)
     /* IBM PC compatible entry point: physical 0000:7C00.
      * Some BIOSes use 07C0:0000; 0000:7C00 is the usual safe form. */
     SET_CS ( 0x0000 );
-    CPU_IP = 0x7C00;
+    SET_IP ( 0x7C00 );
 // like after POST (bios-less solution):
     SET_SS ( 0x0000 );
     CPU_SP = 0x7C00;
@@ -84,7 +84,7 @@ static bios_callback_params_t params = {
 bool bios_19h(CPU* cpu) {
     print_line("Press Win+F12 to enter Setup", 1);
     SET_CS ( 0xFFEF ); // -> FFEFF
-    CPU_IP = 0x000F;
+    SET_IP ( 0x000F );
     set_bios_callback(cpu, &params);
     return false; // exact CS:IP, no IRET required there
 }

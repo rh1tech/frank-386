@@ -2950,7 +2950,11 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
 
 void vga_bios_baner(CPU* cpu)
 {
-    const char *banner = "RP2350 PC AT BIOS";
+#if I386_MODE
+    const char *banner = "RP2350 PC em386 BIOS";
+#else
+    const char *banner = "RP2350 PC em286 BIOS";
+#endif
     const uint8_t attr = 0x61; // bg=yellow(6), fg=blue(1)
     const uint8_t row  = 0;
     const uint8_t cols = 80;

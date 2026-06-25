@@ -248,6 +248,6 @@ bool bios_09h(CPU* cpu)
     set_bios_callback(cpu, &params);
     CPU_AX = 0x4F00 | code; // prepare for int 15h 4Fh
     SET_CS ( IRQ1_STUB_CS );
-    CPU_IP = IRQ1_STUB_IP;
+    SET_IP ( IRQ1_STUB_IP );
     return false;
 }

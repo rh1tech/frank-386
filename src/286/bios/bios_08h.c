@@ -46,7 +46,7 @@ bool bios_08h(CPU* cpu)
     */
 
     SET_CS ( 0xFFF0 );
-    CPU_IP = 0x0000;
+    SET_IP ( 0x0000 );
 
     return false;
 }

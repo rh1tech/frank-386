@@ -151,12 +151,28 @@ struct CPU {
 	int excno;
 	uword excerr;
 
+#if PREFETCH_ENABLED
+/* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
+ * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
+ * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
+ * Invalidated automatically when the physical address of next_ip falls outside
+ * the current 4-byte slot */
+	u32 prefetch_base;
+	u8  prefetch[16] __attribute__((aligned(4)));
+#endif
+
 	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
 
 	FPU *fpu;
 }; // should be the same in all implementations
 
 typedef struct CPU CPU;
+
+#if PREFETCH_ENABLED
+   #define PREFETCH_RESET cpu->prefetch_base = (u32)-1;
+#else
+   #define PREFETCH_RESET
+#endif
 
 bool rp2350_bios_handler(CPU* cpu, uint8_t intnum);
 typedef bool (*handler_t)(CPU*);
@@ -208,7 +224,6 @@ inline static void cpu_abort(CPU *cpu, int code) {
 #define SI_REG_IDX 6
 #define DI_REG_IDX 7
 
-#define CPU_IP    (*(uint16_t*)&(cpu->ip))
 #define StepIP(x) CPU_IP += x
 
 #define CPU_AX    cpu->gprx[regax].r16
