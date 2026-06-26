@@ -6878,27 +6878,190 @@ char kernel_command_line[1] = "";
 size_t kernel_command_line_length = 0;
 #endif
 
+
+/*
+    CfgIgnore(pLine) - the handler for REM/';' (a comment line): does
+    nothing.
+
+    Migrated from config.c verbatim.
+*/
+STATIC VOID CfgIgnore(BYTE * pLine)
+{
+  UNREFERENCED_PARAMETER(pLine);
+}
+
+/*
+    CfgNotImplemented(pLine) - the handler for every directive this
+    iteration doesn't migrate a real implementation for (SWITCHES,
+    MENU*, BREAK, COMMAND/SHELL, COUNTRY, DOS, DOSDATA, FCBS, KEYBUF,
+    NUMLOCK, STACKS, SWITCHAR, SCREEN, VERSION, ANYDOS, IDLEHALT,
+    DEVICE*, INSTALL*, CHAIN, SET - see the command table below).
+
+    /// TODO: each of these is a real, separate piece of FreeDOS
+    /// kernel functionality (device driver loading, country/codepage
+    /// switching, FCB tables, stack-overflow protection, multi-config
+    /// menus, environment variables, ...), none of which is migrated
+    /// yet. Printing the directive name and otherwise doing nothing
+    /// lets CONFIG.SYS parsing continue past a line this kernel
+    /// can't yet act on, rather than failing the whole file (which
+    /// CfgFailure()'s "unrecognized directive" handling is for) or
+    /// silently miscompiling/crashing.
+*/
+STATIC VOID CfgNotImplemented(BYTE * pLine)
+{
+  UNREFERENCED_PARAMETER(pLine);
+  printf("CONFIG.SYS: directive not implemented yet, ignoring line %d\n", nCfgLine);
+}
+
+/*
+    Config_Buffers(pLine)/CfgBuffersHigh(pLine) - BUFFERS=/BUFFERSHIGH=:
+    set the number of FAT buffers to allocate (see config_init_buffers()
+    above, which actually allocates them later in PreConfig()).
+
+    Migrated from config.c verbatim.
+*/
+STATIC void Config_Buffers(BYTE * pLine)
+{
+  COUNT nBuffers;
+
+  /* Get the argument                                             */
+  if (GetNumArg(pLine, &nBuffers))
+    Config.cfgBuffers = nBuffers;
+}
+
+STATIC void CfgBuffersHigh(BYTE * pLine)
+{
+  Config_Buffers(pLine);
+  if (InitKernelConfig.Verbose >= 0) printf("Note: BUFFERS will be in HMA or low RAM, not in UMB\n");
+}
+
+/*
+    Files(pLine)/FilesHigh(pLine) - FILES=/FILESHIGH=: set the number
+    of SFT entries to allocate.
+
+    /// TODO: nothing in this codebase actually allocates a second
+    /// (larger) SFT block sized to Config.cfgFiles yet (PreConfig2()
+    /// is not implemented/called - see the comment on
+    /// LoL->firstsftt's getddt()-style fixed 5-entry block earlier in
+    /// this file), so this only records the requested value; it does
+    /// not yet take effect.
+
+    Migrated from config.c verbatim.
+*/
+STATIC VOID Files(BYTE * pLine)
+{
+  COUNT nFiles;
+
+  /* Get the argument                                             */
+  if (GetNumArg(pLine, &nFiles) == (BYTE *) 0)
+    return;
+
+  /* Got the value, assign either default or new value            */
+  Config.cfgFiles = max(Config.cfgFiles, nFiles);
+  Config.cfgFilesHigh = 0;
+}
+
+STATIC VOID FilesHigh(BYTE * pLine)
+{
+  Files(pLine);
+  Config.cfgFilesHigh = 1;
+}
+
+/*
+    CfgLastdrive(pLine)/CfgLastdriveHigh(pLine) - LASTDRIVE=/
+    LASTDRIVEHIGH=: set the highest drive letter DOS will recognize.
+
+    /// TODO: LoL->lastdrive/the CDS array are sized once in
+    /// PreConfig() (before CONFIG.SYS is even read, see "use largest
+    /// possible value for the initial CDS" in init_kernel() - it's
+    /// already set to 26), so this only records Config.cfgLastdrive;
+    /// nothing currently shrinks the live CDS array to match a
+    /// smaller LASTDRIVE= value.
+
+    Migrated from config.c verbatim.
+*/
+STATIC VOID CfgLastdrive(BYTE * pLine)
+{
+  /* Format:   LASTDRIVE = letter         */
+  BYTE drv;
+
+  pLine = skipwh(pLine);
+  drv = toupper(*pLine);
+
+  if (drv < 'A' || drv > 'Z')
+  {
+    CfgFailure(pLine);
+    return;
+  }
+  drv -= 'A' - 1;               /* Make real number */
+  if (drv > Config.cfgLastdrive)
+    Config.cfgLastdrive = drv;
+  Config.cfgLastdriveHigh = 0;
+}
+
+STATIC VOID CfgLastdriveHigh(BYTE * pLine)
+{
+  /* Format:   LASTDRIVEHIGH = letter         */
+  CfgLastdrive(pLine);
+  Config.cfgLastdriveHigh = 1;
+}
+
 STATIC struct table commands[] = {
-/// TODO:
-#if 0
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
-  {"SWITCHES", 0, CfgSwitches},
+  {"SWITCHES", 0, CfgNotImplemented},
+/// TODO:  {"SWITCHES", 0, CfgSwitches},
 
   /* rem is never executed by locking out pass                    */
   {"REM", 0, CfgIgnore},
   {";", 0,   CfgIgnore},
 
-  {"MENUCOLOR",0,CfgMenuColor},
+  {"MENUCOLOR",0,CfgNotImplemented},
+/// TODO:  {"MENUCOLOR",0,CfgMenuColor},
+#if 1
+  {"MENUDEFAULT", 0, CfgNotImplemented},
+  {"MENU", 0, CfgNotImplemented},      /* lines to print in pass 0 */
+  {"ECHO", 2, CfgNotImplemented},      /* lines to print in pass 2 - install(high) */
+  {"EECHO", 2, CfgNotImplemented},     /* modified ECHO (ea) */
 
+  {"BREAK", 1, CfgNotImplemented},
+#else
   {"MENUDEFAULT", 0, CfgMenuDefault},
   {"MENU", 0, CfgMenu},         /* lines to print in pass 0 */
   {"ECHO", 2, CfgMenu},         /* lines to print in pass 2 - install(high) */
   {"EECHO", 2, CfgMenuEsc},     /* modified ECHO (ea) */
 
   {"BREAK", 1, CfgBreak},
+#endif
+ 
   {"BUFFERS", 1, Config_Buffers},
   {"BUFFERSHIGH", 1, CfgBuffersHigh}, /* as BUFFERS - we use HMA anyway */
+
+#if 1
+  {"COMMAND", 1, CfgNotImplemented},
+  {"COUNTRY", 1, CfgNotImplemented},
+  {"DOS", 1, CfgNotImplemented},
+  {"DOSDATA", 1, CfgNotImplemented},
+  {"FCBS", 1, CfgNotImplemented},
+  {"KEYBUF", 1, CfgNotImplemented},	/* ea */
+  {"NUMLOCK", 1, CfgNotImplemented},
+  {"SHELL", 1, CfgNotImplemented},
+  {"SHELLHIGH", 1, CfgNotImplemented},
+  {"STACKS", 1, CfgNotImplemented},
+  {"STACKSHIGH", 1, CfgNotImplemented},
+  {"SWITCHAR", 1, CfgNotImplemented},
+  {"SCREEN", 1, CfgNotImplemented},   /* JPP */
+  {"VERSION", 1, CfgNotImplemented},     /* JPP */
+  {"ANYDOS", 1, CfgNotImplemented},       /* tom */
+  {"IDLEHALT", 1, CfgNotImplemented},   /* ea  */
+
+  {"DEVICE", 2, CfgNotImplemented},
+  {"DEVICEHIGH", 2, CfgNotImplemented},
+  {"INSTALL", 2, CfgNotImplemented},
+  {"INSTALLHIGH", 2, CfgNotImplemented},
+  {"CHAIN", 2, CfgNotImplemented},
+  {"SET", 2, CfgNotImplemented},
+#else
   {"COMMAND", 1, InitPgm},
   {"COUNTRY", 1, Country},
   {"DOS", 1, Dosmem},
@@ -6970,9 +7133,9 @@ VOID DoConfig(int nPass)
     }
 #endif
   }
+  {
   /// TODO:
 #if 0
-  {
     char * pp = kernel_command_line;
     char * cc;
     unsigned ii;
@@ -7012,6 +7175,24 @@ VOID DoConfig(int nPass)
       }
     }
     if (configcommands[ii].pointer == NULL) {
+#else
+    static const char * const configcommands[] = {
+      "fdconfig.sys", "config.sys", NULL
+    };
+    int ii;
+    dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
+
+    for (ii = 0; configcommands[ii] != NULL; ++ii) {
+      strcpy(PriPathName, configcommands[ii]);
+      if ((nFileDesc = open(x86_path, 0)) >= 0) {
+        CfgDbgPrintf(("Reading \"%s\"...\n", configcommands[ii]));
+        break;
+      } else {
+        CfgDbgPrintf(("\"%s\" not found\n", configcommands[ii]));
+      }
+    }
+    if (configcommands[ii] == NULL) {
+#endif
       /* at this point no config file was found, may return early */
 #ifdef MEMDISK_ARGS
       /* if memdisk in use then only assume end of file reached and proceed, else return early */
@@ -7022,7 +7203,7 @@ VOID DoConfig(int nPass)
         return;
     }
   }
-#endif
+
   nCfgLine = 0;  /* keep track of which line in file for errors   */
 
   /* Read each line into the buffer and then parse the line,      */
