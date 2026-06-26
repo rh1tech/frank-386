@@ -335,6 +335,7 @@ static INLINE void decodeflagsword(CPU* cpu, uint16_t x) {
 }
 
 static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
+    #if 0
     {
         char buf[80];
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
@@ -342,6 +343,7 @@ static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
         snprintf(buf, 79, "INT %02Xh DOS? %04X:%04X->%04X:%04X AX:%04X", intnum, CPU_CS, CPU_IP, new_cs, new_ip, CPU_AX);
         print_line(buf, 0);
     }
+    #endif
     push(cpu, makeflagsword(cpu));
     push(cpu, CPU_CS);
     push(cpu, CPU_IP);
@@ -902,7 +904,7 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
 }
 
 bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
-    print_line2("BIOS", 0, 8);
+    ///print_line2("BIOS", 0, 8);
     bool normal_iret_flow = handlers[intnum](cpu);
     uint16_t flags_on_stack = getmem16(CPU_SS, CPU_SP + 4);
     if (normal_iret_flow) {

@@ -4661,13 +4661,14 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 		cpu->next_ip = newip; PREFETCH_RESET
 		cpu->ip = newip;
 		cpu->flags &= ~(IF|TF);
-    {
-        char buf[80];
-        snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ",
-			no, prev_cs, prev_ip, cpu->seg[SEG_CS].base, newip, cpu->gprx[0].r16);
-        print_line(buf, 0);
-    }
-
+		#if 0
+    	{
+        	char buf[80];
+        	snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ",
+				no, prev_cs, prev_ip, cpu->seg[SEG_CS].base, newip, cpu->gprx[0].r16);
+        	print_line(buf, 0);
+    	}
+		#endif
 		return true;
 	}
 

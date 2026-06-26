@@ -61,10 +61,12 @@ static bool bios_19h_waiter(CPU* cpu, bios_callback_params_t* params) {
         /* Classic boot order used here: floppy A:, then first fixed disk C:.
         * No POST is done here; INT 19h is only bootstrap. */
         if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
+            drop_bios_callback(cpu, params);
             boot_from(cpu, 0x00);
             return false;
         }
         if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
+            drop_bios_callback(cpu, params);
             boot_from(cpu, 0x80);
             return false;
         }

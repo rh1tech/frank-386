@@ -32,6 +32,7 @@ bool bios_FFh(CPU* cpu) { // W/A BIOS callback
 }
 
 bool set_bios_callback(CPU* cpu, bios_callback_params_t* params) {
+    (void)cpu;
     bios_callback_params_t* node = &root;
     while(node->chain) {
         if (node->chain == params) {
@@ -39,9 +40,11 @@ bool set_bios_callback(CPU* cpu, bios_callback_params_t* params) {
             return true;
         }
         if (node->chain->expected_cs == params->expected_cs && node->chain->expected_ip == params->expected_ip) {
-            printf("[set_bios_callback] replaces BIOD handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
-            params->chain = node->chain->chain;
-            node->chain->chain = 0;
+            printf("[set_bios_callback] WARN: replaces handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
+            bios_callback_params_t* old = node->chain;
+            params->chain = old->chain;
+            old->chain = NULL;
+            old->data = NULL;
             node->chain = params;
             return true;
         }
@@ -50,4 +53,22 @@ bool set_bios_callback(CPU* cpu, bios_callback_params_t* params) {
     ///printf("[set_bios_callback] new BIOS handler on %04x:%04x\n", params->expected_cs, params->expected_ip);
     node->chain = params;
     return true;
+}
+
+bool drop_bios_callback(CPU* cpu, bios_callback_params_t* params) {
+    (void)cpu;
+    if (!params) {
+        return false;
+    }
+    bios_callback_params_t* node = &root;
+    while (node->chain) {
+        if (node->chain == params) {
+            node->chain = params->chain;
+            params->chain = NULL;
+            params->data = NULL;
+            return true;
+        }
+        node = node->chain;
+    }
+    return false;
 }
