@@ -564,6 +564,20 @@ static bool bios_15h_C2h(CPU* cpu)
     return true;
 }
 
+#ifndef I386_MODE
+bool bios_15h_89h(CPU* cpu)
+{
+    cf = 1;
+    CPU_AH = 0x86;
+    return true;
+}
+bool bios_15h_E820h(CPU* cpu) {
+    cf = 1;
+    CPU_AH = 0x86;
+    return true;
+}
+#endif
+
 bool bios_15h(CPU* cpu) {
     switch(CPU_AH) {
         case 0x24:
@@ -643,8 +657,7 @@ bool bios_15h(CPU* cpu) {
                 return true;
             }
             case 0x20: { /* E820 MEMORY MAP — 286 не поддерживает 32-bit регистры */
-                cf = 1; CPU_AH = 0x86;
-                return true;
+                return bios_15h_E820h(cpu);
             }
             default:
                 cf = 1; CPU_AH = 0x86;

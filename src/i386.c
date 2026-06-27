@@ -5478,14 +5478,9 @@ int IRAM_ATTR cpu_get_a20(CPU* cpu)
 	return cpu->a20_mask >> 20 & 1;
 }
 
+#ifdef I386_MODE
 bool bios_15h_89h(CPU* _cpu)
 {
-#ifndef I386_MODE
-    CPU* cpu = _cpu;
-    cf = 1;
-    CPU_AH = 0x86;
-    return true;
-#else
     CPUI386* cpu = (CPUI386*)_cpu;
     uint32_t table = ((uint32_t)get_seg16(_cpu, SEG_ES) << 4) + CPU_SI;
 
@@ -5558,8 +5553,68 @@ bool bios_15h_89h(CPU* _cpu)
     CPU_AH = 0x00;
 	SET_BIT(cpu->flags, 0, CF);
     return true;
-#endif
 }
+
+bool bios_15h_E820h(CPU* _cpu)
+{
+    CPUI386* cpu = (CPUI386*)_cpu;
+    uint32_t dst = ((uint32_t)get_seg16(_cpu, SEG_ES) << 4) + CPU_DI;
+    uint32_t idx = REGi(regbx);
+
+    if (REGi(regax) != 0x0000E820u ||
+        REGi(regdx) != 0x534D4150u ||
+        REGi(regcx) < 20) {
+		SET_BIT(cpu->flags, 1, CF);
+        CPU_AH = 0x86;
+        return true;
+    }
+
+    switch (idx) {
+    case 0:
+        pstore32(dst + 0x00, 0x00000000u);
+        pstore32(dst + 0x04, 0x00000000u);
+        pstore32(dst + 0x08, 0x000A0000u);
+        pstore32(dst + 0x0C, 0x00000000u);
+        pstore32(dst + 0x10, 0x00000001u);
+        REGi(regbx) = 1;
+        break;
+
+    case 1:
+        pstore32(dst + 0x00, 0x000A0000u);
+        pstore32(dst + 0x04, 0x00000000u);
+        pstore32(dst + 0x08, 0x00060000u);
+        pstore32(dst + 0x0C, 0x00000000u);
+        pstore32(dst + 0x10, 0x00000002u);
+        REGi(regbx) = 2;
+        break;
+
+    case 2:
+        if (phys_mem_size <= 0x00100000u) {
+			SET_BIT(cpu->flags, 1, CF);
+            CPU_AH = 0x86;
+            return true;
+        }
+        pstore32(dst + 0x00, 0x00100000u);
+        pstore32(dst + 0x04, 0x00000000u);
+        pstore32(dst + 0x08, (uint32_t)phys_mem_size - 0x00100000u);
+        pstore32(dst + 0x0C, 0x00000000u);
+        pstore32(dst + 0x10, 0x00000001u);
+        REGi(regbx) = 0;
+        break;
+
+    default:
+		SET_BIT(cpu->flags, 1, CF);
+        CPU_AH = 0x86;
+        return true;
+    }
+
+    REGi(regax) = 0x534D4150u;
+    REGi(regcx) = 20;
+	SET_BIT(cpu->flags, 0, CF);
+    CPU_AH = 0x00;
+    return true;
+}
+#endif
 
 cpu_int_hook_t* cpu_set_int_hook(CPU* cpu, u8 no, cpu_int_hook_t* hook)
 {
