@@ -5,6 +5,87 @@
 
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
 
+#define EBDA_MOUSE_HANDLER_OFF  0x22
+#define EBDA_MOUSE_HANDLER_SEG  0x24
+#define EBDA_MOUSE_FLAG1        0x26
+#define EBDA_MOUSE_FLAG2        0x27
+#define EBDA_MOUSE_DATA         0x28
+
+#define INT15C2_SUCCESS         0x00
+#define INT15C2_INV_FUNCTION    0x01
+#define INT15C2_INV_INPUT       0x02
+#define INT15C2_INTERFACE       0x03
+#define INT15C2_RESEND          0x04
+#define INT15C2_NO_HANDLER      0x05
+
+#define KBD_STATUS_PORT         0x64
+#define KBD_DATA_PORT           0x60
+#define KBD_CMD_WRITE_MOUSE     0xD4
+#define KBD_STAT_OBF            0x01
+#define KBD_STAT_IBF            0x02
+#define PS2_ACK                 0xFA
+
+static uint32_t bios_15h_ebda(void)
+{
+    uint16_t seg = pload16(0x40E);
+    return (uint32_t)seg << 4;
+}
+
+static void bios_15h_c2_ok(CPU* cpu)
+{
+    CPU_AH = INT15C2_SUCCESS;
+    cf = 0;
+}
+
+static void bios_15h_c2_err(CPU* cpu, uint8_t code)
+{
+    CPU_AH = code;
+    cf = 1;
+}
+
+static bool ps2_wait_in(CPU* cpu)
+{
+    for (uint32_t i = 0; i < 100000; i++)
+        if (!(cpu_portin8(KBD_STATUS_PORT) & KBD_STAT_IBF))
+            return true;
+    return false;
+}
+
+static bool ps2_wait_out(CPU* cpu)
+{
+    for (uint32_t i = 0; i < 100000; i++)
+        if (cpu_portin8(KBD_STATUS_PORT) & KBD_STAT_OBF)
+            return true;
+    return false;
+}
+
+static bool ps2_mouse_write(CPU* cpu, uint8_t v)
+{
+    if (!ps2_wait_in(cpu)) return false;
+    cpu_portout8(KBD_STATUS_PORT, KBD_CMD_WRITE_MOUSE);
+    if (!ps2_wait_in(cpu)) return false;
+    cpu_portout8(KBD_DATA_PORT, v);
+    if (!ps2_wait_out(cpu)) return false;
+    return cpu_portin8(KBD_DATA_PORT) == PS2_ACK;
+}
+
+static bool ps2_mouse_cmd(CPU* cpu, uint8_t cmd, uint8_t *param,
+                          uint8_t out_count, uint8_t in_count)
+{
+    if (!ps2_mouse_write(cpu, cmd))
+        return false;
+    if (out_count) {
+        if (!ps2_mouse_write(cpu, *param))
+            return false;
+    }
+    for (uint8_t i = 0; i < in_count; i++) {
+        if (!ps2_wait_out(cpu))
+            return false;
+        param[i] = cpu_portin8(KBD_DATA_PORT);
+    }
+    return true;
+}
+
 // A20 GATE
 static bool bios_15h_24h(CPU* cpu) {
     switch (CPU_AL) {
@@ -361,6 +442,127 @@ static bool bios_15h_C0h(CPU* cpu) {
     return true;
 }
 
+static bool bios_15h_C2h(CPU* cpu)
+{
+    static const uint8_t sample_rates[7] = {10, 20, 40, 60, 80, 100, 200};
+    uint32_t ebda = bios_15h_ebda();
+    uint8_t p[3];
+
+    if (!ebda) {
+        bios_15h_c2_err(cpu, INT15C2_INTERFACE);
+        return true;
+    }
+
+    switch (CPU_AL) {
+    case 0x00:                                      /* enable/disable */
+        if (CPU_BH == 0x00) {
+            if (!ps2_mouse_cmd(cpu, 0xF5, p, 0, 0))
+                bios_15h_c2_err(cpu, INT15C2_RESEND);
+            else
+                bios_15h_c2_ok(cpu);
+            return true;
+        }
+        if (CPU_BH == 0x01) {
+            if (!(pload8(ebda + EBDA_MOUSE_FLAG2) & 0x80)) {
+                bios_15h_c2_err(cpu, INT15C2_NO_HANDLER);
+                return true;
+            }
+            if (!ps2_mouse_cmd(cpu, 0xF4, p, 0, 0))
+                bios_15h_c2_err(cpu, INT15C2_RESEND);
+            else
+                bios_15h_c2_ok(cpu);
+            return true;
+        }
+        bios_15h_c2_err(cpu, INT15C2_INV_FUNCTION);
+        return true;
+
+    case 0x01:                                      /* reset */
+        if (!ps2_mouse_cmd(cpu, 0xFF, p, 0, 2)) {
+            bios_15h_c2_err(cpu, INT15C2_RESEND);
+            return true;
+        }
+        CPU_BL = p[0];                              /* usually AAh */
+        CPU_BH = p[1];                              /* device id */
+        bios_15h_c2_ok(cpu);
+       return true;
+
+    case 0x02:                                      /* set sample rate */
+        if (CPU_BH >= sizeof(sample_rates)) {
+            bios_15h_c2_err(cpu, INT15C2_INV_INPUT);
+            return true;
+        }
+        p[0] = sample_rates[CPU_BH];
+        if (!ps2_mouse_cmd(cpu, 0xF3, p, 1, 0))
+            bios_15h_c2_err(cpu, INT15C2_RESEND);
+        else
+            bios_15h_c2_ok(cpu);
+        return true;
+
+    case 0x03:                                      /* set resolution */
+        if (CPU_BH >= 4) {
+            bios_15h_c2_err(cpu, INT15C2_INV_INPUT);
+            return true;
+        }
+        p[0] = CPU_BH;
+        if (!ps2_mouse_cmd(cpu, 0xE8, p, 1, 0))
+            bios_15h_c2_err(cpu, INT15C2_RESEND);
+        else
+            bios_15h_c2_ok(cpu);
+        return true;
+
+    case 0x04:                                      /* get device id */
+        if (!ps2_mouse_cmd(cpu, 0xF2, p, 0, 1)) {
+            bios_15h_c2_err(cpu, INT15C2_RESEND);
+            return true;
+        }
+        CPU_BH = p[0];
+        bios_15h_c2_ok(cpu);
+        return true;
+
+    case 0x05:                                      /* initialize */
+        if (CPU_BH != 3) {
+            bios_15h_c2_err(cpu, INT15C2_INTERFACE);
+            return true;
+        }
+        pstore8(ebda + EBDA_MOUSE_FLAG1, 0x00);
+        pstore8(ebda + EBDA_MOUSE_FLAG2, CPU_BH);
+        return bios_15h_C2h((CPU_AL = 0x01, cpu));
+
+    case 0x06:                                      /* status / scaling */
+        if (CPU_BH == 0x00) {
+            if (!ps2_mouse_cmd(cpu, 0xE9, p, 0, 3)) {
+                bios_15h_c2_err(cpu, INT15C2_RESEND);
+                return true;
+            }
+            CPU_BL = p[0];
+            CPU_CL = p[1];
+            CPU_DL = p[2];
+            bios_15h_c2_ok(cpu);
+            return true;
+        }
+        if (CPU_BH == 0x01 || CPU_BH == 0x02) {
+            if (!ps2_mouse_cmd(cpu, CPU_BH == 0x01 ? 0xE6 : 0xE7, p, 0, 0))
+                bios_15h_c2_err(cpu, INT15C2_RESEND);
+            else
+                bios_15h_c2_ok(cpu);
+            return true;
+        }
+        bios_15h_c2_err(cpu, INT15C2_INV_FUNCTION);
+        return true;
+
+    case 0x07:                                      /* set handler ES:BX */
+        pstore16(ebda + EBDA_MOUSE_HANDLER_OFF, CPU_BX);
+        pstore16(ebda + EBDA_MOUSE_HANDLER_SEG, CPU_ES);
+        pstore8(ebda + EBDA_MOUSE_FLAG1, 0x00);
+        pstore8(ebda + EBDA_MOUSE_FLAG2, CPU_BX || CPU_ES ? 0x83 : 0x03);
+        bios_15h_c2_ok(cpu);
+        return true;
+    }
+
+    bios_15h_c2_err(cpu, INT15C2_INV_FUNCTION);
+    return true;
+}
+
 bool bios_15h(CPU* cpu) {
     switch(CPU_AH) {
         case 0x24:
@@ -418,6 +620,8 @@ bool bios_15h(CPU* cpu) {
             cf = 0;
             return true;
         }            
+        case 0xC2:
+            return bios_15h_C2h(cpu); // PS/2 MOUSE BIOS
         case 0xE8: {
             switch (CPU_AL) {
             case 0x01: { /* GET EXTENDED MEMORY (>16MB support) */

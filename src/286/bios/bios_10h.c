@@ -2758,6 +2758,50 @@ static bool bios_10h_101Ah(CPU* cpu)
 }
 
 /*
+VIDEO - PERFORM GRAY-SCALE SUMMING
+AX = 101Bh
+BX = starting DAC register
+CX = number of DAC registers
+
+Desc:
+Converts selected DAC entries to grayscale in-place.
+
+IBM/VGA grayscale summing uses weighted RGB:
+  gray = (77*R + 151*G + 28*B + 128) >> 8
+
+R/G/B are VGA DAC 6-bit components, so gray is also clamped to 00h..3Fh.
+*/
+static bool bios_10h_101Bh(CPU* cpu)
+{
+    uint16_t first = CPU_BX;
+    uint16_t count = CPU_CX;
+
+    if (first >= 256) {
+        cf = 1;
+        return true;
+    }
+    if (count > 256 - first)
+        count = 256 - first;
+    for (uint16_t i = 0; i < count; i++) {
+        uint8_t r, g, b, gray;
+        cpu_portout8(VGA_DAC_READ_INDEX_PORT, (uint8_t)(first + i));
+        r = cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F;
+        g = cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F;
+        b = cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F;
+        gray = (uint8_t)(((uint16_t)77 * r + (uint16_t)151 * g + (uint16_t)28 * b + 128) >> 8);
+        if (gray > 0x3F) {
+            gray = 0x3F;
+        }
+        cpu_portout8(VGA_DAC_WRITE_INDEX_PORT, (uint8_t)(first + i));
+        cpu_portout8(VGA_DAC_DATA_PORT, gray);
+        cpu_portout8(VGA_DAC_DATA_PORT, gray);
+        cpu_portout8(VGA_DAC_DATA_PORT, gray);
+    }
+    cf = 0;
+    return true;
+}
+
+/*
  * Return physical address of one byte in VGA character-generator RAM.
  *
  * This follows the layout expected by vga_text_refresh()/vga_get_font_ptr():
@@ -3241,6 +3285,7 @@ bool bios_10h(CPU* cpu) {
             case 0x18: return bios_10h_1018h(cpu); // SET PEL MASK
             case 0x19: return bios_10h_1019h(cpu); // READ PEL MASK
             case 0x1A: return bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE
+            case 0x1B: return bios_10h_101Bh(cpu); // PERFORM GRAY-SCALE SUMMING
             }
             break;
         case 0x11:

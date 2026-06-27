@@ -1246,6 +1246,9 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
 
 void bios_post(PC *pc) {
 // POST
+    const uint16_t ebda_seg = 0x9FC0;                 /* 1 KiB EBDA at 9FC00 */
+    const uint32_t ebda_phys = (uint32_t)ebda_seg << 4;
+
 	uint32_t ext_ram = phys_mem_size <= (1024 << 10) ? 0 : (phys_mem_size - (1024 << 10)) >> 10;
 	if (ext_ram > 0xFFFF)
 		ext_ram = 0xFFFF;
@@ -1258,6 +1261,10 @@ void bios_post(PC *pc) {
 // init BDA
 	for (uint32_t a = 0x400; a < 0x500; ++a)
 		pstore8(a, 0);
+// init EDBA
+	for (uint32_t a = ebda_phys; a < ebda_phys + 1024; ++a)
+        pstore8(a, 0);
+    pstore8(ebda_phys + 0x00, 1);                    /* EBDA size, KiB */
 // Zero-valued BDA fields are omitted below: the whole BDA was cleared above.
 	/* BIOS Data Area, IBM PC/AT compatible minimum. */
 	pstore16(0x400, pc->enable_serial ? 0x03F8 : 0x0000); /* COM1 base */
@@ -1267,13 +1274,15 @@ void bios_post(PC *pc) {
 //	pstore16(0x408, 0x0000);                              /* LPT1 base */
 //	pstore16(0x40A, 0x0000);                              /* LPT2 base */
 //	pstore16(0x40C, 0x0000);                              /* LPT3 base */
-//	pstore16(0x40E, 0x0000);                              /* EBDA segment: none */
+	pstore16(0x40E, ebda_seg);                            /* EBDA segment */
 
 	uint16_t equipment = 0x0000;
 	equipment |= 0x0001;                                  /* diskette subsystem present */
 	equipment |= 0x0020;                                  /* initial video: 80x25 color */
 	if (pc->enable_serial)
 		equipment |= 0x0200;                              /* one serial port */
+    if (pc->mouse_enabled)
+        equipment |= 0x0004;                              /* pointing device */		
 	equipment |= (1u << 6);                               /* two diskette drives, encoded count-1 */
 	pstore16(0x410, equipment);
 
@@ -1400,7 +1409,7 @@ void bios_post(PC *pc) {
 	bit 1 = Micro Channel bus вместо ISA
 	bit 0 = dual bus: Micro Channel + ISA
 	*/
-    pstore8 (table + 0x05, 0b01111000);   /* feature byte 1: slave PIC + RTC + INT15/4Fh + INT15/41h */
+    pstore8 (table + 0x05, 0b01111100);   /* feature byte 1: slave PIC + RTC + INT15/4Fh + INT15/41h + EDBA */
 	/*
 7      32-bit DMA supported
 6      INT 16/AH=09h (keyboard functionality) supported (see #00585)
