@@ -526,7 +526,8 @@ static bool bios_15h_C2h(CPU* cpu)
         }
         pstore8(ebda + EBDA_MOUSE_FLAG1, 0x00);
         pstore8(ebda + EBDA_MOUSE_FLAG2, CPU_BH);
-        return bios_15h_C2h((CPU_AL = 0x01, cpu));
+        CPU_AL = 0x01;
+        return bios_15h_C2h(cpu);
 
     case 0x06:                                      /* status / scaling */
         if (CPU_BH == 0x00) {
