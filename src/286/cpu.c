@@ -23,12 +23,12 @@ static uint32_t segregs32[6];
 #define CPU_GS    segregs[reggs << 1]
 
 u8 get_reg8(struct CPU* cpu, u8 regn);
-u16 get_reg16(struct CPU* cpu, u8 regn);
+u16 get_reg16(const struct CPU* cpu, u8 regn);
 u32 get_reg32(struct CPU* cpu, u8 regn);
 void set_reg8(struct CPU* cpu, u8 regn, u8 v);
 void set_reg16(struct CPU* cpu, u8 regn, u16 v);
 void set_reg32(struct CPU* cpu, u8 regn, u32 v);
-static u16 IRAM_ATTR get_seg16(struct CPU* _cpu, u8 segn) {
+static u16 IRAM_ATTR get_seg16(const struct CPU* _cpu, u8 segn) {
 	return segregs32[segn];
 }
 static void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
@@ -3287,3 +3287,24 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
         }
     }
 }
+
+#ifndef I386_MODE
+void __not_in_flash() cpu_save_regs(const CPU* cpu, CPU_regs* regs) {
+	regs->es = CPU_ES;
+	regs->ds = CPU_DS;
+	regs->fs = CPU_FS;
+	regs->gs = CPU_GS;
+	for(int i = 0; i < 8; ++i)
+        regs->gprx[i] = cpu->gprx[i];
+    regs->flags = cpu->flags;
+}
+void __not_in_flash() cpu_restore_regs(CPU* cpu, const CPU_regs* regs) {
+	CPU_ES = regs->es;
+	CPU_DS = regs->ds;
+	CPU_FS = regs->fs;
+	CPU_GS = regs->gs;
+	for(int i = 0; i < 8; ++i)
+        cpu->gprx[i] = regs->gprx[i];
+    cpu->flags = regs->flags;
+}
+#endif

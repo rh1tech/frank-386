@@ -5261,7 +5261,7 @@ void cpui386_set_gpr(CPUI386 *cpu, int i, u32 val)
 u8 IRAM_ATTR get_reg8(struct CPU* cpu, u8 regn) {
 	return lreg8(regn);
 }
-u16 IRAM_ATTR get_reg16(struct CPU* cpu, u8 regn) {
+u16 IRAM_ATTR get_reg16(const struct CPU* cpu, u8 regn) {
 	return lreg16(regn);
 }
 u32 IRAM_ATTR get_reg32(struct CPU* cpu, u8 regn) {
@@ -5276,7 +5276,7 @@ void IRAM_ATTR set_reg16(struct CPU* cpu, u8 regn, u16 v) {
 void IRAM_ATTR set_reg32(struct CPU* cpu, u8 regn, u32 v) {
 	sreg32(regn, v);
 }
-static u16 IRAM_ATTR get_seg16(struct CPU* _cpu, u8 segn) {
+static u16 IRAM_ATTR get_seg16(const struct CPU* _cpu, u8 segn) {
 	register CPUI386* cpu = (CPUI386*)_cpu;
 	return cpu->seg[segn].sel;
 }
@@ -5613,6 +5613,25 @@ bool bios_15h_E820h(CPU* _cpu)
 	SET_BIT(cpu->flags, 0, CF);
     CPU_AH = 0x00;
     return true;
+}
+
+void __not_in_flash() cpu_save_regs(const CPU* cpu, CPU_regs* regs) {
+	regs->es = get_seg16(cpu, SEG_ES);
+	regs->ds = get_seg16(cpu, SEG_DS);
+	regs->fs = get_seg16(cpu, SEG_FS);
+	regs->gs = get_seg16(cpu, SEG_GS);
+	for(int i = 0; i < 8; ++i)
+        regs->gprx[i] = cpu->gprx[i];
+    regs->flags = cpu->flags;
+}
+void __not_in_flash() cpu_restore_regs(CPU* cpu, const CPU_regs* regs) {
+    cpu->flags = regs->flags;
+   	set_seg((CPUI386*)cpu, SEG_ES, regs->es);
+   	set_seg((CPUI386*)cpu, SEG_DS, regs->ds);
+   	set_seg((CPUI386*)cpu, SEG_FS, regs->fs);
+   	set_seg((CPUI386*)cpu, SEG_GS, regs->gs);
+	for(int i = 0; i < 8; ++i)
+        cpu->gprx[i] = regs->gprx[i];
 }
 #endif
 

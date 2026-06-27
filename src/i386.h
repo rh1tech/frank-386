@@ -64,7 +64,7 @@ typedef struct cpu_int_hook {
 } cpu_int_hook_t;
 
 typedef u8 (*get_reg8_t)(struct CPU* cpu, u8 regn);
-typedef u16 (*get_reg16_t)(struct CPU* cpu, u8 regn);
+typedef u16 (*get_reg16_t)(const struct CPU* cpu, u8 regn);
 typedef u32 (*get_reg32_t)(struct CPU* cpu, u8 regn);
 typedef u32 (*get_flags_t)(struct CPU* cpu, u32 mask);
 
@@ -141,12 +141,14 @@ typedef union {
     } bits;
 } x86_flags_t;
 
+typedef	union {
+	u32 r32;
+	u16 r16;
+	u8 r8[2];
+} gprx_t;
+
 struct CPU {
-	union {
-		u32 r32;
-		u16 r16;
-		u8 r8[2];
-	} gprx[8];
+	gprx_t gprx[8];
 	uword ip, next_ip;
 	x86_flags_t flags;
 	uword flags_mask;
@@ -187,6 +189,20 @@ typedef struct CPU CPU;
 bool rp2350_bios_handler(CPU* cpu, uint8_t intnum);
 typedef bool (*handler_t)(CPU*);
 extern handler_t handlers[256];
+
+
+// to save and restore in BIOS/DOS calls
+typedef struct CPU_regs {
+	gprx_t gprx[8];
+	x86_flags_t flags;
+	u16 es;
+	u16 ds;
+	u16 fs;
+	u16 gs;
+} CPU_regs;
+
+void cpu_save_regs(const CPU*, CPU_regs*);
+void cpu_restore_regs(CPU*, const CPU_regs*);
 
 CPU *cpu_new(int gen, CPU_CB **cb);
 inline static void enable_fpu(CPU *cpu) {

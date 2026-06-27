@@ -8,12 +8,11 @@ DOS 2+ - FAST CONSOLE OUTPUT
 AL = character to display
 */
 bool fdos_29h(CPU* cpu) {
-    u16 ax = CPU_AX;
-    u16 bx = CPU_BX;
+    CPU_regs regs;
+    cpu_save_regs(cpu, &regs);
     CPU_AH = 0x0e;
     CPU_BX = 0x0007;
     bios_10h(cpu);
-    CPU_AX = ax;
-    CPU_BX = bx;
+    cpu_restore_regs(cpu, &regs);
     return true;
 }
