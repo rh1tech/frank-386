@@ -1,5 +1,5 @@
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 #define LSR_DATA_READY      0x01
 #define LSR_OVERRUN_ERROR   0x02

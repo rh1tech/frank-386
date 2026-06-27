@@ -1,7 +1,7 @@
 #include <stdbool.h>
 #include <stdint.h>
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 #define BDA_BASE        0x400u
 #define BDA_KBD_FLAGS1  0x417u

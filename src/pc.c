@@ -10,7 +10,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <hardware/watchdog.h>
-#include "286/bios.h"
+#include "bios/bios.h"
 #include "mpu401.c.inl"
 void netredirect_init(CPU *cpu, int enable);
 

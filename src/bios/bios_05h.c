@@ -1,5 +1,5 @@
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 #include "ff.h"
 
 static bool text_mode(uint8_t mode) {

@@ -1,6 +1,6 @@
-#include "../cpu.h"
-#include "../bios.h"
-#include "../fdos.h"
+#include "286/cpu.h"
+#include "bios.h"
+#include "fdos/fdos.h"
 #include "disk.h"
 #include <ff.h>
 

@@ -2,9 +2,9 @@
 #include <pico/time.h>
 #include <hardware/pio.h>
 #include <ctype.h>
-#include "../cpu.h"
-#include "../bios.h"
-#include "../fdos.h"
+#include "286/cpu.h"
+#include "bios/bios.h"
+#include "fdos.h"
 #include "i8254.h"
 
 #define printf(...) bios_printf(cpu, __VA_ARGS__)

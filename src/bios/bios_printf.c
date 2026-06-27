@@ -1,5 +1,5 @@
-#include "../bios.h"
-#include "../cpu.h"
+#include "bios.h"
+#include "286/cpu.h"
 #include <stdio.h>
 
 void bios_puts(CPU* cpu, const char* str) {

@@ -1,6 +1,6 @@
 #include <stdio.h>
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 #define BIOS_FONT_SEG       0xF000
 #define BIOS_FONT8X16_OFF   0xA000

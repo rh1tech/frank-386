@@ -1,5 +1,5 @@
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 static bool bios_18h_waiter(CPU* cpu, bios_callback_params_t* any) {
     // actually do nothing, since reboot only is allowed in this case

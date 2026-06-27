@@ -1,6 +1,6 @@
 #include <stdio.h>
-#include "../cpu.h"
-#include "../fdos.h"
+#include "286/cpu.h"
+#include "fdos.h"
 
 // like kernel/boot/boot.asm
 // without redundant actions

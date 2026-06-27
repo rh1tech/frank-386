@@ -1,7 +1,7 @@
 #include <stdio.h>
-#include "../cpu.h"
-#include "../bios.h"
-#include "../fdos.h"
+#include "286/cpu.h"
+#include "bios/bios.h"
+#include "fdos.h"
 
 /*
 DOS 2+ - FAST CONSOLE OUTPUT

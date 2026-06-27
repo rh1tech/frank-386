@@ -1,6 +1,6 @@
 #include <stdio.h>
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 /* INT 08h  –  IRQ0 System Timer Tick (18.2065 Hz)
  *

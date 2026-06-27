@@ -1,6 +1,6 @@
-#include "../cpu.h"
-#include "../bios.h"
-#include "../fdos.h"
+#include "286/cpu.h"
+#include "bios/bios.h"
+#include "fdos.h"
 
 #include "hdr/kconfig.h"
 #include "hdr/portab.h"

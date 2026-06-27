@@ -1,6 +1,6 @@
 #include "mem.h"
 #include "i386.h"
-#include "286/bios.h"
+#include "bios/bios.h"
 #include <pico.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -3,8 +3,8 @@
 #include <pico.h>
 #include "i386.h"
 #include "cpu.h"
-#include "bios.h"
-#include "fdos.h"
+#include "bios/bios.h"
+#include "fdos/fdos.h"
 
 #define IRAM_ATTR __not_in_flash()
 #define INLINE __always_inline

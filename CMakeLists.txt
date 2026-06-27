@@ -225,32 +225,32 @@ set(EMU_CORE_SOURCES
     src/286/cpu.c
     src/286/fpu.c
 
-    # 286 BIOS
-    src/286/bios/bios_00h.c
-    src/286/bios/bios_05h.c
-    src/286/bios/bios_08h.c
-    src/286/bios/bios_09h.c
-    src/286/bios/bios_10h.c
-    src/286/bios/bios_11h.c
-    src/286/bios/bios_12h.c
-    src/286/bios/bios_13h.c
-    src/286/bios/bios_14h.c
-    src/286/bios/bios_15h.c
-    src/286/bios/bios_16h.c
-    src/286/bios/bios_17h.c
-    src/286/bios/bios_18h.c
-    src/286/bios/bios_19h.c
-    src/286/bios/bios_1Ah.c
-    src/286/bios/bios_FFh.c
-    src/286/bios/bios_printf.c
+    # RP2350 SeaBIOS BIOS port
+    src/bios/bios_00h.c
+    src/bios/bios_05h.c
+    src/bios/bios_08h.c
+    src/bios/bios_09h.c
+    src/bios/bios_10h.c
+    src/bios/bios_11h.c
+    src/bios/bios_12h.c
+    src/bios/bios_13h.c
+    src/bios/bios_14h.c
+    src/bios/bios_15h.c
+    src/bios/bios_16h.c
+    src/bios/bios_17h.c
+    src/bios/bios_18h.c
+    src/bios/bios_19h.c
+    src/bios/bios_1Ah.c
+    src/bios/bios_FFh.c
+    src/bios/bios_printf.c
     drivers/vga/font8x8.c
     drivers/vga/font8x14.c
 
     # FreeDOS kernel
-    src/286/fdos/boot.c
-    src/286/fdos/kernel.c
-    src/286/fdos/fdos_21h.c
-    src/286/fdos/fdos_29h.c
+    src/fdos/boot.c
+    src/fdos/kernel.c
+    src/fdos/fdos_21h.c
+    src/fdos/fdos_29h.c
 
     # Peripheral chips
     src/i8042.c      # Keyboard controller

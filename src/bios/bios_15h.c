@@ -1,7 +1,7 @@
 #include <pico.h>
 #include <pico/time.h>
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
 

@@ -1,7 +1,7 @@
 #include <ff.h>
 #include "debug.h"
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 #include "disk.h"
 
 /* INT 13h status codes used by the minimal BIOS layer below.

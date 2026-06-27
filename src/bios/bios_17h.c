@@ -1,5 +1,5 @@
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 #define BDA_LPT_BASE(n)      (0x408 + ((n) * 2))
 #define BDA_LPT_TIMEOUT(n)   (0x478 + (n))

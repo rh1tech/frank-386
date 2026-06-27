@@ -1,5 +1,5 @@
-#include "../cpu.h"
-#include "../bios.h"
+#include "286/cpu.h"
+#include "bios.h"
 
 /*
 BIOS - GET EQUIPMENT LIST
