@@ -525,6 +525,62 @@ void bios_13h_init(void)
     disk_set_fdc_mediachange_callback(bios_13h_fdc_mediachange);
 }
 
+static bool bios_13h_0Ch(CPU* cpu)
+{
+    BiosDisk d;
+    uint32_t lba;
+    uint8_t drive = CPU_DL;
+
+    if (!int13_get_disk(drive, &d) || !d.f) {
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
+        return true;
+    }
+
+    if (!int13_chs_to_lba(cpu, &d, &lba)) {
+        int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
+        return true;
+    }
+
+    if (f_lseek(d.f, lba * 512u) != FR_OK) {
+        int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
+        return true;
+    }
+
+    if (!(drive & 0x80))
+        pstore8(0x494 + drive, CPU_CH);
+
+    int13_set_status(cpu, drive, INT13_ST_OK);
+    return true;
+}
+
+static bool bios_13h_11h(CPU* cpu)
+{
+    BiosDisk d;
+    uint8_t drive = CPU_DL;
+
+    if (!int13_get_disk(drive, &d)) {
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
+        return true;
+    }
+
+    if (!(drive & 0x80))
+        pstore8(0x494 + drive, 0x00);
+
+    int13_set_status(cpu, drive, INT13_ST_OK);
+    return true;
+}
+
+static bool bios_13h_14h(CPU* cpu)
+{
+    /*
+     * Controller internal diagnostic.
+     * File-backed BIOS has no controller self-test state; SeaBIOS accepts this
+     * as success unless the low-level controller reports an error.
+     */
+    int13_set_status(cpu, CPU_DL, INT13_ST_OK);
+    return true;
+}
+
 /*
 DISK - GET DISK TYPE
 AH = 15h
@@ -1013,11 +1069,11 @@ bool bios_13h(CPU* cpu) {
             res = bios_13h_08h(cpu); // GET DRIVE PARAMETERS
             break;
         case 0x09:  /* INITIALIZE DRIVE PARAMETERS — no-op for file-backed emulator */
-        case 0x0C:  /* SEEK TO CYLINDER — no-op for file-backed emulator */
         case 0x0D:  /* ALTERNATE DISK RESET — no-op for file-backed emulator */
-        case 0x11:  /* RECALIBRATE DRIVE — no-op for file-backed emulator */
-        case 0x14:  /* CONTROLLER INTERNAL DIAGNOSTIC — no-op for file-backed emulator */
             int13_set_status(cpu, CPU_DL, INT13_ST_OK);
+            break;
+        case 0x0C:
+            res = bios_13h_0Ch(cpu); // SEEK TO CYLINDER
             break;
         case 0x10: { /* CHECK DRIVE READY */
             BiosDisk d;
@@ -1025,6 +1081,12 @@ bool bios_13h(CPU* cpu) {
                             ? INT13_ST_OK : INT13_ST_TIMEOUT);
             break;
         }
+        case 0x11:
+            res = bios_13h_11h(cpu); // RECALIBRATE DRIVE
+            break;
+        case 0x14:
+            res = bios_13h_14h(cpu); // CONTROLLER INTERNAL DIAGNOSTIC
+            break;
         case 0x15:
             res = bios_13h_15h(cpu); // GET DISK TYPE
             break;
@@ -1051,10 +1113,15 @@ bool bios_13h(CPU* cpu) {
             break;
         }
         case 0x47: { /* EXTENDED SEEK — no-op for file-backed emulator */
+            BiosDisk d;
             uint32_t lba, addr;
             uint16_t count;
-            if (!int13_decode_dap(cpu, &lba, &count, &addr)) {
-                int13_set_status(cpu, CPU_DL, INT13_ST_BAD_COMMAND);
+            if (!(CPU_DL & 0x80) || !int13_get_disk(CPU_DL, &d)) {
+                int13_set_status(cpu, CPU_DL, INT13_ST_TIMEOUT);
+            } else if (!int13_decode_dap(cpu, &lba, &count, &addr)) {
+                 int13_set_status(cpu, CPU_DL, INT13_ST_BAD_COMMAND);
+            } else if (lba >= int13_total_sectors(&d)) {
+                int13_set_status(cpu, CPU_DL, INT13_ST_SECTOR_NF);
             } else {
                 int13_set_status(cpu, CPU_DL, INT13_ST_OK);
             }
