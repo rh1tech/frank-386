@@ -58,7 +58,7 @@ bool bios_16h(CPU* cpu)
     switch (CPU_AH) {
     case 0x00: /* read keystroke */
     case 0x10: /* enhanced read keystroke */
-        if (kbd_empty()) {// renter to the same call, so sometimes IRQ 1 will call INT 9h and update BDA area
+        if (kbd_empty()) {// rеenter to the same call, so sometimes IRQ 1 will call INT 9h and update BDA area
             /* Set IF=1 in the flags word already pushed on stack by intcall86,
             * so that after any IRQ's IRET we still have interrupts enabled. */
             uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);

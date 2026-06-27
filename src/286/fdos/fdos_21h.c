@@ -23,6 +23,8 @@
 #include "proto.h"
 #include "globals.h"
 
+#define printf(...) bios_printf(cpu, __VA_ARGS__)
+
 static CPU* cpu; /// TODO: refactoring
 
 static bool no_handler(CPU* cpu) {

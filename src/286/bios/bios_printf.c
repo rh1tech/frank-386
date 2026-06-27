@@ -5,6 +5,10 @@
 void bios_puts(CPU* cpu, const char* str) {
     u16 ax = CPU_AX;
     u16 bx = CPU_BX;
+    u16 cx = CPU_CX;
+    u16 dx = CPU_DX;
+    u16 es = CPU_ES;
+    u32 flags = cpu->flags.value;
     CPU_AH = 0x0e;
     CPU_BX = 0x0007;
     while(*str) {
@@ -18,6 +22,11 @@ void bios_puts(CPU* cpu, const char* str) {
     }
     CPU_AX = ax;
     CPU_BX = bx;
+    CPU_CX = cx;
+    CPU_DX = dx;
+    if (CPU_ES != es)
+        SET_ES ( es );
+    cpu->flags.value = flags;
 }
 
 void bios_printf(CPU* cpu, const char *fmt, ...) {
