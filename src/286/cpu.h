@@ -5,15 +5,6 @@
 #include "i386.h"
 #include "emulator.h"
 
-#define regax 0
-#define regcx 1
-#define regdx 2
-#define regbx 3
-#define regsp 4
-#define regbp 5
-#define regsi 6
-#define regdi 7
-
 #define reges 0
 #define regcs 1
 #define regss 2

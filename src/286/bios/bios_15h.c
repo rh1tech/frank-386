@@ -606,6 +606,8 @@ bool bios_15h(CPU* cpu) {
             return bios_15h_87h(cpu); // COPY EXTENDED MEMORY
         case 0x88:
             return bios_15h_88h(cpu); // GET EXTENDED MEMORY SIZE (286+)
+        case 0x89:
+            return bios_15h_89h(cpu); // SWITCH TO PROTECTED MODE
         case 0x90:  /* DEVICE BUSY — no-op (SeaBIOS: empty handler) */
         case 0x91:  /* INTERRUPT COMPLETE — no-op (SeaBIOS: empty handler) */
             return true;
@@ -649,7 +651,6 @@ bool bios_15h(CPU* cpu) {
                 return true;
             }
         }
-        case 0x89:  /* SWITCH TO PROTECTED MODE — not supported, no PM in emulator */
         default:
             // unsupported
     }

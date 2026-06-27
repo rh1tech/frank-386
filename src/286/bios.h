@@ -17,6 +17,7 @@ bool bios_12h(CPU*); // LOW MEM SIZE
 bool bios_13h(CPU*); // DISK 
 bool bios_14h(CPU*); // SERIAL
 bool bios_15h(CPU*); // TSR
+bool bios_15h_89h(CPU*); // SWITCH TO PROTECTED MODE
 bool bios_16h(CPU*); // KEYBOARD
 bool bios_17h(CPU*); // PRINTERS
 bool bios_18h(CPU*); // Call internal Basic

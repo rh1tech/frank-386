@@ -5478,6 +5478,89 @@ int IRAM_ATTR cpu_get_a20(CPU* cpu)
 	return cpu->a20_mask >> 20 & 1;
 }
 
+bool bios_15h_89h(CPU* _cpu)
+{
+#ifndef I386_MODE
+    CPU* cpu = _cpu;
+    cf = 1;
+    CPU_AH = 0x86;
+    return true;
+#else
+    CPUI386* cpu = (CPUI386*)_cpu;
+    uint32_t table = ((uint32_t)get_seg16(_cpu, SEG_ES) << 4) + CPU_SI;
+
+    /*
+     * INT 15h/AH=89h input table:
+     *   ES:SI+08h = 6-byte GDTR pseudo-descriptor
+     *   ES:SI+10h = 6-byte IDTR pseudo-descriptor
+     *
+     * Selector layout follows IBM/SeaBIOS convention:
+     *   18h = DS
+     *   20h = ES
+     *   28h = SS
+     *   30h = return CS
+     */
+    uint16_t gdt_limit = pload16(table + 0x08);
+    uint32_t gdt_base  = pload32(table + 0x0A);
+    uint16_t idt_limit = pload16(table + 0x10);
+    uint32_t idt_base  = pload32(table + 0x12);
+
+    if (gdt_base == 0 || gdt_limit < 0x37) {
+		SET_BIT(cpu->flags, 1, CF);
+        CPU_AH = 0x86;
+        return true;
+    }
+
+    /*
+     * Remap PIC vectors:
+     *   BL = IRQ0..IRQ7 base
+     *   BH = IRQ8..IRQ15 base
+     *
+     * Preserve current interrupt masks.
+     */
+    uint8_t master_mask = cpu->cb.io_read8(cpu->cb.io, 0x21);
+    uint8_t slave_mask  = cpu->cb.io_read8(cpu->cb.io, 0xA1);
+
+    cpu->cb.io_write8(cpu->cb.io, 0x20, 0x11);
+    cpu->cb.io_write8(cpu->cb.io, 0x21, CPU_BL);
+    cpu->cb.io_write8(cpu->cb.io, 0x21, 0x04);
+    cpu->cb.io_write8(cpu->cb.io, 0x21, 0x01);
+    cpu->cb.io_write8(cpu->cb.io, 0x21, master_mask);
+
+    cpu->cb.io_write8(cpu->cb.io, 0xA0, 0x11);
+    cpu->cb.io_write8(cpu->cb.io, 0xA1, CPU_BH);
+    cpu->cb.io_write8(cpu->cb.io, 0xA1, 0x02);
+    cpu->cb.io_write8(cpu->cb.io, 0xA1, 0x01);
+    cpu->cb.io_write8(cpu->cb.io, 0xA1, slave_mask);
+
+    cpu_set_a20(_cpu, 1);
+
+    cpu->gdt.base = gdt_base;
+    cpu->gdt.limit = gdt_limit;
+    cpu->idt.base = idt_base;
+    cpu->idt.limit = idt_limit;
+
+    cpu->cr0 |= 1;
+    tlb_clear(cpu);
+
+    if (!set_seg(cpu, SEG_DS, 3 << 3) ||
+        !set_seg(cpu, SEG_ES, 4 << 3) ||
+        !set_seg(cpu, SEG_SS, 5 << 3) ||
+        !set_seg(cpu, SEG_CS, 6 << 3)) {
+		SET_BIT(cpu->flags, 1, CF);
+        CPU_AH = 0x86;
+        return true;
+    }
+
+    cpu->next_ip = cpu->ip;
+    PREFETCH_RESET
+
+    CPU_AH = 0x00;
+	SET_BIT(cpu->flags, 0, CF);
+    return true;
+#endif
+}
+
 cpu_int_hook_t* cpu_set_int_hook(CPU* cpu, u8 no, cpu_int_hook_t* hook)
 {
 	cpu_int_hook_t* prev = cpu->int_hooks[no];
