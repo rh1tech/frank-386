@@ -10,7 +10,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <hardware/watchdog.h>
-
+#include "286/bios.h"
 #include "mpu401.c.inl"
 void netredirect_init(CPU *cpu, int enable);
 
@@ -1010,6 +1010,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	/* Set up INT 13h disk handler (real mode - DOS) */
 	disk_set_cpu(pc->cpu);
 	disk_set_cmos_callback(cmos_floppy_update);
+	bios_13h_init();
 
 	netredirect_init(pc->cpu, conf->redirector);
 
@@ -1157,7 +1158,6 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	return pc;
 }
 
-#include "286/bios.h"
 // IRET is saved on 0xFFF06
 static void point2iret(u32 intno) {
 	pstore16(intno*4, 0x0006);

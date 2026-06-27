@@ -18,6 +18,7 @@ void disk_set_cpu(CPU *cpu);
 uint8_t ata_is_inserted(uint8_t drivenum);
 uint8_t fdd_is_inserted(uint8_t drivenum);
 void disk_set_cmos_callback(void (*cb)(uint8_t type_a, uint8_t type_b));
+void disk_set_fdc_mediachange_callback(void (*cb)(int drive));
 /* Optional callback: called when a floppy (drive 0 or 1) is inserted/ejected.
    Used by the FDC emulator to update the DIR disk-change bit. */
 void disk_set_fdc_mediachange_callback(void (*cb)(int drive));

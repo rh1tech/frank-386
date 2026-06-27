@@ -212,6 +212,17 @@ static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16
     return true;
 }
 
+static uint8_t fdd_changed[2] = { 0, 0 };
+
+static bool int13_check_fdd_changed(CPU* cpu, uint8_t drive)
+{
+    if ((drive & 0x80) || drive >= 2 || !fdd_changed[drive])
+        return false;
+    fdd_changed[drive] = 0;
+    int13_set_status(cpu, drive, INT13_ST_ECHANGED);
+    return true;
+}
+
 /* Common CHS transfer path for AH=02h/03h/04h.
  * write=0, verify=0: read sectors to ES:BX
  * write=1, verify=0: write sectors from ES:BX
@@ -233,6 +244,7 @@ static bool int13_rw_chs(CPU* cpu, uint8_t write, uint8_t verify)
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
+    
     if (!d.f) {
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
@@ -502,6 +514,17 @@ static bool bios_13h_08h(CPU* cpu)
     return true;
 }
 
+static void bios_13h_fdc_mediachange(int drive)
+{
+    if (drive >= 0 && drive < 2)
+        fdd_changed[drive] = 1;
+}
+
+void bios_13h_init(void)
+{
+    disk_set_fdc_mediachange_callback(bios_13h_fdc_mediachange);
+}
+
 /*
 DISK - GET DISK TYPE
 AH = 15h
@@ -539,6 +562,42 @@ static bool bios_13h_15h(CPU* cpu)
     return true;
 }
 
+/*
+DISKETTE - DETECT DISK CHANGE
+AH = 16h
+DL = drive number
+
+Return:
+CF clear, AH=00h if disk has not changed
+CF set, AH=06h if disk changed
+
+The per-drive pending-change latch is set by disk.c media-change callback
+and is cleared by this function after reporting INT13_ST_ECHANGED.
+*/
+static bool bios_13h_16h(CPU* cpu)
+{
+    BiosDisk d;
+    uint8_t drive = CPU_DL;
+
+    if (drive & 0x80) {
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
+        return true;
+    }
+
+    if (!int13_get_disk(drive, &d)) {
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
+        return true;
+    }
+
+    if (fdd_changed[drive]) {
+        fdd_changed[drive] = 0;
+        int13_set_status(cpu, drive, INT13_ST_ECHANGED);
+        return true;
+    }
+
+    int13_set_status(cpu, drive, INT13_ST_OK);
+    return true;
+}
 
 /*
 DISK - IBM/MS INT 13 EXTENSIONS - INSTALLATION CHECK
@@ -968,6 +1027,9 @@ bool bios_13h(CPU* cpu) {
         }
         case 0x15:
             res = bios_13h_15h(cpu); // GET DISK TYPE
+            break;
+        case 0x16:
+            res = bios_13h_16h(cpu); // DETECT DISK CHANGE
             break;
         case 0x41:
             res = bios_13h_41h(cpu); // EXTENSIONS INSTALLATION CHECK
