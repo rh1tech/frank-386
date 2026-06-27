@@ -46,6 +46,7 @@ void boot_from(CPU* cpu, uint8_t dl)
 */
 
 static bool bios_19h_waiter(CPU* cpu, bios_callback_params_t* params) {
+    if (params->done) goto ex; // just wait bios_19h will continue
     uint32_t ticks = pload32(0x046C);
     if (params->data == (void*)ticks) {
         goto ex;
@@ -56,21 +57,9 @@ static bool bios_19h_waiter(CPU* cpu, bios_callback_params_t* params) {
     } else if (ticks < 36) {
         print_line("2", 2);
     } else {
-        print_line(" ", 2);
-
-        /* Classic boot order used here: floppy A:, then first fixed disk C:.
-        * No POST is done here; INT 19h is only bootstrap. */
-        if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
-            drop_bios_callback(cpu, params);
-            boot_from(cpu, 0x00);
-            return false;
-        }
-        if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
-            drop_bios_callback(cpu, params);
-            boot_from(cpu, 0x80);
-            return false;
-        }
-        return bios_18h(cpu); // ROM Basic, or System halted
+        print_line("3", 2);
+        drop_bios_callback(cpu, params);
+        params->done = true;
     }
 ex:
     ifl = 1; // allow IRQ
@@ -80,13 +69,34 @@ ex:
 static bios_callback_params_t params = {
     .callback = bios_19h_waiter,
     .expected_cs = 0xFFEF,
-    .expected_ip = 0x000F
+    .expected_ip = 0x000F,
+    .done = false
 };
+
+extern struct PC* pc;
+void pc_step(struct PC* pc);
 
 bool bios_19h(CPU* cpu) {
     print_line("Press Win+F12 to enter Setup", 1);
     SET_CS ( 0xFFEF ); // -> FFEFF
     SET_IP ( 0x000F );
     set_bios_callback(cpu, &params);
-    return false; // exact CS:IP, no IRET required there
+    while(!params.done) {
+        pc_step(pc);
+    }
+    params.done = false;
+    print_line(" ", 2);
+    /* Classic boot order used here: floppy A:, then first fixed disk C:.
+    * No POST is done here; INT 19h is only bootstrap. */
+    if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
+        boot_from(cpu, 0x00);
+        return false;
+    }
+    if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
+        drop_bios_callback(cpu, &params);
+        boot_from(cpu, 0x80);
+        return false;
+    }
+    return bios_18h(cpu); // ROM Basic, or System halted
+    __unreachable();
 }

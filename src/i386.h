@@ -89,6 +89,7 @@ typedef struct bios_callback_params {
 	u16 expected_cs;
 	u16 expected_ip;
 	struct bios_callback_params* chain;
+	bool done;
 } bios_callback_params_t;
 
 typedef struct CPU_ext_accessors {

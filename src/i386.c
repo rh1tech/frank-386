@@ -3984,12 +3984,12 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 #define CX(_1) f ## _1:
 #endif
 
-	u8 b1;
-	u8 modrm;
-	OptAddr meml;
-	uword addr;
-	for (; stepcount > 0; stepcount--) {
-	if (!(cpu->cr0 & 1)) {
+  u8 b1;
+  u8 modrm;
+  OptAddr meml;
+  uword addr;
+  for (; stepcount > 0; stepcount--) {
+	if (!(cpu->cr0 & 1) || (cpu->flags & VM)) {
 		u32 phys = cpu->seg[SEG_CS].base + (cpu->next_ip & 0xffffu);
 		if ((phys >> 8) == 0xFFE) {
 			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
@@ -4258,8 +4258,8 @@ GRPEND
 
 	edefault: default_ud;
 	}
-	}
-	return true;
+  }
+  return true;
 }
 
 // XXX: incomplete
@@ -4633,8 +4633,8 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	}
 	#endif
 	if (!(cpu->cr0 & 1)) {
-		u16 prev_cs = cpu->seg[SEG_CS].base;
-		u16 prev_ip = cpu->next_ip;
+		///u16 prev_cs = cpu->seg[SEG_CS].base;
+		///u16 prev_ip = cpu->next_ip;
 		/* REAL-ADDRESS-MODE */
 		uword sp_mask = cpu->seg[SEG_SS].flags & SEG_B_BIT ? 0xffffffff : 0xffff;
 		OptAddr meml;

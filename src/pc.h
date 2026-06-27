@@ -28,7 +28,7 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward);
 
 typedef struct IDEIFState IDEIFState;
 
-typedef struct {
+typedef struct PC {
 	CPU *cpu;
 	PicState2 *pic;
 	PITState *pit;
