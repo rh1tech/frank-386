@@ -19,7 +19,26 @@
  */
 #define BIOS10_DCC_VGA_COLOR_ANALOG  0x08
 
- /*
+/*
+ * INT 10h/AX=1B00h GET FUNCTIONALITY/STATE INFORMATION.
+ *
+ * ES:DI points to a 64-byte caller buffer.  The first field is a far pointer
+ * to the static functionality table.  Keep that table in guest-visible BIOS
+ * ROM area, below the built-in font tables.
+ */
+#define BIOS10_FUNC_STATIC_SEG        BIOS_FONT_SEG
+#define BIOS10_FUNC_STATIC_OFF        0x9000
+#define BIOS10_FUNC_INFO_SIZE         0x40
+
+/*
+ * Supported video modes bitmap for INT 10h/AX=1B00h static table.
+ *
+ * Bits set here match vga_modes[]:
+ *   00h..07h, 0Dh..13h
+ */
+#define BIOS10_FUNC_MODES_BITMAP      0x000FE0FFu
+
+/*
  * INT 10h/AH=12h/BL=10h GET EGA/VGA INFORMATION constants.
  */
 #define BIOS10_EGA_INFO_COLOR_IO      0x00  /* active CRTC is 3Dxh */
@@ -78,6 +97,13 @@
 #define VGA_DAC_DATA_PORT              0x3C9
 #define VGA_DAC_READ_INDEX_PORT        0x3C7
 #define VGA_PEL_MASK_PORT              0x3C6
+#define VGA_MISC_OUTPUT_READ_PORT      0x3CC
+#define VGA_MISC_OUTPUT_WRITE_PORT     0x3C2
+#define VGA_SEQ_INDEX_PORT             0x3C4
+#define VGA_SEQ_DATA_PORT              0x3C5
+#define VGA_GFX_INDEX_PORT             0x3CE
+#define VGA_GFX_DATA_PORT              0x3CF
+#define BIOS10_STATE_BLOCK             64
 
 /*
  * INT 10h/AH=0Bh/BH=01h CGA palette selector bits.
@@ -140,6 +166,7 @@
 /*
  * EGA/VGA BIOS Data Area fields used by alternate-select services.
  */
+#define BIOS10_BDA_VIDEO_CTL           0x465
 #define BIOS10_BDA_VIDEO_MODE_OPTIONS  0x487
 #define BIOS10_BDA_VIDEO_DISPLAY_DATA  0x489
 
@@ -167,6 +194,7 @@
 #define BIOS10_VDD_SCANLINE_350        0x00
 #define BIOS10_VDD_SCANLINE_400        0x10
 #define BIOS10_VDD_SCANLINE_200        0x80
+#define BIOS10_VMO_GRAYSCALE_SUMMING   0x02
 
 /*
  * Forward declaration: mode-set scan-line selection needs to load the
@@ -2099,6 +2127,249 @@ static bool bios_10h_1A00h(CPU* cpu)
 }
 
 /*
+VIDEO - GET FUNCTIONALITY/STATE INFORMATION
+AX = 1B00h
+ES:DI -> 64-byte information buffer
+
+Return if supported:
+AL = 1Bh
+
+Desc:
+This is the VGA function/state information call.  DOS software mostly uses it
+as a richer VGA capability probe after AX=1A00h.
+*/
+static bool bios_10h_1B00h(CPU* cpu)
+{
+    uint32_t info = ((uint32_t)CPU_ES << 4) + CPU_DI;
+    uint32_t stat = ((uint32_t)BIOS10_FUNC_STATIC_SEG << 4) + BIOS10_FUNC_STATIC_OFF;
+    for (uint8_t i = 0; i < BIOS10_FUNC_INFO_SIZE; i++)
+        write86(info + i, 0x00);
+    /*
+     * struct video_func_static, 16 bytes:
+     *   +00 dword supported mode bitmap
+     *   +07 scanline support flags: 200/350/400
+     *   +08 max visible character blocks
+     *   +09 total character blocks
+     *   +0A misc flags
+     *   +0E save/restore flags
+     */
+    writedw86(stat + 0x00, BIOS10_FUNC_MODES_BITMAP);
+    write86  (stat + 0x04, 0x00);
+    write86  (stat + 0x05, 0x00);
+    write86  (stat + 0x06, 0x00);
+    write86  (stat + 0x07, 0x07);
+    write86  (stat + 0x08, 0x02);
+    write86  (stat + 0x09, BIOS10_FONT_BLOCK_COUNT);
+    writew86 (stat + 0x0A, 0x0CE7);
+    write86  (stat + 0x0C, 0x00);
+    write86  (stat + 0x0D, 0x00);
+    write86  (stat + 0x0E, 0x00);
+    write86  (stat + 0x0F, 0x00);
+    /*
+     * struct video_func_info, 64 bytes.
+     */
+    writew86(info + 0x00, BIOS10_FUNC_STATIC_OFF);
+    writew86(info + 0x02, BIOS10_FUNC_STATIC_SEG);
+    for (uint8_t i = 0; i < 30; i++)
+        write86(info + 0x04 + i, read86(0x449 + i));
+    for (uint8_t i = 0; i < 3; i++)
+        write86(info + 0x22 + i, read86(0x484 + i));
+    write86 (info + 0x25, BIOS10_DCC_VGA_COLOR_ANALOG);
+    write86 (info + 0x26, 0x00);
+    writew86(info + 0x27, 16);
+    write86 (info + 0x29, 8);
+    write86 (info + 0x2A, 2);
+    write86 (info + 0x2B, 0);
+    write86 (info + 0x2C, 0);
+    write86 (info + 0x2D, 0);
+    write86 (info + 0x2E, 0);
+    write86 (info + 0x31, BIOS10_EGA_INFO_MEM_256K);
+    write86 (info + 0x32, 0x00);
+    write86 (info + 0x33, read86(BIOS10_BDA_VIDEO_DISPLAY_DATA));
+    CPU_AL = 0x1B;
+    cf = 0;
+    return true;
+}
+
+static uint8_t bios_10h_indexed_read(CPU* cpu, uint16_t index_port, uint8_t reg)
+{
+    cpu_portout8(index_port, reg);
+    return cpu_portin8(index_port + 1);
+}
+
+static void bios_10h_indexed_write(CPU* cpu, uint16_t index_port, uint8_t reg, uint8_t val)
+{
+    cpu_portout8(index_port, reg);
+    cpu_portout8(index_port + 1, val);
+}
+
+static uint16_t bios_10h_save_bda(uint32_t dst)
+{
+    for (uint8_t i = 0; i < 28; i++)
+        write86(dst++, read86(0x449 + i));
+
+    for (uint8_t i = 0; i < 6; i++)
+        write86(dst++, read86(0x484 + i));
+
+    writew86(dst + 0, readw86(0x1F * 4 + 0));
+    writew86(dst + 2, readw86(0x1F * 4 + 2));
+    writew86(dst + 4, readw86(0x43 * 4 + 0));
+    writew86(dst + 6, readw86(0x43 * 4 + 2));
+
+    return 28 + 6 + 8;
+}
+
+static uint16_t bios_10h_restore_bda(uint32_t src)
+{
+    for (uint8_t i = 0; i < 28; i++)
+        write86(0x449 + i, read86(src++));
+
+    for (uint8_t i = 0; i < 6; i++)
+        write86(0x484 + i, read86(src++));
+
+    writew86(0x1F * 4 + 0, readw86(src + 0));
+    writew86(0x1F * 4 + 2, readw86(src + 2));
+    writew86(0x43 * 4 + 0, readw86(src + 4));
+    writew86(0x43 * 4 + 2, readw86(src + 6));
+
+    return 28 + 6 + 8;
+}
+
+static uint16_t bios_10h_save_hw(CPU* cpu, uint32_t dst)
+{
+    uint16_t crtc = readw86(0x463);
+    if (crtc == 0)
+        crtc = 0x3D4;
+
+    write86(dst++, cpu_portin8(VGA_MISC_OUTPUT_READ_PORT));
+
+    for (uint8_t i = 0; i < 5; i++)
+        write86(dst++, bios_10h_indexed_read(cpu, VGA_SEQ_INDEX_PORT, i));
+
+    for (uint8_t i = 0; i < 25; i++)
+        write86(dst++, bios_10h_indexed_read(cpu, crtc, i));
+
+    for (uint8_t i = 0; i < 9; i++)
+        write86(dst++, bios_10h_indexed_read(cpu, VGA_GFX_INDEX_PORT, i));
+
+    for (uint8_t i = 0; i < 21; i++)
+        write86(dst++, bios_10h_attr_read(cpu, i));
+
+    return 1 + 5 + 25 + 9 + 21;
+}
+
+static uint16_t bios_10h_restore_hw(CPU* cpu, uint32_t src)
+{
+    uint16_t crtc = readw86(0x463);
+    if (crtc == 0)
+        crtc = 0x3D4;
+
+    cpu_portout8(VGA_MISC_OUTPUT_WRITE_PORT, read86(src++));
+
+    for (uint8_t i = 0; i < 5; i++)
+        bios_10h_indexed_write(cpu, VGA_SEQ_INDEX_PORT, i, read86(src++));
+
+    for (uint8_t i = 0; i < 25; i++)
+        bios_10h_indexed_write(cpu, crtc, i, read86(src++));
+
+    for (uint8_t i = 0; i < 9; i++)
+        bios_10h_indexed_write(cpu, VGA_GFX_INDEX_PORT, i, read86(src++));
+
+    for (uint8_t i = 0; i < 21; i++)
+        bios_10h_attr_write(cpu, i, read86(src++));
+
+    return 1 + 5 + 25 + 9 + 21;
+}
+
+static uint16_t bios_10h_save_dac(CPU* cpu, uint32_t dst)
+{
+    write86(dst++, cpu_portin8(VGA_PEL_MASK_PORT));
+
+    cpu_portout8(VGA_DAC_READ_INDEX_PORT, 0);
+    for (uint16_t i = 0; i < 256 * 3; i++)
+        write86(dst++, cpu_portin8(VGA_DAC_DATA_PORT) & 0x3F);
+
+    return 1 + 256 * 3;
+}
+
+static uint16_t bios_10h_restore_dac(CPU* cpu, uint32_t src)
+{
+    cpu_portout8(VGA_PEL_MASK_PORT, read86(src++));
+
+    cpu_portout8(VGA_DAC_WRITE_INDEX_PORT, 0);
+    for (uint16_t i = 0; i < 256 * 3; i++)
+        cpu_portout8(VGA_DAC_DATA_PORT, read86(src++) & 0x3F);
+
+    return 1 + 256 * 3;
+}
+
+static uint16_t bios_10h_state_size(uint16_t states)
+{
+    uint16_t size = 0;
+
+    if (states & 0x01)
+        size += 1 + 5 + 25 + 9 + 21;
+    if (states & 0x02)
+        size += 28 + 6 + 8;
+    if (states & 0x04)
+        size += 1 + 256 * 3;
+
+    return size;
+}
+
+/*
+VIDEO - SAVE/RESTORE VIDEO STATE
+AH = 1Ch
+AL = 00h get buffer size
+AL = 01h save state
+AL = 02h restore state
+CX = requested state bits:
+     bit 0 = hardware registers
+     bit 1 = BIOS data area / font vectors
+     bit 2 = DAC state
+ES:BX -> buffer for AL=01h/02h
+
+Return if supported:
+AL = 1Ch
+BX = required 64-byte blocks, for AL=00h only
+*/
+static bool bios_10h_1Ch(CPU* cpu)
+{
+    uint8_t cmd = CPU_AL;
+    uint16_t states = CPU_CX;
+    uint32_t pos = ((uint32_t)CPU_ES << 4) + CPU_BX;
+
+    if (cmd > 2 || (states & ~0x0007)) {
+        cf = 1;
+        return true;
+    }
+
+    switch (cmd) {
+    case 0x00:
+        CPU_BX = (bios_10h_state_size(states) + BIOS10_STATE_BLOCK - 1) / BIOS10_STATE_BLOCK;
+        break;
+    case 0x01:
+        if (states & 0x01) pos += bios_10h_save_hw(cpu, pos);
+        if (states & 0x02) pos += bios_10h_save_bda(pos);
+        if (states & 0x04) pos += bios_10h_save_dac(cpu, pos);
+        break;
+    case 0x02:
+        if (states & 0x01) pos += bios_10h_restore_hw(cpu, pos);
+        if (states & 0x02) pos += bios_10h_restore_bda(pos);
+        if (states & 0x04) pos += bios_10h_restore_dac(cpu, pos);
+        break;
+    default:
+unsupported:
+        cf = 1;
+        return true;
+    }
+
+    CPU_AL = 0x1C;
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - ALTERNATE FUNCTION SELECT - GET EGA INFORMATION
 AH = 12h
 BL = 10h
@@ -2207,6 +2478,66 @@ static bool bios_10h_1230h(CPU* cpu)
         return true;
     }
     write86(BIOS10_BDA_VIDEO_DISPLAY_DATA, data);
+    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, opts);
+    CPU_AL = 0x12;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - ALTERNATE FUNCTION SELECT - DEFAULT PALETTE LOADING
+AH = 12h
+BL = 31h
+AL = 00h enable default palette loading
+AL = 01h disable default palette loading
+
+SeaBIOS stores this in BDA 40:65 bit 3.
+*/
+static bool bios_10h_1231h(CPU* cpu)
+{
+    uint8_t ctl = read86(BIOS10_BDA_VIDEO_CTL);
+    ctl = (ctl & ~0x08) | ((CPU_AL & 0x01) << 3);
+    write86(BIOS10_BDA_VIDEO_CTL, ctl);
+    CPU_AL = 0x12;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - ALTERNATE FUNCTION SELECT - VIDEO ADDRESSING
+AH = 12h
+BL = 32h
+AL bit 0: 0 = enable CPU access to video memory, 1 = disable
+*/
+static bool bios_10h_1232h(CPU* cpu)
+{
+    uint8_t misc = cpu_portin8(VGA_MISC_OUTPUT_READ_PORT);
+    if (CPU_AL & 0x01)
+        misc &= ~0x02;
+    else
+        misc |= 0x02;
+    cpu_portout8(VGA_MISC_OUTPUT_WRITE_PORT, misc);
+    CPU_AL = 0x12;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - ALTERNATE FUNCTION SELECT - GRAYSCALE SUMMING
+AH = 12h
+BL = 33h
+AL = 00h enable grayscale summing
+AL = 01h disable grayscale summing
+
+SeaBIOS stores this in BDA 40:87 bit 1.
+*/
+static bool bios_10h_1233h(CPU* cpu)
+{
+    uint8_t opts = read86(BIOS10_BDA_VIDEO_MODE_OPTIONS);
+    if (CPU_AL & 0x01)
+        opts &= ~BIOS10_VMO_GRAYSCALE_SUMMING;
+    else
+        opts |= BIOS10_VMO_GRAYSCALE_SUMMING;
     write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, opts);
     CPU_AL = 0x12;
     cf = 0;
@@ -2763,6 +3094,34 @@ static bool bios_10h_1124h(CPU* cpu)
 }
 
 /*
+VIDEO - ALTERNATE FUNCTION SELECT - DISPLAY SWITCH INTERFACE
+AH = 12h
+BL = 35h
+
+No real display switch hardware exists here.  SeaBIOS accepts this as a stub.
+*/
+static bool bios_10h_1235h(CPU* cpu)
+{
+    CPU_AL = 0x12;
+    cf = 0;
+    return true;
+}
+
+/*
+VIDEO - ALTERNATE FUNCTION SELECT - VIDEO REFRESH CONTROL
+AH = 12h
+BL = 36h
+
+No real refresh-disable path exists here.  SeaBIOS accepts this as a stub.
+*/
+static bool bios_10h_1236h(CPU* cpu)
+{
+    CPU_AL = 0x12;
+    cf = 0;
+    return true;
+}
+
+/*
 VIDEO - GET FONT INFORMATION (EGA, MCGA, VGA)
 AX = 1130h
 BH = pointer specifier
@@ -2907,7 +3266,12 @@ bool bios_10h(CPU* cpu) {
             case 0x10: return bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
             case 0x20: return bios_10h_1220h(cpu); // ALTERNATE PRINT SCREEN
             case 0x30: return bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
+            case 0x31: return bios_10h_1231h(cpu); // DEFAULT PALETTE LOADING
+            case 0x32: return bios_10h_1232h(cpu); // VIDEO ADDRESSING
+            case 0x33: return bios_10h_1233h(cpu); // GRAYSCALE SUMMING
             case 0x34: return bios_10h_1234h(cpu); // CURSOR EMULATION
+            case 0x35: return bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
+            case 0x36: return bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
             }            break;
         case 0x13:
             return bios_10h_13h(cpu); // WRITE STRING
@@ -2915,6 +3279,12 @@ bool bios_10h(CPU* cpu) {
             if (CPU_AL == 0x00)
                 return bios_10h_1A00h(cpu); // GET DISPLAY COMBINATION CODE
             break;
+        case 0x1B:
+            if (CPU_AL == 0x00)
+                return bios_10h_1B00h(cpu); // GET FUNCTIONALITY/STATE INFORMATION
+            break;
+        case 0x1C:
+            return bios_10h_1Ch(cpu); // SAVE/RESTORE VIDEO STATE
         default:
             // unsupported
     }
