@@ -2439,7 +2439,7 @@ implementation should consume this state.
 static bool bios_10h_1220h(CPU* cpu)
 {
     ///TODO: integrate with native INT 05h Print Screen implementation
-    cf = 0;
+    CPU_AL = 0x12;
     return true;
 }
 
@@ -3051,13 +3051,14 @@ AX = 1120h
 
 Desc:
 IBM/EGA/VGA BIOS function for print-screen character translation.
-The current native BIOS does not implement a real print-screen renderer,
-so there is no internal table to update.  Accept the call as a harmless
-no-op instead of reporting failure to software probing font services.
 */
 static bool bios_10h_1120h(CPU* cpu)
 {
-    ///TODO:
+    /* INT 10h AX=1120h: Set user 8x8 graphics characters.
+     * Store ES:BP into interrupt vector 1Fh.
+     */
+    writew86(0x0001F * 4 + 0, CPU_BP);
+    writew86(0x0001F * 4 + 2, CPU_ES);
     cf = 0;
     return true;
 }
