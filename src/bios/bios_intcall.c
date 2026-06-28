@@ -10,25 +10,24 @@ static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
     return false; // in a loop on the same CS:IP, no IRET required there
 }
 
-static bios_callback_params_t params = {
-    .callback = intcall_waiter,
-    .expected_cs = 0xFFEF,
-    .expected_ip = 0x000F,
-    .done = false
-};
-
 extern struct PC* pc;
 void pc_step(struct PC* pc);
 
 void bios_intcall(CPU* cpu, uint8_t intnum) {
     u16 cs = CPU_CS;
     u16 ip = CPU_IP;
-    // to handle INT 10h IRET by dos_29h_waiter:
-    SET_CS ( 0xFFEF ); // -> FFEFF
-    SET_IP ( 0x000F );
-    set_bios_callback(cpu, &params);
+    bios_callback_params_t params = {
+        .callback = intcall_waiter,
+        .expected_cs = 0xFFEF, // just default, may be changed
+        .expected_ip = 0x000F, // by set_bios_callback reenter=true
+        .done = false
+    };
+    set_bios_callback(cpu, &params, true);
+    // to handle IRET by intcall_waiter:
+    SET_CS ( params.expected_cs ); // -> FFEFF
+    SET_IP ( params.expected_ip );
     // set CS:IP/flags, prep stack, and on IRET will recover
-    cpu_intcall(cpu, 0x10);
+    cpu_intcall(cpu, intnum);
     while(!params.done) {
         pc_step(pc);
     }

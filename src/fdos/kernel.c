@@ -7480,6 +7480,6 @@ void kernel(CPU* _cpu) {
     // allow it to wait for keyboard 
     SET_CS ( 0xF000 ); // -> FFEFFh (bios callback)
     SET_IP ( 0xFEFF );
-    set_bios_callback(cpu, &params);
+    set_bios_callback(cpu, &params, false);
     printf("FreeDOS impl. is incomplete. Nothing to do for now...\n");
 }

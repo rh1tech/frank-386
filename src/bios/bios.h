@@ -26,7 +26,7 @@ bool bios_18h(CPU*); // Call internal Basic
 bool bios_19h(CPU*); // Bootstrap
 bool bios_1Ah(CPU*); // Time/Date services
 bool bios_FFh(CPU*); // W/A BIOS callback
-bool set_bios_callback(CPU*, bios_callback_params_t*);
+bool set_bios_callback(CPU*, bios_callback_params_t*, bool reenter);
 bool drop_bios_callback(CPU*, bios_callback_params_t*);
 void bios_intcall(CPU*, uint8_t); // sync call
 
