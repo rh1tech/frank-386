@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <assert.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -776,6 +777,7 @@ void __not_in_flash_func(pc_step)(PC *pc)
 		if (pc->full_update == 2)
 			pc->full_update = 0;
 	}
+	if (pc->paused) return;
 	if (pc->adlib_enabled) {
 		for (int i = 0; i < 409; ++i) {
 			cpu_step(pc->cpu, 10);
@@ -989,7 +991,11 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->cpu = cpu_new(conf->cpu_gen, &cb);
 	if (conf->fpu)
 		enable_fpu(pc->cpu);
-	pc->bios = 0; /// TODO: support both modes // conf->bios;
+	pc->bios = conf->bios;
+	pc->cpu->bios = pc->bios;
+	if (!pc->bios) {
+		cpu_install_handlers(pc->cpu);
+	}
 	pc->vga_bios = conf->vga_bios;
 	pc->enable_serial = conf->enable_serial;
 #if !defined(_WIN32) && !defined(__wasm__)
@@ -1516,7 +1522,10 @@ int parse_conf_ini(void* user, const char* section,
 	// Support both [pc] and [386] sections for compatibility
 	if (SEC("pc") || SEC("386")) {
 		if (NAME("bios")) {
-			conf->bios = strdup(value);
+			if (value[0] == '\0' || strcasecmp(value, "native") == 0)
+				conf->bios = NULL;
+			else
+				conf->bios = strdup(value);
 		} else if (NAME("vga_bios")) {
 			conf->vga_bios = strdup(value);
 		} else if (NAME("mem_size") || NAME("mem")) {

@@ -163,6 +163,8 @@ struct CPU {
 	int excno;
 	uword excerr;
 
+	const char *bios;
+
 #if PREFETCH_ENABLED
 /* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
  * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
@@ -179,6 +181,8 @@ struct CPU {
 }; // should be the same in all implementations
 
 typedef struct CPU CPU;
+
+void cpu_install_handlers(CPU*);
 
 #if PREFETCH_ENABLED
    #define PREFETCH_RESET cpu->prefetch_base = (u32)-1;

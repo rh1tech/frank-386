@@ -130,7 +130,9 @@ void cpu_init_286(CPU* cpu) {
     cpue->raise_irq = raise_irq;
     cpue->setexc = setexc;
     cpue->abort = i286_abort;
-
+}
+#ifndef I386_MODE
+void cpu_install_handlers(CPU* cpu) {
     for(int i = 0; i < 256; ++i) {
         handlers[i] = no_handler;
     }
@@ -154,6 +156,7 @@ void cpu_init_286(CPU* cpu) {
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
 // TODO: INT 30h как far jump на CP/M entry
 }
+#endif
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION
 //#define CPU_LIMIT_SHIFT_COUNT
@@ -930,17 +933,18 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
             int no = cpu->cb.pic_read_irq(cpu->cb.pic);
             intcall86(cpu, no);
         }
-        u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP);
-        if ((ip32 >> 8) == 0xFFE) {
-            if (rp2350_bios_handler(cpu, (uint8_t)ip32)) { // normal flow IRET is expected
-                CPU_IP = 0x0006;
-                CPU_CS = 0xFFF0; // reusable IRET (pc.c)
-            }
-            else {// internal using INT in JMP style (INT 19h...)
-                continue; // to allow to recheck IRQ before next step
+        if (!cpu->bios) {
+            u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP);
+            if ((ip32 >> 8) == 0xFFE) {
+                if (rp2350_bios_handler(cpu, (uint8_t)ip32)) { // normal flow IRET is expected
+                    CPU_IP = 0x0006;
+                    CPU_CS = 0xFFF0; // reusable IRET (pc.c)
+                }
+                else {// internal using INT in JMP style (INT 19h...)
+                    continue; // to allow to recheck IRQ before next step
+                }
             }
         }
-
         reptype = 0;
         segoverride = 0;
         useseg = CPU_DS;

@@ -34,6 +34,7 @@ static const DriveInfo drive_table[DRIVE_TOTAL] = {
     { "ATA0-1", "ATA Disk" },  // DRIVE_ATA0_1
     { "ATA1-0", "ATA Disk" },  // DRIVE_ATA1_0
     { "ATA1-1", "ATA Disk" },  // DRIVE_ATA1_1
+    { "BIOS",   "System"   },  // DRIVE_BIOS
 };
 
 // File listing (reduced size to save SRAM)
@@ -86,7 +87,9 @@ static void reset_pending(void);
 // --------------------------------------------------------------------------
 
 static const char *get_drive_filename(int drive_idx) {
-    if (drive_idx < 2) {
+    if (drive_idx == DRIVE_BIOS) {
+        return config_get_bios_file();           // NULL = Native BIOS
+    } else if (drive_idx < 2) {
         return fdd_get_filename(drive_idx);      // FDD-0 / FDD-1
     } else {
         return ata_get_filename(drive_idx - 2);  // ATA0-0 .. ATA1-1
@@ -112,6 +115,12 @@ static bool file_is_iso(const char *filename) {
 
 // Returns true if the extension is valid for the given drive type.
 static bool ext_accepted_for_drive(const char *ext, int drive_idx) {
+    if (drive_idx == DRIVE_BIOS) {
+        if (strcasecmp(ext, ".bin") == 0) return true;
+        if (strcasecmp(ext, ".rom") == 0) return true;
+        return false;
+    }
+
     if (strcasecmp(ext, ".iso") == 0) return true;
     if (strcasecmp(ext, ".img") == 0) return true;
     if (strcasecmp(ext, ".ima") == 0) return true;
@@ -194,11 +203,15 @@ static void draw_main_menu(void) {
             strncpy(truncated, filename, 23);
             truncated[23] = '\0';
             osd_print(MENU_X + 22, y, truncated, attr);
+        } else if (i == DRIVE_BIOS) {
+            osd_print(MENU_X + 22, y, "Native", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
         } else {
             osd_print(MENU_X + 22, y, "[empty]", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
         }
 
-        if (filename) {
+        if (i == DRIVE_BIOS) {
+            osd_print(MENU_X + MENU_W - 12, y, "[Select]", attr);
+        } else if (filename) {
             osd_print(MENU_X + MENU_W - 12, y, "[Eject] ", attr);
         } else {
             osd_print(MENU_X + MENU_W - 12, y, "[Select]", attr);
@@ -208,7 +221,7 @@ static void draw_main_menu(void) {
     // Blank line + reboot notification + blank line
     int notify_y = MENU_Y + 3 + DRIVE_TOTAL;
     if (reboot_required) {
-        osd_print_center(notify_y, "! Reboot required for HDD changes !", OSD_ATTR(OSD_WHITE, OSD_RED));
+        osd_print_center(notify_y, "! Reboot required for HDD/BIOS changes !", OSD_ATTR(OSD_WHITE, OSD_RED));
     }
 
     // Action row
@@ -234,7 +247,9 @@ static void draw_file_browser(void) {
     osd_fill(FILE_X + 1, FILE_Y + 1, FILE_W - 2, FILE_H - 2, ' ', OSD_ATTR_NORMAL);
 
     char title[48];
-    snprintf(title, sizeof(title), " Select Image for %s ", drive_table[selected_row].label);
+    snprintf(title, sizeof(title),
+             (selected_row == DRIVE_BIOS) ? " Select BIOS " : " Select Image for %s ",
+             drive_table[selected_row].label);
     osd_print_center(FILE_Y, title, OSD_ATTR(OSD_YELLOW, OSD_BLUE));
 
     int visible_files = FILE_VISIBLE;
@@ -259,7 +274,9 @@ static void draw_file_browser(void) {
     }
 
     if (file_count == 0) {
-        osd_print_center(FILE_Y + FILE_H / 2, "No disk images found in 386/", OSD_ATTR_DISABLED);
+        osd_print_center(FILE_Y + FILE_H / 2,
+                         (selected_row == DRIVE_BIOS) ? "No BIOS files found in 386/" : "No disk images found in 386/",
+                         OSD_ATTR_DISABLED);
     }
 
     int help_y = FILE_Y + FILE_H - 2;
@@ -278,6 +295,10 @@ static void scan_disk_images(int drive_idx) {
 
     file_count = 0;
     memset(file_list, 0, sizeof(file_list));
+
+    if (drive_idx == DRIVE_BIOS) {
+        strncpy(file_list[file_count++], "Native", MAX_FILENAME_LEN - 1);
+    }
 
     res = f_opendir(&dir, "386");
     if (res != FR_OK) return;
@@ -300,9 +321,10 @@ static void scan_disk_images(int drive_idx) {
 
     f_closedir(&dir);
 
-    // Sort alphabetically (bubble sort)
-    for (int i = 0; i < file_count - 1; i++) {
-        for (int j = 0; j < file_count - i - 1; j++) {
+    // Sort alphabetically, keeping the BIOS Native item first.
+    int sort_start = (drive_idx == DRIVE_BIOS) ? 1 : 0;
+    for (int i = sort_start; i < file_count - 1; i++) {
+        for (int j = sort_start; j < file_count - i + sort_start - 1; j++) {
             if (strcasecmp(file_list[j], file_list[j + 1]) > 0) {
                 char temp[MAX_FILENAME_LEN];
                 strcpy(temp, file_list[j]);
@@ -324,8 +346,12 @@ static void select_file(void) {
     if (file_count == 0 || selected_file >= file_count) return;
 
     int drive_idx = selected_row;
-    strncpy(pending_filename[drive_idx], file_list[selected_file], MAX_FILENAME_LEN - 1);
-    pending_filename[drive_idx][MAX_FILENAME_LEN - 1] = '\0';
+    if (drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "Native") == 0) {
+        pending_filename[drive_idx][0] = '\0';
+    } else {
+        strncpy(pending_filename[drive_idx], file_list[selected_file], MAX_FILENAME_LEN - 1);
+        pending_filename[drive_idx][MAX_FILENAME_LEN - 1] = '\0';
+    }
     pending_changed[drive_idx] = true;
 
     if (drive_idx >= 2) reboot_required = true;
@@ -351,14 +377,18 @@ static void apply_and_close(void) {
 
         if (pending_filename[i][0] == '\0') {
             // Eject
-            if (i < 2) {
+            if (i == DRIVE_BIOS) {
+                config_set_bios_file(NULL);
+            } else if (i < 2) {
                 ejectdisk(i, true);
             } else {
                 ejectdisk(i - 2, false);
             }
         } else {
             // Insert
-            if (i < 2) {
+            if (i == DRIVE_BIOS) {
+                config_set_bios_file(pending_filename[i]);
+            } else if (i < 2) {
                 insertdisk(i, true, false, pending_filename[i]);
             } else {
                 int ata_index = i - 2;
@@ -406,12 +436,12 @@ bool diskui_handle_key(int keycode, bool is_down) {
                         break;
                     }
                     const char *filename = get_display_filename(selected_row);
-                    if (filename) {
-                        eject_pending();
-                    } else {
+                    if (selected_row == DRIVE_BIOS || !filename) {
                         scan_disk_images(selected_row);
                         menu_state = MENU_FILE_BROWSER;
                         draw_file_browser();
+                    } else {
+                        eject_pending();
                     }
                     break;
                 }
@@ -427,6 +457,7 @@ bool diskui_handle_key(int keycode, bool is_down) {
                 case KEY_D: selected_row = DRIVE_ATA0_1; draw_main_menu(); break;
                 case KEY_E: selected_row = DRIVE_ATA1_0; draw_main_menu(); break;
                 case KEY_F: selected_row = DRIVE_ATA1_1; draw_main_menu(); break;
+                case KEY_G: selected_row = DRIVE_BIOS;   draw_main_menu(); break;
             }
             break;
 

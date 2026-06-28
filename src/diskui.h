@@ -23,7 +23,8 @@ typedef enum {
     DRIVE_ATA0_1 = 3,
     DRIVE_ATA1_0 = 4,
     DRIVE_ATA1_1 = 5,
-    DRIVE_TOTAL = 6
+    DRIVE_BIOS = 6,
+    DRIVE_TOTAL = 7
 } DiskUIDrive;
 
 // Drive info for UI display
@@ -71,5 +72,6 @@ void diskui_animate(void);
 #define KEY_D       32
 #define KEY_E       18
 #define KEY_F       33
+#define KEY_G       34
 
 #endif // DISKUI_H

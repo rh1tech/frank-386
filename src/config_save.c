@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "pc.h"
 
 // Current configuration values (minimal storage)
@@ -21,6 +22,7 @@ static int cfg_mem_mb = 8;
 static int cfg_cpu_gen = 4;
 static int cfg_fpu = 0;
 static int cfg_redirector = 1;
+static char cfg_bios[32] = "";  /* empty = Native BIOS */
 static bool cfg_changed = false;
 
 // Hardware settings (use build-time defaults)
@@ -81,6 +83,29 @@ void config_set_redirector(int enabled) {
         cfg_redirector = enabled;
         cfg_changed = true;
     }
+}
+
+const char *config_get_bios_file(void) {
+    return cfg_bios[0] ? cfg_bios : NULL;
+}
+
+void config_set_bios_file(const char *filename) {
+    char normalized[sizeof(cfg_bios)];
+
+    if (!filename || filename[0] == '\0' || strcasecmp(filename, "native") == 0) {
+        normalized[0] = '\0';
+    } else {
+        strncpy(normalized, filename, sizeof(normalized) - 1);
+        normalized[sizeof(normalized) - 1] = '\0';
+    }
+
+    if (strcmp(cfg_bios, normalized) != 0) {
+        strcpy(cfg_bios, normalized);
+        cfg_changed = true;
+    }
+
+    if (pc)
+        pc->bios = cfg_bios[0] ? cfg_bios : NULL;
 }
 
 // Hardware settings
@@ -248,7 +273,12 @@ bool config_save_all(void) {
     write_line(&fp, line);
 
     // BIOS files
-    write_line(&fp, "bios=bios.bin\n");
+    if (cfg_bios[0]) {
+        snprintf(line, sizeof(line), "bios=%s\n", cfg_bios);
+        write_line(&fp, line);
+    } else {
+        write_line(&fp, "bios=native\n");
+    }
     write_line(&fp, "vga_bios=vgabios.bin\n");
 
     // Fill CMOS

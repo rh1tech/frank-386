@@ -33,6 +33,9 @@ void config_set_fpu(int enabled);
 int config_get_redirector(void);
 void config_set_redirector(int enabled);
 
+const char *config_get_bios_file(void);
+void config_set_bios_file(const char *filename);
+
 // Hardware settings (saved in [frank-386] section)
 int config_get_pcspeaker(void);
 void config_set_pcspeaker(int enabled);

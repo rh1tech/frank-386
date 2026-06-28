@@ -31,6 +31,8 @@ typedef struct CPUI386 {
 	int excno;
 	uword excerr;
 
+	const char *bios;
+
 #if PREFETCH_ENABLED
 /* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
  * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
@@ -3989,7 +3991,7 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
   OptAddr meml;
   uword addr;
   for (; stepcount > 0; stepcount--) {
-	if (!(cpu->cr0 & 1) || (cpu->flags & VM)) {
+	if (!cpu->bios && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
 		u32 phys = cpu->seg[SEG_CS].base + (cpu->next_ip & 0xffffu);
 		if ((phys >> 8) == 0xFFE) {
 			if (rp2350_bios_handler((CPU*)cpu, (uint8_t)phys)) {
@@ -5365,6 +5367,19 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 			cpu->bios_prof_depth = 0;
 			i386_profile_install_bios_hooks(cpu);
 			#endif
+#else
+			cpu_init_286(cpu);
+#endif
+
+	cpu->ext_accessors->reset((CPU*)cpu);
+	memset(&(cpu->cb), 0, sizeof(CPU_CB));
+	if (cb)
+		*cb = &(cpu->cb);
+	return cpu;
+}
+
+#ifdef I386_MODE
+void cpu_install_handlers(CPU* cpu) {
     for(int i = 0; i < 256; ++i) {
         handlers[i] = no_handler;
     }
@@ -5386,16 +5401,8 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 ///    handlers[0x21] = fdos_21h; // main DOS handler
 ///    handlers[0x29] = fdos_29h; // fast console output.
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
-
-#else
-			cpu_init_286(cpu);
-#endif
-	cpu->ext_accessors->reset((CPU*)cpu);
-	memset(&(cpu->cb), 0, sizeof(CPU_CB));
-	if (cb)
-		*cb = &(cpu->cb);
-	return cpu;
 }
+#endif
 
 #if !defined(_WIN32) && !defined(__wasm__)
 void cpui386_set_verbose() // for debugging
