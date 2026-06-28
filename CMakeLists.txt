@@ -242,6 +242,7 @@ set(EMU_CORE_SOURCES
     src/bios/bios_19h.c
     src/bios/bios_1Ah.c
     src/bios/bios_FFh.c
+    src/bios/bios_intcall.c
     src/bios/bios_printf.c
     drivers/vga/font8x8.c
     drivers/vga/font8x14.c
