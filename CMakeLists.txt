@@ -249,6 +249,18 @@ set(EMU_CORE_SOURCES
 
     # FreeDOS kernel
     src/fdos/boot.c
+    src/fdos/intr.c
+    src/fdos/initclk.c
+    src/fdos/initdisk.c
+    src/fdos/dyninit.c
+    src/fdos/config.c
+    src/fdos/inithma.c
+    src/fdos/dsk.c
+    src/fdos/dosfns.c
+    src/fdos/fatfs.c
+    src/fdos/fattab.c
+    src/fdos/fatdir.c
+    src/fdos/blockio.c
     src/fdos/kernel.c
     src/fdos/fdos_21h.c
     src/fdos/fdos_29h.c

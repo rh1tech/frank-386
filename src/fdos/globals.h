@@ -96,3 +96,30 @@ COUNT ASMCFUNC
 #define DSKREAD         2
 #define DSKWRITEINT26   3
 #define DSKREADINT25    4
+
+/* PriPathName/SecPathBuffer are SDA fields in the original (extern
+   ASM _PriPathBuffer._PriPathName, see globals.h), reserved here as
+   internal_data->PriPathBuffer/SecPathBuffer (see lol.h). Named with
+   the original's name (not a trailing-D macro like IoReqHdrD) since,
+   unlike IoReqHdr/sda_tmp_dm, there is no internal_data field of the
+   same name to collide with. */
+#define PriPathName ((char *)internal_data->PriPathBuffer)
+
+extern /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
+extern dos_far_ptr InitDiskTransferBuffer;
+extern /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer; // BSS
+
+/* near fnodes:
+ * fnode[0] is used internally for almost all cases.
+ * fnode[1] is only used for:
+ * 1) rename (target)
+ * 2) rmdir (checks if the directory to remove is empty)
+ * 3) commit (copies, than closes fnode[0])
+ * 3) merge_file_changes (for SHARE)
+ */
+GLOBAL struct f_node fnode[2];
+
+UWORD fgetword(const void *vp);
+void fputword(void *vp, UWORD w);
+ULONG fgetlong(const void *vp);
+void fputlong(void *vp, ULONG l);

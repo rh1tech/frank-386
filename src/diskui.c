@@ -204,7 +204,7 @@ static void draw_main_menu(void) {
             truncated[23] = '\0';
             osd_print(MENU_X + 22, y, truncated, attr);
         } else if (i == DRIVE_BIOS) {
-            osd_print(MENU_X + 22, y, "Native", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
+            osd_print(MENU_X + 22, y, "[native]", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
         } else {
             osd_print(MENU_X + 22, y, "[empty]", OSD_ATTR(OSD_LIGHTGRAY, OSD_BLUE));
         }
@@ -297,7 +297,7 @@ static void scan_disk_images(int drive_idx) {
     memset(file_list, 0, sizeof(file_list));
 
     if (drive_idx == DRIVE_BIOS) {
-        strncpy(file_list[file_count++], "Native", MAX_FILENAME_LEN - 1);
+        strncpy(file_list[file_count++], "[native]", MAX_FILENAME_LEN - 1);
     }
 
     res = f_opendir(&dir, "386");
@@ -346,7 +346,7 @@ static void select_file(void) {
     if (file_count == 0 || selected_file >= file_count) return;
 
     int drive_idx = selected_row;
-    if (drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "Native") == 0) {
+    if (drive_idx == DRIVE_BIOS && strcasecmp(file_list[selected_file], "[native]") == 0) {
         pending_filename[drive_idx][0] = '\0';
     } else {
         strncpy(pending_filename[drive_idx], file_list[selected_file], MAX_FILENAME_LEN - 1);
