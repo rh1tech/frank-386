@@ -203,6 +203,7 @@ typedef struct CPU_regs {
 
 void cpu_save_regs(const CPU*, CPU_regs*);
 void cpu_restore_regs(CPU*, const CPU_regs*);
+void cpu_intcall(CPU* cpu, uint8_t intnum);
 
 CPU *cpu_new(int gen, CPU_CB **cb);
 inline static void enable_fpu(CPU *cpu) {

@@ -3,6 +3,24 @@
 #include "bios/bios.h"
 #include "fdos.h"
 
+static bool dos_29h_waiter(CPU* cpu, bios_callback_params_t* params) {
+    if (!params->done) {
+        params->done = true;
+        drop_bios_callback(cpu, params);
+    }
+    return false; // in a loop on the same CS:IP, no IRET required there
+}
+
+static bios_callback_params_t params = {
+    .callback = dos_29h_waiter,
+    .expected_cs = 0xFFEF,
+    .expected_ip = 0x000F,
+    .done = false
+};
+
+extern struct PC* pc;
+void pc_step(struct PC* pc);
+
 /*
 DOS 2+ - FAST CONSOLE OUTPUT
 AL = character to display
@@ -10,9 +28,23 @@ AL = character to display
 bool fdos_29h(CPU* cpu) {
     CPU_regs regs;
     cpu_save_regs(cpu, &regs);
+    u16 cs = CPU_CS;
+    u16 ip = CPU_IP;
     CPU_AH = 0x0e;
     CPU_BX = 0x0007;
-    bios_10h(cpu);
+    // to handle INT 10h IRET by dos_29h_waiter:
+    SET_CS ( 0xFFEF ); // -> FFEFF
+    SET_IP ( 0x000F );
+    set_bios_callback(cpu, &params);
+    // set CS:IP/flags, prep stack, and on IRET will recover
+    cpu_intcall(cpu, 0x10);
+    while(!params.done) {
+        pc_step(pc);
+    }
+    params.done = false;
     cpu_restore_regs(cpu, &regs);
+    // restore initial CS:IP
+    SET_CS (cs);
+    SET_IP (ip);
     return true;
 }

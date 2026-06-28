@@ -3307,4 +3307,7 @@ void __not_in_flash() cpu_restore_regs(CPU* cpu, const CPU_regs* regs) {
         cpu->gprx[i] = regs->gprx[i];
     cpu->flags = regs->flags;
 }
+void __not_in_flash() cpu_intcall(CPU* cpu, uint8_t intnum) {
+    intcall86(cpu, intnum);
+}
 #endif

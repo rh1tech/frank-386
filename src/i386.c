@@ -5633,6 +5633,9 @@ void __not_in_flash() cpu_restore_regs(CPU* cpu, const CPU_regs* regs) {
 	for(int i = 0; i < 8; ++i)
         cpu->gprx[i] = regs->gprx[i];
 }
+void __not_in_flash() cpu_intcall(CPU* cpu, uint8_t intnum) {
+    call_isr((CPUI386*)cpu, intnum, false, 1);
+}
 #endif
 
 cpu_int_hook_t* cpu_set_int_hook(CPU* cpu, u8 no, cpu_int_hook_t* hook)
