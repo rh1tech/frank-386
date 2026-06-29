@@ -38,6 +38,7 @@ void Init_clk_driver(CPU* cpu);
 COUNT dsk_init(CPU* cpu);
 void PreConfig(void);
 VOID PreConfig2(VOID);
+VOID PostConfig(VOID);
 dos_far_ptr HMAalloc(COUNT bytesToAllocate);
 dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode);
 dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode);

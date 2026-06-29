@@ -2000,18 +2000,18 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
 
     /* initialize near data and MCBs */
     PreConfig2();
+
+    /* and process CONFIG.SYS one last time for device drivers */
+    DoConfig(2);
+
+    /* Close all (device) files */
+    for (i = 0; i < 20; i++)
+      close(i);
+
+    /* and do final buffer allocation. */
+    PostConfig();
+
 /// TODO:
-  /* and process CONFIG.SYS one last time for device drivers */
-//  DoConfig(2);
-
-
-  /* Close all (device) files * /
-  for (i = 0; i < 20; i++)
-    close(i);
-*/
-  /* and do final buffer allocation. * /
-  PostConfig();
-*/
   /* Init the file system one more time     */
 ///  FsConfig();
   

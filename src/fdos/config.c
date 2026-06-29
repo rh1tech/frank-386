@@ -81,6 +81,9 @@ STATIC BOOL askThisSingleCommand BSS_INIT(0);
 STATIC BOOL DontAskThisSingleCommand BSS_INIT(0);
 STATIC unsigned MenuLine BSS_INIT(0);
 STATIC unsigned Menus BSS_INIT(0);
+STATIC dos_far_ptr x86_stackBase BSS_INIT({0});
+STATIC COUNT nStacks BSS_INIT(0);
+STATIC COUNT stackSize BSS_INIT(0);
 
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 
@@ -443,6 +446,54 @@ STATIC void CfgBuffersHigh(BYTE * pLine)
 }
 
 
+STATIC VOID Stacks(BYTE * pLine)
+{
+  COUNT stacks;
+
+  /* Format: STACKS = stacks [, stackSize] */
+  pLine = GetNumArg((char *)pLine, &stacks);
+  if (pLine == NULL)
+    return;
+
+  Config.cfgStacks = stacks;
+  pLine = skipwh(pLine);
+
+  if (*pLine == ',')
+  {
+    pLine = GetNumArg((char *)++pLine, &stacks);
+    if (pLine == NULL)
+      return;
+    Config.cfgStackSize = stacks;
+  }
+
+  if (Config.cfgStacks)
+  {
+    if (Config.cfgStackSize < 32)
+      Config.cfgStackSize = 32;
+    if (Config.cfgStackSize > 512)
+      Config.cfgStackSize = 512;
+    if (Config.cfgStacks > 64)
+      Config.cfgStacks = 64;
+  }
+  Config.cfgStacksHigh = 0;
+}
+
+STATIC VOID StacksHigh(BYTE * pLine)
+{
+  Stacks(pLine);
+  Config.cfgStacksHigh = 1;
+}
+
+STATIC VOID init_stacks(dos_far_ptr x86_base, COUNT stacks, COUNT size)
+{
+  x86_stackBase = x86_base;
+  nStacks = stacks;
+  stackSize = size;
+
+  memset(ARM_PTR(x86_stackBase), 0,
+         (size_t)nStacks * (size_t)stackSize);
+}
+
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
@@ -484,8 +535,8 @@ STATIC struct table commands[] = {
   {"NUMLOCK", 1, CfgNotImplemented},
   {"SHELL", 1, CfgNotImplemented},
   {"SHELLHIGH", 1, CfgNotImplemented},
-  {"STACKS", 1, CfgNotImplemented},
-  {"STACKSHIGH", 1, CfgNotImplemented},
+  {"STACKS", 1, Stacks},
+  {"STACKSHIGH", 1, StacksHigh},
   {"SWITCHAR", 1, CfgNotImplemented},
   {"SCREEN", 1, CfgNotImplemented},   /* JPP */
   {"VERSION", 1, CfgNotImplemented},     /* JPP */
@@ -1135,4 +1186,76 @@ dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode)
   }
   fmemset(p, 0, nBytes);
   return p;
+}
+
+/*
+ * Do third pass initialization.
+ * Also prepares final CONFIG.SYS pass for DEVICE/INSTALL handlers.
+ */
+VOID PostConfig(VOID)
+{
+  dos_far_ptr x86_sp;
+  sfttbl *sp;
+  COUNT extra_files;
+
+  if (Config.cfgDosDataUmb)
+  {
+    Config.cfgFilesHigh = TRUE;
+    Config.cfgLastdriveHigh = TRUE;
+    Config.cfgStacksHigh = TRUE;
+  }
+
+  LoL->lastdrive = Config.cfgLastdrive;
+  if (LoL->lastdrive < LoL->nblkdev)
+    LoL->lastdrive = LoL->nblkdev;
+
+  CfgDbgPrintf(("starting FAR allocations at %x\n", base_seg));
+
+  config_init_buffers(Config.cfgBuffers);
+
+  /*
+   * PreConfig2() appended the second 3-entry SFT block after the
+   * built-in 5-entry block. Now append the final FILES= extension.
+   */
+  x86_sp = LoL->sfthead;
+  sp = (sfttbl *)ARM_PTR(x86_sp);
+  x86_sp = sp->sftt_next;
+  sp = (sfttbl *)ARM_PTR(x86_sp);
+
+  extra_files = Config.cfgFiles - 8;
+  if (extra_files > 0)
+  {
+    dos_far_ptr x86_sft3 =
+      KernelAlloc(sizeof(sftheader) + extra_files * sizeof(sft),
+                  'F', Config.cfgFilesHigh);
+
+    sp->sftt_next = x86_sft3;
+    sp = (sfttbl *)ARM_PTR(x86_sft3);
+    sp->sftt_next = MK_FP(-1, -1);
+    sp->sftt_count = extra_files;
+  }
+
+  LoL->CDSp = KernelAlloc(sizeof(struct cds) * LoL->lastdrive,
+                          'L', Config.cfgLastdriveHigh);
+
+  CfgDbgPrintf((" sft table %04x:%04x\n",
+                FP_SEG(((sfttbl *)ARM_PTR(LoL->sfthead))->sftt_next),
+                FP_OFF(((sfttbl *)ARM_PTR(LoL->sfthead))->sftt_next)));
+  CfgDbgPrintf((" CDS table %04x:%04x\n", FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp)));
+  CfgDbgPrintf((" DPB table %04x:%04x\n", FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp)));
+
+  if (Config.cfgStacks)
+  {
+    dos_far_ptr stackBase =
+      KernelAlloc((size_t)Config.cfgStacks * (size_t)Config.cfgStackSize,
+                  'S', Config.cfgStacksHigh);
+
+    init_stacks(stackBase, Config.cfgStacks, Config.cfgStackSize);
+
+    CfgDbgPrintf(("Stacks allocated at %04x:%04x count=%u size=%u\n",
+                  FP_SEG(stackBase), FP_OFF(stackBase),
+                  Config.cfgStacks, Config.cfgStackSize));
+  }
+
+  CfgDbgPrintf(("Allocation completed: top at 0x%x\n", base_seg));
 }
