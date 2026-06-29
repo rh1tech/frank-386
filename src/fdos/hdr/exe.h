@@ -35,6 +35,7 @@ static BYTE *exe_hRcsId =
 #endif
 #endif
 
+#pragma pack(push, 1)
 typedef struct {
   UWORD exSignature;
   UWORD exExtraBytes;
@@ -51,6 +52,7 @@ typedef struct {
   UWORD exRelocTable;
   UWORD exOverlay;
 } exe_header;
+#pragma pack(pop)
 
 #define MAGIC 0x5a4d
 #define OLD_MAGIC 0x4d5a

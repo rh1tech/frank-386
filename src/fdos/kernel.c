@@ -383,12 +383,15 @@ static void BlkEntry(request FAR *rq) {
     case C_INPUT:
     case C_OUTPUT:
     case C_OUTVFY:
+    case C_MEDIACHK:
+    case C_BLDBPB:
         blockio(cpu, rq);
         break;
     case C_INIT:
         /* disk init is done, so this should never be called */
     default:
-        /// TODO: C_MEDIACHK / C_BUILDBPB / C_IOCTLIN / C_IOCTLOUT / C_GENIOCTL
+    printf("DBG BlkEntry unimplemented cmd=%02X unit=%u status_before=%04X\n",  rq->r_command, rq->r_unit, rq->r_status);
+        /// TODO: C_IOCTLIN / C_IOCTLOUT / C_GENIOCTL
         /// are not implemented yet - not required for DosOpen() on a fixed,
         /// never-removed disk image.
         rq_error(rq, E_CMD);

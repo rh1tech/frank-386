@@ -785,7 +785,8 @@ VOID DoConfig(int nPass)
         CfgDbgPrintf(("Reading \"%s\"...\n", configcommands[ii]));
         break;
       } else {
-        CfgDbgPrintf(("\"%s\" not found\n", configcommands[ii]));
+        CfgDbgPrintf(("\"%s\" not found, PriPathName=\"%s\"\n",
+                      configcommands[ii], PriPathName));
       }
     }
     if (configcommands[ii] == NULL) {

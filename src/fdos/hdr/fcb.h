@@ -77,6 +77,7 @@ static BYTE *fcb_hRcsId =
 #define FCB_WRITE 1
 
 /* File Control Block (FCB)                                             */
+#pragma pack(push, 1)
 typedef struct {
   UBYTE fcb_drive;              /* Drive number 0=default, 1=A, etc     */
   BYTE fcb_fname[FNAME_SIZE];   /* File name                    */
@@ -117,4 +118,4 @@ typedef struct {
   BYTE renNewExtent[3];         /* New FileExtension            */
   BYTE renReserved2[9];
 } rfcb;
-
+#pragma pack(pop)

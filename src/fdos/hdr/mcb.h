@@ -59,6 +59,7 @@ static BYTE *mcb_hRcsId =
 typedef UWORD seg;
 typedef UWORD offset;
 
+#pragma pack(push, 1)
 typedef struct {
   BYTE m_type;                  /* mcb type - chain or end              */
   UWORD m_psp;                  /* owner id via psp segment             */
@@ -66,4 +67,4 @@ typedef struct {
   BYTE m_fill[3];
   BYTE m_name[8];               /* owner name limited to 8 bytes        */
 } mcb;
-
+#pragma pack(pop)

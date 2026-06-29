@@ -55,6 +55,125 @@
    Migrated from dsk.c (#define hd(x) ((x) & DF_FIXED)). */
 #define hd(x)   ((x) & DF_FIXED)
 
+#pragma pack(push, 1)
+struct FS_info {
+  ULONG serialno;
+  BYTE volume[11];
+  BYTE fstype[8];
+};
+#pragma pack(pop)
+
+STATIC WORD diskchange(ddt *pddt)
+{
+  if (hd(pddt->ddt_descflags))
+    return M_NOT_CHANGED;
+
+  return M_NOT_CHANGED; /* removable-change line TODO */
+}
+
+STATIC int LBA_Transfer(CPU* cpu,
+    ddt *pddt, UWORD mode, BYTE *buffer,
+    ULONG LBA_address, unsigned totaltodo,
+    UWORD *transferred);
+
+STATIC WORD RWzero(CPU *cpu, ddt *pddt, UWORD mode)
+{
+  UWORD done = 0;
+
+  return LBA_Transfer(cpu, pddt, mode,
+                      (BYTE *)ARM_PTR(DiskTransferBuffer),
+                      pddt->ddt_offset, 1, &done);
+}
+
+STATIC WORD getbpb(CPU *cpu, ddt *pddt)
+{
+  BYTE *buf = (BYTE *)ARM_PTR(DiskTransferBuffer);
+  bpb *pbpbarray = &pddt->ddt_bpb;
+  ULONG count;
+  unsigned secs_per_cyl;
+  WORD ret;
+
+  if (diskchange(pddt) != M_NOT_CHANGED)
+    pddt->ddt_descflags |= DF_DISKCHANGE;
+
+  ret = RWzero(cpu, pddt, LBA_READ);
+  if (ret != 0)
+    return ret;
+
+  pbpbarray->bpb_nbyte = fgetword(&buf[BT_BPB]);
+
+  if (buf[0x1fe] != 0x55 || buf[0x1ff] != 0xaa ||
+      pbpbarray->bpb_nbyte == 0 ||
+      pbpbarray->bpb_nbyte % 512)
+  {
+    memcpy(pbpbarray, &pddt->ddt_defbpb, sizeof(bpb));
+    return 0;
+  }
+
+  pddt->ddt_descflags &= ~DF_NOACCESS;
+  memcpy(pbpbarray, &buf[BT_BPB], sizeof(bpb));
+
+  {
+    struct FS_info *fs = (struct FS_info *)&buf[0x27];
+    BYTE sig = buf[0x26];
+
+    if (sig == 0x29 || sig == 0x28)
+      pddt->ddt_serialno = fgetlong(&fs->serialno);
+    else
+      pddt->ddt_serialno = 0;
+
+    if (sig == 0x29) {
+      memcpy(pddt->ddt_volume, fs->volume, sizeof fs->volume);
+      memcpy(pddt->ddt_fstype, fs->fstype, sizeof fs->fstype);
+    } else {
+      memcpy(pddt->ddt_volume, "NO NAME    ", 11);
+      memcpy(pddt->ddt_fstype, "FAT??   ", 8);
+    }
+  }
+
+  count = pbpbarray->bpb_nsize == 0 ? pbpbarray->bpb_huge : pbpbarray->bpb_nsize;
+  secs_per_cyl = pbpbarray->bpb_nheads * pbpbarray->bpb_nsecs;
+
+  if (secs_per_cyl == 0)
+    return failure(E_FAILURE);
+
+  pddt->ddt_ncyl = (UWORD)((count + (secs_per_cyl - 1)) / secs_per_cyl);
+  return 0;
+}
+
+STATIC void block_media_check(CPU *cpu, request FAR *rq)
+{
+  ddt *pddt = getddt(rq->r_unit);
+
+  (void)cpu;
+
+  if (pddt->ddt_descflags & DF_REFORMAT) {
+    pddt->ddt_descflags &= ~DF_REFORMAT;
+    rq->r_mcretcode = M_CHANGED;
+  } else if (pddt->ddt_descflags & DF_DISKCHANGE) {
+    pddt->ddt_descflags &= ~DF_DISKCHANGE;
+    rq->r_mcretcode = M_DONT_KNOW;
+  } else {
+    rq->r_mcretcode = diskchange(pddt);
+  }
+
+  rq_done(rq);
+}
+
+STATIC void block_build_bpb(CPU *cpu, request FAR *rq)
+{
+  ddt *pddt = getddt(rq->r_unit);
+  WORD ret = getbpb(cpu, pddt);
+
+  if (ret != 0) {
+    rq->r_status = ret;
+    return;
+  }
+
+  rq->r_bpptr = &pddt->ddt_bpb;
+  rq_done(rq);
+}
+
 /*
     translate LBA sectors into CHS addressing, using the BPB stored in
     a ddt entry (as opposed to init_LBA_to_CHS() above, which is only
@@ -342,6 +461,12 @@ void blockio(CPU* cpu, request FAR *rq)
 
   switch (rq->r_command)
   {
+    case C_MEDIACHK:
+      block_media_check(cpu, rq);
+      return;
+    case C_BLDBPB:
+      block_build_bpb(cpu, rq);
+      return;
     case C_INPUT:
       mode = LBA_READ;
       break;
