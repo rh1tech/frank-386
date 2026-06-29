@@ -121,7 +121,7 @@ STATIC void config_init_buffers(int wantedbuffers)
     {
       LoL->bufloc = LOC_HMA;
       /* space in HMA beyond requested buffers available as user space */
-      x86_firstAvailableBuf = MK_FP(FP_SEG(x86_buffer), FP_OFF(x86_buffer) + wantedbuffers);
+      x86_firstAvailableBuf = MK_FP(FP_SEG(x86_buffer), FP_OFF(x86_buffer) + wantedbuffers * sizeof(struct buffer));
     }
     pbuffer = (struct buffer*)ARM_PTR(x86_buffer);
   }
@@ -132,18 +132,17 @@ STATIC void config_init_buffers(int wantedbuffers)
   CfgDbgPrintf((" (%p)", LoL->firstbuf));
 
   buffers--;
-  pbuffer->b_prev = FP_OFF(x86_buffer) + buffers * sizeof(struct buffer);
+  UWORD base_off = FP_OFF(x86_buffer);
   {
-    int i = buffers;
-    do
+    unsigned last = buffers;
+    unsigned idx;
+    for (idx = 0; idx <= last; idx++)
     {
-      pbuffer->b_next = FP_OFF(x86_buffer) + sizeof(struct buffer);
+      pbuffer->b_prev = base_off + (idx ? idx - 1 : last) * sizeof(struct buffer);
+      pbuffer->b_next = base_off + (idx == last ? 0 : idx + 1) * sizeof(struct buffer);
       pbuffer++;
-      pbuffer->b_prev = FP_OFF(x86_buffer) - sizeof(struct buffer);
     }
-    while (--i);
   }
-  pbuffer->b_next = FP_OFF(x86_buffer) - buffers * sizeof(struct buffer);
 
     /* now, we can have quite some buffers in HMA
        -- up to 50 for KE38616.

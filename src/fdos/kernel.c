@@ -90,6 +90,7 @@ dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0
 
 /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer = x86_BSS; // BSS
 /*256*/const dos_far_ptr x86_szLine = MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE); // _BSS + MAX_SEC_SIZE
+
 const dos_far_ptr x86_con_dev = MK_FP(DOS_PSP, 0x07A8); // _IO_FIXED_DATA -> con_dev
 const dos_far_ptr x86_prn_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr));
 const dos_far_ptr x86_aux_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 2);
@@ -1369,6 +1370,12 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
         cds.h), so media_check() (which takes a native struct dpb*)
         needs an ARM_PTR() first.
 */
+#define TNDBG(fmt, ...) 
+///printf("[truename] " fmt "\n", ##__VA_ARGS__)
+
+#define TNPTR(p)  ((unsigned)((const char *)(p) - srcbuf))
+#define TNDPTR(p) ((unsigned)((const char *)(p) - dest))
+
 COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 {
   COUNT i;
@@ -1385,8 +1392,10 @@ COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
   char *src;
   struct cds TempCDS;
 
-  /* copy the guest path into a native buffer up front - see the
-     migration note above for why there is no adjust_far() step */
+  TNDBG("TN00 enter x86_src=%04X:%04X guest=%p mode=%04X raw='%s'",
+        FP_SEG(x86_src), FP_OFF(x86_src), ARM_PTR(x86_src), mode,
+        (const char *)ARM_PTR(x86_src));
+
   {
     unsigned len;
     const char *guest_src = (const char *)ARM_PTR(x86_src);
@@ -1399,146 +1408,162 @@ COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
     srcbuf[sizeof(srcbuf) - 1] = '\0';
   }
   src = srcbuf;
+  TNDBG("TN01 copied srcbuf='%s'", srcbuf);
 
-  /* In opposite of the TRUENAME shell command, an empty string is
-     rejected by MS DOS 6 */
   src0 = src[0];
-  if (src0 == '\0')
+  if (src0 == '\0') {
+    TNDBG("TN02 empty -> DE_FILENOTFND");
     return DE_FILENOTFND;
+  }
 
   if (src0 == '\\' && src[1] == '\\') {
     const char *unc_src = src;
-    /* Flag UNC paths and short circuit processing.  Set current LDT   */
-    /* to sentinel (offset 0xFFFF) for redirector processing.          */
+    TNDBG("TN03 UNC start src='%s'", src);
+
     do {
       src0 = unc_src[0];
       addChar(src0);
       unc_src++;
     } while (src0);
+
     internal_data->current_ldt = MK_FP(0xFFFF, 0xFFFF);
-    /* Flag as network - drive bits are empty but shouldn't get */
-    /* referenced for network with empty current_ldt.           */
+    TNDBG("TN04 UNC return dest='%s'", dest);
     return IS_NETWORK;
   }
 
-  /* Do we have a drive?                                          */
   if (src[1] == ':')
     result = drLetterToNr(DosUpFChar(src0));
   else
     result = internal_data->default_drive;
 
+  TNDBG("TN05 drive result=%u default=%u src='%s'",
+        result, internal_data->default_drive, src);
+
   dhp = IsDevice(src);
+  TNDBG("TN06 IsDevice=%p src='%s'", dhp, src);
 
   x86_cdsEntry = get_cds(result);
   cdsEntry = far_is_null(x86_cdsEntry) ? NULL : (struct cds *)ARM_PTR(x86_cdsEntry);
+
+  TNDBG("TN07 get_cds(%u)=%04X:%04X native=%p lastdrive=%u",
+        result, FP_SEG(x86_cdsEntry), FP_OFF(x86_cdsEntry),
+        cdsEntry, LoL->lastdrive);
+
   if (cdsEntry == NULL)
   {
-    /* If opening a character device, DOS allows device name
-       to be prefixed by [invalid] drive letter and/or optionally
-       \DEV\ directory prefix, however, any other directory
-       including root (\) is an invalid path if drive is not
-       valid and returns such.
-       Whereas truename always fails for invalid drive.
-    */
     if (dhp && (mode & CDS_MODE_CHECK_DEV_PATH) && (result >= LoL->lastdrive))
     {
-      /* Note: check for (result >= lastdrive) means invalid drive
-         was provided as otherwise we would have used default_drive
-         so we know src in the form of X:?
-         fail if anything other than no path or path is \DEV\
-      */
-      const char *s = src+2;
+      const char *s = src + 2;
       char c = *s;
 
-      if( c != '\\' && c != '/' ) c = '\0';
-      /* could be 1 letter devicename, don't go scanning random memory */
-      if (*(src+3) != '\0')
+      TNDBG("TN08 invalid drive but device path candidate src='%s'", src);
+
+      if (c != '\\' && c != '/')
+        c = '\0';
+
+      if (*(src + 3) != '\0')
       {
-        s = strchr(src+3, '\\'); /* ?is there \ or / other than immediately after drive: */
-        if (s == NULL) s = strchr(src+3, '/');
+        s = strchr(src + 3, '\\');
+        if (s == NULL)
+          s = strchr(src + 3, '/');
       }
       else
       {
         s = NULL;
       }
 
+      TNDBG("TN09 dev invalid-drive check c=%02X s_ofs=%d",
+            (unsigned char)c, s ? (int)(s - src) : -1);
+
       if (c == '\0')
       {
-        /* either X:devicename or X:path\devicename */
-        if (s != NULL) goto invalid_path;
+        if (s != NULL)
+          goto invalid_path;
       }
       else
       {
-        /* either X:\devicename or X:\path\devicename 
-           only X:\DEV\devicename is valid path
-        */
         if (s == NULL) goto invalid_path;
-        if (s != src+6) goto invalid_path;
-        if (memcmp(src+3, "DEV", 3) != 0) goto invalid_path;
-        s = strchr(src+7, '\\');
-        if (s == NULL) s = strchr(src+7, '/');
-        if (s != NULL) goto invalid_path;
+        if (s != src + 6) goto invalid_path;
+        if (memcmp(src + 3, "DEV", 3) != 0) goto invalid_path;
+        s = strchr(src + 7, '\\');
+        if (s == NULL)
+          s = strchr(src + 7, '/');
+        if (s != NULL)
+          goto invalid_path;
       }
 
-      /* use CDS of current drive (MS-DOS may return drive P: for invalid drive.) */
       result = internal_data->default_drive;
       x86_cdsEntry = get_cds(result);
       cdsEntry = far_is_null(x86_cdsEntry) ? NULL : (struct cds *)ARM_PTR(x86_cdsEntry);
-      if (cdsEntry == NULL) goto invalid_path;
+
+      TNDBG("TN10 fallback default drive result=%u cds=%04X:%04X native=%p",
+            result, FP_SEG(x86_cdsEntry), FP_OFF(x86_cdsEntry), cdsEntry);
+
+      if (cdsEntry == NULL)
+        goto invalid_path;
     }
     else
     {
 invalid_path:
-        return DE_PATHNOTFND;
+      TNDBG("TN11 invalid path result=%u src='%s'", result, src);
+      return DE_PATHNOTFND;
     }
   }
 
   memcpy(&TempCDS, cdsEntry, sizeof(TempCDS));
-  /* is the current_ldt thing necessary for compatibly??
-     -- 2001/09/03 ska*/
+  TNDBG("TN12 CDS path='%s' flags=%04X dpb=%04X:%04X backslash=%u join=%u",
+        TempCDS.cdsCurrentPath, TempCDS.cdsFlags,
+        FP_SEG(TempCDS.cdsDpb), FP_OFF(TempCDS.cdsDpb),
+        TempCDS.cdsBackslashOffset, TempCDS.cdsJoinOffset);
+
   internal_data->current_ldt = x86_cdsEntry;
+
   if (TempCDS.cdsFlags & CDSNETWDRV)
     result |= IS_NETWORK;
 
   if (dhp)
     result |= IS_DEVICE;
 
-  /* Try if the Network redirector wants to do it */
-  /* via Qualify Remote Filename call & validate results */
-  memset(dest, 0, 12);  /* enable can verify redirector set result value */
-  /* MUX succeeded and really something */
+  TNDBG("TN13 before QRemote mode=%04X result=%04X src='%s'",
+        mode, result, src);
+
+  memset(dest, 0, 12);
+
   if (!(mode & CDS_MODE_SKIP_PHYSICAL) &&
       QRemote_Fn(dest, src) == SUCCESS && dest[0] != '\0')
   {
-    /* don't flag devices such as Z:/NUL as NETWORK devices,
-       where Z: is a network mapped drive, but do flag redirected
-       devices such as LPT# for Lantastic
-     */       
+    TNDBG("TN14 QRemote success dest='%s' result=%04X", dest, result);
+
     if (dest[2] == '/' && (result & IS_DEVICE))
       result &= ~IS_NETWORK;
     else
       result |= IS_NETWORK;
+
+    TNDBG("TN15 QRemote return result=%04X dest='%s'", result, dest);
     return result;
   }
 
-  /* Redirector interface failed --> proceed with local mapper */
   dest[0] = drNrToLetter(result & 0x1f);
   dest[1] = ':';
 
-  /* Do we have a drive? */
+  TNDBG("TN16 local mapper dest='%c%c' result=%04X",
+        dest[0], dest[1], result);
+
   if (src[1] == ':')
     src += 2;
 
-/*
-    Code repoff from dosfns.c
-    MSD returns X:/CON for truename con. Not X:\CON
-*/
-  /* check for a device  */
+  TNDBG("TN17 after drive skip src_ofs=%u src='%s'", TNPTR(src), src);
 
   dest[2] = '\\';
+
   if (result & IS_DEVICE)
   {
+    TNDBG("TN18 device path src='%s'", src);
+
     froot = get_root(src);
+    TNDBG("TN19 get_root froot_ofs=%d",
+          froot ? (int)(froot - src) : -1);
+
     if (froot == src || froot == src + 5)
     {
       if (froot == src + 5)
@@ -1547,248 +1572,339 @@ invalid_path:
         DosUpMem(dest + 3, 5);
         if (dest[3] == '/') dest[3] = '\\';
         if (dest[7] == '/') dest[7] = '\\';
+
+        TNDBG("TN20 device copied prefix dest='%s'", dest);
       }
+
       if (froot == src || memcmp(dest + 3, "\\DEV\\", 5) == 0)
       {
-        /* /// Bugfix: NUL.LST is the same as NUL.  This is true for all
-           devices.  On a device name, the extension is irrelevant
-           as long as the name matches.
-           - Ron Cemer */
         dest[2] = '/';
         result &= ~IS_NETWORK;
-        /* /// DOS will return C:/NUL.LST if you pass NUL.LST in.
-           DOS will also return C:/NUL.??? if you pass NUL.* in.
-           Code added here to support this.
-           - Ron Cemer */
         src = (char *)froot;
+
+        TNDBG("TN21 device direct dest='%s' src_ofs=%u result=%04X",
+              dest, TNPTR(src), result);
       }
     }
   }
 
-  /* Make fully-qualified logical path */
-  /* register these two used characters and the \0 terminator byte */
-  /* we always append the current dir to stat the drive;
-     the only exceptions are devices without paths */
   rootPos = p = dest + 2;
-  if (*p != '/') /* i.e., it's a backslash! */
+  TNDBG("TN22 fullqual start dest0='%c%c%c' p=%u root=%u",
+        dest[0], dest[1], dest[2], TNDPTR(p), TNDPTR(rootPos));
+
+  if (*p != '/')
   {
     BYTE *cp;
 
     cp = TempCDS.cdsCurrentPath;
-    /* ensure termination of strcpy */
     cp[MAX_CDSPATH - 1] = '\0';
+
+    TNDBG("TN23 CDS current cp='%s' flags=%04X", cp, TempCDS.cdsFlags);
+
     if ((TempCDS.cdsFlags & CDSNETWDRV) == 0)
     {
-      if (media_check((struct dpb *)ARM_PTR(TempCDS.cdsDpb)) < 0)
-        return DE_PATHNOTFND;
+      struct dpb *native_dpb = (struct dpb *)ARM_PTR(TempCDS.cdsDpb);
 
-      /* dos_cd ensures that the path exists; if not, we
-         need to change to the root directory */
+      TNDBG("TN24 before media_check dpb=%04X:%04X native=%p cp='%s'",
+            FP_SEG(TempCDS.cdsDpb), FP_OFF(TempCDS.cdsDpb),
+            native_dpb, cp);
+
+      int mc = media_check(native_dpb);
+
+      TNDBG("TN25 after media_check rc=%d", mc);
+
+      if (mc < 0) {
+        TNDBG("TN26 media_check failed -> DE_PATHNOTFND");
+        return DE_PATHNOTFND;
+      }
+
+      TNDBG("TN27 before dos_cd cp='%s'", cp);
+
       if (dos_cd((char *)cp) != SUCCESS) {
+        TNDBG("TN28 dos_cd failed cp='%s' backslash=%u",
+              cp, TempCDS.cdsBackslashOffset);
+
         cp[TempCDS.cdsBackslashOffset + 1] =
           cdsEntry->cdsCurrentPath[TempCDS.cdsBackslashOffset + 1] = '\0';
+
+        TNDBG("TN29 retry dos_cd cp='%s'", cp);
         dos_cd((char *)cp);
       }
+
+      TNDBG("TN30 after dos_cd cp='%s'", cp);
     }
 
     if (!(mode & CDS_MODE_SKIP_PHYSICAL))
     {
-/* What to do now: the logical drive letter will be replaced by the hidden
-   portion of the associated path. This is necessary for NETWORK and
-   SUBST drives. For local drives it should not harm.
-   This is actually the reverse mechanism of JOINED drives. */
+      TNDBG("TN31 before strcpy dest <- cp='%s'", cp);
 
       strcpy(dest, (char *)cp);
+
+      TNDBG("TN32 after strcpy dest='%s'", dest);
+
       if (TempCDS.cdsFlags & CDSSUBST)
       {
-        /* The drive had been changed --> update the CDS pointer */
+        TNDBG("TN33 CDSSUBST dest='%s'", dest);
+
         if (dest[1] == ':')
-        {  /* sanity check if this really is a local drive still */
+        {
           unsigned ii = drLetterToNr(dest[0]);
 
-          /* truename returns the "real", not the "virtual" drive letter! */
-          if (ii < LoL->lastdrive) /* sanity check #2 */
+          TNDBG("TN34 subst real drive ii=%u lastdrive=%u",
+                ii, LoL->lastdrive);
+
+          if (ii < LoL->lastdrive)
             result = (result & 0xffe0) | ii;
         }
       }
+
       rootPos = p = dest + TempCDS.cdsBackslashOffset;
+
+      TNDBG("TN35 after root setup p=%u root=%u backslash=%u dest='%s'",
+            TNDPTR(p), TNDPTR(rootPos), TempCDS.cdsBackslashOffset, dest);
     }
     else
     {
       cp += TempCDS.cdsBackslashOffset;
-      /* truename must use the CuDir of the "virtual" drive letter! */
+
+      TNDBG("TN36 skip physical cp='%s'", cp);
+
       strcpy(p, (char *)cp);
+
+      TNDBG("TN37 after skip physical strcpy dest='%s'", dest);
     }
+
     if (p[0] == '\0')
       p[1] = p[0];
-    p[0] = '\\'; /* force backslash! */
+
+    p[0] = '\\';
+
+    TNDBG("TN38 after force slash p=%u root=%u dest='%s'",
+          TNDPTR(p), TNDPTR(rootPos), dest);
 
     if (*src != '\\' && *src != '/')
       p += strlen(p);
-    else /* skip the absolute path marker */
+    else
       src++;
-    /* remove trailing separator */
-    if (p[-1] == '\\') p--;
+
+    if (p[-1] == '\\')
+      p--;
+
+    TNDBG("TN39 before append src_ofs=%u src='%s' p=%u root_char='%c' dest='%s'",
+          TNPTR(src), src, TNDPTR(p), *rootPos, dest);
   }
 
-  /* append the path specified in src */
-
   state = 0;
-  while(*src)
-  {
-    /* New segment.  If any wildcards in previous
-       segment(s), this is an invalid path. */
-    if (state & PNE_WILDCARD)
-      return DE_PATHNOTFND;
 
-    /* append backslash if not already there.
-       MS DOS preserves a trailing '\\', so an access to "C:\\DOS\\"
-       or "CDS.C\\" fails; in that case the last new segment consists of just
-       the \ */
+  while (*src)
+  {
+    TNDBG("TN40 loop start src_ofs=%u src='%s' p=%u state=%u dest='%s'",
+          TNPTR(src), src, TNDPTR(p), state, dest);
+
+    if (state & PNE_WILDCARD) {
+      TNDBG("TN41 wildcard before end -> DE_PATHNOTFND");
+      return DE_PATHNOTFND;
+    }
+
     if (p[-1] != *rootPos)
       addChar(*rootPos);
-    /* skip multiple separators (duplicated slashes) */
+
     while (*src == '/' || *src == '\\')
       src++;
 
-    if(*src == '.')
+    TNDBG("TN42 after sep skip src_ofs=%u src='%s' p=%u",
+          TNPTR(src), src, TNDPTR(p));
+
+    if (*src == '.')
     {
       int dots = 1;
-      /* special directory component */
+
       ++src;
-      if (*src == '.') /* skip the second dot */
+      if (*src == '.')
       {
         ++src;
         dots++;
       }
+
+      TNDBG("TN43 dot candidate dots=%d src_ofs=%u next=%02X",
+            dots, TNPTR(src), (unsigned char)*src);
+
       if (*src == '/' || *src == '\\' || *src == '\0')
       {
-        --p; /* backup the backslash */
+        --p;
+
         if (dots == 2)
         {
-          /* ".." entry */
-          /* remove last path component */
-          while(*--p != '\\')
-            if (p <= rootPos) /* already on root */
+          TNDBG("TN44 dotdot before strip p=%u root=%u dest='%s'",
+                TNDPTR(p), TNDPTR(rootPos), dest);
+
+          while (*--p != '\\')
+          {
+            if (p <= rootPos) {
+              TNDBG("TN45 dotdot beyond root -> DE_PATHNOTFND");
               return DE_PATHNOTFND;
+            }
+          }
+
+          TNDBG("TN46 dotdot after strip p=%u", TNDPTR(p));
         }
-        continue;	/* next char */
+
+        continue;
       }
 
-      /* ill-formed .* or ..* entries => return error */
-      /* The error is either PATHNOTFND or FILENOTFND
-         depending on if it is not the last component */
+      TNDBG("TN47 malformed dot component");
       return PATH_ERROR();
     }
 
-    /* normal component */
-    /* append component in 8.3 convention */
-
-    /* *** parse name and extension *** */
     i = FNAME_SIZE;
     state &= ~PNE_DOT;
-    while(*src != '/' && *src  != '\\' && *src != '\0')
+
+    TNDBG("TN48 parse component start src_ofs=%u p=%u",
+          TNPTR(src), TNDPTR(p));
+
+    while (*src != '/' && *src != '\\' && *src != '\0')
     {
       char c = *src++;
+
+      TNDBG("TN49 char c=%02X '%c' src_ofs=%u p=%u i=%d state=%u",
+            (unsigned char)c,
+            (c >= 32 && c < 127) ? c : '.',
+            TNPTR(src), TNDPTR(p), i, state);
+
       if (c == '*')
       {
-        /* register the wildcard, even if no '?' is appended */
         c = '?';
         while (i)
         {
           --i;
           addChar(c);
         }
+
+        TNDBG("TN50 wildcard star expanded p=%u i=%d", TNDPTR(p), i);
       }
+
       if (c == '.')
       {
-        if (state & PNE_DOT) /* multiple dots are ill-formed */
+        if (state & PNE_DOT) {
+          TNDBG("TN51 multiple dot");
           return PATH_ERROR();
-        /* strip trailing dot */
+        }
+
         if (*src == '/' || *src == '\\' || *src == '\0')
           break;
-        /* we arrive here only when an extension-dot has been found */
+
         state |= PNE_DOT;
         i = FEXT_SIZE + 1;
+
+        TNDBG("TN52 extension dot i=%d state=%u", i, state);
       }
       else if (c == '?')
+      {
         state |= PNE_WILDCARD;
-      if (i) {	/* name length in limits */
+      }
+
+      if (i) {
         --i;
-        if (!DirChar(c)) return PATH_ERROR();
+        if (!DirChar(c)) {
+          TNDBG("TN53 bad dir char c=%02X", (unsigned char)c);
+          return PATH_ERROR();
+        }
         addChar(c);
       }
     }
-    /* *** end of parse name and extension *** */
+
+    TNDBG("TN54 component done src_ofs=%u p=%u state=%u dest='%s'",
+          TNPTR(src), TNDPTR(p), state, dest);
   }
-  if (state & PNE_WILDCARD && !(mode & CDS_MODE_ALLOW_WILDCARDS))
+
+  if (state & PNE_WILDCARD && !(mode & CDS_MODE_ALLOW_WILDCARDS)) {
+    TNDBG("TN55 wildcard final not allowed");
     return DE_PATHNOTFND;
+  }
+
   if (p == dest + 2)
   {
-    /* we must always add a seperator if dest = "c:" */
+    TNDBG("TN56 dest only drive, add slash");
     addChar('\\');
   }
 
-  *p = '\0';				/* add the string terminator */
-  DosUpFString(rootPos);	        /* upcase the file/path name */
+  *p = '\0';
 
-/** Note:
-    Only the portions passed in by the user are upcased, because it is
-    assumed that the CDS is configured correctly and if it contains
-    lower case letters, it is required so **/
+  TNDBG("TN57 before DosUpFString root=%u dest='%s'",
+        TNDPTR(rootPos), dest);
 
-  /* Now, all the steps 1) .. 7) are fullfilled. Join now */
-  /* search, if this path is a joined drive */
+  DosUpFString(rootPos);
+
+  TNDBG("TN58 after DosUpFString dest='%s'", dest);
 
   if (dest[2] != '/' && (!(mode & CDS_MODE_SKIP_PHYSICAL)) && LoL->njoined)
   {
     dos_far_ptr x86_cdsp = LoL->CDSp;
     struct cds *cdsp = (struct cds *)ARM_PTR(x86_cdsp);
-    for(i = 0; i < LoL->lastdrive; ++i, ++cdsp)
+
+    TNDBG("TN59 JOIN scan njoined=%u cdsp=%04X:%04X native=%p",
+          LoL->njoined, FP_SEG(x86_cdsp), FP_OFF(x86_cdsp), cdsp);
+
+    for (i = 0; i < LoL->lastdrive; ++i, ++cdsp)
     {
-      /* How many bytes must match */
       size_t j = strlen((char *)cdsp->cdsCurrentPath);
-      /* the last component must end before the backslash offset and */
-      /* the path the drive is joined to leads the logical path */
-      if ((cdsp->cdsFlags & CDSJOINED) && (dest[j] == '\\' || dest[j] == '\0')
-         && memcmp(dest, cdsp->cdsCurrentPath, j) == 0)
-      { /* JOINed drive found */
-        dest[0] = drNrToLetter(i);	/* index is physical here */
+
+      TNDBG("TN60 JOIN i=%u j=%u flags=%04X path='%s'",
+            i, (unsigned)j, cdsp->cdsFlags, cdsp->cdsCurrentPath);
+
+      if ((cdsp->cdsFlags & CDSJOINED) &&
+          (dest[j] == '\\' || dest[j] == '\0') &&
+          memcmp(dest, cdsp->cdsCurrentPath, j) == 0)
+      {
+        dest[0] = drNrToLetter(i);
         dest[1] = ':';
+
         if (dest[j] == '\0')
-        {	/* Reduce to root direc */
+        {
           dest[2] = '\\';
           dest[3] = 0;
-          /* move the relative path right behind the drive letter */
         }
         else if (j != 2)
         {
           strcpy(dest + 2, dest + j);
         }
-        result = (result & 0xffe0) | i; /* tweak drive letter (JOIN) */
+
+        result = (result & 0xffe0) | i;
         internal_data->current_ldt = x86_FAR_PTR(FP_SEG(LoL->CDSp), cdsp);
         result &= ~IS_NETWORK;
+
         if (cdsp->cdsFlags & CDSNETWDRV)
           result |= IS_NETWORK;
+
+        TNDBG("TN61 JOIN return result=%04X dest='%s'", result, dest);
         return result;
       }
     }
-    /* nothing found => continue normally */
-  }
-  if ((mode & CDS_MODE_CHECK_DEV_PATH) &&
-      ((result & (IS_DEVICE|IS_NETWORK)) == IS_DEVICE) &&
-      dest[2] != '/' && !dir_exists(dest))
-    return DE_PATHNOTFND;
 
-  /* Note: Not reached on error or if JOIN or QRemote_Fn (2f.1123) matched */
-  if (mode==CDS_MODE_ALLOW_WILDCARDS) /* DosTruename mode */
-  {
-    /* in other words: result & 0x60 = 0x20...: */
-    /// TODO: os_major is not tracked in this codebase (no real
-    /// "DOS version" concept yet) - always taking the "else" branch
-    /// here (as if os_major were never 6) until that exists.
-    result = 0; /* AL is 00, 2f, 5c, or last-of-TempCDS.cdsCurrentPath? */
+    TNDBG("TN62 JOIN no match");
   }
+
+  if ((mode & CDS_MODE_CHECK_DEV_PATH) &&
+      ((result & (IS_DEVICE | IS_NETWORK)) == IS_DEVICE) &&
+      dest[2] != '/')
+  {
+    TNDBG("TN63 before dir_exists dest='%s'", dest);
+
+    int de = dir_exists(dest);
+
+    TNDBG("TN64 after dir_exists rc=%d", de);
+
+    if (!de)
+      return DE_PATHNOTFND;
+  }
+
+  if (mode == CDS_MODE_ALLOW_WILDCARDS)
+  {
+    TNDBG("TN65 allow wildcards final result forced 0");
+    result = 0;
+  }
+
+  TNDBG("TN66 return result=%04X dest='%s'", result, dest);
   return result;
 }
 
@@ -1861,6 +1977,11 @@ STATIC VOID FsConfig(VOID)
     pcds_table->cdsParam = 0xffff;
     pcds_table->cdsStoreUData = 0xffff;
     pcds_table->cdsJoinOffset = 2;
+/*
+printf("DBG FsConfig cds[%d] path='%s' flags=%04X dpb=%04X:%04X\n",
+       i, pcds_table->cdsCurrentPath, pcds_table->cdsFlags,
+       FP_SEG(pcds_table->cdsDpb), FP_OFF(pcds_table->cdsDpb));
+*/     
   }
 
   /* Log-in the default drive. */
@@ -1962,11 +2083,26 @@ STATIC void init_kernel(CPU* cpu)
     blk_dev->dh_name[0] = dsk_init(cpu);
 
     PreConfig();
+/*
+printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPBp=%04X:%04X\n",
+       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp), ARM_PTR(LoL->CDSp),
+       LoL->lastdrive, LoL->nblkdev, FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));
+
+/* after update_dcb(x86_blk_dev); * /
+printf("DBG after update_dcb CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPBp=%04X:%04X\n",
+       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp), ARM_PTR(LoL->CDSp),
+       LoL->lastdrive, LoL->nblkdev, FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));
+
+/* at start of FsConfig * /
+printf("DBG FsConfig enter CDSp=%04X:%04X native=%p DPBp=%04X:%04X native=%p lastdrive=%u nblkdev=%u\n",
+       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp), ARM_PTR(LoL->CDSp),
+       FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp), ARM_PTR(LoL->DPBp),
+       LoL->lastdrive, LoL->nblkdev);
+*/
     /* Number of units */
     if (blk_dev->dh_name[0] > 0) {
         update_dcb(x86_blk_dev);
     }
-
     /* Now config the temporary file system */
     FsConfig();
 

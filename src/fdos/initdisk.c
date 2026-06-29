@@ -327,7 +327,7 @@ StandardBios:   /* get disk geometry, and if LBA is not enabled, also size */
   driveParam->chs.Head = (CPU_DX >> 8) + 1; /* DH = max head value = # of heads - 1 (0-255) */
   driveParam->chs.Sector = (CPU_CX & 0x3f); /* CL bits 0-5 = max sector value = # (sectors/track) - 1 (1-63) */
   /* max cylinder value = # cylinders - 1 (0-1023) = [high two bits]CL7:6=cyls9:8, [low byte]CH=cyls7:0 */
-  driveParam->chs.Cylinder = (CPU_CX >> 8) | ((CPU_CX & 0xc0) << 2) + 1; 
+  driveParam->chs.Cylinder = ((CPU_CX >> 8) | ((CPU_CX & 0xc0) << 2)) + 1;
   
   if (driveParam->chs.Sector == 0) {
     /* happens e.g. with Bochs 1.x if no harddisk defined */
