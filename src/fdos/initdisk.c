@@ -55,8 +55,7 @@ void BIOS_drive_reset(CPU* cpu, unsigned drive)
 BOOL ExtLBAForce = FALSE;
 COUNT nUnits BSS_INIT(0);
 UWORD LBA_WRITE_VERIFY = 0x4302;
-dos_far_ptr InitDiskTransferBuffer = MK_FP(0x8000, 0x0000); // 512b
-dos_far_ptr x86_dap = MK_FP(0x8000, 0x0200); // + 512
+#define InitDiskTransferBuffer DiskTransferBuffer
 
 typedef struct {
   UWORD bpb_nbyte;              /* Bytes per Sector             */

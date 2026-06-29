@@ -104,6 +104,7 @@ COUNT ASMCFUNC
    unlike IoReqHdr/sda_tmp_dm, there is no internal_data field of the
    same name to collide with. */
 #define PriPathName ((char *)internal_data->PriPathBuffer)
+#define SecPathName ((char *)internal_data->SecPathBuffer)
 
 extern /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 extern dos_far_ptr InitDiskTransferBuffer;

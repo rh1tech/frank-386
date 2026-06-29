@@ -83,6 +83,7 @@ dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0
 
 /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer = x86_BSS; // BSS
 /*256*/const dos_far_ptr x86_szLine = MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE); // _BSS + MAX_SEC_SIZE
+/*16*/ const dos_far_ptr x86_dap = MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256);
 
 const dos_far_ptr x86_con_dev = MK_FP(DOS_PSP, 0x07A8); // _IO_FIXED_DATA -> con_dev
 const dos_far_ptr x86_prn_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr));
@@ -1956,13 +1957,14 @@ STATIC VOID InitSerialPorts(VOID)
 */
 static void InitializeAllBPBs(VOID)
 {
-  static char filename[] = "A:-@JUNK@-.TMP";
   int drive, fileno;
-  strcpy(PriPathName, filename);
-  dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
+  char *path = ARM_PTR(x86_szLine);
+  dos_far_ptr x86_path = x86_szLine;
+  strcpy(path, "A:-@JUNK@-.TMP");
   for (drive = 'C'; drive < 'A' + LoL->nblkdev; drive++)
   {
-    PriPathName[0] = drive;
+    printf("drive: %c\n", (char)drive);
+    path[0] = drive;
     if ((fileno = open( x86_path, O_RDONLY)) >= 0)
       close(fileno);
   }
@@ -2039,11 +2041,6 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     FsConfig();
   
     configDone();
-printf("DBG: DPBp=%04X:%04X CDSp=%04X:%04X firstbuf=%04X:%04X sfthead=%04X:%04X\n",
-       FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp),
-       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp),
-       FP_SEG(LoL->firstbuf), FP_OFF(LoL->firstbuf),
-       FP_SEG(LoL->sfthead), FP_OFF(LoL->sfthead));
 
     InitializeAllBPBs();
 }

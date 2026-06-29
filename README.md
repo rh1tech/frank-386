@@ -370,12 +370,7 @@ This project is based on the following open-source projects:
 001FF4-002A0Eh: DOS kernel _BSS; DiskTransferBuffer начинается тут
 002A0E-007C00h: свободно/не размечено явно 20978b
 007C00-007E00h: boot sector load buffer - removable
-007E00-80000h: свободно/обычная conventional RAM, кроме будущих MCB/KernelAlloc сверху вниз
-080000-080200h: InitDiskTransferBuffer, 8000:0000, 512 bytes
-080200-0802xxh: x86_dap, 8000:0200
-
-080300-08FFFFh: свободно/не размечено явно 64767b
-
+007E00-08FFFFh: свободно
 090000-09FFFFh: DynAlloc area, 9000:0000; 9000:0000..0001 = DynS.Allocated, дальше DDT/DPB/etc
 0A0000-0BFFFFh: VGA window / iomem, 128 KiB
 0B0000-0B7FFFh: MDA text window, режим 07h

@@ -24,7 +24,7 @@ extern const struct _KernelConfig InitKernelConfig;
 extern UWORD HMAFree;            /* first byte in HMA not yet used      */
 extern struct config Config;
 extern BYTE DOSFAR ASM HaltCpuWhileIdle;
-extern dos_far_ptr x86_dap;
+extern const dos_far_ptr x86_dap;
 extern dos_far_ptr lpTop;
 extern UWORD ram_top;
 
