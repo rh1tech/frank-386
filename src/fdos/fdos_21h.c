@@ -22,6 +22,7 @@
 #include "hdr/cds.h"
 #include "proto.h"
 #include "globals.h"
+#include "init-mod.h"
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
@@ -242,6 +243,8 @@ int DosSetTime(CPU* cpu)
 dos_far_ptr/*struct cds*/ get_cds(unsigned drive)
 {
   if (drive >= LoL->lastdrive)
+    return MK_FP(0, 0);
+  if (far_is_null(LoL->CDSp))
     return MK_FP(0, 0);
 
   struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp) + drive;
