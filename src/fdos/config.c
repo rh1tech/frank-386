@@ -81,6 +81,7 @@ STATIC unsigned Menus BSS_INIT(0);
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 
 extern const dos_far_ptr x86_szLine;
+const size_t szLine_len = 256;
 
 STATIC void config_init_buffers(int wantedbuffers)
 {
@@ -831,7 +832,7 @@ VOID DoConfig(int nPass)
         break;
       }
 
-      if (pLine >= szLine + sizeof(szLine) - 3)
+      if (pLine >= szLine + szLine_len - 3)
       {
         CfgFailure(pLine);
         printf("error - line overflow line %d \n", nCfgLine);
