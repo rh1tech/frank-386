@@ -52,6 +52,10 @@ STATIC BYTE szBuf[256] BSS_INIT({0});
 STATIC unsigned nCfgLine BSS_INIT(0);
 static UBYTE ErrorAlreadyPrinted[128] BSS_INIT({0});
 BYTE *pLineStart BSS_INIT(0);
+STATIC seg base_seg BSS_INIT(0);
+static COUNT UmbState BSS_INIT(0);
+STATIC seg umb_base_seg BSS_INIT(0);
+UWORD umb_start BSS_INIT(0), UMB_top BSS_INIT(0);
 static BYTE HMAState BSS_INIT(0);
 struct config Config = { 0 };
 static COUNT nFileDesc BSS_INIT(0);
@@ -963,4 +967,172 @@ UWORD GetBiosKey(int timeout)
 {
   UNREFERENCED_PARAMETER(timeout);
   return 0xffff;
+}
+
+STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)
+{
+  UWORD uSegVal;
+
+  /* First, convert the segmented pointer to linear address       */
+  uSegVal = FP_SEG(lpPtr);
+  uSegVal += (FP_OFF(lpPtr) + 0xf) >> 4;
+  if (FP_OFF(lpPtr) > 0xfff0)
+    uSegVal += 0x1000;          /* handle overflow */
+
+  /* and return an adddress adjusted to the nearest paragraph     */
+  /* boundary.                                                    */
+  return MK_FP(uSegVal, 0);
+}
+
+STATIC VOID mcb_init_copy(UCOUNT seg, UWORD size, mcb *near_mcb)
+{
+  near_mcb->m_size = size;
+  memcpy(ARM_PTR(MK_FP(seg, 0)), near_mcb, sizeof(mcb));
+}
+
+STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type)
+{
+  static mcb near_mcb BSS_INIT({0}); /// TODO: _BSS
+  near_mcb.m_type = type;
+  mcb_init_copy(seg, size, &near_mcb);
+}
+
+STATIC VOID mumcb_init(UCOUNT seg, UWORD size)
+{
+  static mcb near_mcb = {
+    MCB_NORMAL,
+    8, 0,
+    {0,0,0},
+    {"SC"}
+  };
+  mcb_init_copy(seg, size, &near_mcb);
+}
+
+/*
+ * PreConfig2() from FreeDOS config.c, ported to the current native/guest
+ * pointer split.
+ *
+ * Original effects kept here:
+ *   - initialize LoL->first_mcb/base_seg;
+ *   - create the low-memory MCB chain;
+ *   - append the second 3-entry SFT block after the built-in 5-entry block.
+ * 
+ * /// TODO: Not ported here:
+ *   - EBDA move;
+ *   - UMB init;
+ *   - HMA finalization.
+ */
+VOID PreConfig2(VOID)
+{
+  /*
+   * Current fixed guest layout comment in this file says:
+   *   _BSS 019F4h..0240Dh, size 0A1Ah
+   * so DynLast() equivalent is DOS_PSP:240Eh.
+   */
+  dos_far_ptr x86_dyn_last = MK_FP(DOS_PSP, 0x240E);
+  dos_far_ptr x86_first_mcb = AlignParagraph(ADD_OFF(x86_dyn_last, 0x0F));
+  dos_far_ptr x86_sft2;
+  sfttbl *sp;
+
+  base_seg = LoL->first_mcb = FP_SEG(x86_first_mcb);
+
+  /*
+   * ram_top is in Kbytes; MCB size is in paragraphs.
+   * The MCB itself occupies first_mcb:0000, so usable size is -1.
+   */
+  mcb_init(base_seg, ram_top * 64 - LoL->first_mcb - 1, MCB_LAST);
+
+  /*
+   * Built-in firstsftt has 5 SFT entries. Original PreConfig2 appends
+   * a second 3-entry SFT block, giving the initial 8 entries expected
+   * before PostConfig() allocates the final FILES= block.
+   */
+  sp = (sfttbl *)ARM_PTR(LoL->sfthead);
+  x86_sft2 = KernelAlloc(sizeof(sftheader) + 3 * sizeof(sft), 'F', 0);
+  sp->sftt_next = x86_sft2;
+
+  sp = (sfttbl *)ARM_PTR(x86_sft2);
+  sp->sftt_next = MK_FP(-1, -1);
+  sp->sftt_count = 3;
+}
+
+#pragma pack(push, 1)
+struct submcb
+{
+  char type;
+  unsigned short start;
+  unsigned short size;
+  char unused[3];
+  char name[8];
+};
+#pragma pack(pop)
+
+dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
+{
+  seg base, start;
+
+  /* if no umb available force low allocation */
+  if (UmbState != 1)
+    mode = 0;
+
+  if (mode)
+  {
+    base = umb_base_seg;
+    start = umb_start;
+  }
+  else
+  {
+    base = base_seg;
+    start = LoL->first_mcb;
+  }
+
+  /* create the special DOS data MCB if it doesn't exist yet */
+  CfgDbgPrintf(("kernelallocpara: %x %x %x %c %d\n", start, base, nPara, type, mode));
+
+  if (base == start)
+  {
+    /*mcb*/ dos_far_ptr x86_p = x86_para2far(base);
+    mcb* p = (mcb*)ARM_PTR(x86_p);
+    base++;
+    mcb_init(base, p->m_size - 1, p->m_type);
+    mumcb_init(FP_SEG(x86_p), 0);
+    p->m_name[1] = 'D';
+  }
+
+  nPara++;
+  mcb_init(base + nPara, para2far(base)->m_size - nPara, para2far(base)->m_type);
+  para2far(start)->m_size += nPara;
+
+  struct submcb* p = (struct submcb*)para2far(base);
+  p->type = type;
+  p->start = base + 1;
+  p->size = nPara-1;
+  if (name)
+    memcpy(p->name, name, 8);
+  base += nPara;
+  if (mode)
+    umb_base_seg = base;
+  else
+    base_seg = base;
+
+  return MK_FP(base+1, 0);
+}
+
+dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode)
+{
+  dos_far_ptr p;
+  size_t nPara = (nBytes + 15)/16;
+
+  if (LoL->first_mcb == 0)
+  {
+    /* prealloc */
+    lpTop = MK_FP(FP_SEG(lpTop) - nPara, FP_OFF(lpTop));
+    p = AlignParagraph(lpTop);
+  }
+  else
+  {
+    p = KernelAllocPara(nPara, type, NULL, mode);
+  }
+  fmemset(p, 0, nBytes);
+  return p;
 }

@@ -67,15 +67,8 @@ void dos_printf(const char *fmt, ...) {
 #include "init-mod.h"
 #include "dyndata.h"
 
-#define x86_para2far(seg) (MK_FP((seg), 0))
-#define para2far(seg) ((mcb*)ARM_PTR(MK_FP((seg), 0)))
-
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
-COUNT UmbState BSS_INIT(0);
-STATIC seg base_seg BSS_INIT(0);
-STATIC seg umb_base_seg BSS_INIT(0);
-UWORD umb_start BSS_INIT(0), UMB_top BSS_INIT(0);
 dos_far_ptr lpTop;
 /*
  00000H 000FFH 00100H PSP                PSP
@@ -590,126 +583,6 @@ WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp) {
       x86_execrh();
   }
   return rq->r_status;
-}
-
-STATIC VOID mcb_init_copy(UCOUNT seg, UWORD size, mcb *near_mcb)
-{
-  near_mcb->m_size = size;
-  memcpy(ARM_PTR(MK_FP(seg, 0)), near_mcb, sizeof(mcb));
-}
-
-STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type)
-{
-  static mcb near_mcb BSS_INIT({0}); /// TODO: _BSS
-  near_mcb.m_type = type;
-  mcb_init_copy(seg, size, &near_mcb);
-}
-
-STATIC VOID mumcb_init(UCOUNT seg, UWORD size)
-{
-  static mcb near_mcb = {
-    MCB_NORMAL,
-    8, 0,
-    {0,0,0},
-    {"SC"}
-  };
-  mcb_init_copy(seg, size, &near_mcb);
-}
-
-#pragma pack(push, 1)
-struct submcb
-{
-  char type;
-  unsigned short start;
-  unsigned short size;
-  char unused[3];
-  char name[8];
-};
-#pragma pack(pop)
-
-dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
-{
-  seg base, start;
-
-  /* if no umb available force low allocation */
-  if (UmbState != 1)
-    mode = 0;
-
-  if (mode)
-  {
-    base = umb_base_seg;
-    start = umb_start;
-  }
-  else
-  {
-    base = base_seg;
-    start = LoL->first_mcb;
-  }
-
-  /* create the special DOS data MCB if it doesn't exist yet */
-  CfgDbgPrintf(("kernelallocpara: %x %x %x %c %d\n", start, base, nPara, type, mode));
-
-  if (base == start)
-  {
-    /*mcb*/ dos_far_ptr x86_p = x86_para2far(base);
-    mcb* p = (mcb*)ARM_PTR(x86_p);
-    base++;
-    mcb_init(base, p->m_size - 1, p->m_type);
-    mumcb_init(FP_SEG(x86_p), 0);
-    p->m_name[1] = 'D';
-  }
-
-  nPara++;
-  mcb_init(base + nPara, para2far(base)->m_size - nPara, para2far(base)->m_type);
-  para2far(start)->m_size += nPara;
-
-  struct submcb* p = (struct submcb*)para2far(base);
-  p->type = type;
-  p->start = base + 1;
-  p->size = nPara-1;
-  if (name)
-    memcpy(p->name, name, 8);
-  base += nPara;
-  if (mode)
-    umb_base_seg = base;
-  else
-    base_seg = base;
-
-  return MK_FP(base+1, 0);
-}
-
-STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)
-{
-  UWORD uSegVal;
-
-  /* First, convert the segmented pointer to linear address       */
-  uSegVal = FP_SEG(lpPtr);
-  uSegVal += (FP_OFF(lpPtr) + 0xf) >> 4;
-  if (FP_OFF(lpPtr) > 0xfff0)
-    uSegVal += 0x1000;          /* handle overflow */
-
-  /* and return an adddress adjusted to the nearest paragraph     */
-  /* boundary.                                                    */
-  return MK_FP(uSegVal, 0);
-}
-
-dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode)
-{
-  dos_far_ptr p;
-  size_t nPara = (nBytes + 15)/16;
-
-  if (LoL->first_mcb == 0)
-  {
-    /* prealloc */
-    lpTop = MK_FP(FP_SEG(lpTop) - nPara, FP_OFF(lpTop));
-    p = AlignParagraph(lpTop);
-  }
-  else
-  {
-    p = KernelAllocPara(nPara, type, NULL, mode);
-  }
-  fmemset(p, 0, nBytes);
-  return p;
 }
 
 /* check for a block device and update  device control block    */
@@ -2125,9 +1998,9 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     DoConfig(0);
     DoConfig(1);
 
+    /* initialize near data and MCBs */
+    PreConfig2();
 /// TODO:
-  /* initialize near data and MCBs */
-///  PreConfig2();
   /* and process CONFIG.SYS one last time for device drivers */
 //  DoConfig(2);
 

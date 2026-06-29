@@ -26,6 +26,8 @@ extern struct config Config;
 extern BYTE DOSFAR ASM HaltCpuWhileIdle;
 extern dos_far_ptr x86_dap;
 extern dos_far_ptr lpTop;
+extern UWORD ram_top;
+
 /*
     data shared between DSK.C and INITDISK.C
 */
@@ -35,6 +37,7 @@ void init_PSPSet(CPU* cpu, u16 psp);
 void Init_clk_driver(CPU* cpu);
 COUNT dsk_init(CPU* cpu);
 void PreConfig(void);
+VOID PreConfig2(VOID);
 dos_far_ptr HMAalloc(COUNT bytesToAllocate);
 dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode);
 dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode);
