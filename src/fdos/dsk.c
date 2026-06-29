@@ -487,9 +487,9 @@ void blockio(CPU* cpu, request FAR *rq)
     rq_done(rq);
     return;
   }
-
+  ULONG start = (rq->r_start != HUGECOUNT) ? rq->r_start : rq->r_huge;
   err = LBA_Transfer(cpu, pddt, mode, rq->r_trans,
-                      rq->r_start != HUGECOUNT ? rq->r_start : rq->r_huge,
+                      pddt->ddt_offset + start,
                       rq->r_count, &transferred);
 
   rq->r_count = transferred;
