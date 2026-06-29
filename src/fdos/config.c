@@ -1259,3 +1259,36 @@ VOID PostConfig(VOID)
 
   CfgDbgPrintf(("Allocation completed: top at 0x%x\n", base_seg));
 }
+
+/* This code must be executed after device drivers has been loaded */
+VOID configDone(VOID)
+{
+  if (UmbState == 1)
+    para2far(base_seg)->m_type = MCB_LAST;
+
+/* ///TODO: ??
+  if (HMAState != HMA_DONE)
+  {
+    mcb FAR *p;
+    unsigned short kernel_seg;
+    unsigned short hma_paras = (HMAFree+0xf)/16;
+
+    kernel_seg = allocmem(hma_paras);
+    p = para2far(kernel_seg - 1);
+
+    p->m_name[0] = 'S';
+    p->m_name[1] = 'C';
+    p->m_psp = 8;
+
+    CfgDbgPrintf(("HMA not available, moving text to %x\n", kernel_seg));
+    MoveKernel(kernel_seg);
+
+    kernel_seg += hma_paras + 1;
+
+    CfgDbgPrintf(("kernel is low, start alloc at %x\n", kernel_seg));
+  }
+*/
+
+  /* The standard handles should be reopened here, because
+     we may have loaded new console or printer drivers in CONFIG.SYS */
+}

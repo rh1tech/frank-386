@@ -1944,6 +1944,30 @@ STATIC VOID InitSerialPorts(VOID)
   }
 }
 
+/*
+    InitializeAllBPBs()
+    
+    or MakeNortonDiskEditorHappy()
+
+    it has been determined, that FDOS's BPB tables are initialized,
+    only when used (like DIR H:).
+    at least one known utility (norton DE) seems to access them directly.
+    ok, so we access for all drives, that the stuff gets build
+*/
+static void InitializeAllBPBs(VOID)
+{
+  static char filename[] = "A:-@JUNK@-.TMP";
+  int drive, fileno;
+  strcpy(PriPathName, filename);
+  dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
+  for (drive = 'C'; drive < 'A' + LoL->nblkdev; drive++)
+  {
+    PriPathName[0] = drive;
+    if ((fileno = open( x86_path, O_RDONLY)) >= 0)
+      close(fileno);
+  }
+}
+
 STATIC void init_kernel(CPU* cpu)
 {
     COUNT i;
@@ -2011,13 +2035,17 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     /* and do final buffer allocation. */
     PostConfig();
 
-/// TODO:
-  /* Init the file system one more time     */
-///  FsConfig();
+    /* Init the file system one more time     */
+    FsConfig();
   
-///  configDone();
+    configDone();
+printf("DBG: DPBp=%04X:%04X CDSp=%04X:%04X firstbuf=%04X:%04X sfthead=%04X:%04X\n",
+       FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp),
+       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp),
+       FP_SEG(LoL->firstbuf), FP_OFF(LoL->firstbuf),
+       FP_SEG(LoL->sfthead), FP_OFF(LoL->sfthead));
 
-///  InitializeAllBPBs();
+    InitializeAllBPBs();
 }
 
 void kernel(CPU* _cpu) {
