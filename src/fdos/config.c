@@ -189,7 +189,7 @@ void PreConfig(void)
 
   /* Done.  Now initialize the MCB structure                      */
   /* This next line is 8086 and 80x86 real mode specific          */
-  CfgDbgPrintf(("Preliminary  allocation completed: top at %p\n", lpTop));
+  CfgDbgPrintf(("Preliminary  allocation completed: top at %04x:%04x\n", lpTop.segment,  lpTop.offset));
 }
 
 /// TODO:
@@ -699,7 +699,6 @@ STATIC VOID CfgLastdriveHigh(BYTE * pLine)
 VOID DoConfig(int nPass)
 {
   BOOL bEof = FALSE;
-
 #ifdef MEMDISK_ARGS
   /* check if MEMDISK used for LoL->BootDrive, if so check for special appended arguments */
   struct memdiskinfo FAR *mdsk = NULL;
@@ -719,7 +718,6 @@ VOID DoConfig(int nPass)
   if (nPass==0)
   {
     HaltCpuWhileIdle = 0; /* init to "no HLT while idle" */
-
 #ifdef MEMDISK_ARGS
     if (mdsk != NULL)
     {

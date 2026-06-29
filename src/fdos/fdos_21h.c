@@ -239,7 +239,7 @@ int DosSetTime(CPU* cpu)
 /* get current directory structure for drive
    return NULL if the CDS is not valid or the
    drive is not within range */
-/*struct cds*/ dos_far_ptr get_cds(unsigned drive)
+dos_far_ptr/*struct cds*/ get_cds(unsigned drive)
 {
   if (drive >= LoL->lastdrive)
     return MK_FP(0, 0);
@@ -251,7 +251,7 @@ int DosSetTime(CPU* cpu)
     return MK_FP(0, 0);
   if (!(flags & CDSNETWDRV) && EFFECTIVE(CDSp->cdsDpb) == 0)
     return MK_FP(0, 0);
-  return x86_FAR_PTR(DOS_PSP, CDSp);
+  return x86_FAR_PTR(FP_SEG(LoL->CDSp), CDSp);
 }
 
 UBYTE DosSelectDrv(UBYTE drv)

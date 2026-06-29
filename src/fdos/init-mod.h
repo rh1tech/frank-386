@@ -25,6 +25,7 @@ extern UWORD HMAFree;            /* first byte in HMA not yet used      */
 extern struct config Config;
 extern BYTE DOSFAR ASM HaltCpuWhileIdle;
 extern dos_far_ptr x86_dap;
+extern dos_far_ptr lpTop;
 /*
     data shared between DSK.C and INITDISK.C
 */
