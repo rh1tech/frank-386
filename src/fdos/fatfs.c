@@ -867,7 +867,6 @@ int dos_cd(char *PathName)
 {
   f_node_ptr fnp;
   struct cds *cdsp;
-
   /* now test for its existance. If it doesn't, return an error.  */
   if ((fnp = dir_open(PathName, FALSE, &fnode[0])) == NULL)
     return DE_PATHNOTFND;
@@ -877,4 +876,379 @@ int dos_cd(char *PathName)
   cdsp = (struct cds *)ARM_PTR(get_cds(PathName[0] - 'A'));
   cdsp->cdsStrtClst = (UWORD)fnp->f_dmp->dm_dircluster;
   return SUCCESS;
+}
+
+
+/*
+    get_dpb(dsk) - return a pointer to the DPB for logical drive "dsk"
+    (0=A:, 1=B:, ...), or NULL if the drive isn't a valid, non-network
+    drive.
+
+    Migrated from fatfs.c. Unlike the original (struct dpb FAR *), the
+    return type here is a native ARM pointer: get_dpb() is only ever
+    used internally (by code in this file, eventually including
+    dos_open() et al.), never exposed across the DOS API, so there is
+    no reason to keep it in dos_far_ptr form - see fnode.h.
+*/
+struct dpb *get_dpb(COUNT dsk)
+{
+  dos_far_ptr x86_cdsp = get_cds(dsk);
+  struct cds *cdsp;
+
+  if (far_is_null(x86_cdsp))
+    return NULL;
+
+  cdsp = (struct cds *)ARM_PTR(x86_cdsp);
+  if (cdsp->cdsFlags & CDSNETWDRV)
+    return NULL;
+  return (struct dpb *)ARM_PTR(cdsp->cdsDpb);
+}
+
+STATIC int rqblockio(unsigned char command, struct dpb FAR * dpbp)
+{
+ retry:
+  MediaReqHdrD.r_length = sizeof(request);
+  MediaReqHdrD.r_unit = dpbp->dpb_subunit;
+  MediaReqHdrD.r_command = command;
+  MediaReqHdrD.r_mcmdesc = dpbp->dpb_mdb;
+  MediaReqHdrD.r_status = 0;
+
+  if (command == C_BLDBPB) /* help USBASPI.SYS & DI1000DD.SYS (TE) */
+    MediaReqHdrD.r_bpfat = (boot*)ARM_PTR(DiskTransferBuffer);
+  execrh((request FAR *) & MediaReqHdrD, dpbp->dpb_device);
+  if ((MediaReqHdrD.r_status & S_ERROR) || !(MediaReqHdrD.r_status & S_DONE))
+  {
+    FOREVER
+    {
+      switch (block_error(&MediaReqHdrD, dpbp->dpb_unit, (struct dhdr*)ARM_PTR(dpbp->dpb_device), 0))
+      {
+      case ABORT:
+      case FAIL:
+        return DE_INVLDDRV;
+
+      case RETRY:
+        goto retry;
+
+      case CONTINUE:
+        return SUCCESS;
+      }
+    }
+  }
+  return SUCCESS;
+}
+
+#ifdef WITHFAT32
+VOID dpb16to32(struct dpb FAR *dpbp)
+{
+  dpbp->dpb_xflags = 0;
+  dpbp->dpb_xfsinfosec = 0xffff;
+  dpbp->dpb_xbackupsec = 0xffff;
+  dpbp->dpb_xrootclst = 0;
+  dpbp->dpb_xdata = dpbp->dpb_data;
+  dpbp->dpb_xsize = dpbp->dpb_size;
+}
+
+VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp, BOOL extended)
+#else
+VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp)
+#endif
+{
+  ULONG size;
+  REG UWORD shftcnt;
+  bpb sbpb;
+
+  memcpy(&sbpb, bpbp, sizeof(sbpb));
+  if (sbpb.bpb_nsector == 0) {
+    shftcnt = 8;
+  } else {
+    for (shftcnt = 0; (sbpb.bpb_nsector >> shftcnt) > 1; shftcnt++)
+      ;
+  }
+  dpbp->dpb_shftcnt = shftcnt;
+
+  dpbp->dpb_mdb = sbpb.bpb_mdesc;
+  dpbp->dpb_secsize = sbpb.bpb_nbyte;
+  dpbp->dpb_clsmask = (sbpb.bpb_nsector - 1) & 0xFF;
+  dpbp->dpb_fatstrt = sbpb.bpb_nreserved;
+  dpbp->dpb_fats = sbpb.bpb_nfat;
+  dpbp->dpb_dirents = sbpb.bpb_ndirent;
+  size = sbpb.bpb_nsize == 0 ? sbpb.bpb_huge : (ULONG) sbpb.bpb_nsize;
+  dpbp->dpb_fatsize = sbpb.bpb_nfsect;
+  dpbp->dpb_dirstrt = dpbp->dpb_fatstrt + dpbp->dpb_fats * dpbp->dpb_fatsize;
+  dpbp->dpb_data = dpbp->dpb_dirstrt
+      + (dpbp->dpb_dirents + dpbp->dpb_secsize/DIRENT_SIZE - 1) /
+          (dpbp->dpb_secsize/DIRENT_SIZE);
+  dpbp->dpb_size = (UWORD)((size - dpbp->dpb_data) >> shftcnt) + 1;
+  { /* Make sure the number of FAT sectors is actually enough to hold that */
+    /* many clusters. Otherwise back the number of clusters down (LG & AB) */
+    unsigned fatsiz;
+    ULONG tmp = dpbp->dpb_fatsize * (ULONG)(dpbp->dpb_secsize / 2);/* entries/2 */
+    if (tmp >= 0x10000UL)
+      goto ckok;
+    fatsiz = (unsigned) tmp;
+    if (dpbp->dpb_size > FAT_MAGIC) {/* FAT16 */
+      if (fatsiz <= FAT_MAGIC)       /* FAT12 - let it pass through rather */
+        goto ckok;                   /* than lose data correcting FAT type */
+    } else {                         /* FAT12 */
+      if (fatsiz >= 0x4000)
+        goto ckok;
+      fatsiz = fatsiz * 4 / 3;
+    }
+    if (dpbp->dpb_size >= fatsiz)    /* FAT too short */
+      dpbp->dpb_size = fatsiz - 1;   /* - 2 reserved entries + 1 */
+ckok:;
+  }
+  dpbp->dpb_flags = 0;
+  dpbp->dpb_cluster = UNKNCLUSTER;
+  /* number of free clusters */
+  dpbp->dpb_nfreeclst = UNKNCLSTFREE;
+
+#ifdef WITHFAT32
+  if (extended)
+  {
+    dpbp->dpb_xfatsize = sbpb.bpb_nfsect == 0 ? sbpb.bpb_xnfsect
+        : sbpb.bpb_nfsect;
+    dpbp->dpb_xcluster = UNKNCLUSTER;
+    dpbp->dpb_xnfreeclst = XUNKNCLSTFREE;       /* number of free clusters */
+
+    dpb16to32(dpbp);
+
+    if (ISFAT32(dpbp))
+    {
+      dpbp->dpb_xflags = sbpb.bpb_xflags;
+      dpbp->dpb_xfsinfosec = sbpb.bpb_xfsinfosec;
+      dpbp->dpb_xbackupsec = sbpb.bpb_xbackupsec;
+      dpbp->dpb_dirents = 0;
+      dpbp->dpb_dirstrt = 0xffff;
+      dpbp->dpb_size = 0;
+      dpbp->dpb_xdata =
+          dpbp->dpb_fatstrt + dpbp->dpb_fats * dpbp->dpb_xfatsize;
+      dpbp->dpb_xsize = ((size - dpbp->dpb_xdata) >> shftcnt) + 1;
+      dpbp->dpb_xrootclst = sbpb.bpb_xrootclst;
+      read_fsinfo(dpbp);
+    }
+  }
+#endif
+}
+
+/*
+    media_check(dpbp) - check whether removable media in drive dpbp
+    may have been swapped since the last access, and if so, rebuild
+    the DPB's BPB-derived fields from the new media.
+*/
+COUNT media_check(struct dpb *dpbp)
+{
+  int ret;
+  if (dpbp == NULL)
+    return DE_INVLDDRV;
+
+  /* First test if anyone has changed the removable media         */
+  ret = rqblockio(C_MEDIACHK, dpbp);
+  if (ret < SUCCESS)
+    return ret;
+
+  switch (MediaReqHdrD.r_mcretcode | dpbp->dpb_flags)
+  {
+    case M_NOT_CHANGED:
+      /* It was definitely not changed, so ignore it          */
+      return SUCCESS;
+
+      /* If it is forced or the media may have changed,       */
+      /* rebuild the bpb                                      */
+    case M_DONT_KNOW:
+      /* IBM PCDOS technical reference says to call BLDBPB if */
+      /* there are no used buffers                            */
+      if (dirty_buffers(dpbp->dpb_unit))
+        return SUCCESS;
+
+      /* If it definitely changed, don't know (falls through) */
+      /* or has been changed, rebuild the bpb.                */
+    /* case M_CHANGED: */
+    default:
+      setinvld(dpbp->dpb_unit);
+      ret = rqblockio(C_BLDBPB, dpbp);
+      if (ret < SUCCESS)
+        return ret;
+#ifdef WITHFAT32
+      /* extend dpb only for internal or FAT32 devices */
+      bpb_to_dpb(MediaReqHdrD.r_bpptr, dpbp,
+                 MediaReqHdrD.r_bpptr->bpb_nfsect == 0 ||
+                 !is_guest_ptr(dpbp)
+      );
+#else
+      bpb_to_dpb(MediaReqHdr.r_bpptr, dpbp);
+#endif
+      return SUCCESS;
+  }
+}
+
+/*    clus2phys(cl_no, dpbp) - convert a cluster number into the absolute
+    sector number of its first sector.
+
+    Migrated from fatfs.c verbatim (dpbp is already a native pointer
+    here, see get_dpb()/fnode.h above).
+*/
+ULONG clus2phys(CLUSTER cl_no, struct dpb *dpbp)
+{
+  CLUSTER data =
+#ifdef WITHFAT32
+      ISFAT32(dpbp) ? dpbp->dpb_xdata :
+#endif
+      dpbp->dpb_data;
+  return ((ULONG)(cl_no - 2) << dpbp->dpb_shftcnt) + data;
+}
+
+/*
+    getdstart(dpbp)/setdstart(dpbp, dentry, value) - get/set a
+    directory entry's starting cluster number, taking the FAT32
+    high-word split (dir_start + dir_start_high) into account when the
+    volume is FAT32.
+
+    Migrated from fatfs.c verbatim.
+*/
+CLUSTER getdstart(struct dpb *dpbp, struct dirent *dentry)
+{
+#ifdef WITHFAT32
+  if (!ISFAT32(dpbp))
+    return dentry->dir_start;
+  return (((CLUSTER)dentry->dir_start_high << 16) | dentry->dir_start);
+#else
+  UNREFERENCED_PARAMETER(dpbp);
+  return dentry->dir_start;
+#endif
+}
+
+void setdstart(struct dpb *dpbp, struct dirent *dentry, CLUSTER value)
+{
+  dentry->dir_start = (UWORD)value;
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+    dentry->dir_start_high = (UWORD)(value >> 16);
+#else
+  UNREFERENCED_PARAMETER(dpbp);
+#endif
+}
+
+
+/*
+    extend(fnp) - extend a directory or file by exactly one cluster,
+    allocating a free one from the FAT and chaining it in.
+
+    /// TODO: stub for this iteration. The original calls
+    /// find_fat_free(fnp) to locate a free cluster - not migrated yet,
+    /// since nothing exercising the write path (map_cluster(fnp,
+    /// XFR_WRITE), i.e. writing past the current end of a file) is
+    /// migrated yet either. Always reports the disk as full, which is
+    /// what map_cluster() does with a real extend() that can't find a
+    /// free cluster - this just means writes that would grow a file
+    /// fail for now instead of allocating, while reads (XFR_READ)
+    /// never call this at all (see map_cluster() below).
+*/
+STATIC CLUSTER extend(f_node_ptr fnp)
+{
+  UNREFERENCED_PARAMETER(fnp);
+  return LONG_LAST_CLUSTER;
+}
+
+/* Description.
+ *    Finds the cluster which contains byte at the fnp->f_offset offset and
+ *  stores its number to the fnp->f_cluster. The search begins from the start of
+ *  a file or a directory depending on whether the SFT index is valid
+ *  and continues through the FAT chain until the target cluster is found.
+ *  The mode can have only XFR_READ or XFR_WRITE values.
+ *    In the XFR_WRITE mode map_cluster extends the FAT chain by creating
+ *  new clusters upon necessity.
+ * Return value.
+ *  DE_HNDLDSKFULL - [XFR_WRITE mode only] unable to find free cluster
+ *                   for extending the FAT chain, the disk is full.
+ *                   The fnode is released from memory.
+ *  DE_SEEK        - [XFR_READ mode only] byte at f_offset lies outside of
+ *                   the FAT chain. The fnode is not released.
+ * Notes.
+ *  If we are moving forward, then use the relative cluster number offset
+ *  that we are at now (f_cluster_offset) to start, instead of starting
+ *  at the beginning.
+
+    Migrated from fatfs.c verbatim.
+*/
+COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
+{
+  CLUSTER relcluster, cluster;
+
+  if (fnp->f_cluster == FREE)
+  {
+    /* If this is a read but the file still has zero bytes return   */
+    /* immediately....                                              */
+    if (mode == XFR_READ)
+      return DE_SEEK;
+
+    /* If someone did a seek, but no writes have occured, we will   */
+    /* need to initialize the fnode.                                */
+    /*  (mode == XFR_WRITE) */
+    /* If there are no more free fat entries, then we are full! */
+    cluster = extend(fnp);
+    if (cluster == LONG_LAST_CLUSTER)
+    {
+      return DE_HNDLDSKFULL;
+    }
+    fnp->f_cluster = cluster;
+  }
+
+  relcluster = (CLUSTER)((fnp->f_offset / fnp->f_dpb->dpb_secsize) >>
+                         fnp->f_dpb->dpb_shftcnt);
+  if (relcluster < fnp->f_cluster_offset)
+  {
+    /* If seek is to earlier in file than current position, */
+    /* we have to follow chain from the beginning again...  */
+    /* Set internal index and cluster size.                 */
+    fnp->f_cluster = fnp->f_sft_idx == 0xff ? fnp->f_dmp->dm_dircluster :
+        getdstart(fnp->f_dpb, &fnp->f_dir);
+    fnp->f_cluster_offset = 0;
+  }
+
+  /* Now begin the linear search. The relative cluster is         */
+  /* maintained as part of the set of physical indices. It is     */
+  /* also the highest order index and is mapped directly into     */
+  /* physical cluster. Our search is performed by pacing an index */
+  /* up to the relative cluster position where the index falls    */
+  /* within the cluster.                                          */
+
+  while (fnp->f_cluster_offset != relcluster)
+  {
+    /* get next cluster in the chain */
+    cluster = next_cluster(fnp->f_dpb, fnp->f_cluster);
+    if (cluster <= 1) /* 1/error or 0/FREE chain into the void */
+      return DE_SEEK;
+
+    /* If this is a read and the next is a LAST_CLUSTER,               */
+    /* then we are going to read past EOF, return zero read            */
+    /* or expand the list if we're going to write and have run into    */
+    /* the last cluster marker.                                        */
+    if (cluster == LONG_LAST_CLUSTER)
+    {
+      if (mode == XFR_READ)
+        return DE_SEEK;
+
+      /* mode == XFR_WRITE */
+      cluster = extend(fnp);
+      if (cluster == LONG_LAST_CLUSTER)
+        return DE_HNDLDSKFULL;
+    }
+
+    fnp->f_cluster = cluster;
+    fnp->f_cluster_offset++;
+  }
+
+  return SUCCESS;
+}
+
+/*
+    fcbmatch(fcbname1, fcbname2) - compare two FCB-style (8.3,
+    space-padded, no dot) names for an exact match.
+
+    Migrated from fatfs.c verbatim.
+*/
+BOOL fcbmatch(const char *fcbname1, const char *fcbname2)
+{
+  return memcmp(fcbname1, fcbname2, FNAME_SIZE + FEXT_SIZE) == 0;
 }

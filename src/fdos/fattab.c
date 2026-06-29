@@ -370,3 +370,52 @@ BOOL is_free_cluster(struct dpb *dpbp, CLUSTER ClusterNum)
 {
   return (link_fat(dpbp, ClusterNum, READ_CLUSTER) == FREE);
 }
+
+#ifdef WITHFAT32
+void read_fsinfo(struct dpb FAR * dpbp)
+{
+  struct buffer FAR *bp;
+  struct fsinfo FAR *fip;
+  CLUSTER cluster;
+
+  if (dpbp->dpb_xfsinfosec == 0xffff)
+    return;
+
+  bp = getblock(dpbp->dpb_xfsinfosec, dpbp->dpb_unit);
+  bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT | BFR_DIRTY);
+  bp->b_flag |= BFR_VALID;
+
+  fip = (struct fsinfo FAR *)&bp->b_buffer[0x1e4];
+  /* need to range check values because they may not be correct */
+  cluster = fip->fi_nfreeclst;
+  if (cluster >= dpbp->dpb_xsize)
+    cluster = XUNKNCLSTFREE;
+  dpbp->dpb_xnfreeclst = cluster;
+  cluster = fip->fi_cluster;
+  if (cluster < 2 || cluster > dpbp->dpb_xsize)
+    cluster = UNKNCLUSTER;
+  dpbp->dpb_xcluster = cluster;
+}
+
+void write_fsinfo(struct dpb FAR * dpbp)
+{
+  struct buffer FAR *bp;
+  struct fsinfo FAR *fip;
+
+  if (dpbp->dpb_xfsinfosec == 0xffff)
+    return;
+
+  bp = getblock(dpbp->dpb_xfsinfosec, dpbp->dpb_unit);
+  bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT);
+  bp->b_flag |= BFR_VALID;
+
+  fip = (struct fsinfo FAR *)&bp->b_buffer[0x1e4];
+
+  if (fip->fi_nfreeclst != dpbp->dpb_xnfreeclst ||
+    fip->fi_cluster != dpbp->dpb_xcluster)
+    bp->b_flag |= BFR_DIRTY; /* only flag for update if we had real news */
+
+  fip->fi_nfreeclst = dpbp->dpb_xnfreeclst;
+  fip->fi_cluster = dpbp->dpb_xcluster;
+}
+#endif

@@ -417,3 +417,300 @@ BOOL IsShareInstalled(BOOL recheck)
   UNREFERENCED_PARAMETER(recheck);
   return FALSE;
 }
+
+
+/*
+    DosRWSft(sft_idx, n, bp, mode) - the real implementation behind
+    INT 21h AH=3Fh/40h (read/write): dispatch to the network
+    redirector, a character device, or rwblock() (regular files),
+    depending on the SFT's flags.
+
+    Migrated from dosfns.c. Differences from the original:
+      - bp is a dos_far_ptr (it comes straight from the guest program
+        via DS:DX, like rwblock()'s buffer above) - converted to a
+        native pointer only where BinaryCharIO()/cooked_read()/
+        cooked_write() (which all take native void* / char* - see their
+        definitions above) need one; passed straight through
+        (untranslated) to rwblock(), which itself expects a
+        dos_far_ptr.
+      - the SFT_FSHARED (network redirector) branch is migrated as-is
+        but unreachable, same reasoning as DosCloseSft()'s SFT_FSHARED
+        branch above - dta/lpCurSft/current_filepos below are
+        internal_data fields here (see lol.h), not bare "extern ASM"
+        variables.
+      - the SHARE-installed branch (share_access_check()) is left as
+        a deliberate panic, same reasoning as DosOpenSft()'s SHARE
+        branch above.
+*/
+long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
+{
+  /* Get the SFT block that contains the SFT      */
+  sft *s = idx_to_sft(sft_idx);
+
+  if (s == (sft *) - 1)
+  {
+    return DE_INVLDHNDL;
+  }
+  /* If for read and write-only or for write and read-only then exit */
+  if((mode == XFR_READ && (s->sft_mode & O_WRONLY)) ||
+     (mode == XFR_WRITE && (s->sft_mode & O_ACCMODE) == O_RDONLY))
+  {
+    return DE_ACCESS;
+  }
+  if (mode == XFR_FORCE_WRITE)
+    mode = XFR_WRITE;
+    
+/*
+ *   Do remote first or return error.
+ *   must have been opened from remote.
+ */
+  if (s->sft_flags & SFT_FSHARED)
+  {
+    /// unreachable: see the function-level comment above.
+    long XferCount;
+    dos_far_ptr save_dta;
+
+    save_dta = internal_data->dta;
+    internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), s);
+    internal_data->current_filepos = s->sft_posit;     /* needed for MSCDEX */
+    internal_data->dta = bp;
+    XferCount = remote_rw(mode == XFR_READ ? REM_READ : REM_WRITE, s, n);
+    internal_data->dta = save_dta;
+    return XferCount;
+  }
+
+  /* Do a device transfer if device                   */
+  if (s->sft_flags & SFT_FDEVICE)
+  {
+    dos_far_ptr dev = s->sft_dev;
+
+    /* Now handle raw and cooked modes      */
+    if (s->sft_flags & SFT_FBINARY)
+    {
+      long rc = BinaryCharIO(&dev, n, ARM_PTR(bp),
+                             mode == XFR_READ ? C_INPUT : C_OUTPUT);
+      if (mode == XFR_WRITE && rc > 0 && (s->sft_flags & SFT_FCONOUT))
+      {
+        size_t cnt = (size_t)rc;
+        const char *p = (const char *)ARM_PTR(bp);
+        while (cnt--)
+          update_scr_pos(*p++, 1);
+      }
+      return rc;
+    }
+
+    /* cooked mode */
+    if (mode==XFR_READ)
+    {
+      long rc;
+      /* dev (a dos_far_ptr local) cannot be reinterpreted as a
+         "struct dhdr **" - cooked_read()/cooked_write() are
+         unreachable PANIC stubs anyway (see their definitions
+         above), so NULL is passed instead of a meaningless cast. */
+      struct dhdr *unused_dev = NULL;
+
+      /* Test for eof and exit                */
+      /* immediately if it is                 */
+      if (!(s->sft_flags & SFT_FEOF))
+        return 0;
+
+      if (s->sft_flags & SFT_FCONIN)
+        rc = read_line_handle(sft_idx, n, (char *)ARM_PTR(bp));
+      else
+        rc = cooked_read(&unused_dev, n, (char *)ARM_PTR(bp));
+      if (*(char *)ARM_PTR(bp) == CTL_Z)
+        s->sft_flags &= ~SFT_FEOF;
+      return rc;
+    }
+    else
+    {
+      struct dhdr *unused_dev = NULL;
+
+      /* reset EOF state (set to no EOF)      */
+      s->sft_flags |= SFT_FEOF;
+
+      /* if null just report full transfer    */
+      if (s->sft_flags & SFT_FNUL)
+        return n;
+      else
+        return cooked_write(&unused_dev, n, (char *)ARM_PTR(bp));
+    }
+  }
+
+  /* a block transfer                           */
+  /* /// Added for SHARE - Ron Cemer */
+  if (IsShareInstalled(FALSE) && (s->sft_shroff >= 0))
+  {
+    /// unreachable: IsShareInstalled() always returns FALSE in this
+    /// codebase. share_access_check() is not implemented, so this is
+    /// left as a deliberate panic rather than silently doing nothing,
+    /// in case that assumption ever stops holding.
+    printf("PANIC: DosRWSft reached share_access_check unexpectedly\n");
+    for (;;) ;
+  }
+  /* /// End of additions for SHARE - Ron Cemer */
+  return rwblock(sft_idx, bp, n, mode);
+}
+
+
+/*
+    get_root(fname) - return a pointer to the last path component
+    (filename) in fname, i.e. whatever follows the last '/', '\\', or
+    ':' - or fname itself if it contains none of those.
+
+    Migrated from dosfns.c verbatim. fname/the return value are plain
+    native char* here (see dos_open()'s "path" parameter for why), so
+    the original's fstrlen()/FAR pointer arithmetic becomes ordinary
+    strlen()/pointer arithmetic - no other change.
+*/
+const char *get_root(const char *fname)
+{
+  /* find the end                                 */
+  register unsigned length = strlen(fname);
+  char c;
+
+  /* now back up to first path seperator or start */
+  fname += length;
+  while (length)
+  {
+    length--;
+    c = *--fname;
+    if (c == '/' || c == '\\' || c == ':') {
+      fname++;
+      break;
+    }
+  }
+  return fname;
+}
+
+
+/* check for a device
+   returns device header if match, else returns NULL
+   can only match character devices (as only they have names)
+
+    Migrated from dosfns.c. The device chain (dh_next) is walked via
+    dos_far_ptr/ARM_PTR()/far_is_end(), the same way the device table
+    built earlier in this file (see update_dcb()) already is, instead
+    of following a native "struct dhdr FAR *" chain directly - dh_next
+    is a dos_far_ptr in this codebase (see device.h), not a directly
+    dereferenceable pointer like the original's "struct dhdr FAR *".
+*/
+struct dhdr *IsDevice(const char *fname)
+{
+  dos_far_ptr x86_dhp;
+  struct dhdr *dhp;
+  const char *froot = get_root(fname);
+  int i;
+
+/* /// BUG!!! This is absolutely wrong.  A filename of "NUL.LST" must be
+       treated EXACTLY the same as a filename of "NUL".  The existence or
+       content of the extension is irrelevent in determining whether a
+       filename refers to a device.
+       - Ron Cemer
+  // if we have an extension, can't be a device <--- WRONG.
+  if (*froot != '.')
+  {
+*/
+
+/*  BUGFIX: MSCD000<00> should be handled like MSCD000<20> TE 
+    ie the 8 character device name may be padded with spaces ' ' or NULs '\0'
+
+    Note: fname is assumed an ASCIIZ string (ie not padded, unknown length)
+    but the name in the device header is assumed FNAME_SIZE and padded.  KJD
+*/
+
+
+  /* check for names that will never be devices to avoid checking all device headers.
+     only the file name (not path nor extension) need be checked, "" == root or empty name
+   */
+  if ( (*froot == '\0') ||
+       ((*froot=='.') && ((*(froot+1)=='\0') || (*(froot+2)=='\0' && *(froot+1)=='.')))
+     )
+  {
+    return NULL;
+  }
+
+  /* cycle through all device headers checking for match */
+  for (x86_dhp = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev); !far_is_end(x86_dhp);
+       x86_dhp = dhp->dh_next)
+  {
+    dhp = (struct dhdr *)ARM_PTR(x86_dhp);
+
+    if (!(dhp->dh_attr & ATTR_CHAR))  /* if this is block device, skip */
+      continue;
+
+    for (i = 0; i < FNAME_SIZE; i++)
+    {
+      unsigned char c1 = (unsigned char)froot[i];
+      /* ignore extensions and handle filenames shorter than FNAME_SIZE */
+      if (c1 == '.' || c1 == '\0')
+      {
+        /* check if remainder of device name consists of spaces or nulls */
+        for (; i < FNAME_SIZE; i++)
+        {
+          unsigned char c2 = dhp->dh_name[i];
+          if (c2 != ' ' && c2 != '\0')
+            break;
+        }
+        break;
+      }
+      if (DosUpFChar(c1) != DosUpFChar(dhp->dh_name[i]))
+        break;
+    }
+
+    /* if found a match then return device header */
+    if (i == FNAME_SIZE)
+      return dhp;
+  }
+
+  return NULL;
+}
+
+/*
+    get_free_hndl() - find a free slot in the current process's file
+    handle table (psp->ps_filetab), i.e. the lowest DOS file handle
+    number not currently in use.
+
+    Migrated from dosfns.c. p/q/r are native pointers here (fmemchr()
+    becomes plain memchr()) - see get_sft_idx() above for the same
+    "psp through internal_data->cu_psp" pattern.
+*/
+STATIC long get_free_hndl(void)
+{
+  psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  UBYTE *q = p->ps_filetab;
+  UBYTE *r = (UBYTE *)memchr(q, 0xff, p->ps_maxfiles);
+  if (r == NULL) return DE_TOOMANY;
+  return (unsigned)(r - q);
+}
+
+/*
+    DosOpen(fname, mode, attrib) - allocate a DOS file handle for the
+    current process and bind it to a newly DosOpenSft()'d SFT entry.
+
+    Migrated from dosfns.c verbatim, aside from the native-pointer psp
+    access noted in get_free_hndl() above.
+*/
+long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
+{
+  long result;
+  unsigned hndl;
+  psp *p;
+
+  /* test if mode is in range                     */
+  if ((mode & ~O_VALIDMASK) != 0)
+    return DE_INVLDACC;
+
+  /* get a free handle  */
+  if ((result = get_free_hndl()) < 0)
+    return result;
+  hndl = (unsigned)result;
+
+  result = DosOpenSft(fname, mode, attrib);
+  if (result < SUCCESS)
+    return result;
+
+  p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  p->ps_filetab[hndl] = (UBYTE)result;
+  return hndl | (result & 0xffff0000l);
+}

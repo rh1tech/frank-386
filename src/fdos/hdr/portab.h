@@ -190,6 +190,12 @@ extern char DosDataSeg[];
 #endif
 #define X86_RAM_BASE ((uint8_t*)PSRAM_BASE_ADDR)
 
+static inline bool is_guest_ptr(const void *p) {
+    uintptr_t a = (uintptr_t)p;
+    return a >= (uintptr_t)X86_RAM_BASE &&
+           a <  (uintptr_t)X86_RAM_BASE + (16ul << 20);
+}
+
 #pragma pack(push, 1)
 typedef struct dos_far_ptr {
     uint16_t offset;

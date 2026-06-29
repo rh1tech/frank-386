@@ -315,3 +315,36 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
   /* Clear buffers after directory write or DOS close                     */
   return flush_buffers(fnp->f_dpb->dpb_unit);
 }
+
+/*
+    ConvertNameSZToName83(fcbname, dirname) - convert a single path
+    component (dirname, a NUL- or '\\'-terminated name) into its
+    FCB-style (8.3, space-padded, no dot) form in fcbname, and return
+    a pointer to whatever follows it in dirname (the next '\\', or the
+    terminating NUL).
+
+    Migrated from fatdir.c verbatim. ". and .. are not allowed [by
+    this function], only straightforward 8+3 names" (original comment)
+    - dos_open()/split_path() reject "."/".." before this is reached
+    (TODO once they're migrated). Operates purely on native char*
+    strings (path components are plain C strings throughout this
+    file, never dos_far_ptr - see dos_open()'s "path" parameter), so
+    no address-translation changes are needed here.
+*/
+const char *ConvertNameSZToName83(char *fcbname, const char *dirname)
+{
+  int i;
+  memset(fcbname, ' ', FNAME_SIZE + FEXT_SIZE);
+
+  for (i = 0; i < FNAME_SIZE + FEXT_SIZE; i++, dirname++)
+  {
+    char c = *dirname;
+    if (c == '.')
+      i = FNAME_SIZE - 1;
+    else if (c != '\0' && c != '\\')
+      fcbname[i] = c;
+    else
+      break;
+  }
+  return dirname;
+}
