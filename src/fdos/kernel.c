@@ -712,6 +712,9 @@ dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode)
 /* check for a block device and update  device control block    */
 STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
 {
+printf("before update_dcb: first_mcb=%04X nblkdev=%u DPBp=%04X:%04X\n",
+       LoL->first_mcb, LoL->nblkdev,
+       FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));  
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
   REG COUNT Index;
   COUNT nunits = dhp->dh_name[0];
@@ -732,6 +735,7 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
     x86_dpb = DynAlloc("DPBp", blk_dev->dh_name[0], sizeof(struct dpb));
   }
   struct dpb FAR *dpb = (struct dpb*)ARM_PTR(x86_dpb);
+///printf("DBG update_dcb alloc nunits=%u x86_dpb=%04X:%04X native=%p\n", nunits, FP_SEG(x86_dpb), FP_OFF(x86_dpb), ARM_PTR(x86_dpb));
 
   /* find end of dpb chain or initialize root if needed */
   if (LoL->nblkdev == 0)
@@ -757,7 +761,10 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
   for (Index = 0; Index < nunits; Index++)
   {		
     /* printf("processing unit %i of %i nunits\n", Index, nunits); */
-    dpb->dpb_next = ADD_OFF(x86_dpb, Index * sizeof(struct dpb));  /* memory allocated as array, so next is just next element */
+    /* memory allocated as array, so next is just next element */
+    dpb->dpb_next = (Index + 1 < nunits)
+                  ? ADD_OFF(x86_dpb, (Index + 1) * sizeof(struct dpb))
+                  : MK_FP(-1, -1);
     dpb->dpb_unit = LoL->nblkdev;
     dpb->dpb_subunit = Index;
     dpb->dpb_device = x86_dhp;
@@ -769,12 +776,19 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
       CDSp[LoL->nblkdev].cdsDpb = x86_dpb;
       CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
     }
-	
+    /*
+	printf("DBG update_dcb unit=%u dpb=%04X:%04X native=%p next=%04X:%04X dev=%04X:%04X flags=%04X\n",
+       LoL->nblkdev,
+       FP_SEG(ADD_OFF(x86_dpb, Index * sizeof(struct dpb))),
+       FP_OFF(ADD_OFF(x86_dpb, Index * sizeof(struct dpb))),
+       dpb,
+       FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next),
+       FP_SEG(dpb->dpb_device), FP_OFF(dpb->dpb_device),
+       dpb->dpb_flags);
+    */
     ++dpb;  /* dbp = dbp->dpb_next; */
     ++LoL->nblkdev;
   }
-  /* note that always at least 1 valid dpb due to above early exit if nunits==0 */
-  (dpb - 1)->dpb_next = MK_FP(-1, -1);
 
   /* printf("processed %i nunits\n", nunits); */
 }
@@ -1965,6 +1979,15 @@ STATIC VOID FsConfig(VOID)
     if (i < LoL->nblkdev && dpb != (struct dpb*)ARM_PTR(MK_FP(-1, -1)))
     {
       pcds_table->cdsDpb = x86_dpb;
+      /*
+printf("DBG FsConfig cds[%d] path='%s' flags=%04X cdsDpb=%04X:%04X x86_dpb=%04X:%04X dpb_next=%04X:%04X\n",
+       i,
+       pcds_table->cdsCurrentPath,
+       pcds_table->cdsFlags,
+       FP_SEG(pcds_table->cdsDpb), FP_OFF(pcds_table->cdsDpb),
+       FP_SEG(x86_dpb), FP_OFF(x86_dpb),
+       FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next));
+*/
       pcds_table->cdsFlags = CDSPHYSDRV;
       x86_dpb = dpb->dpb_next;
       dpb = (struct dpb*)ARM_PTR(x86_dpb);
@@ -2087,17 +2110,6 @@ STATIC void init_kernel(CPU* cpu)
 printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPBp=%04X:%04X\n",
        FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp), ARM_PTR(LoL->CDSp),
        LoL->lastdrive, LoL->nblkdev, FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));
-
-/* after update_dcb(x86_blk_dev); * /
-printf("DBG after update_dcb CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPBp=%04X:%04X\n",
-       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp), ARM_PTR(LoL->CDSp),
-       LoL->lastdrive, LoL->nblkdev, FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));
-
-/* at start of FsConfig * /
-printf("DBG FsConfig enter CDSp=%04X:%04X native=%p DPBp=%04X:%04X native=%p lastdrive=%u nblkdev=%u\n",
-       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp), ARM_PTR(LoL->CDSp),
-       FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp), ARM_PTR(LoL->DPBp),
-       LoL->lastdrive, LoL->nblkdev);
 */
     /* Number of units */
     if (blk_dev->dh_name[0] > 0) {
