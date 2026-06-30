@@ -1194,8 +1194,8 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
     fnp->f_cluster = cluster;
   }
 
-  relcluster = (CLUSTER)((fnp->f_offset / fnp->f_dpb->dpb_secsize) >>
-                         fnp->f_dpb->dpb_shftcnt);
+  relcluster = (CLUSTER)((fnp->f_offset / fnp->f_dpb->dpb_secsize) >> fnp->f_dpb->dpb_shftcnt);
+
   if (relcluster < fnp->f_cluster_offset)
   {
     /* If seek is to earlier in file than current position, */
@@ -1217,6 +1217,16 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
   {
     /* get next cluster in the chain */
     cluster = next_cluster(fnp->f_dpb, fnp->f_cluster);
+/*
+    printf("map_cluster next off=%lu size=%lu rel=%lu cur=%lu next=%lu dpb_size=%u phys=%lu\n",
+           fnp->f_offset, fnp->f_dir.dir_size,
+           (unsigned long)relcluster,
+           (unsigned long)fnp->f_cluster,
+           (unsigned long)cluster,
+           fnp->f_dpb->dpb_size,
+           cluster >= 2 && cluster <= fnp->f_dpb->dpb_size
+             ? clus2phys(cluster, fnp->f_dpb) : 0UL);
+*/
     if (cluster <= 1) /* 1/error or 0/FREE chain into the void */
       return DE_SEEK;
 

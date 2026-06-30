@@ -1155,8 +1155,9 @@ dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
   para2far(start)->m_size += nPara;
 
   struct submcb* p = (struct submcb*)para2far(base);
+  seg alloc_seg = base + 1;
   p->type = type;
-  p->start = base + 1;
+  p->start = alloc_seg;
   p->size = nPara-1;
   if (name)
     memcpy(p->name, name, 8);
@@ -1166,7 +1167,7 @@ dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
   else
     base_seg = base;
 
-  return MK_FP(base+1, 0);
+  return MK_FP(alloc_seg, 0);
 }
 
 dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode)

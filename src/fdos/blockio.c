@@ -74,6 +74,14 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE *buf, UWORD numblocks,
   }
   dpb_device = (struct dhdr *)ARM_PTR(dpbp->dpb_device);
 
+  if (dpbp->dpb_secsize != 512)
+  {
+    printf("PANIC: bad dpb_secsize dsk=%d dpbp=%p secsize=%u blk=%lu cnt=%u\n",
+           dsk, dpbp, dpbp->dpb_secsize,
+           (unsigned long)blkno, numblocks);
+    while (1);
+  }
+
   for (;;)
   {
     IoReqHdrD.r_length = sizeof(request);
@@ -116,7 +124,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE *buf, UWORD numblocks,
      * Then transfer block through deblock_buf (DiskTransferBuffer doesn't work!)
      * (But this won't work for multi-block HMA transfers... are there any?)
      */
-    if (is_guest_ptr(buf) && buf >= ARM_PTR(MK_FP(0xa000, 0)) && numblocks == 1 && LoL->bufloc != LOC_CONV)
+    if (is_guest_ptr(buf) && (uintptr_t)buf >= (uintptr_t)ARM_PTR(MK_FP(0xa000, 0)) && numblocks == 1 && LoL->bufloc != LOC_CONV)
     {
       IoReqHdrD.r_trans = (BYTE *)ARM_PTR(LoL->deblock_buf);
       if (mode == DSKWRITE)
@@ -128,6 +136,22 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE *buf, UWORD numblocks,
     else
     {
       IoReqHdrD.r_trans = buf;
+/*
+      if (is_guest_ptr(buf))
+      {
+        dos_far_ptr fp = linear_to_far(buf);
+        UWORD seg = FP_SEG(fp);
+        UWORD off = FP_OFF(fp);
+        ULONG linear1 = ((ULONG)seg << 4) + off;
+        ULONG linear2 = (ULONG)((uintptr_t)buf - (uintptr_t)X86_RAM_BASE);
+        ULONG len = (ULONG)numblocks * dpbp->dpb_secsize;
+
+        printf("dskxfer %s dsk=%d blk=%lu cnt=%u sec=%u bufp=%p fp=%04X:%04X lin_fp=%05lX lin_ptr=%05lX end=%05lX\n",
+               mode == DSKREAD ? "READ" : "WRITE",
+               dsk, (unsigned long)blkno, numblocks, dpbp->dpb_secsize,
+               buf, seg, off, linear1, linear2, linear2 + len);
+      }
+*/      
       execrh(&IoReqHdrD, dpbp->dpb_device);
     }
     if ((IoReqHdrD.r_status & (S_ERROR | S_DONE)) == S_DONE)
@@ -200,7 +224,15 @@ STATIC struct buffer *bufptr(UWORD off)
 STATIC void move_buffer(struct buffer *bp, UWORD firstbp)
 {
   UWORD bp_off = buf_seg_off(bp);
-
+/*
+  printf("move_buffer enter bp=%04X first=%04X "
+         "bp.next=%04X bp.prev=%04X "
+         "next.prev=%04X prev.next=%04X first.prev=%04X\n",
+         bp_off, firstbp,
+         bp->b_next, bp->b_prev,
+         b_next(bp)->b_prev, b_prev(bp)->b_next,
+         bufptr(firstbp)->b_prev);
+*/
   /* connect bp->b_prev and bp->b_next */
   b_next(bp)->b_prev = bp->b_prev;
   b_prev(bp)->b_next = bp->b_next;
@@ -210,6 +242,11 @@ STATIC void move_buffer(struct buffer *bp, UWORD firstbp)
   bp->b_next = firstbp;
   b_next(bp)->b_prev = bp_off;
   b_prev(bp)->b_next = bp_off;
+/*
+  printf("move_buffer leave bp=%04X first=%04X "
+         "bp.next=%04X bp.prev=%04X\n",
+         bp_off, firstbp, bp->b_next, bp->b_prev);
+*/
 }
 
 /*
@@ -224,6 +261,7 @@ STATIC void move_buffer(struct buffer *bp, UWORD firstbp)
 */
 STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
 {
+  unsigned guard = 0;
   int fat_count = 0;
   struct buffer *bp;
   UWORD lastNonFat = 0;
@@ -254,6 +292,21 @@ STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
       fat_count++;
     else
       lastNonFat = buf_seg_off(bp);
+
+    {
+      UWORD cur = buf_seg_off(bp);
+      UWORD next = bp->b_next;
+
+      if (next == 0xffff || guard >= LoL->nbuffers)
+      {
+        printf("PANIC: bad buffer link blk=%lu dsk=%d seg=%04X first=%04X cur=%04X next=%04X prev=%04X flags=%02X unit=%u bblk=%lu nbuffers=%u\n",
+               (unsigned long)blkno, dsk, FP_SEG(LoL->firstbuf), firstbp, cur, next, bp->b_prev,
+               bp->b_flag, bp->b_unit, (unsigned long)bp->b_blkno, LoL->nbuffers);
+        while(1);
+      }
+      guard++;
+    }
+
     bp = b_next(bp);
   } while (buf_seg_off(bp) != firstbp);
 
@@ -340,7 +393,13 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 
   if (!flush1(bp))
     return NULL;
-
+/*
+  printf("getblk fill blk=%lu dsk=%d bp_off=%04X buf_off=%04X "
+         "next=%04X prev=%04X\n",
+         (unsigned long)blkno, dsk, buf_seg_off(bp),
+         buf_seg_off((struct buffer *)bp->b_buffer),
+         bp->b_next, bp->b_prev);
+*/  
   if (!overwrite && dskxfer(dsk, blkno, bp->b_buffer, 1, DSKREAD))
   {
     return NULL;

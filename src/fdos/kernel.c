@@ -381,13 +381,13 @@ static void BlkEntry(request FAR *rq) {
     case C_BLDBPB:
         blockio(cpu, rq);
         break;
-    case C_INIT:
-        /* disk init is done, so this should never be called */
     default:
-    printf("DBG BlkEntry unimplemented cmd=%02X unit=%u status_before=%04X\n",  rq->r_command, rq->r_unit, rq->r_status);
+        printf("WARN: BlkEntry unimplemented cmd=%02X unit=%u status_before=%04X\n",  rq->r_command, rq->r_unit, rq->r_status);
         /// TODO: C_IOCTLIN / C_IOCTLOUT / C_GENIOCTL
         /// are not implemented yet - not required for DosOpen() on a fixed,
         /// never-removed disk image.
+    case C_INIT:
+        /* disk init is done, so this should never be called */
         rq_error(rq, E_CMD);
         break;
     }
@@ -589,9 +589,11 @@ WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp) {
 /* check for a block device and update  device control block    */
 STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
 {
-printf("before update_dcb: first_mcb=%04X nblkdev=%u DPBp=%04X:%04X\n",
+  /*
+  printf("before update_dcb: first_mcb=%04X nblkdev=%u DPBp=%04X:%04X\n",
        LoL->first_mcb, LoL->nblkdev,
        FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));  
+  */
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
   REG COUNT Index;
   COUNT nunits = dhp->dh_name[0];
@@ -626,7 +628,7 @@ printf("before update_dcb: first_mcb=%04X nblkdev=%u DPBp=%04X:%04X\n",
     /* find current end of dpb chain by following next pointers to end */
     for (
         tmp_dpb = (struct dpb*)ARM_PTR(LoL->DPBp);
-        FP_SEG(tmp_dpb->dpb_next) != 0xFFFF && FP_OFF(tmp_dpb->dpb_next) != 0xFFFF;
+        !far_is_end(tmp_dpb->dpb_next);
         tmp_dpb = (struct dpb*)ARM_PTR(tmp_dpb->dpb_next)
     )
       ;
@@ -654,7 +656,7 @@ printf("before update_dcb: first_mcb=%04X nblkdev=%u DPBp=%04X:%04X\n",
       CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
     }
     /*
-	printf("DBG update_dcb unit=%u dpb=%04X:%04X native=%p next=%04X:%04X dev=%04X:%04X flags=%04X\n",
+	  printf("DBG update_dcb unit=%u dpb=%04X:%04X native=%p next=%04X:%04X dev=%04X:%04X flags=%04X\n",
        LoL->nblkdev,
        FP_SEG(ADD_OFF(x86_dpb, Index * sizeof(struct dpb))),
        FP_OFF(ADD_OFF(x86_dpb, Index * sizeof(struct dpb))),
@@ -1853,7 +1855,7 @@ STATIC VOID FsConfig(VOID)
 
     pcds_table->cdsCurrentPath[0] += i;
 
-    if (i < LoL->nblkdev && dpb != (struct dpb*)ARM_PTR(MK_FP(-1, -1)))
+    if (i < LoL->nblkdev && !far_is_end(x86_dpb))
     {
       pcds_table->cdsDpb = x86_dpb;
       /*
@@ -1963,7 +1965,6 @@ static void InitializeAllBPBs(VOID)
   strcpy(path, "A:-@JUNK@-.TMP");
   for (drive = 'C'; drive < 'A' + LoL->nblkdev; drive++)
   {
-    printf("drive: %c\n", (char)drive);
     path[0] = drive;
     if ((fileno = open( x86_path, O_RDONLY)) >= 0)
       close(fileno);
