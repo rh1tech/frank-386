@@ -55,7 +55,6 @@ void BIOS_drive_reset(CPU* cpu, unsigned drive)
 BOOL ExtLBAForce = FALSE;
 COUNT nUnits BSS_INIT(0);
 UWORD LBA_WRITE_VERIFY = 0x4302;
-#define InitDiskTransferBuffer DiskTransferBuffer
 
 typedef struct {
   UWORD bpb_nbyte;              /* Bytes per Sector             */
@@ -406,6 +405,8 @@ int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
 {
   struct _bios_LBA_address_packet* pdap = (struct _bios_LBA_address_packet*)ARM_PTR(x86_dap);
   pdap->packet_size = sizeof(struct _bios_LBA_address_packet);
+  pdap->reserved_1 = 0;
+  pdap->reserved_2 = 0;
 
   struct CHS chs;
   int num_retries;
@@ -442,6 +443,7 @@ int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
     {
       if (InitKernelConfig.Verbose >= 1) printf("LBA mode\n");
       pdap->number_of_blocks = 1;
+      pdap->reserved_2 = 0;
       pdap->buffer_address = buffer;
       pdap->block_address_high = 0;       /* clear high part */
       pdap->block_address = LBA_address;  /* clear high part */
@@ -1018,6 +1020,8 @@ static int ProcessDisk(CPU* cpu, int scanType, unsigned drive, int PartitionsToI
 ReadNextPartitionTable:
     strangeHardwareLoop = 0;
     strange_restart:
+  // used only on the init-time
+  dos_far_ptr InitDiskTransferBuffer = MK_FP(0x8000, 0000);
 
   if (Read1LBASector(cpu, &driveParam, drive, RelSectorOffset, InitDiskTransferBuffer))
   {

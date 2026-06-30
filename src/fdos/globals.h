@@ -107,7 +107,6 @@ COUNT ASMCFUNC
 #define SecPathName ((char *)internal_data->SecPathBuffer)
 
 extern /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
-extern dos_far_ptr InitDiskTransferBuffer;
 extern /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer; // BSS
 
 /* near fnodes:

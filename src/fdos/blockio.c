@@ -116,8 +116,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE *buf, UWORD numblocks,
      * Then transfer block through deblock_buf (DiskTransferBuffer doesn't work!)
      * (But this won't work for multi-block HMA transfers... are there any?)
      */
-    if ((int)(buf - (intptr_t)X86_RAM_BASE) >= 0xa0000 && numblocks == 1 &&
-        LoL->bufloc != LOC_CONV)
+    if (is_guest_ptr(buf) && buf >= ARM_PTR(MK_FP(0xa000, 0)) && numblocks == 1 && LoL->bufloc != LOC_CONV)
     {
       IoReqHdrD.r_trans = (BYTE *)ARM_PTR(LoL->deblock_buf);
       if (mode == DSKWRITE)
@@ -242,8 +241,8 @@ STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
       if (buf_seg_off(bp) != firstbp)
       {
         UWORD bp_off = buf_seg_off(bp);
-        move_buffer(bp, firstbp);
         LoL->firstbuf = MK_FP(FP_SEG(LoL->firstbuf), bp_off);
+        move_buffer(bp, firstbp);
       }
       return bp;
     }

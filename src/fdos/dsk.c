@@ -317,6 +317,8 @@ STATIC int LBA_Transfer(CPU* cpu,
   /// parameter table maintenance - not needed for a fixed disk image.
 
   pdap->packet_size = sizeof(struct _bios_LBA_address_packet);
+  pdap->reserved_1 = 0;
+  pdap->reserved_2 = 0;
 
   for (; totaltodo != 0;)
   {
@@ -353,6 +355,8 @@ STATIC int LBA_Transfer(CPU* cpu,
                                           /// original dsk.c does not clamp this either, and
                                           /// our bios_13h's int13_transfer_lba() has no such
                                           /// limit, but a real BIOS might reject large counts.
+        pdap->reserved_2 = 0; // ??? may be count 16-bit?
+
         pdap->buffer_address = transfer_far;
         pdap->block_address_high = 0;     /* clear high part */
         pdap->block_address = LBA_address;
