@@ -405,8 +405,6 @@ int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
 {
   struct _bios_LBA_address_packet* pdap = (struct _bios_LBA_address_packet*)ARM_PTR(x86_dap);
   pdap->packet_size = sizeof(struct _bios_LBA_address_packet);
-  pdap->reserved_1 = 0;
-  pdap->reserved_2 = 0;
 
   struct CHS chs;
   int num_retries;
