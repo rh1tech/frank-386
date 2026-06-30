@@ -90,6 +90,20 @@ STATIC COUNT stackSize BSS_INIT(0);
 extern const dos_far_ptr x86_szLine;
 const size_t szLine_len = 256;
 
+#ifdef DEBUG
+#define InstallPrintf(x) printf x
+#else
+#define InstallPrintf(x)
+#endif
+
+#define MAX_INSTALL_CMDS 10
+struct instCmds {
+  char buffer[128];
+  int mode;
+};
+static int numInstallCmds;
+static struct instCmds InstallCommands[MAX_INSTALL_CMDS];
+
 STATIC void config_init_buffers(int wantedbuffers)
 {
   unsigned buffers = 0;
@@ -494,6 +508,33 @@ STATIC VOID init_stacks(dos_far_ptr x86_base, COUNT stacks, COUNT size)
          (size_t)nStacks * (size_t)stackSize);
 }
 
+static void _CmdInstall(BYTE *pLine, int mode)
+{
+  struct instCmds *cmd;
+
+  if (numInstallCmds >= MAX_INSTALL_CMDS)
+  {
+    printf("Too many Install commands given (%d max)\n", MAX_INSTALL_CMDS);
+    CfgFailure(pLine);
+    return;
+  }
+
+  cmd = &InstallCommands[numInstallCmds++];
+  memcpy(cmd->buffer, pLine, sizeof(cmd->buffer) - 1);
+  cmd->buffer[sizeof(cmd->buffer) - 1] = 0;
+  cmd->mode = mode;
+}
+
+STATIC VOID CmdInstall(BYTE *pLine)
+{
+  _CmdInstall(pLine, FIRST_FIT);
+}
+
+STATIC VOID CmdInstallHigh(BYTE *pLine)
+{
+  _CmdInstall(pLine, FIRST_FIT_U);
+}
+
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
@@ -545,8 +586,8 @@ STATIC struct table commands[] = {
 
   {"DEVICE", 2, CfgNotImplemented},
   {"DEVICEHIGH", 2, CfgNotImplemented},
-  {"INSTALL", 2, CfgNotImplemented},
-  {"INSTALLHIGH", 2, CfgNotImplemented},
+  {"INSTALL", 2, CmdInstall},
+  {"INSTALLHIGH", 2, CmdInstallHigh},
   {"CHAIN", 2, CfgNotImplemented},
   {"SET", 2, CfgNotImplemented},
 #else
@@ -1292,4 +1333,85 @@ VOID configDone(VOID)
 
   /* The standard handles should be reopened here, because
      we may have loaded new console or printer drivers in CONFIG.SYS */
+}
+
+STATIC VOID InstallExec(struct instCmds *icmd)
+{
+  BYTE filename[128];
+  BYTE *args;
+  BYTE *d;
+  BYTE *cmd = (BYTE *)icmd->buffer;
+  exec_blk exb;
+
+  cmd = skipwh(cmd);
+
+  for (args = cmd, d = filename; ; args++, d++)
+  {
+    *d = *args;
+    if (*d <= 0x20 || *d == '/')
+      break;
+  }
+  *d = 0;
+
+  args--;
+  *args = strlen((char *)&args[1]);
+  args[*args + 1] = '\r';
+  args[*args + 2] = 0;
+
+  exb.exec.env_seg = 0;
+  exb.exec.cmd_line = (CommandTail FAR *)args;
+  exb.exec.fcb_1 = exb.exec.fcb_2 = NULL; /// may be after dos_far_ptr MK_FP(0xffff, 0xffff);
+
+  InstallPrintf(("INSTALL exec file='%s' tail_len=%u tail='%s'\n", filename, *args, args + 1));
+
+  /// TODO:
+  /*
+INT 21h AH=4Bh EXEC
+INT 21h AH=4Ch terminate
+INT 21h AH=48h alloc
+INT 21h AH=49h free
+INT 21h AH=4Ah resize
+INT 21h AX=5800/5801 allocation strategy
+COM/EXE loader: DosExec / DosComLoader / DosExeLoader
+PSP creation
+environment block
+MCB ownership by PSP  
+  */
+  ///if (init_DosExec(icmd->mode, &exb, filename) != SUCCESS)
+  ///  CfgFailure(cmd);
+}
+
+VOID DoInstall(void)
+{
+  int i;
+///  unsigned short installMemory;
+  struct instCmds *cmd;
+
+  if (numInstallCmds == 0)
+    return;
+
+  InstallPrintf(("Installing commands now\n"));
+
+  /* grab memory for this install code
+     we KNOW, that we are executing somewhere at top of memory
+     we need to protect the INIT_CODE from other programs
+     that will be executing soon
+  */
+
+///TODO:  set_strategy(LAST_FIT);
+///  installMemory = ((unsigned)_init_end + ebda_size + 15) / 16;
+///  installMemory = allocmem(installMemory);
+///  InstallPrintf(("allocated memory at %x\n",installMemory));
+
+  for (i = 0; i < numInstallCmds; i++)
+  {
+    InstallPrintf(("INSTALL[%d] mode=%02X: %s\n", i, InstallCommands[i].mode, InstallCommands[i].buffer));
+ ///   set_strategy(cmd->mode);
+    InstallExec(&InstallCommands[i]);
+  }
+///  set_strategy(FIRST_FIT);
+///  free(installMemory);
+
+  InstallPrintf(("Done with installing commands\n"));
+  return;
 }

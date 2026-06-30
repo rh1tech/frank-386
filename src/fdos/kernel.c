@@ -2119,7 +2119,15 @@ void kernel(CPU* _cpu) {
     /* initialize all internal variables, process CONFIG.SYS, load drivers, etc */
     init_kernel(_cpu);
 
+#ifdef DEBUG
+    /* Non-portable message kludge alert!   */
+    printf("KERNEL: Boot drive = %c\n", 'A' + LoL->BootDrive - 1);
+#endif
+
+    DoInstall();
+
     /// TODO: next point to complete impl.
+///    kernel();
 
     /// debug-blink this point acived
     for (int i = 0; i < 6; i++) {
