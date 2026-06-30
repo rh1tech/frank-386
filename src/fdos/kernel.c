@@ -35,37 +35,7 @@ void dos_printf(const char *fmt, ...) {
     bios_puts(cpu, buf);
 }
 
-#include "hdr/kconfig.h"
-#include "hdr/portab.h"
-
-#include "hdr/ddate.h"
-#include "hdr/dtime.h"
-#include "hdr/error.h"
-#include "hdr/clock.h"
-#include "hdr/device.h"
-#include "hdr/sft.h"
-#include "hdr/kbd.h"
-#include "hdr/fcb.h"
-#include "hdr/fat.h"
-#include "hdr/pcb.h"
-#include "hdr/dirmatch.h"
-#include "hdr/fnode.h"
-#include "hdr/mcb.h"
-#include "hdr/lol.h"
-#include "hdr/dcb.h"
-#include "hdr/cds.h"
-#include "hdr/tail.h"
-#include "hdr/process.h"
-#include "hdr/version.h"
-#include "proto.h"
-#include "globals.h"
-#include "hdr/debug.h"
-#include "hdr/buffer.h"
-#include "hdr/file.h"
-#include "config.h"
-#include "hdr/network.h"
-#include "init-mod.h"
-#include "dyndata.h"
+#include "hdrs.h"
 
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
@@ -2050,8 +2020,8 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
 static void init_call_p_0(CPU* cpu, struct config* config) {
   cpu_set_a20(cpu, 1);
   SET_DS ( DOS_PSP );
+  P_0(cpu, config);
   /// TODO:
-  ///P_0();
     /// debug-blink this point acived
     for (int i = 0; i < 6; i++) {
     /// TODO: for reboot    keyboard_tick();

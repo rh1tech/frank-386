@@ -390,3 +390,13 @@ bool fdos_21h(CPU* _cpu) {
     }
     return true;
 }
+
+UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
+    CPU_AH = 0x3F;
+    CPU_BX = fd;
+    CPU_CX = count;
+    SET_DS ( FP_SEG(buf) );
+    CPU_DX = FP_OFF(buf);
+    fdos_21h(cpu);
+    return cf ? (UCOUNT)-1 : CPU_AX;
+}

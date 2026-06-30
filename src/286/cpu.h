@@ -1,3 +1,6 @@
+#ifndef CPU_286_H
+#define CPU_286_H
+
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -90,3 +93,5 @@ inline static void print_line2(const char* s, int row, int col) {
 #define SET_IP(x) cpu->ip = (x)
 #define CPU_IP    (*(uint16_t*)&(cpu->ip))
 #endif
+
+#endif // CPU_286_H

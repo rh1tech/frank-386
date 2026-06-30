@@ -224,7 +224,7 @@ UBYTE FcbFindFirstNext(xfcb FAR * lpXfcb, BOOL First);
 /* intr.asm */
 UWORD ASMPASCAL call_intr(WORD nr, iregs FAR * rp);
 COUNT ASMPASCAL res_DosExec(COUNT mode, exec_blk * ep, BYTE * lp);
-UCOUNT ASMPASCAL res_read(int fd, void *buf, UCOUNT count);
+UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count);
 #ifdef __WATCOMC__
 #pragma aux (__pascal) call_intr __modify __exact [__ax]
 #pragma aux (__pascal) res_DosExec __modify __exact [__ax __bx __dx __es]
@@ -292,7 +292,8 @@ int VA_CDECL sprintf(char * buff, CONST char * fmt, ...);
 #endif
 VOID hexd(char *title, VOID FAR * p, COUNT numBytes);
 void put_unsigned(unsigned n, int base, int width);
-void put_string(const char *s);
+/// TODO: void put_string(const char *s);
+#define put_string(x)  do { dos_printf(x); dos_printf("\n"); } while(0)
 void put_console(int);
 
 /* strings.c */
@@ -311,7 +312,7 @@ void FAR * /*ASMCFUNC*/ ASMPASCAL fmemchr(const void FAR * s, int c, size_t n);
 char * /*ASMCFUNC*/ ASMPASCAL strcpy(char * d, const char * s);
 void /*ASMCFUNC*/ ASMPASCAL fmemcpyBack(void FAR * d, const void FAR * s, size_t n);
 void /*ASMCFUNC*/ ASMPASCAL fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n);
-void /*ASMCFUNC*/ ASMPASCAL fstrcpy(char FAR * d, const char FAR * s);
+#define fstrcpy strcpy
 void * /*ASMCFUNC*/ ASMPASCAL memcpy(void *d, const void * s, size_t n);
 void * /*ASMCFUNC*/ ASMPASCAL fmemset(dos_far_ptr s, int ch, size_t n);
 void * /*ASMCFUNC*/ ASMPASCAL memset(void * s, int ch, size_t n);

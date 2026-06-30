@@ -262,6 +262,7 @@ set(EMU_CORE_SOURCES
     src/fdos/fatdir.c
     src/fdos/blockio.c
     src/fdos/kernel.c
+    src/fdos/task.c
     src/fdos/fdos_21h.c
     src/fdos/fdos_29h.c
 
