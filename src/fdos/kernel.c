@@ -82,8 +82,9 @@ dos_far_ptr lpTop;
 dos_far_ptr x86_PSP = MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0060:0000–0060:00FF
 
 /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer = x86_BSS; // BSS
-/*256*/const dos_far_ptr x86_szLine = MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE); // _BSS + MAX_SEC_SIZE
-/*16*/ const dos_far_ptr x86_dap = MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256);
+/*256*/const dos_far_ptr x86_szLine = x86_SZ_LINE; // _BSS + MAX_SEC_SIZE
+/* 16*/const dos_far_ptr x86_dap = x86_DAP;
+/*128*/const dos_far_ptr x86_master_env = x86_MASTER_ENV;
 
 const dos_far_ptr x86_con_dev = MK_FP(DOS_PSP, 0x07A8); // _IO_FIXED_DATA -> con_dev
 const dos_far_ptr x86_prn_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr));
@@ -2046,6 +2047,79 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     InitializeAllBPBs();
 }
 
+static void init_call_p_0(CPU* cpu, struct config* config) {
+  cpu_set_a20(cpu, 1);
+  SET_DS ( DOS_PSP );
+  /// TODO:
+  ///P_0();
+    /// debug-blink this point acived
+    for (int i = 0; i < 6; i++) {
+    /// TODO: for reboot    keyboard_tick();
+        sleep_ms(23);
+        gpio_put(PICO_DEFAULT_LED_PIN, true);
+        sleep_ms(23);
+        gpio_put(PICO_DEFAULT_LED_PIN, false);
+    }
+    // allow it to wait for keyboard 
+    SET_CS ( 0xF000 ); // -> FFEFFh (bios callback)
+    SET_IP ( 0xFEFF );
+    set_bios_callback(cpu, &params, false);
+    printf("FreeDOS impl. is incomplete. Nothing to do for now...\n");
+}
+
+STATIC void prep_shell(CPU* cpu)
+{
+  CommandTail Cmd;
+  char* master_env  = ((char *)ARM_PTR(x86_master_env));
+  if (master_env[0] == '\0')   /* some shells panic on empty master env. */
+    memcpy(master_env, "PATH=.\0\0\0\0", sizeof("PATH=.\0\0\0\0"));
+
+  /* process 0       */
+  /* Execute command.com from the drive we just booted from    */
+  memset(Cmd.ctBuffer, 0, sizeof(Cmd.ctBuffer));
+  strcpy(Cmd.ctBuffer, Config.cfgInitTail);
+
+  for (Cmd.ctCount = 0; Cmd.ctCount < sizeof(Cmd.ctBuffer); Cmd.ctCount++)
+    if (Cmd.ctBuffer[Cmd.ctCount] == '\r')
+      break;
+
+  /* if stepping CONFIG.SYS (F5/F8), tell COMMAND.COM about it */
+
+  /* 3 for string + 2 for "\r\n" */
+  if (Cmd.ctCount < sizeof(Cmd.ctBuffer) - 5)
+  {
+    char *insertString = NULL;
+
+    if (singleStep)
+      insertString = " /Y";     /* single step AUTOEXEC */
+
+    if (SkipAllConfig)
+      insertString = " /D";     /* disable AUTOEXEC */
+
+    if (insertString)
+    {
+
+      /* insert /D, /Y as first argument */
+      char *p, *q;
+
+      for (p = Cmd.ctBuffer; p < &Cmd.ctBuffer[Cmd.ctCount]; p++)
+      {
+        if (*p == ' ' || *p == '\t' || *p == '\r')
+        {
+          for (q = &Cmd.ctBuffer[Cmd.ctCount + 1]; q >= p; q--)
+            q[3] = q[0];
+          memcpy(p, insertString, 3);
+          break;
+        }
+      }
+      /* save buffer -- on the stack it's fine here */
+      Config.cfgInitTail = Cmd.ctBuffer;
+    }
+  }
+  // start_shell
+  init_call_p_0(cpu, &Config); /* go execute process 0 (the shell) */
+}
+
 void kernel(CPU* _cpu) {
     cpu = _cpu;
     con_dev = (struct dhdr*)ARM_PTR(x86_con_dev);
@@ -2126,20 +2200,5 @@ void kernel(CPU* _cpu) {
 
     DoInstall();
 
-    /// TODO: next point to complete impl.
-///    kernel();
-
-    /// debug-blink this point acived
-    for (int i = 0; i < 6; i++) {
-    /// TODO: for reboot    keyboard_tick();
-        sleep_ms(23);
-        gpio_put(PICO_DEFAULT_LED_PIN, true);
-        sleep_ms(23);
-        gpio_put(PICO_DEFAULT_LED_PIN, false);
-    }
-    // allow it to wait for keyboard 
-    SET_CS ( 0xF000 ); // -> FFEFFh (bios callback)
-    SET_IP ( 0xFEFF );
-    set_bios_callback(cpu, &params, false);
-    printf("FreeDOS impl. is incomplete. Nothing to do for now...\n");
+    prep_shell(_cpu);
 }
