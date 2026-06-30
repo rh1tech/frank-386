@@ -2,6 +2,18 @@
 
 #define MAX_HARD_DRIVE  4
 
+#define GLOBAL extern
+#define NAMEMAX         MAX_CDSPATH     /* Maximum path for CDS         */
+#define NFILES          16      /* number of files in table     */
+#define NFCBS           16      /* number of fcbs               */
+#define NSTACKS         8       /* number of stacks             */
+#define STACKSIZE       256     /* default stacksize            */
+#define NLAST           5       /* last drive                   */
+#define NUMBUFF         20      /* Number of track buffers at INIT time     */
+                                        /* -- must be at least 3        */
+///#define MAX_HARD_DRIVE  8
+#define NDEV            26      /* up to Z:                     */
+
 #define open        init_DosOpen
 
 /*

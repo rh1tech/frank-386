@@ -57,7 +57,6 @@ static COUNT UmbState BSS_INIT(0);
 STATIC seg umb_base_seg BSS_INIT(0);
 UWORD umb_start BSS_INIT(0), UMB_top BSS_INIT(0);
 static BYTE HMAState BSS_INIT(0);
-struct config Config = { 0 };
 static COUNT nFileDesc BSS_INIT(0);
 /* CHAIN= support (multiple nested CONFIG.SYS-like files) - the
    table exists so DoConfig()'s "if (bEof && nCurChain)" check below
@@ -89,6 +88,25 @@ STATIC COUNT stackSize BSS_INIT(0);
 
 extern const dos_far_ptr x86_szLine;
 const size_t szLine_len = 256;
+
+struct config Config = { 
+  0,
+  NUMBUFF,
+  NFILES,
+  0,
+  NFCBS,
+  0,
+  "command.com",
+  " /P /E:256\r\n",
+  NLAST,
+  0,
+  NSTACKS,
+  0,
+  STACKSIZE
+  /* COUNTRY= is initialized within DoConfig() */
+  , 0                       /* strategy for command.com is low by default */
+  , 0                       /* default value for switches=/E:nnnn */
+};
 
 #ifdef DEBUG
 #define InstallPrintf(x) printf x
