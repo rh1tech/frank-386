@@ -101,27 +101,79 @@ const KernelConfig InitKernelConfig = {
 };
 
 static void ConIntr(request FAR *rq) {
-    /*
-     * CON device interrupt entry.
-     *
-     * Handles DOS character-device requests for console input/output:
-     * init, input status, input, non-destructive input, output, flush,
-     * ioctl where supported.
-     *
-     * Native implementation should bridge these requests to the emulator's
-     * keyboard and screen/TTY backend, then update request status/count
-     * exactly like a DOS character driver.
-     */
+    CPU_regs saved;
     switch (rq->r_command) {
     case C_INIT:
         rq_done(rq);
         break;
+    case C_IFLUSH:
+        /* drain the BIOS keyboard buffer */
+        cpu_save_regs(cpu, &saved);
+        while (1) {
+            CPU_AH = 0x01;          /* INT 16h: check keystroke */
+            bios_intcall(cpu, 0x16);
+            if (zf) break;          /* ZF=1: buffer empty */
+            CPU_AH = 0x00;          /* INT 16h: read and discard */
+            bios_intcall(cpu, 0x16);
+        }
+        cpu_restore_regs(cpu, &saved);
+        rq_done(rq);
+        break;
+
+    case C_NDREAD:
+        /* non-destructive peek: S_BUSY if no key, else set r_ndbyte */
+        cpu_save_regs(cpu, &saved);
+        CPU_AH = 0x01;              /* INT 16h AH=01h: check keystroke */
+        bios_intcall(cpu, 0x16);
+        if (zf) {
+            /* no key in buffer */
+            rq->r_status = S_DONE | S_BUSY;
+        } else {
+            rq->r_ndbyte = CPU_AL;
+            rq_done(rq);
+        }
+        cpu_restore_regs(cpu, &saved);
+        break;
+
+    case C_ISTAT:
+        /* input status: S_BUSY if no key waiting */
+        cpu_save_regs(cpu, &saved);
+        CPU_AH = 0x01;
+        bios_intcall(cpu, 0x16);
+        rq->r_status = zf ? (S_DONE | S_BUSY) : S_DONE;
+        cpu_restore_regs(cpu, &saved);
+        break;
+
+    case C_INPUT:
+        /* blocking read: wait until a key is available */
+        cpu_save_regs(cpu, &saved);
+        CPU_AH = 0x00;              /* INT 16h AH=00h: read keystroke */
+        bios_intcall(cpu, 0x16);    /* returns false (re-enters) until key ready */
+        rq->r_ndbyte = CPU_AL;
+        rq->r_count  = 1;
+        cpu_restore_regs(cpu, &saved);
+        rq_done(rq);
+        break;
+
+    case C_OUTPUT:
+    case C_OUTVFY:
+        /* teletype output via INT 10h AH=0Eh */
+        cpu_save_regs(cpu, &saved);
+        {
+            BYTE FAR *p   = rq->r_trans;
+            UWORD     cnt = rq->r_count;
+            while (cnt--) {
+                CPU_AH = 0x0E;
+                CPU_AL = *p++;
+                CPU_BX = 0x0007;    /* page 0, attribute 7 */
+                bios_intcall(cpu, 0x10);
+            }
+        }
+        cpu_restore_regs(cpu, &saved);
+        rq_done(rq);
+        break;
 
     default:
-        /*
-         * CON command table will be filled later.
-         * For now only INIT is required by InitIO().
-         */
         rq_error(rq, E_CMD);
         break;
     }
