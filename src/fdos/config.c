@@ -553,47 +553,171 @@ STATIC VOID CmdInstallHigh(BYTE *pLine)
   _CmdInstall(pLine, FIRST_FIT_U);
 }
 
+STATIC VOID Fcbs(BYTE * pLine)
+{
+  /* Format: FCBS = totalFcbs [,protectedFcbs]
+   *
+   * Ported from FreeDOS config.c. This only records CONFIG.SYS values
+   * in Config; actual FCB table allocation/use is handled elsewhere
+   * and is not implemented in this iteration.
+   */
+  COUNT fcbs;
+
+  if ((pLine = GetNumArg((char *)pLine, &fcbs)) == NULL)
+    return;
+  Config.cfgFcbs = fcbs;
+
+  pLine = skipwh(pLine);
+
+  if (*pLine == ',')
+  {
+    if (GetNumArg((char *)++pLine, &fcbs) != NULL)
+      Config.cfgProtFcbs = fcbs;
+  }
+
+  if (Config.cfgProtFcbs > Config.cfgFcbs)
+    Config.cfgProtFcbs = Config.cfgFcbs;
+}
+
+/*
+    UmbState of confidence, 1 is sure, 2 maybe, 4 unknown and 0 no way.
+*/
+
+STATIC VOID Dosmem(BYTE * pLine)
+{
+  BYTE *pTmp;
+  BYTE UMBwanted = FALSE;
+
+  GetStringArg(pLine, szBuf);
+  strcpy(szBuf, pLine);
+  strupr(szBuf);
+
+  /* printf("DOS called with %s\n", szBuf); */
+
+  for (pTmp = szBuf;;)
+  {
+    while (*pTmp == ' ' || *pTmp == '\t')
+      pTmp++;
+
+    if (memcmp(pTmp, "UMB", 3) == 0)
+    {
+      UMBwanted = TRUE;
+      pTmp += 3;
+    }
+    if (memcmp(pTmp, "HIGH", 4) == 0)
+    {
+      HMAState = HMA_REQ;
+      pTmp += 4;
+    }
+    if (memcmp(pTmp, "LOW", 3) == 0)
+    {
+      HMAState = HMA_LOW;
+      pTmp += 3;
+    }
+    if (memcmp(pTmp, "NOUMB", 5) == 0)
+    {
+      UMBwanted = FALSE;
+      pTmp += 5;
+    }
+/*        if (memcmp(pTmp, "CLAIMINIT",9) == 0) { INITDataSegmentClaimed = 0; pTmp += 9; }*/
+    pTmp = skipwh(pTmp);
+
+    if (*pTmp == '\0')
+      break;
+    if (*pTmp != ',')
+    {
+      CfgFailure(pLine + (pTmp - szBuf));
+      break;
+    }
+    pTmp++;
+  }
+
+  if (UmbState == 0)
+  {
+    LoL->uppermem_link = 0;
+    LoL->uppermem_root = 0xffff;
+    UmbState = UMBwanted ? 2 : 0;
+  }
+  /* Check if HMA is available straight away */
+  if (HMAState == HMA_REQ && MoveKernelToHMA())
+  {
+    HMAState = HMA_DONE;
+  }
+}
+
+STATIC VOID InitPgm(BYTE * pLine)
+{
+  static char init[NAMEMAX];
+  static char inittail[NAMEMAX];
+
+  /*
+   * Ported from FreeDOS config.c.
+   *
+   * SHELL=/COMMAND= only selects the command interpreter and its tail.
+   * Actual execution is still done later by process-0 / EXEC startup.
+   */
+  Config.cfgInit = init;
+  Config.cfgInitTail = inittail;
+
+  pLine = GetStringArg(pLine, (BYTE *)Config.cfgInit);
+
+  strcpy(Config.cfgInitTail, (char *)pLine);
+  strcat(Config.cfgInitTail, "\r\n");
+
+  Config.cfgP_0_startmode = 0;
+}
+
+STATIC VOID InitPgmHigh(BYTE * pLine)
+{
+  InitPgm(pLine);
+  /*
+   * Original FreeDOS marks process-0 start mode high here.
+   * This flag is preserved even though EXEC/high loading is not yet
+   * implemented in the current port.
+   */
+  Config.cfgP_0_startmode = 0x80;
+}
+
+STATIC VOID CfgMenu(BYTE * pLine) {
+  /// TODO:
+}
+
+STATIC VOID CfgMenuEsc(BYTE * pLine) {
+  BYTE * check;
+  for (check = pLine; check[0]; check++)
+    if (check[0] == '$') check[0] = 27;	/* translate $ to ESC */
+  printf("%s\n",pLine);
+}
+
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
   {"SWITCHES", 0, CfgNotImplemented},
-/// TODO:  {"SWITCHES", 0, CfgSwitches},
 
   /* rem is never executed by locking out pass                    */
   {"REM", 0, CfgIgnore},
   {";", 0,   CfgIgnore},
 
-  {"MENUCOLOR",0,CfgNotImplemented},
-/// TODO:  {"MENUCOLOR",0,CfgMenuColor},
-#if 1
+  {"MENUCOLOR",0, CfgNotImplemented},
   {"MENUDEFAULT", 0, CfgNotImplemented},
   {"MENU", 0, CfgNotImplemented},      /* lines to print in pass 0 */
   {"ECHO", 2, CfgNotImplemented},      /* lines to print in pass 2 - install(high) */
-  {"EECHO", 2, CfgNotImplemented},     /* modified ECHO (ea) */
+  {"EECHO", 2, CfgMenuEsc},            /* modified ECHO (ea) */
 
   {"BREAK", 1, CfgNotImplemented},
-#else
-  {"MENUDEFAULT", 0, CfgMenuDefault},
-  {"MENU", 0, CfgMenu},         /* lines to print in pass 0 */
-  {"ECHO", 2, CfgMenu},         /* lines to print in pass 2 - install(high) */
-  {"EECHO", 2, CfgMenuEsc},     /* modified ECHO (ea) */
-
-  {"BREAK", 1, CfgBreak},
-#endif
  
   {"BUFFERS", 1, Config_Buffers},
   {"BUFFERSHIGH", 1, CfgBuffersHigh}, /* as BUFFERS - we use HMA anyway */
 
-#if 1
-  {"COMMAND", 1, CfgNotImplemented},
+  {"COMMAND", 1, InitPgm},
   {"COUNTRY", 1, CfgNotImplemented},
-  {"DOS", 1, CfgNotImplemented},
+  {"DOS", 1, Dosmem},
   {"DOSDATA", 1, CfgNotImplemented},
-  {"FCBS", 1, CfgNotImplemented},
+  {"FCBS", 1, Fcbs},
   {"KEYBUF", 1, CfgNotImplemented},	/* ea */
   {"NUMLOCK", 1, CfgNotImplemented},
-  {"SHELL", 1, CfgNotImplemented},
-  {"SHELLHIGH", 1, CfgNotImplemented},
+  {"SHELL", 1, InitPgm},
+  {"SHELLHIGH", 1, InitPgmHigh},
   {"STACKS", 1, Stacks},
   {"STACKSHIGH", 1, StacksHigh},
   {"SWITCHAR", 1, CfgNotImplemented},
@@ -608,35 +732,6 @@ STATIC struct table commands[] = {
   {"INSTALLHIGH", 2, CmdInstallHigh},
   {"CHAIN", 2, CfgNotImplemented},
   {"SET", 2, CfgNotImplemented},
-#else
-  {"COMMAND", 1, InitPgm},
-  {"COUNTRY", 1, Country},
-  {"DOS", 1, Dosmem},
-  {"DOSDATA", 1, DosData},
-  {"FCBS", 1, Fcbs},
-  {"KEYBUF", 1, CfgKeyBuf},	/* ea */
-  {"FILES", 1, Files},
-  {"FILESHIGH", 1, FilesHigh},
-  {"LASTDRIVE", 1, CfgLastdrive},
-  {"LASTDRIVEHIGH", 1, CfgLastdriveHigh},
-  {"NUMLOCK", 1, Numlock},
-  {"SHELL", 1, InitPgm},
-  {"SHELLHIGH", 1, InitPgmHigh},
-  {"STACKS", 1, Stacks},
-  {"STACKSHIGH", 1, StacksHigh},
-  {"SWITCHAR", 1, CfgSwitchar},
-  {"SCREEN", 1, sysScreenMode},   /* JPP */
-  {"VERSION", 1, sysVersion},     /* JPP */
-  {"ANYDOS", 1, SetAnyDos},       /* tom */
-  {"IDLEHALT", 1, SetIdleHalt},   /* ea  */
-
-  {"DEVICE", 2, Device},
-  {"DEVICEHIGH", 2, DeviceHigh},
-  {"INSTALL", 2, CmdInstall},
-  {"INSTALLHIGH", 2, CmdInstallHigh},
-  {"CHAIN", 2, CmdChain},
-  {"SET", 2, CmdSet},
-#endif
   /* default action                                               */
   {"", -1, CfgFailure}
 };
@@ -929,8 +1024,8 @@ VOID DoConfig(int nPass)
 #endif
   {
     struct table *pEntry;
-    char* szLine = ARM_PTR(x86_szLine);
-    pLineStart = szLine;
+    pLineStart = ARM_PTR(x86_szLine);
+    BYTE *szLine = ARM_PTR(x86_szLine);
 
 #ifdef MEMDISK_ARGS
     if (!bEof)
@@ -938,7 +1033,8 @@ VOID DoConfig(int nPass)
 #endif
 
     /* read in a single line, \n or ^Z terminated */
-    for (BYTE *pLine = szLine;;)
+    BYTE *pLine;
+    for (pLine = szLine;;)
     {
       if (read(nFileDesc, linear_to_far(pLine), 1) == 0)
       {
@@ -960,6 +1056,7 @@ VOID DoConfig(int nPass)
         pLine++;
     }
 
+    *pLine = 0;
 #ifdef MEMDISK_ARGS
     }
     else if (mdsk != NULL)
@@ -983,7 +1080,7 @@ VOID DoConfig(int nPass)
     CfgDbgPrintf(("CONFIG=[%s]\n", szLine));
 
     /* Skip leading white space and get verb.               */
-    BYTE* pLine = scan(szLine, szBuf, 1);
+    pLine = scan(szLine, szBuf, 1);
 
     /* If the line was blank, skip it.  Otherwise, look up  */
     /* the verb and execute the appropriate function.       */
@@ -1007,8 +1104,7 @@ VOID DoConfig(int nPass)
       if (SkipLine(pLineStart))   /* F5/F8/?/! processing */
         continue;
     }
-    /// TODO:
-#if 0
+
     if ((pEntry->func != CfgMenu) && (pEntry->func != CfgMenuEsc))
     {
       /* compatibility "device foo.sys" */
@@ -1021,7 +1117,6 @@ VOID DoConfig(int nPass)
     }
     if ('=' == *pLine || pEntry->func == CfgMenu || pEntry->func == CfgMenuEsc)
       pLine = skipwh(pLine+1);
-#endif
 
     /* YES. DO IT */
     pEntry->func(pLine);

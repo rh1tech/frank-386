@@ -63,6 +63,8 @@ VOID PostConfig(VOID);
 VOID configDone(VOID);
 VOID DoInstall(void);
 void P_0(CPU* cpu, struct config*);
+/// TODO:
+inline static int MoveKernelToHMA() { return 0; }
 dos_far_ptr HMAalloc(COUNT bytesToAllocate);
 dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode);
 dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode);
