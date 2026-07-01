@@ -149,8 +149,13 @@ static void ConIntr(request FAR *rq) {
         cpu_save_regs(cpu, &saved);
         CPU_AH = 0x00;              /* INT 16h AH=00h: read keystroke */
         bios_intcall(cpu, 0x16);    /* returns false (re-enters) until key ready */
-        rq->r_ndbyte = CPU_AL;
-        rq->r_count  = 1;
+        if (rq->r_count > 0 && rq->r_trans) {
+            BYTE FAR *p = rq->r_trans;
+            *p = CPU_AL;
+            rq->r_count = 1;
+        } else {
+            rq->r_count = 0;
+        }
         cpu_restore_regs(cpu, &saved);
         rq_done(rq);
         break;
@@ -594,8 +599,8 @@ const static struct lol lol = {
 
 static void x86_execrh() {
   /// TODO: see execrh.asm
-        print_line("KERNEL INIT TODO (x86_execrh)", 1);
-        while(1);
+  printf("KERNEL INIT TODO (x86_execrh)\n");
+  while(1);
 }
 
 WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp) {

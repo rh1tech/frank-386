@@ -31,7 +31,7 @@
 #define x86_FIXED_DATA    MK_FP(DOS_PSP, 0x08F0) // _FIXED_DATA -> LoL
 #define x86_INTERNAL_DATA MK_FP(DOS_PSP, 0x08F0 + 0x01FB /*+LoL*/) // internal_data
 
-#define x86_DATA          MK_FP(DOS_PSP, 0x13A0) // _DATA - not used?
+#define x86_DATA          MK_FP(DOS_PSP, 0x13A0) // _DATA - not used? (one byte in chario.c)
 
 #define x86_BSS           MK_FP(DOS_PSP, 0x19F4) // _BSS -> DiskTransferBuffer[MAX_SEC_SIZE=512]
 #define x86_SZ_LINE       MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE) // _BSS + MAX_SEC_SIZE = 0x1BF4

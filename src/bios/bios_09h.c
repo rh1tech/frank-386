@@ -88,15 +88,16 @@ static char scan_to_ascii(uint8_t scan, bool shift, bool ctrl, bool caps)
  * Continues scan code processing. */
 static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* ignore)
 {
-    uint8_t scan;
+    uint8_t raw, scan;
     if (!cf) {
         /* intercepted: use modified scan from AL */
-        scan = CPU_AL;
+        raw = CPU_AL;
     } else {
         /* not intercepted: restore original scan from scratch */
-        scan = read86(IRQ1_SCRATCH);
+        raw = read86(IRQ1_SCRATCH);
     }
-    ///printf("[09] scan: %02xh\n", scan);
+    scan = raw & 0x7Fu;
+    //printf("[09] scan: %02xh raw: %02xh\n", scan, raw);
 
     if (scan == 0) {
         cpu_portout8(0x20, 0x20);
@@ -105,7 +106,7 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* ignore)
 
     uint8_t flags  = read86(BDA_KBD_FLAGS1);
     uint8_t flags1 = read86(BDA_KBD_FLAG1);
-    bool is_up = (read86(IRQ1_SCRATCH) & 0x80u) != 0;  /* original break bit */
+    bool is_up = (raw & 0x80u) != 0;
 
     ///printf("[09] raw=%02X scan=%02X flags=%02X flags1=%02X cf=%d al=%02X\n",
     ///   read86(IRQ1_SCRATCH), scan, flags, flags1, cf, CPU_AL);

@@ -300,7 +300,36 @@ bool fdos_21h(CPU* _cpu) {
         break;
 
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
-      /// TODO:
+      // BX = existing handle (old), CX = handle to redirect (new)
+      {
+        unsigned old_hndl = CPU_BX;
+        unsigned new_hndl = CPU_CX;
+        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+
+        if (old_hndl >= p->ps_maxfiles || p->ps_filetab[old_hndl] == 0xff)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-DE_INVLDHNDL);
+          break;
+        }
+        if (new_hndl >= p->ps_maxfiles)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-DE_INVLDHNDL);
+          break;
+        }
+        if (new_hndl != old_hndl)
+        {
+          /* close new handle if open */
+          if (p->ps_filetab[new_hndl] != 0xff)
+            DosClose(new_hndl);
+
+          /* copy SFT index and bump ref count */
+          p->ps_filetab[new_hndl] = p->ps_filetab[old_hndl];
+          idx_to_sft(p->ps_filetab[new_hndl])->sft_count++;
+        }
+        cf = 0;
+      }
         break;
 
         /* Set PSP                                                      */

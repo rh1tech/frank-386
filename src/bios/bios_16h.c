@@ -55,13 +55,13 @@ bool bios_16h_store_key(uint16_t ax)
 
 bool bios_16h(CPU* cpu)
 {
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
     case 0x00: /* read keystroke */
     case 0x10: /* enhanced read keystroke */
         if (kbd_empty()) {// rеenter to the same call, so sometimes IRQ 1 will call INT 9h and update BDA area
             /* Set IF=1 in the flags word already pushed on stack by intcall86,
             * so that after any IRQ's IRET we still have interrupts enabled. */
-            uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
             writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack | 0x0200); /* IF bit */
             ifl = 1; /* allow IRQs while waiting for keypress */
             return false;
@@ -74,11 +74,11 @@ bool bios_16h(CPU* cpu)
         cf = 0;  // ← явно сбросить CF (W/A)
         if (kbd_empty()) {
             zf = 1;
-            return true;
+            goto rt;
         }
         CPU_AX = kbd_peek();
         zf = 0;
-        return true;
+        goto rt;
 
     case 0x02: /* get shift flags */
         CPU_AL = read86(BDA_KBD_FLAGS1);
@@ -91,7 +91,7 @@ bool bios_16h(CPU* cpu)
     case 0xFF: /* KBUF extensions: add key to tail, DX=scancode/key word */
         CPU_AL = bios_16h_store_key(CPU_DX) ? 0x00 : 0x01;
         cf = 0;
-        return true;
+        goto rt;
     case 0x09: /* GET KEYBOARD FUNCTIONALITY (SeaBIOS handle_1609) */
         CPU_AL = 0x30;  /* bits 5,4: AH=10h-12h + AH=0Ah supported */
         return true;
@@ -115,12 +115,17 @@ bool bios_16h(CPU* cpu)
 
     case 0xA2: /* 122-key capability check (SeaBIOS handle_16a2) */
         /* do nothing: 122-key NOT supported, AH unchanged */
-         return true;        
+        return true;        
 
     default:
         CPU_AH = 0x86;
         cf = 1;
         zf = 0;
-        return true;
+        goto rt;
     }
+rt:
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
+    return true;
 }

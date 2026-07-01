@@ -524,8 +524,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
       /* if null just report full transfer    */
       if (s->sft_flags & SFT_FNUL)
         return n;
-      else
-        return cooked_write(&dev, n, (char *)ARM_PTR(bp));
+      return cooked_write(&dev, n, (char *)ARM_PTR(bp));
     }
   }
 
