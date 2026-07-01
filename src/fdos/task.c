@@ -48,4 +48,5 @@ VOID P_0(CPU* cpu, struct config FAR *Config)
         while(1);
     }
   }
+  __unreachable();
 }

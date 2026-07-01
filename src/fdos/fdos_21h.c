@@ -241,6 +241,21 @@ bool fdos_21h(CPU* _cpu) {
         CPU_BX = FP_OFF(internal_data->dta);
         SET_ES(FP_SEG(internal_data->dta));
         break;
+      case 0x37: /* DOS 2+ - SWITCHAR - GET/SET SWITCH CHARACTER */
+        switch (CPU_AL) {
+        case 0x00:              /* get switch character */
+          CPU_DL = internal_data->switchar;
+          CPU_AL = 0x00;
+          break;
+        case 0x01:              /* set switch character */
+          internal_data->switchar = CPU_DL;
+          CPU_AL = 0x00;
+          break;
+        default:
+          CPU_AL = 0xff;
+          break;
+        }
+        break;
 
       case 0x3d: // DOS 2+ - OPEN - OPEN EXISTING FILE
       {
@@ -365,5 +380,13 @@ UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
     SET_DS ( FP_SEG(buf) );
     CPU_DX = FP_OFF(buf);
     fdos_21h(cpu);
+/// TODO:    bios_intcall(cpu, 0x21);
     return cf ? (UCOUNT)-1 : CPU_AX;
+}
+
+int init_switchar(int ch) {
+  CPU_AX = 0x3701;
+  CPU_DL = (BYTE)ch;
+  bios_intcall(cpu, 0x21);
+  return CPU_AL == 0x00 ? 0 : -1;
 }

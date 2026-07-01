@@ -38,7 +38,7 @@
 #define x86_DAP           MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256) // = 0x1CF4 /* 16 */
 #define x86_MASTER_ENV    MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256 + 16) // = 0x1D04 /* 128 */
 
-extern const struct _KernelConfig InitKernelConfig;
+extern struct _KernelConfig InitKernelConfig;
 extern UWORD HMAFree;            /* first byte in HMA not yet used      */
 extern struct config Config;
 extern BYTE DOSFAR ASM HaltCpuWhileIdle;
@@ -48,12 +48,15 @@ extern dos_far_ptr lpTop;
 extern UWORD ram_top;
 extern char singleStep;
 extern char SkipAllConfig;
+extern BYTE DOSFAR ASM break_ena;  /* break enabled flag                   */
+extern unsigned char DOSTEXTFAR ASM kbdType;
 
 /*
     data shared between DSK.C and INITDISK.C
 */
 extern UWORD DOSFAR LBA_WRITE_VERIFY;
 
+void keycheck(void);
 void init_PSPSet(CPU* cpu, u16 psp);
 void Init_clk_driver(CPU* cpu);
 COUNT dsk_init(CPU* cpu);
@@ -75,6 +78,7 @@ dos_far_ptr linear_to_far(const BYTE *p);
 VOID DoConfig(int nPass);
 void BIOS_drive_reset(CPU* cpu, unsigned drive);
 void blockio(CPU* cpu, request FAR *rq);
+int ASMPASCAL init_switchar(int chr);
 
 inline static void rq_done(request FAR *rq) {
     rq->r_status = S_DONE;

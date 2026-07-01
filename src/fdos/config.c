@@ -1,45 +1,6 @@
-#include <pico.h>
-#include <pico/time.h>
-#include <hardware/pio.h>
 #include <ctype.h>
-#include "286/cpu.h"
 #include "bios/bios.h"
-#include "fdos.h"
-#include "i8254.h"
-
-#include "hdr/kconfig.h"
-#include "hdr/portab.h"
-
-#include "hdr/ddate.h"
-#include "hdr/dtime.h"
-#include "hdr/error.h"
-#include "hdr/clock.h"
-#include "hdr/device.h"
-#include "hdr/sft.h"
-#include "hdr/kbd.h"
-#include "hdr/fcb.h"
-#include "hdr/fat.h"
-#include "hdr/pcb.h"
-#include "hdr/dirmatch.h"
-#include "hdr/fnode.h"
-#include "hdr/mcb.h"
-#include "hdr/lol.h"
-#include "hdr/dcb.h"
-#include "hdr/cds.h"
-#include "hdr/tail.h"
-#include "hdr/process.h"
-#include "hdr/version.h"
-#include "proto.h"
-#include "globals.h"
-#include "hdr/debug.h"
-#include "hdr/buffer.h"
-#include "hdr/file.h"
-#include "config.h"
-#include "hdr/network.h"
-#include "init-mod.h"
-#include "dyndata.h"
-
-#define printf(...) dos_printf(__VA_ARGS__)
+#include "hdrs.h"
 
 #define HMA_NONE 0              /* do nothing */
 #define HMA_REQ 1               /* DOS = HIGH detected */
@@ -83,6 +44,29 @@ STATIC unsigned Menus BSS_INIT(0);
 STATIC dos_far_ptr x86_stackBase BSS_INIT({0});
 STATIC COUNT nStacks BSS_INIT(0);
 STATIC COUNT stackSize BSS_INIT(0);
+STATIC int MenuColor = -1;
+STATIC COUNT MenuTimeout = -1;
+STATIC BYTE  MenuSelected BSS_INIT(0);
+BYTE singleStep BSS_INIT(FALSE);        /* F8 processing */
+BYTE SkipAllConfig BSS_INIT(FALSE);     /* F5 processing */
+
+/**
+  Menu selection bar struct:
+  x pos, ypos, string
+*/
+#define MENULINEMAX 80
+#define MENULINESMAX 10
+struct MenuSelector
+{
+  int x;
+  int y;
+  BYTE bSelected;
+  BYTE Text[MENULINEMAX];
+};
+
+/** Structure below holds the menu-strings */
+STATIC struct MenuSelector MenuStruct[MENULINESMAX] BSS_INIT({0});
+STATIC int nMenuLine BSS_INIT(0);
 
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 
@@ -679,8 +663,59 @@ STATIC VOID InitPgmHigh(BYTE * pLine)
   Config.cfgP_0_startmode = 0x80;
 }
 
-STATIC VOID CfgMenu(BYTE * pLine) {
-  /// TODO:
+/* RE function for menu. */
+int  findend(BYTE * s)
+{
+  int nLen = 0;
+  /* 'marks' end if at least ten spaces, 0, or newline is found. */
+  while (*s && (*s != 0x0d || *s != 0x0a) )
+  {
+    BYTE *p= skipwh(s);
+    /* ah, more than 9 whitespaces ? We're done here (hrmph!) */
+    if(p - s >= 10)
+      break;
+    nLen++;
+    ++s;
+  }
+  return nLen;
+}
+
+STATIC VOID CfgMenu(BYTE * pLine)
+{
+  int nLen;
+  BYTE *pNumber = pLine;
+
+  printf("%s\n",pLine);
+  if (MenuColor == -1)
+    return;
+
+  pLine = skipwh(pLine);
+
+  /* skip drawing characters in cp437, which is what we'll have
+     just after booting! */
+  while ((unsigned char)*pLine >= 0xb0 && (unsigned char)*pLine < 0xe0)
+    pLine++;
+
+  pLine = skipwh(pLine);  /* skip more whitespaces... */
+
+  /* now I'm expecting a number here if this is a menu-choice line. */
+  if (isnum(pLine[0]))
+  {
+    struct MenuSelector *menu = &MenuStruct[pLine[0]-'0'];
+
+    menu->x = (pLine-pNumber);  /* xpos is at start of number */
+    menu->y = nMenuLine;
+    /* copy menu text: */
+    nLen = findend(pLine); /* length is until cr/lf, null or three spaces */
+
+    /* max 40 chars including nullterminator
+       (change struct at top of file if you want more...) */
+    if (nLen > MENULINEMAX-1)
+      nLen = MENULINEMAX-1;
+    memcpy(menu->Text, pLine, nLen);
+    menu->Text[nLen] = 0;  /* nullTerminate */
+  }
+  nMenuLine++;
 }
 
 STATIC VOID CfgMenuEsc(BYTE * pLine) {
@@ -734,22 +769,278 @@ STATIC VOID CfgLastdriveHigh(BYTE * pLine)
   Config.cfgLastdriveHigh = 1;
 }
 
+STATIC VOID CfgBreak(BYTE *pLine)
+{
+    pLine = skipwh(pLine);
+    if (toupper(pLine[0]) == 'O' && toupper(pLine[1]) == 'N') {
+        break_ena = TRUE;
+        return;
+    }
+    if (toupper(pLine[0]) == 'O' &&
+        toupper(pLine[1]) == 'F' &&
+        toupper(pLine[2]) == 'F') {
+        break_ena = FALSE;
+        return;
+    }
+    CfgFailure(pLine);
+}
+
+STATIC VOID Numlock(BYTE * pLine)
+{
+  /* Format:      NUMLOCK = (ON | OFF)      */
+  GetStringArg(pLine, szBuf);
+  BYTE flags = pload8(0x417);
+  flags &= ~0x20;
+  if (!strcaseequal((const char *)szBuf, "OFF"))
+    flags |= 0x20;
+  pstore8(0x417, flags);
+  keycheck();
+}
+
+STATIC struct table commands[];
+
+STATIC VOID CfgSwitches(BYTE * pLine)
+{
+  pLine = skipwh(pLine);
+  if (*pLine == '=')
+  {
+    pLine = skipwh(pLine + 1);
+  }
+  while (*pLine)
+  {
+    if (*pLine == '/') {
+      pLine++;
+      switch(toupper(*pLine)) {
+      case 'K':
+        if (commands[0].pass == 1)
+          kbdType = 0; /* force conv keyb */
+        break;
+      case 'N':
+        InitKernelConfig.SkipConfigSeconds = -1;
+        break;
+      case 'F':
+        InitKernelConfig.SkipConfigSeconds = 0;
+        break;
+      case 'E': /* /E[[:]nnnn]  Set the desired EBDA amount to move in bytes */
+        {       /* Note that if there is no EBDA, this will have no effect */
+          int n = 0;
+          if (*++pLine == ':')
+            pLine++;                    /* skip optional separator */
+          if (!(isnum(*pLine) || (*pLine == '-')))
+          {
+            pLine--;
+            break;
+          }
+          pLine = GetNumArg(pLine, &n) - 1;
+          /* allowed values: [48..1024] bytes, multiples of 16
+           * e.g. AwardBIOS: 48, AMIBIOS: 1024
+           * (Phoenix, MRBIOS, Unicore = ????)
+           */
+          if (n == -1)
+          {
+            Config.ebda2move = 0xffff;
+            break;
+          }
+          else if (n >= 48 && n <= 1024)
+          {
+            Config.ebda2move = (n + 15) & 0xfff0;
+            break;
+          }
+          /* else fall through (failure) */
+        }
+      default:
+        CfgFailure(pLine);
+      }
+    } else {
+      CfgFailure(pLine);
+    }
+    pLine = skipwh(pLine+1);
+  }
+  commands[0].pass = 1;
+}
+
+STATIC void ClearScreen(unsigned char attr)
+{
+  /* scroll down (newlines): */
+  iregs r;
+  unsigned char rows;
+
+  /* clear */
+  CPU_AX = 0x0600;
+  CPU_BH = attr;
+  CPU_CX = 0;
+  CPU_DL = peekb(0x40, 0x4a) - 1; /* columns */
+  rows = peekb(0x40, 0x84);
+  if (rows == 0) rows = 24;
+  CPU_DH = rows;
+  bios_intcall(cpu, 0x10);
+
+  /* move cursor to pos 0,0: */
+  CPU_AH = 0x02; /* set cursorpos */
+  CPU_BH = 0;    /* displaypage: */
+  CPU_DX = 0;  /* pos 0,0 */
+  bios_intcall(cpu, 0x10);
+  MenuColor = attr;
+}
+
+/**
+  MENUCOLOR[=] fg[, bg]
+*/
+STATIC void CfgMenuColor(BYTE * pLine)
+{
+  int num = 0;
+  unsigned char fg, bg = 0;
+
+  pLine = skipwh(pLine);
+
+  if ('=' == *pLine)
+    pLine = skipwh(pLine + 1);
+
+  pLine = GetNumArg(pLine, &num);
+  if (pLine == 0)
+    return;
+  fg = (unsigned char)num;
+
+  pLine = skipwh(pLine);
+
+  if (*pLine == ',')
+  {
+    pLine = GetNumArg(skipwh(pLine+1), &num);
+    if (pLine == 0)
+      return;
+    bg = (unsigned char)num;
+  }
+  ClearScreen((bg << 4) | fg);
+}
+
+STATIC VOID CfgMenuDefault(BYTE * pLine)
+{
+  COUNT num = 0;
+
+  pLine = skipwh(pLine);
+
+  if ('=' != *pLine)
+  {
+    CfgFailure(pLine);
+    return;
+  }
+  pLine = skipwh(pLine + 1);
+
+  /* Format:  STACKS = stacks [, stackSize]       */
+  pLine = GetNumArg(pLine, &num);
+  MenuSelected = num;
+  pLine = skipwh(pLine);
+
+  if (*pLine == ',')
+  {
+    GetNumArg(++pLine, &MenuTimeout);
+  }
+}
+
+STATIC VOID DosData(BYTE * pLine)
+{
+  pLine = GetStringArg(pLine, szBuf);
+  strupr(szBuf);
+
+  if (memcmp(szBuf, "UMB", 3) == 0)
+    Config.cfgDosDataUmb = TRUE;
+}
+
+/*
+   Keyboard buffer relocation: KEYBUF=start[,end]
+   Select a new location for the  keyboard buffer  at 0x40:xx,
+   for example 0x40:0xac-0xff, but 0x50:5-0xff ("basica" only?)
+   feels safer? 0x60:0-0xff is scratch, we use it as SHELL PSP.
+   (sys / boot sector load_segment / LOADSEG, exeflat call in
+   makefile, DOS_PSP in mcb.h, main.c P_0, task.c, kernel.asm)
+   (50:e0..ff used as early kernel boot drive / config buffer)
+*/
+STATIC VOID CfgKeyBuf(BYTE * pLine)
+{
+  /*  Format:     KEYBUF = startoffset [,endoffset]    */
+  UWORD FAR *keyfill = (UWORD FAR *)ARM_PTR( MK_FP(0x40, 0x1a) );
+  UWORD FAR *keyrange = (UWORD FAR *)ARM_PTR( MK_FP(0x40, 0x80) );
+  COUNT startbuf, endbuf;
+
+  if ((pLine = GetNumArg(pLine, &startbuf)) == 0)
+    return;
+  pLine = skipwh(pLine);
+  endbuf = (startbuf | 0xff)+1;	/* default end: end of the same "page" */
+  if (*pLine == ',')
+  {
+    if ((pLine = GetNumArg(++pLine, &endbuf)) == 0)
+      return;
+  }
+  startbuf &= 0xfffe;
+  endbuf &= 0xfffe;
+  if (endbuf<startbuf || (endbuf-startbuf)<=0x20 ||
+    ((startbuf & 0xff00) != ((endbuf-1) & 0xff00)) )
+    startbuf = 0;		/* flag as bad: too small or page wrap */
+  if (startbuf<0xac || (startbuf>=0x100 && startbuf<0x105) || startbuf>0x1de)
+  {				/* 50:0 / 50:4 are for prtscr / A:/B: DJ */
+    printf("Must start at 0xac..0x1de, not 0x100..0x104\n");
+    return;
+  }
+  keyfill[0] = startbuf;
+  keyfill[1] = startbuf;
+  keyrange[0] = startbuf;
+  keyrange[1] = endbuf;
+  keycheck();
+}
+
+STATIC VOID CfgSwitchar(BYTE * pLine)
+{
+  /* Format: SWITCHAR = character         */
+  GetStringArg(pLine, szBuf);
+  init_switchar(*szBuf);
+}
+
+/**
+  Set screen mode - rewritten to use init_call_intr() by RE / ICD
+*/
+STATIC VOID sysScreenMode(BYTE * pLine)
+{
+  iregs r;
+  COUNT nMode;
+  COUNT nFunc = 0x11;
+
+  /* Get the argument                                             */
+  if (GetNumArg(pLine, &nMode) == (BYTE *) 0)
+    return;
+
+  if(nMode<0x10)
+    nFunc = 0; /* set lower screenmode */
+  else if ((nMode != 0x11) && (nMode != 0x12) && (nMode != 0x14))
+    return; /* do nothing; invalid screenmode */
+
+/* Modes
+   0x11 (17)   28 lines
+   0x12 (18)   43/50 lines
+   0x14 (20)   25 lines
+ */
+  /* move cursor to pos 0,0: */
+  CPU_AH = nFunc; /* set videomode */
+  CPU_AL = nMode;
+  CPU_BL = 0;
+  bios_intcall(cpu, 0x10);
+}
+
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
-  {"SWITCHES", 0, CfgNotImplemented},
+  {"SWITCHES", 0, CfgSwitches},
 
   /* rem is never executed by locking out pass                    */
   {"REM", 0, CfgIgnore},
   {";", 0,   CfgIgnore},
 
-  {"MENUCOLOR",0, CfgNotImplemented},
-  {"MENUDEFAULT", 0, CfgNotImplemented},
-  {"MENU", 0, CfgNotImplemented},      /* lines to print in pass 0 */
-  {"ECHO", 2, CfgNotImplemented},      /* lines to print in pass 2 - install(high) */
+  {"MENUCOLOR", 0, CfgMenuColor},
+  {"MENUDEFAULT", 0, CfgMenuDefault},
+  {"MENU", 0, CfgMenu},      /* lines to print in pass 0 */
+  {"ECHO", 2, CfgMenu},      /* lines to print in pass 2 - install(high) */
   {"EECHO", 2, CfgMenuEsc},            /* modified ECHO (ea) */
 
-  {"BREAK", 1, CfgNotImplemented},
+  {"BREAK", 1, CfgBreak},
  
   {"BUFFERS", 1, Config_Buffers},
   {"BUFFERSHIGH", 1, CfgBuffersHigh}, /* as BUFFERS - we use HMA anyway */
@@ -757,20 +1048,20 @@ STATIC struct table commands[] = {
   {"COMMAND", 1, InitPgm},
   {"COUNTRY", 1, CfgNotImplemented},
   {"DOS", 1, Dosmem},
-  {"DOSDATA", 1, CfgNotImplemented},
+  {"DOSDATA", 1, DosData},
   {"FCBS", 1, Fcbs},
-  {"KEYBUF", 1, CfgNotImplemented},	/* ea */
+  {"KEYBUF", 1, CfgKeyBuf},	/* ea */
   {"FILES", 1, Files},
   {"FILESHIGH", 1, FilesHigh},
   {"LASTDRIVE", 1, CfgLastdrive},
-  {"LASTDRIVEHIGH", 1, CfgLastdriveHigh},  
-  {"NUMLOCK", 1, CfgNotImplemented},
+  {"LASTDRIVEHIGH", 1, CfgLastdriveHigh}, 
+  {"NUMLOCK", 1, Numlock},
   {"SHELL", 1, InitPgm},
   {"SHELLHIGH", 1, InitPgmHigh},
   {"STACKS", 1, Stacks},
   {"STACKSHIGH", 1, StacksHigh},
-  {"SWITCHAR", 1, CfgNotImplemented},
-  {"SCREEN", 1, CfgNotImplemented},   /* JPP */
+  {"SWITCHAR", 1, CfgSwitchar},
+  {"SCREEN", 1, sysScreenMode},   /* JPP */
   {"VERSION", 1, CfgNotImplemented},     /* JPP */
   {"ANYDOS", 1, CfgNotImplemented},       /* tom */
   {"IDLEHALT", 1, CfgNotImplemented},   /* ea  */
@@ -784,10 +1075,6 @@ STATIC struct table commands[] = {
   /* default action                                               */
   {"", -1, CfgFailure}
 };
-
-BYTE singleStep BSS_INIT(FALSE);        /* F8 processing */
-BYTE SkipAllConfig BSS_INIT(FALSE);     /* F5 processing */
-BYTE  MenuSelected BSS_INIT(0);
 
 STATIC BOOL SkipLine(char *pLine)
 {

@@ -81,13 +81,15 @@ struct dhdr* clk_dev;
 struct dhdr* blk_dev;
 struct lol* LoL;// = (struct lol*)ARM_PTR(x86_FIXED_DATA);
 struct dos_data* internal_data;// (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
+BYTE DOSFAR ASM break_ena = 1;  /* break enabled flag                   */
+unsigned char DOSTEXTFAR ASM kbdType = 0x10; // 00 for 84key, 10h for 102key
 
-const KernelConfig InitKernelConfig = {
+KernelConfig InitKernelConfig = {
     .CONFIG = {'C','O','N','F','I','G'},
     .ConfigSize = sizeof(KernelConfig) - 8, // без signature[6] и config_size
     .DLASortByDriveNo = 0,
     .InitDiskShowDriveAssignment = 1,
-    .SkipConfigSeconds = -1, /// TODO: was 2
+    .SkipConfigSeconds = 2,
     .ForceLBA = 0,
     .GlobalEnableLBAsupport = 1,
     .BootHarddiskSeconds = 0,
@@ -99,6 +101,12 @@ const KernelConfig InitKernelConfig = {
     .Verbose = 0,
     .PartitionMode = 0x1F
 };
+
+void keycheck(void)
+{
+    CPU_AH = 0x01;
+    bios_intcall(cpu, 0x16);
+}
 
 static void ConIntr(request FAR *rq) {
     CPU_regs saved;
@@ -2020,26 +2028,6 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     InitializeAllBPBs();
 }
 
-static void init_call_p_0(CPU* cpu, struct config* config) {
-  cpu_set_a20(cpu, 1);
-  SET_DS ( DOS_PSP );
-  P_0(cpu, config);
-  /// TODO:
-    /// debug-blink this point acived
-    for (int i = 0; i < 6; i++) {
-    /// TODO: for reboot    keyboard_tick();
-        sleep_ms(23);
-        gpio_put(PICO_DEFAULT_LED_PIN, true);
-        sleep_ms(23);
-        gpio_put(PICO_DEFAULT_LED_PIN, false);
-    }
-    // allow it to wait for keyboard 
-    SET_CS ( 0xF000 ); // -> FFEFFh (bios callback)
-    SET_IP ( 0xFEFF );
-    set_bios_callback(cpu, &params, false);
-    printf("FreeDOS impl. is incomplete. Nothing to do for now...\n");
-}
-
 STATIC void prep_shell(CPU* cpu)
 {
   CommandTail Cmd;
@@ -2089,8 +2077,11 @@ STATIC void prep_shell(CPU* cpu)
       Config.cfgInitTail = Cmd.ctBuffer;
     }
   }
-  // start_shell
-  init_call_p_0(cpu, &Config); /* go execute process 0 (the shell) */
+  /* go execute process 0 (the shell) */
+  cpu_set_a20(cpu, 1);
+  SET_DS ( DOS_PSP );
+  P_0(cpu, &Config);
+  __unreachable();
 }
 
 void kernel(CPU* _cpu) {
@@ -2174,4 +2165,6 @@ void kernel(CPU* _cpu) {
     DoInstall();
 
     prep_shell(_cpu);
+
+    __unreachable();
 }
