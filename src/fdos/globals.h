@@ -118,6 +118,7 @@ extern /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransfer
  * 3) merge_file_changes (for SHARE)
  */
 GLOBAL struct f_node fnode[2];
+GLOBAL BYTE ASM ReturnAnyDosVersionExpected;
 
 UWORD fgetword(const void *vp);
 void fputword(void *vp, UWORD w);

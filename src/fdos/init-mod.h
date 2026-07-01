@@ -42,6 +42,7 @@ extern struct _KernelConfig InitKernelConfig;
 extern UWORD HMAFree;            /* first byte in HMA not yet used      */
 extern struct config Config;
 extern BYTE DOSFAR ASM HaltCpuWhileIdle;
+extern dos_far_ptr x86_PSP; // == MK_FP(DOS_PSP, 0x0000); // PSP ядра занимает 0060:0000–0060:00FF
 extern const dos_far_ptr x86_dap;
 extern const dos_far_ptr x86_master_env;
 extern dos_far_ptr lpTop;

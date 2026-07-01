@@ -49,7 +49,7 @@ STATIC COUNT MenuTimeout = -1;
 STATIC BYTE  MenuSelected BSS_INIT(0);
 BYTE singleStep BSS_INIT(FALSE);        /* F8 processing */
 BYTE SkipAllConfig BSS_INIT(FALSE);     /* F5 processing */
-
+BYTE ASM ReturnAnyDosVersionExpected = 0; // originated from?
 /**
   Menu selection bar struct:
   x pos, ypos, string
@@ -1025,6 +1025,128 @@ STATIC VOID sysScreenMode(BYTE * pLine)
   bios_intcall(cpu, 0x10);
 }
 
+STATIC VOID sysVersion(BYTE * pLine)
+{
+  COUNT major, minor;
+  char *p = strchr(pLine, '.');
+
+  if (p == NULL)
+    return;
+
+  p++;
+
+  /* Get major number */
+  if (GetNumArg(pLine, &major) == (BYTE *) 0)
+    return;
+
+  /* Get minor number */
+  if (GetNumArg(p, &minor) == (BYTE *) 0)
+    return;
+
+  if (InitKernelConfig.Verbose >= 0) printf("Changing reported version to %d.%d\n", major, minor);
+
+  LoL->os_setver_major = major; /* not the internal os_major */
+  LoL->os_setver_minor = minor; /* not the internal os_minor */
+  ((psp far *) ARM_PTR(x86_PSP))->ps_retdosver = (minor << 8) + major;
+}
+
+/*
+    Undocumented feature:  ANYDOS
+        will report to MSDOS programs just the version number
+        they expect. be careful with it!
+*/
+STATIC VOID SetAnyDos(BYTE * pLine)
+{
+  UNREFERENCED_PARAMETER(pLine);
+  ReturnAnyDosVersionExpected = TRUE;
+}
+
+/*
+   Kernel built-in energy saving: IDLEHALT=haltlevel
+   -1 max savings, 0 never HLT, 1 safe kernel only HLT,
+   2 (3) also hooks int2f.1680 (and sets al=0)
+*/
+STATIC VOID SetIdleHalt(BYTE * pLine)
+{
+  COUNT haltlevel;
+  if (GetNumArg(pLine, &haltlevel))
+    HaltCpuWhileIdle = haltlevel; /* 0 for no HLT, 1..n more, -1 max */
+}
+
+STATIC BYTE far * searchvar(const BYTE * name, int length)
+{
+  BYTE* pp = ((BYTE*)ARM_PTR(x86_master_env));
+  do {
+    if (!fmemcmp(name, pp, length + 1)) {
+      return pp;
+    }
+    pp += strlen(pp) + 1;
+  } while (*pp);
+  return NULL;
+}
+
+static char* envp = 0;
+STATIC void deletevar(BYTE far * pp) {
+  if (!envp) {
+    envp = ((char*)ARM_PTR(x86_master_env));
+  }
+  int variablelength;
+  if (NULL == pp)
+    return;
+  variablelength = fstrlen(pp) + 1;
+  memcpy(pp, pp + variablelength, (unsigned)(envp + 3 - (pp + variablelength)));
+  /* our fmemcpy always copies forwards */
+  envp -= variablelength;
+  return;
+}
+
+STATIC VOID CmdSet(BYTE *pLine)
+{
+  if (!envp) {
+    envp = ((char*)ARM_PTR(x86_master_env));
+  }
+  pLine = GetStringArg(pLine, szBuf);
+  pLine = skipwh(pLine);  /* scan() stops at the equal sign or space */
+  if (*pLine == '=')      /* equal sign is required */
+  {
+    int size, oldsize, namesize;
+    BYTE far * pp;
+    strupr(szBuf);        /* all environment variables must be uppercase */
+    namesize = strlen(szBuf);
+    strcat(szBuf, "=");
+    pp = searchvar(szBuf, namesize);
+    pLine = skipwh(++pLine);
+    strcat(szBuf, pLine); /* append the variable value (may include spaces) */
+    size = strlen(szBuf);
+    if (size == namesize + 1) {
+      /* empty variable ?  then just delete. (cannot fail) */
+      deletevar(pp);
+      return;
+    }
+    if (pp) {
+      oldsize = fstrlen(pp) + 1;
+    } else {
+      oldsize = 0;
+    }
+    BYTE* master_env = ((BYTE*)ARM_PTR(x86_master_env));
+    if (size < master_env + 128 - (envp - oldsize) - 1 - 2)
+    {                     /* must end with two consequtive zeros */
+      deletevar(pp);      /* now that there's enough space, actually delete */
+      fstrcpy(envp, szBuf);
+      envp += size + 1;   /* add next variables starting at the second zero */
+      *envp = 0;
+      envp[1] = 0;
+      envp[2] = 0;
+      /* The word marker after last variable should not equal 1,
+          to indicate that there is no executable pathname following.  */
+    }
+    else
+      printf("Master environment is full - can't add \"%s\"\n", szBuf);
+  }
+  else
+    printf("Invalid SET command: \"%s\"\n", szBuf);
+}
+
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
@@ -1062,16 +1184,16 @@ STATIC struct table commands[] = {
   {"STACKSHIGH", 1, StacksHigh},
   {"SWITCHAR", 1, CfgSwitchar},
   {"SCREEN", 1, sysScreenMode},   /* JPP */
-  {"VERSION", 1, CfgNotImplemented},     /* JPP */
-  {"ANYDOS", 1, CfgNotImplemented},       /* tom */
-  {"IDLEHALT", 1, CfgNotImplemented},   /* ea  */
+  {"VERSION", 1, sysVersion},     /* JPP */
+  {"ANYDOS", 1, SetAnyDos},       /* tom */
+  {"IDLEHALT", 1, SetIdleHalt},   /* ea  */
 
   {"DEVICE", 2, CfgNotImplemented},
   {"DEVICEHIGH", 2, CfgNotImplemented},
   {"INSTALL", 2, CmdInstall},
   {"INSTALLHIGH", 2, CmdInstallHigh},
   {"CHAIN", 2, CfgNotImplemented},
-  {"SET", 2, CfgNotImplemented},
+  {"SET", 2, CmdSet},
   /* default action                                               */
   {"", -1, CfgFailure}
 };

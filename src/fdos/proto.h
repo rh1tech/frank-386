@@ -298,7 +298,7 @@ void put_console(int);
 
 /* strings.c */
 size_t /* ASMCFUNC */ ASMPASCAL strlen(const char * s);
-size_t /* ASMCFUNC */ ASMPASCAL fstrlen(const char FAR * s);
+#define fstrlen strlen
 char FAR * /*ASMCFUNC*/ ASMPASCAL _fstrcpy(char FAR * d, const char FAR * s);
 int /*ASMCFUNC*/ ASMPASCAL strcmp(const char * d, const char * s);
 int /*ASMCFUNC*/ ASMPASCAL fstrcmp(const char FAR * d, const char FAR * s);
@@ -306,7 +306,7 @@ int /*ASMCFUNC*/ ASMPASCAL fstrncmp(const char FAR * d, const char FAR * s, size
 int /*ASMCFUNC*/ ASMPASCAL strncmp(const char * d, const char * s, size_t l);
 char * /*ASMCFUNC*/ ASMPASCAL strchr(const char * s, int c);
 char FAR * /*ASMCFUNC*/ ASMPASCAL fstrchr(const char FAR * s, int c);
-void FAR * /*ASMCFUNC*/ ASMPASCAL fmemchr(const void FAR * s, int c, size_t n);
+#define fmemchr memchr
 
 /* misc.c */
 char * /*ASMCFUNC*/ ASMPASCAL strcpy(char * d, const char * s);
@@ -318,27 +318,7 @@ void * /*ASMCFUNC*/ ASMPASCAL fmemset(dos_far_ptr s, int ch, size_t n);
 void * /*ASMCFUNC*/ ASMPASCAL memset(void * s, int ch, size_t n);
 
 int /*ASMCFUNC*/ ASMPASCAL memcmp(const void *m1, const void *m2, size_t n);
-int /*ASMCFUNC*/ ASMPASCAL fmemcmp(const void FAR *m1, const void FAR *m2, size_t n);
-
-#ifdef __WATCOMC__
-/* bx, cx, dx and es not used or clobbered for all asmsupt.asm functions except
-   (f)memchr/(f)strchr (which clobber dx) */
-#pragma aux (__pascal) pascal_ax __modify __exact [__ax]
-#pragma aux (pascal_ax) fmemcpy
-#pragma aux (pascal_ax) memcpy
-#pragma aux (pascal_ax) fmemset
-#pragma aux (pascal_ax) memset
-#pragma aux (pascal_ax) fmemcmp __modify __nomemory
-#pragma aux (pascal_ax) memcmp __modify __nomemory
-#pragma aux (pascal_ax) fstrcpy
-#pragma aux (pascal_ax) strcpy
-#pragma aux (pascal_ax) fstrlen __modify __nomemory
-#pragma aux (pascal_ax) strlen __modify __nomemory
-#pragma aux (__pascal) memchr __modify __exact [__ax __dx] __nomemory
-#pragma aux (__pascal) fmemchr __modify __exact [__ax __dx] __nomemory
-#pragma aux (__pascal) strchr __modify __exact [__ax __dx] __nomemory
-#pragma aux (__pascal) fstrchr __modify __exact [__ax __dx] __nomemory
-#endif
+#define fmemcmp memcmp
 
 /* sysclk.c */
 COUNT BcdToByte(COUNT x);
