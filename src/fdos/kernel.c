@@ -8,6 +8,7 @@
 #include "i8254.h"
 
 #define printf(...) dos_printf(__VA_ARGS__)
+CPU* cpu;
 
 static bool waiter(CPU* cpu, bios_callback_params_t* any) {
     // actually do nothing, since reboot only is allowed in this case
@@ -20,8 +21,6 @@ static bios_callback_params_t params = {
     .expected_cs = 0xF000,
     .expected_ip = 0xFEFF
 };
-
-static CPU* cpu;
 
 int	vsnprintf (char *__restrict, size_t, const char *__restrict, __gnuc_va_list)
                _ATTRIBUTE ((__format__ (__printf__, 3, 0)));
@@ -1029,60 +1028,6 @@ int network_redirector_fp(unsigned cmd, void *s)
   UNREFERENCED_PARAMETER(cmd);
   UNREFERENCED_PARAMETER(s);
   return -1;
-}
-
-/*
-    cooked_read/cooked_write/read_line_handle/update_scr_pos - "cooked"
-    (line-buffered, ^Z-EOF-aware, echo-as-you-type) character device
-    I/O, used by rwblock()/DosRWSft() (below) when reading/writing a
-    device opened without SFT_FBINARY (raw/binary mode) - typically
-    CON.
-
-    /// TODO: stubs for this iteration. The original (chario.c) is a
-    /// substantial separate module (line editing, ^C/^Break checking,
-    /// tab expansion, BIOS_inkey()/BIOS_putc() console interaction).
-    /// None of it is migrated yet. This iteration's actual goal
-    /// (reading/closing a fixed file like CONFIG.SYS) never reaches
-    /// these - CONFIG.SYS is opened as a regular file, not a console
-    /// device - so these panic loudly instead of silently behaving
-    /// like an empty/closed console, in case that assumption ever
-    /// stops holding (e.g. something tries to DosRead() from CON).
-
-    Migrated from chario.c (signatures only; bodies replaced as above).
-*/
-long cooked_read(struct dhdr **pdev, size_t n, char *bp)
-{
-  UNREFERENCED_PARAMETER(pdev);
-  UNREFERENCED_PARAMETER(n);
-  UNREFERENCED_PARAMETER(bp);
-  printf("PANIC: cooked_read() called but not implemented\n");
-  for (;;) ;
-}
-
-long cooked_write(struct dhdr **pdev, size_t n, char *bp)
-{
-  UNREFERENCED_PARAMETER(pdev);
-  UNREFERENCED_PARAMETER(n);
-  UNREFERENCED_PARAMETER(bp);
-  printf("PANIC: cooked_write() called but not implemented\n");
-  for (;;) ;
-}
-
-size_t read_line_handle(int sft_idx, size_t n, char *bp)
-{
-  UNREFERENCED_PARAMETER(sft_idx);
-  UNREFERENCED_PARAMETER(n);
-  UNREFERENCED_PARAMETER(bp);
-  printf("PANIC: read_line_handle() called but not implemented\n");
-  for (;;) ;
-}
-
-void update_scr_pos(unsigned char c, unsigned char count)
-{
-  UNREFERENCED_PARAMETER(c);
-  UNREFERENCED_PARAMETER(count);
-  printf("PANIC: update_scr_pos() called but not implemented\n");
-  for (;;) ;
 }
 
 /*

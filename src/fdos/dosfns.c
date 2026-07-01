@@ -503,12 +503,6 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
     if (mode==XFR_READ)
     {
       long rc;
-      /* dev (a dos_far_ptr local) cannot be reinterpreted as a
-         "struct dhdr **" - cooked_read()/cooked_write() are
-         unreachable PANIC stubs anyway (see their definitions
-         above), so NULL is passed instead of a meaningless cast. */
-      struct dhdr *unused_dev = NULL;
-
       /* Test for eof and exit                */
       /* immediately if it is                 */
       if (!(s->sft_flags & SFT_FEOF))
@@ -517,15 +511,13 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
       if (s->sft_flags & SFT_FCONIN)
         rc = read_line_handle(sft_idx, n, (char *)ARM_PTR(bp));
       else
-        rc = cooked_read(&unused_dev, n, (char *)ARM_PTR(bp));
+        rc = cooked_read(&dev, n, (char *)ARM_PTR(bp));
       if (*(char *)ARM_PTR(bp) == CTL_Z)
         s->sft_flags &= ~SFT_FEOF;
       return rc;
     }
     else
     {
-      struct dhdr *unused_dev = NULL;
-
       /* reset EOF state (set to no EOF)      */
       s->sft_flags |= SFT_FEOF;
 
@@ -533,7 +525,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
       if (s->sft_flags & SFT_FNUL)
         return n;
       else
-        return cooked_write(&unused_dev, n, (char *)ARM_PTR(bp));
+        return cooked_write(&dev, n, (char *)ARM_PTR(bp));
     }
   }
 

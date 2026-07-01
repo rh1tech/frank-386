@@ -51,28 +51,28 @@ void AllocateHMASpace (size_t lowbuffer, size_t highbuffer);
 
 /* break.c */
 unsigned char ctrl_break_pressed(void);
-unsigned char check_handle_break(struct dhdr FAR **pdev);
-void handle_break(struct dhdr FAR **pdev, int sft_out);
+unsigned char check_handle_break(dos_far_ptr *pdev);
+void handle_break(dos_far_ptr *pdev, int sft_out);
 #ifdef __WATCOMC__
 #pragma aux handle_break __aborts;
 #endif
 
 /* chario.c */
-struct dhdr FAR *sft_to_dev(sft FAR *sft);
+dos_far_ptr/*struct dhdr*/ sft_to_dev(sft *s);
 long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, void FAR * bp,
                   unsigned command);
-int ndread(struct dhdr FAR **pdev);
+int ndread(dos_far_ptr *pdev);
 int StdinBusy(void);
-void con_flush(struct dhdr FAR **pdev);
+void con_flush(dos_far_ptr *pdev);
 unsigned char read_char(int sft_in, int sft_out, BOOL check_break);
 unsigned char read_char_stdin(BOOL check_break);
-long cooked_read(struct dhdr FAR **pdev, size_t n, char FAR *bp);
+long cooked_read(dos_far_ptr/*struct dhdr*/ *pdev, size_t n, char *bp);
 void read_line(int sft_in, int sft_out, keyboard FAR * kp);
 size_t read_line_handle(int sft_idx, size_t n, char FAR * bp);
 void write_char(int c, int sft_idx);
 void write_char_stdout(int c);
 void update_scr_pos(unsigned char c, unsigned char count);
-long cooked_write(struct dhdr FAR **pdev, size_t n, char FAR *bp);
+long cooked_write(dos_far_ptr/*struct dhdr*/ *pdev, size_t n, char *bp);
 
 sft FAR *get_sft(UCOUNT);
 

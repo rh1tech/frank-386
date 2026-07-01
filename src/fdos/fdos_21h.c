@@ -1,32 +1,6 @@
-#include "286/cpu.h"
+#include "hdrs.h"
 #include "bios/bios.h"
 #include "fdos.h"
-
-#include "hdr/kconfig.h"
-#include "hdr/portab.h"
-#include "hdr/error.h"
-#include "hdr/clock.h"
-#include "hdr/device.h"
-#include "hdr/sft.h"
-#include "hdr/kbd.h"
-#include "hdr/fcb.h"
-#include "hdr/fat.h"
-#include "hdr/pcb.h"
-#include "hdr/dirmatch.h"
-#include "hdr/fnode.h"
-#include "hdr/mcb.h"
-#include "hdr/lol.h"
-#include "hdr/tail.h"
-#include "hdr/process.h"
-#include "hdr/file.h"
-#include "hdr/cds.h"
-#include "proto.h"
-#include "globals.h"
-#include "init-mod.h"
-
-#define printf(...) dos_printf(__VA_ARGS__)
-
-static CPU* cpu; /// TODO: refactoring
 
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined");
@@ -58,46 +32,6 @@ COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice,
   return CriticalError(EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE |
                        (mode == DSKWRITE ? EFLG_WRITE : 0),
                        nDrive, rq->r_status & S_MASK, lpDevice);
-}
-
-STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
-{
-  struct dhdr* dev = (struct dhdr*)ARM_PTR(*pdev);
-  CharReqHdr.r_command = command;
-  CharReqHdr.r_unit = 0;
-  CharReqHdr.r_status = 0;
-  CharReqHdr.r_length = sizeof(request);
-  execrh(&CharReqHdr, *pdev);
-  if (CharReqHdr.r_status & S_ERROR)
-  {
-    for (;;) {
-      switch (char_error(&CharReqHdr, dev))
-      {
-      case ABORT:
-      case FAIL:
-        return DE_INVLDACC;
-      case CONTINUE:
-        CharReqHdr.r_count = 0;
-        return 0;
-      case RETRY:
-        return 1;
-      }
-    }
-  }
-  return SUCCESS;
-}
-
-long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, void FAR * bp,
-                  unsigned command)
-{
-  int err;
-  do
-  {
-    CharReqHdr.r_count = n;
-    CharReqHdr.r_trans = bp;
-    err = CharRequest(pdev, command);
-  } while (err == 1);
-  return err == SUCCESS ? (long)CharReqHdr.r_count : err;
 }
 
 /* common - call the clock driver */

@@ -39,3 +39,4 @@
 
 #define printf(...) dos_printf(__VA_ARGS__)
 void dos_printf(const char *fmt, ...);
+extern CPU* cpu;
