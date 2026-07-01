@@ -579,66 +579,75 @@ bool bios_15h_E820h(CPU* cpu) {
 #endif
 
 bool bios_15h(CPU* cpu) {
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
+    bool res = true;
     switch(CPU_AH) {
         case 0x24:
-            return bios_15h_24h(cpu); // A20 GATE
+            res = bios_15h_24h(cpu); // A20 GATE
+            goto ok;
         case 0x41:
-            return bios_15h_41h(cpu); // WAIT ON EXTERNAL EVENT (CONVERTIBLE and some others)
+            res = bios_15h_41h(cpu); // WAIT ON EXTERNAL EVENT (CONVERTIBLE and some others)
+            goto ok;
         case 0x4F:  /* keyboard intercept — not hooked, pass through */
             cf = 1;  /* не перехватывать, AH не трогаем */
-            return true;
+            goto ok;
         case 0x52:  /* TODO: REMOVABLE MEDIA EJECT — SeaBIOS: always success */
             cf = 0;
             CPU_AH = 0x00;
-            return true;
+            goto ok;
         case 0x86: { /* WAIT — CX:DX microseconds */
             uint32_t usec = ((uint32_t)CPU_CX << 16) | CPU_DX;
             sleep_us(usec);  /* Pico SDK: busy-waits but yields to hardware */
             cf = 0;
             CPU_AH = 0x00;
-            return true;
+            goto ok;
         }
         case 0x83: {
             if (CPU_AL == 0x01) {
                 pstore8(0x4A0, 0x00);
                 cf = 0; CPU_AH = 0x00;
-                return true;
+                goto ok;
             }
-            if (CPU_AL != 0x00) { cf = 1; CPU_AH = 0x86; return true; }
-            if (pload8(0x4A0) & 0x01) { cf = 1; CPU_AH = 0x83; return true; }
+            if (CPU_AL != 0x00) { cf = 1; CPU_AH = 0x86; goto ok; }
+            if (pload8(0x4A0) & 0x01) { cf = 1; CPU_AH = 0x83; goto ok; }
             uint32_t usec = ((uint32_t)CPU_CX << 16) | CPU_DX;
             pstore8(0x4A0, 0x01);
-            sleep_us(usec);
+            sleep_us(usec); /// TODO: ensure
             uint32_t addr = (uint32_t)CPU_ES * 16 + CPU_BX;
             pstore8(addr, pload8(addr) | 0x80);  /* set bit 7 of flag byte */
             pstore8(0x4A0, 0x00);
             cf = 0; CPU_AH = 0x00;
-            return true;
+            goto ok;
         }
 
         case 0x87:
-            return bios_15h_87h(cpu); // COPY EXTENDED MEMORY
+            res = bios_15h_87h(cpu); // COPY EXTENDED MEMORY
+            goto ok;
         case 0x88:
-            return bios_15h_88h(cpu); // GET EXTENDED MEMORY SIZE (286+)
+            res = bios_15h_88h(cpu); // GET EXTENDED MEMORY SIZE (286+)
+            goto ok;
         case 0x89:
-            return bios_15h_89h(cpu); // SWITCH TO PROTECTED MODE
+            res = bios_15h_89h(cpu); // SWITCH TO PROTECTED MODE
+            goto ok;
         case 0x90:  /* DEVICE BUSY — no-op (SeaBIOS: empty handler) */
         case 0x91:  /* INTERRUPT COMPLETE — no-op (SeaBIOS: empty handler) */
-            return true;
+            goto ok;
         case 0xC0:
-            return bios_15h_C0h(cpu); // GET CONFIGURATION
+            res = bios_15h_C0h(cpu); // GET CONFIGURATION
+            goto ok;
         case 0xC1: { /* GET EBDA SEGMENT */
             uint16_t ebda = pload16(0x40E);
             if (ebda == 0x0000) {
                 cf = 1;  /* no EBDA */
-                return true;
+                goto ok;
             }
             SET_ES ( ebda );
             cf = 0;
-            return true;
+            goto ok;
         }            
         case 0xC2:
-            return bios_15h_C2h(cpu); // PS/2 MOUSE BIOS
+            res = bios_15h_C2h(cpu); // PS/2 MOUSE BIOS
+            goto ok;
         case 0xE8: {
             switch (CPU_AL) {
             case 0x01: { /* GET EXTENDED MEMORY (>16MB support) */
@@ -654,14 +663,15 @@ bool bios_15h(CPU* cpu) {
                 CPU_AX = CPU_CX;
                 CPU_BX = CPU_DX;
                 cf = 0; CPU_AH = 0x00;
-                return true;
+                goto ok;
             }
             case 0x20: { /* E820 MEMORY MAP — 286 не поддерживает 32-bit регистры */
-                return bios_15h_E820h(cpu);
+                res = bios_15h_E820h(cpu);
+                goto ok;
             }
             default:
                 cf = 1; CPU_AH = 0x86;
-                return true;
+                goto ok;
             }
         }
         default:
@@ -669,5 +679,11 @@ bool bios_15h(CPU* cpu) {
     }
     cf = 1;
     CPU_AH = 0x86;   // unsupported function
-    return true;
+ok:
+    if (res) {
+        flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                       | (cpu->flags.value & 0x0041); // set them back from CPU
+        writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
+    }
+    return res;
 }

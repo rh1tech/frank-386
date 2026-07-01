@@ -207,6 +207,7 @@ DOS 1+ - main DOS handler
 bool fdos_21h(CPU* _cpu) {
     cpu = _cpu;
     internal_data->Int21AX = CPU_AX;
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
       case 0x0E: // set drive
         CPU_AL = DosSelectDrv(CPU_DL);
@@ -351,6 +352,9 @@ bool fdos_21h(CPU* _cpu) {
       default:
         no_handler(_cpu);
     }
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
     return true;
 }
 

@@ -54,8 +54,12 @@ typedef struct BiosDisk_s {
  */
 static void int13_set_status(CPU* cpu, uint8_t drive, uint8_t status)
 {
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     CPU_AH = status;
     cf = status ? 1 : 0;
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
 
     if (drive & 0x80)
         pstore8(BDA_HDD_LAST_STATUS, status);
@@ -296,9 +300,13 @@ CF clear if AH=00h, set otherwise
 */
 static bool bios_13h_01h(CPU* cpu)
 {
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     uint8_t st = int13_get_last_status(CPU_DL);
     CPU_AH = st;
     cf = st ? 1 : 0;
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
     return true;
 }
 
@@ -597,9 +605,13 @@ static bool bios_13h_15h(CPU* cpu)
     BiosDisk d;
     uint8_t drive = CPU_DL;
 
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     if (!int13_get_disk(drive, &d)) {
         CPU_AH = 0x00;
         cf = 1;
+        flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                    | (cpu->flags.value & 0x0041); // set them back from CPU
+        writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
         return true;
     }
 
@@ -615,6 +627,9 @@ static bool bios_13h_15h(CPU* cpu)
     }
 
     cf = 0;
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
     return true;
 }
 
@@ -675,9 +690,13 @@ static bool bios_13h_41h(CPU* cpu)
     BiosDisk d;
     uint8_t drive = CPU_DL;
 
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     if (!(drive & 0x80) || CPU_BX != 0x55AA || !int13_get_disk(drive, &d)) {
         CPU_AH = INT13_ST_BAD_COMMAND;
         cf = 1;
+        flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                    | (cpu->flags.value & 0x0041); // set them back from CPU
+        writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
         return true;
     }
 
@@ -685,6 +704,9 @@ static bool bios_13h_41h(CPU* cpu)
     CPU_AH = INT13_EDD_VERSION;
     CPU_CX = INT13_EDD_FEATURES;
     cf = 0;
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
     pstore8(BDA_HDD_LAST_STATUS, INT13_ST_OK);
     return true;
 }

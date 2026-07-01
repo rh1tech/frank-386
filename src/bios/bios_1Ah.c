@@ -21,6 +21,7 @@
  */
 bool bios_1Ah(CPU* cpu)
 {
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
 
     /* ── AH=00h: Get System Time ──────────────────────────────────────── */
@@ -31,7 +32,7 @@ bool bios_1Ah(CPU* cpu)
         CPU_AL = pload8(0x0470);   /* midnight rollover flag */
         pstore8(0x0470, 0);        /* clear after read (IBM BIOS behaviour) */
         cf = 0;
-        break;
+        goto ret;
     }
 
     /* ── AH=01h: Set System Time ──────────────────────────────────────── */
@@ -40,7 +41,7 @@ bool bios_1Ah(CPU* cpu)
         pstore32(0x046C, ticks);
         pstore8(0x0470, 0);
         cf = 0;
-        break;
+        goto ret;
     }
 
     /* ── AH=02h: Get RTC Time ─────────────────────────────────────────── */
@@ -48,14 +49,14 @@ bool bios_1Ah(CPU* cpu)
         /* CF=1 if RTC lost power (REG_D bit 7 = VRT, 0 means battery dead) */
         if (!(cmos_read(cpu, 0x0D) & 0x80)) {
             cf = 1;
-            break;
+            goto ret;
         }
         CPU_CH = cmos_read(cpu, 0x04); /* hours   BCD */
         CPU_CL = cmos_read(cpu, 0x02); /* minutes BCD */
         CPU_DH = cmos_read(cpu, 0x00); /* seconds BCD */
         CPU_DL = 0;               /* DST: not supported */
         cf = 0;
-        break;
+        goto ret;
     }
 
     /* ── AH=03h: Set RTC Time ─────────────────────────────────────────── */
@@ -64,21 +65,21 @@ bool bios_1Ah(CPU* cpu)
         cmos_write(cpu, 0x02, CPU_CL); /* minutes BCD */
         cmos_write(cpu, 0x00, CPU_DH); /* seconds BCD */
         cf = 0;
-        break;
+        goto ret;
     }
 
     /* ── AH=04h: Get RTC Date ─────────────────────────────────────────── */
     case 0x04: {
         if (!(cmos_read(cpu, 0x0D) & 0x80)) {
             cf = 1;
-            break;
+            goto ret;
         }
         CPU_CH = cmos_read(cpu, 0x32); /* century BCD */
         CPU_CL = cmos_read(cpu, 0x09); /* year    BCD */
         CPU_DH = cmos_read(cpu, 0x08); /* month   BCD */
         CPU_DL = cmos_read(cpu, 0x07); /* day     BCD */
         cf = 0;
-        break;
+        goto ret;
     }
 
     /* ── AH=05h: Set RTC Date ─────────────────────────────────────────── */
@@ -88,14 +89,17 @@ bool bios_1Ah(CPU* cpu)
         cmos_write(cpu, 0x08, CPU_DH); /* month   BCD */
         cmos_write(cpu, 0x07, CPU_DL); /* day     BCD */
         cf = 0;
-        break;
+        goto ret;
     }
 
     default:
         CPU_AH = 0x86;
         cf = 1;
-        break;
+        goto ret;
     }
-
+ret:
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
     return true;
 }

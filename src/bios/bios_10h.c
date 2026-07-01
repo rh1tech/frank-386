@@ -3236,105 +3236,181 @@ static bool bios_10h_1130h(CPU* cpu) {
 }
 
 bool bios_10h(CPU* cpu) {
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch(CPU_AH) {
         case 0x00:
-            return bios_10h_00h(cpu); // SET VIDEO MODE
+            bios_10h_00h(cpu); // SET VIDEO MODE
+            break;
         case 0x01:
-            return bios_10h_01h(cpu); // SET CURSOR SHAPE
+            bios_10h_01h(cpu); // SET CURSOR SHAPE
+            break;
         case 0x02:
-            return bios_10h_02h(cpu); // SET CURSOR POSITION
+            bios_10h_02h(cpu); // SET CURSOR POSITION
+            break;
         case 0x03:
-            return bios_10h_03h(cpu); // GET CURSOR POSITION AND SIZE
+            bios_10h_03h(cpu); // GET CURSOR POSITION AND SIZE
+            break;
         case 0x04:
-            return bios_10h_04h(cpu); // READ LIGHT PEN POSITION
+            bios_10h_04h(cpu); // READ LIGHT PEN POSITION
+            break;
         case 0x05:
-            return bios_10h_05h(cpu); // SELECT ACTIVE DISPLAY PAGE
+            bios_10h_05h(cpu); // SELECT ACTIVE DISPLAY PAGE
+            break;
         case 0x06:
-            return bios_10h_scroll_window(cpu, false); // SCROLL WINDOW UP
+            bios_10h_scroll_window(cpu, false); // SCROLL WINDOW UP
+            break;
         case 0x07:
-            return bios_10h_scroll_window(cpu, true); // SCROLL WINDOW DOWN
+            bios_10h_scroll_window(cpu, true); // SCROLL WINDOW DOWN
+            break;
         case 0x08:
-            return bios_10h_08h(cpu); // READ CHARACTER AND ATTRIBUTE
+            bios_10h_08h(cpu); // READ CHARACTER AND ATTRIBUTE
+            break;
         case 0x09:
-            return bios_10h_09h(cpu); // WRITE CHARACTER AND ATTRIBUTE
+            bios_10h_09h(cpu); // WRITE CHARACTER AND ATTRIBUTE
+            break;
         case 0x0A:
-            return bios_10h_0Ah(cpu); // WRITE CHARACTER ONLY
+            bios_10h_0Ah(cpu); // WRITE CHARACTER ONLY
+            break;
         case 0x0B:
-            return bios_10h_0Bh(cpu); // SET BORDER/BACKGROUND OR CGA PALETTE
+            bios_10h_0Bh(cpu); // SET BORDER/BACKGROUND OR CGA PALETTE
+            break;
         case 0x0C:
-            return bios_10h_0Ch(cpu); // WRITE GRAPHICS PIXEL
+            bios_10h_0Ch(cpu); // WRITE GRAPHICS PIXEL
+            break;
         case 0x0D:
-            return bios_10h_0Dh(cpu); // READ GRAPHICS PIXEL
+            bios_10h_0Dh(cpu); // READ GRAPHICS PIXEL
+            break;
         case 0x0E:
-            return bios_10h_0Eh(cpu); // TELETYPE OUTPUT
+            bios_10h_0Eh(cpu); // TELETYPE OUTPUT
+            break;
         case 0x0F:
-            return bios_10h_0Fh(cpu); // GET CURRENT VIDEO MODE
+            bios_10h_0Fh(cpu); // GET CURRENT VIDEO MODE
+            break;
         case 0x10:
             switch(CPU_AL) {
-            case 0: return bios_10h_1000h(cpu); // SET SINGLE PALETTE REGISTER
-            case 1: return bios_10h_1001h(cpu); // SET BORDER / OVERSCAN COLOR
-            case 2: return bios_10h_1002h(cpu); // SET ALL PALETTE REGISTERS
-            case 3: return bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
-            case 7: return bios_10h_1007h(cpu); // READ SINGLE PALETTE REGISTER
-            case 8: return bios_10h_1008h(cpu); // READ BORDER / OVERSCAN COLOR
-            case 9: return bios_10h_1009h(cpu); // READ ALL PALETTE REGISTERS
-            case 0x10: return bios_10h_1010h(cpu); // SET INDIVIDUAL DAC REGISTER
-            case 0x12: return bios_10h_1012h(cpu); // SET BLOCK OF DAC REGISTERS
-            case 0x13: return bios_10h_1013h(cpu); // SELECT VIDEO DAC COLOR PAGE
-            case 0x15: return bios_10h_1015h(cpu); // READ INDIVIDUAL DAC REGISTER
-            case 0x17: return bios_10h_1017h(cpu); // READ BLOCK OF DAC REGISTERS
-            case 0x18: return bios_10h_1018h(cpu); // SET PEL MASK
-            case 0x19: return bios_10h_1019h(cpu); // READ PEL MASK
-            case 0x1A: return bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE
-            case 0x1B: return bios_10h_101Bh(cpu); // PERFORM GRAY-SCALE SUMMING
+            case 0: bios_10h_1000h(cpu); // SET SINGLE PALETTE REGISTER
+                break;
+            case 1: bios_10h_1001h(cpu); // SET BORDER / OVERSCAN COLOR
+                break;
+            case 2: bios_10h_1002h(cpu); // SET ALL PALETTE REGISTERS
+                break;
+            case 3: bios_10h_1003h(cpu); // TOGGLE BLINK / BACKGROUND INTENSITY
+                break;
+            case 7: bios_10h_1007h(cpu); // READ SINGLE PALETTE REGISTER
+                break;
+            case 8: bios_10h_1008h(cpu); // READ BORDER / OVERSCAN COLOR
+                break;
+            case 9: bios_10h_1009h(cpu); // READ ALL PALETTE REGISTERS
+                break;
+            case 0x10: bios_10h_1010h(cpu); // SET INDIVIDUAL DAC REGISTER
+                break;
+            case 0x12: bios_10h_1012h(cpu); // SET BLOCK OF DAC REGISTERS
+                break;
+            case 0x13: bios_10h_1013h(cpu); // SELECT VIDEO DAC COLOR PAGE
+                break;
+            case 0x15: bios_10h_1015h(cpu); // READ INDIVIDUAL DAC REGISTER
+                break;
+            case 0x17: bios_10h_1017h(cpu); // READ BLOCK OF DAC REGISTERS
+                break;
+            case 0x18: bios_10h_1018h(cpu); // SET PEL MASK
+                break;
+            case 0x19: bios_10h_1019h(cpu); // READ PEL MASK
+                break;
+            case 0x1A: bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE
+                break;
+            case 0x1B: bios_10h_101Bh(cpu); // PERFORM GRAY-SCALE SUMMING
+                break;
+            default:
+                goto err;
             }
             break;
         case 0x11:
             switch(CPU_AL) {
-            case 0: return bios_10h_1100h(cpu); // LOAD USER TEXT-MODE FONT
-            case 1: return bios_10h_1101h(cpu); // LOAD 8x14 ROM FONT
-            case 2: return bios_10h_1102h(cpu); // LOAD 8x8 ROM FONT
-            case 4: return bios_10h_1104h(cpu); // LOAD 8x16 ROM FONT
-            case 0x10: return bios_10h_1110h(cpu); // LOAD USER GRAPHICS FONT
-            case 0x11: return bios_10h_1111h(cpu); // LOAD ROM 8x14 GRAPHICS FONT
-            case 0x12: return bios_10h_1112h(cpu); // LOAD ROM 8x8 GRAPHICS FONT
-            case 0x14: return bios_10h_1114h(cpu); // LOAD ROM 8x16 GRAPHICS FONT
-            case 0x20: return bios_10h_1120h(cpu); // SET ALTERNATE PRINT-SCREEN CHARS
-            case 0x21: return bios_10h_1121h(cpu); // SET USER GRAPHICS CHARS
-            case 0x22: return bios_10h_1122h(cpu); // SET GRAPHICS 8x14
-            case 0x23: return bios_10h_1123h(cpu); // SET GRAPHICS 8x8 DOUBLE-DOT
-            case 0x24: return bios_10h_1124h(cpu); // SET GRAPHICS 8x16
-            case 0x30: return bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
+            case 0: bios_10h_1100h(cpu); // LOAD USER TEXT-MODE FONT
+                break;
+            case 1: bios_10h_1101h(cpu); // LOAD 8x14 ROM FONT
+                break;
+            case 2: bios_10h_1102h(cpu); // LOAD 8x8 ROM FONT
+                break;
+            case 4: bios_10h_1104h(cpu); // LOAD 8x16 ROM FONT
+                break;
+            case 0x10: bios_10h_1110h(cpu); // LOAD USER GRAPHICS FONT
+                break;
+            case 0x11: bios_10h_1111h(cpu); // LOAD ROM 8x14 GRAPHICS FONT
+                break;
+            case 0x12: bios_10h_1112h(cpu); // LOAD ROM 8x8 GRAPHICS FONT
+                break;
+            case 0x14: bios_10h_1114h(cpu); // LOAD ROM 8x16 GRAPHICS FONT
+                break;
+            case 0x20: bios_10h_1120h(cpu); // SET ALTERNATE PRINT-SCREEN CHARS
+                break;
+            case 0x21: bios_10h_1121h(cpu); // SET USER GRAPHICS CHARS
+                break;
+            case 0x22: bios_10h_1122h(cpu); // SET GRAPHICS 8x14
+                break;
+            case 0x23: bios_10h_1123h(cpu); // SET GRAPHICS 8x8 DOUBLE-DOT
+                break;
+            case 0x24: bios_10h_1124h(cpu); // SET GRAPHICS 8x16
+                break;
+            case 0x30: bios_10h_1130h(cpu); // GET FONT INFORMATION (EGA, MCGA, VGA)
+                break;
+            default:
+                goto err;
             }
             break;
         case 0x12:
             switch(CPU_BL) {
-            case 0x10: return bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
-            case 0x20: return bios_10h_1220h(cpu); // ALTERNATE PRINT SCREEN
-            case 0x30: return bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
-            case 0x31: return bios_10h_1231h(cpu); // DEFAULT PALETTE LOADING
-            case 0x32: return bios_10h_1232h(cpu); // VIDEO ADDRESSING
-            case 0x33: return bios_10h_1233h(cpu); // GRAYSCALE SUMMING
-            case 0x34: return bios_10h_1234h(cpu); // CURSOR EMULATION
-            case 0x35: return bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
-            case 0x36: return bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
-            }            break;
+            case 0x10: bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
+                break;
+            case 0x20: bios_10h_1220h(cpu); // ALTERNATE PRINT SCREEN
+                break;
+            case 0x30: bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
+                break;
+            case 0x31: bios_10h_1231h(cpu); // DEFAULT PALETTE LOADING
+                break;
+            case 0x32: bios_10h_1232h(cpu); // VIDEO ADDRESSING
+                break;
+            case 0x33: bios_10h_1233h(cpu); // GRAYSCALE SUMMING
+                break;
+            case 0x34: bios_10h_1234h(cpu); // CURSOR EMULATION
+                break;
+            case 0x35: bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
+                break;
+            case 0x36: bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
+                break;
+            default:
+                goto err;
+            }
+            break;
         case 0x13:
-            return bios_10h_13h(cpu); // WRITE STRING
+            bios_10h_13h(cpu); // WRITE STRING
+            break;
         case 0x1A:
             if (CPU_AL == 0x00)
-                return bios_10h_1A00h(cpu); // GET DISPLAY COMBINATION CODE
+                bios_10h_1A00h(cpu); // GET DISPLAY COMBINATION CODE
+            else
+                goto err;
             break;
         case 0x1B:
             if (CPU_AL == 0x00)
-                return bios_10h_1B00h(cpu); // GET FUNCTIONALITY/STATE INFORMATION
+                bios_10h_1B00h(cpu); // GET FUNCTIONALITY/STATE INFORMATION
+            else
+                goto err;
             break;
         case 0x1C:
-            return bios_10h_1Ch(cpu); // SAVE/RESTORE VIDEO STATE
+            bios_10h_1Ch(cpu); // SAVE/RESTORE VIDEO STATE
+            break;
         default:
             // unsupported
+            goto err;
     }
+    goto ok;
+err:
     cf = 1; // unsuported unknown function
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
+ok:
     return true;
 }
 
