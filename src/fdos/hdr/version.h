@@ -41,7 +41,7 @@
 
 /* Used for version information displayed to user at boot (& stored in os_release string) */
 #ifndef KERNEL_VERSION
-#define KERNEL_VERSION "Pico2"
+#define KERNEL_VERSION "02.45"
 #endif
 
 /* actual version string */
@@ -50,4 +50,4 @@
 #define KVS(v,s,o) "FreeDOS " STR(MAJOR_RELEASE) "." STR(MINOR_RELEASE) " kernel " v " (build 20" #s " OEM:" #o ") [compiled " __DATE__ "]\n"
 #define xKVS(v,s,o) KVS(v,s,o)
 #define KERNEL_VERSION_STRING xKVS(KERNEL_VERSION, REVISION_SEQ, OEM_ID)
-#define KERNEL_VERSION_SHORT_STRING "FreeDOS " STR(MAJOR_RELEASE) "." STR(MINOR_RELEASE) " " KERNEL_VERSION " kernel\n"
+#define KERNEL_VERSION_SHORT_STRING "FreeDOS " STR(MAJOR_RELEASE) "." STR(MINOR_RELEASE) " " KERNEL_VERSION " RP2350 kernel\n"

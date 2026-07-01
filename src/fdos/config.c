@@ -405,6 +405,7 @@ STATIC VOID CfgNotImplemented(BYTE * pLine)
 {
   UNREFERENCED_PARAMETER(pLine);
   printf("CONFIG.SYS: directive not implemented yet, ignoring line %d\n", nCfgLine);
+  printf(">>>%s\n", pLine);
 }
 
 /*
@@ -688,6 +689,50 @@ STATIC VOID CfgMenuEsc(BYTE * pLine) {
     if (check[0] == '$') check[0] = 27;	/* translate $ to ESC */
   printf("%s\n",pLine);
 }
+STATIC VOID Files(BYTE * pLine)
+{
+  COUNT nFiles;
+
+  /* Get the argument                                             */
+  if (GetNumArg(pLine, &nFiles) == (BYTE *) 0)
+    return;
+
+  /* Got the value, assign either default or new value            */
+  Config.cfgFiles = max(Config.cfgFiles, nFiles);
+  Config.cfgFilesHigh = 0;
+}
+
+STATIC VOID FilesHigh(BYTE * pLine)
+{
+  Files(pLine);
+  Config.cfgFilesHigh = 1;
+}
+
+STATIC VOID CfgLastdrive(BYTE * pLine)
+{
+  /* Format:   LASTDRIVE = letter         */
+  BYTE drv;
+
+  pLine = skipwh(pLine);
+  drv = toupper(*pLine);
+
+  if (drv < 'A' || drv > 'Z')
+  {
+    CfgFailure(pLine);
+    return;
+  }
+  drv -= 'A' - 1;               /* Make real number */
+  if (drv > Config.cfgLastdrive)
+    Config.cfgLastdrive = drv;
+  Config.cfgLastdriveHigh = 0;
+}
+
+STATIC VOID CfgLastdriveHigh(BYTE * pLine)
+{
+  /* Format:   LASTDRIVEHIGH = letter         */
+  CfgLastdrive(pLine);
+  Config.cfgLastdriveHigh = 1;
+}
 
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
@@ -715,6 +760,10 @@ STATIC struct table commands[] = {
   {"DOSDATA", 1, CfgNotImplemented},
   {"FCBS", 1, Fcbs},
   {"KEYBUF", 1, CfgNotImplemented},	/* ea */
+  {"FILES", 1, Files},
+  {"FILESHIGH", 1, FilesHigh},
+  {"LASTDRIVE", 1, CfgLastdrive},
+  {"LASTDRIVEHIGH", 1, CfgLastdriveHigh},  
   {"NUMLOCK", 1, CfgNotImplemented},
   {"SHELL", 1, InitPgm},
   {"SHELLHIGH", 1, InitPgmHigh},
@@ -833,77 +882,6 @@ STATIC BOOL SkipLine(char *pLine)
 char kernel_command_line[1] = "";
 size_t kernel_command_line_length = 0;
 #endif
-
-/*
-    Files(pLine)/FilesHigh(pLine) - FILES=/FILESHIGH=: set the number
-    of SFT entries to allocate.
-
-    /// TODO: nothing in this codebase actually allocates a second
-    /// (larger) SFT block sized to Config.cfgFiles yet (PreConfig2()
-    /// is not implemented/called - see the comment on
-    /// LoL->firstsftt's getddt()-style fixed 5-entry block earlier in
-    /// this file), so this only records the requested value; it does
-    /// not yet take effect.
-
-    Migrated from config.c verbatim.
-*/
-STATIC VOID Files(BYTE * pLine)
-{
-  COUNT nFiles;
-
-  /* Get the argument                                             */
-  if (GetNumArg(pLine, &nFiles) == (BYTE *) 0)
-    return;
-
-  /* Got the value, assign either default or new value            */
-  Config.cfgFiles = max(Config.cfgFiles, nFiles);
-  Config.cfgFilesHigh = 0;
-}
-
-STATIC VOID FilesHigh(BYTE * pLine)
-{
-  Files(pLine);
-  Config.cfgFilesHigh = 1;
-}
-
-/*
-    CfgLastdrive(pLine)/CfgLastdriveHigh(pLine) - LASTDRIVE=/
-    LASTDRIVEHIGH=: set the highest drive letter DOS will recognize.
-
-    /// TODO: LoL->lastdrive/the CDS array are sized once in
-    /// PreConfig() (before CONFIG.SYS is even read, see "use largest
-    /// possible value for the initial CDS" in init_kernel() - it's
-    /// already set to 26), so this only records Config.cfgLastdrive;
-    /// nothing currently shrinks the live CDS array to match a
-    /// smaller LASTDRIVE= value.
-
-    Migrated from config.c verbatim.
-*/
-STATIC VOID CfgLastdrive(BYTE * pLine)
-{
-  /* Format:   LASTDRIVE = letter         */
-  BYTE drv;
-
-  pLine = skipwh(pLine);
-  drv = toupper(*pLine);
-
-  if (drv < 'A' || drv > 'Z')
-  {
-    CfgFailure(pLine);
-    return;
-  }
-  drv -= 'A' - 1;               /* Make real number */
-  if (drv > Config.cfgLastdrive)
-    Config.cfgLastdrive = drv;
-  Config.cfgLastdriveHigh = 0;
-}
-
-STATIC VOID CfgLastdriveHigh(BYTE * pLine)
-{
-  /* Format:   LASTDRIVEHIGH = letter         */
-  CfgLastdrive(pLine);
-  Config.cfgLastdriveHigh = 1;
-}
 
 VOID DoConfig(int nPass)
 {
