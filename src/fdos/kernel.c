@@ -951,6 +951,7 @@ int dup2(int oldfd, int newfd)
 int read(int fd, dos_far_ptr dst, COUNT sz) {
     CPU_AH = 0x3F;
     CPU_BX = fd;
+    CPU_CX = sz;
     CPU_DX = dst.offset;
     SET_DS ( dst.segment );
     fdos_21h(cpu);
