@@ -54,13 +54,13 @@ void Init_clk_driver(CPU* cpu) {
   CPU_AH = 0x2d;
   CPU_CL = InitBcdToByte(CPU_CL);   /* minutes */
   CPU_CH = InitBcdToByte(CPU_CH);   /* hours   */
-  CPU_DH = InitBcdToByte(CPU_DH);   /*seconds */
+  CPU_DH = InitBcdToByte(CPU_DH);   /* seconds */
   CPU_DL = 0;
-  fdos_21h(cpu);
+  bios_intcall(cpu, 0x21);
 
   /* get BIOS date */
   CPU_AH = 4;
-  bios_1Ah(cpu);
+  bios_intcall(cpu, 0x1A);
 
   /* DosSetDate */
   CPU_AH = 0x2b;
@@ -70,6 +70,5 @@ void Init_clk_driver(CPU* cpu) {
   if ((CPU_CX >= 1900) && (CPU_CX < 1980)) CPU_CX += 100;
   CPU_DH = InitBcdToByte(CPU_DH);   /* month */
   CPU_DL = InitBcdToByte(CPU_DL);   /* day   */
-  fdos_21h(cpu);
-
+  bios_intcall(cpu, 0x21);
 }

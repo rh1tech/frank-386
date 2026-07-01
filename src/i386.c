@@ -1,6 +1,7 @@
 #include "mem.h"
 #include "i386.h"
 #include "bios/bios.h"
+#include "fdos/fdos.h"
 #include <pico.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -5398,8 +5399,8 @@ void cpu_install_handlers(CPU* cpu) {
     handlers[0x18] = bios_18h; // BASIC
     handlers[0x19] = bios_19h; // BOOTSTRAP
     handlers[0x1A] = bios_1Ah; // CMOS TIME
-///    handlers[0x21] = fdos_21h; // main DOS handler
-///    handlers[0x29] = fdos_29h; // fast console output.
+    handlers[0x21] = fdos_21h; // main DOS handler
+    handlers[0x29] = fdos_29h; // fast console output.
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
 }
 #endif

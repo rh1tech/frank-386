@@ -805,7 +805,7 @@ static void set_DTA(dos_far_ptr p) {
     CPU_AH = 0x1A; // Set Current DTA
     SET_DS (FP_SEG(p));
     CPU_DX = p.offset;
-    fdos_21h(cpu);
+    bios_intcall(cpu, 0x21);
 }
 
 static dos_far_ptr getvec(uint8_t intno) {
@@ -977,7 +977,7 @@ dos_far_ptr linear_to_far(const BYTE *p)
 int init_setdrive(int drive) {
     CPU_AH = 0x0e;
     CPU_DX = drive;
-    fdos_21h(cpu);
+    bios_intcall(cpu, 0x21);
     return CPU_AL;          /* number of potentially valid drives */
 }
 
@@ -986,7 +986,7 @@ int init_DosOpen(dos_far_ptr pathname, int flags) {
     CPU_DX = FP_OFF(pathname);
     CPU_AL = flags & 0xff;
     CPU_AH = 0x3d;          /* DOS open */
-    fdos_21h(cpu);
+    bios_intcall(cpu, 0x21);
     return cf ? -1 : CPU_AX;          /* file handle */
 }
 
@@ -995,7 +995,7 @@ int dup2(int oldfd, int newfd)
     CPU_AH = 0x46;      /* Force duplicate file handle */
     CPU_BX = oldfd;
     CPU_CX = newfd;
-    fdos_21h(cpu);
+    bios_intcall(cpu, 0x21);
     return cf ? -1 : CPU_AX;
 }
 
@@ -1005,14 +1005,14 @@ int read(int fd, dos_far_ptr dst, COUNT sz) {
     CPU_CX = sz;
     CPU_DX = dst.offset;
     SET_DS ( dst.segment );
-    fdos_21h(cpu);
+    bios_intcall(cpu, 0x21);
     return cf ? -1 : CPU_AX;
 }
 
 int close(int fd) {
     CPU_AH = 0x3E;
     CPU_BX = fd;
-    fdos_21h(cpu);
+    bios_intcall(cpu, 0x21);
     return cf ? -1 : CPU_AX;
 }
 
