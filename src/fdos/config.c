@@ -19,12 +19,6 @@ STATIC seg umb_base_seg BSS_INIT(0);
 UWORD umb_start BSS_INIT(0), UMB_top BSS_INIT(0);
 static BYTE HMAState BSS_INIT(0);
 static COUNT nFileDesc BSS_INIT(0);
-/* CHAIN= support (multiple nested CONFIG.SYS-like files) - the
-   table exists so DoConfig()'s "if (bEof && nCurChain)" check below
-   compiles and behaves correctly, but nCurChain can never become
-   nonzero: CmdChain() (the CHAIN= handler) is CfgNotImplemented() in
-   this iteration (see the command table below), so nothing ever
-   pushes onto cfgFile[]. */
 #define MAX_CHAINS 5
 struct CfgFile {
   COUNT nFileDesc;
@@ -32,11 +26,6 @@ struct CfgFile {
 } cfgFile[MAX_CHAINS] BSS_INIT({0});
 
 static COUNT nCurChain BSS_INIT(0);
-/* [MENU]/numbered-block ("1?DEVICE=...") CONFIG.SYS menu support -
-   these are real, live state read/written by scan() below (and by
-   CfgMenu()/CfgMenuColor()/etc, all CfgNotImplemented() in this
-   iteration - see the command table below), so they need to exist
-   and behave correctly even though nothing exercises [MENU] yet. */
 STATIC BOOL askThisSingleCommand BSS_INIT(0);
 STATIC BOOL DontAskThisSingleCommand BSS_INIT(0);
 STATIC unsigned MenuLine BSS_INIT(0);
@@ -390,30 +379,6 @@ STATIC struct table * LookUp(struct table *p, BYTE * token)
 STATIC VOID CfgIgnore(BYTE * pLine)
 {
   UNREFERENCED_PARAMETER(pLine);
-}
-
-/*
-    CfgNotImplemented(pLine) - the handler for every directive this
-    iteration doesn't migrate a real implementation for (SWITCHES,
-    MENU*, BREAK, COMMAND/SHELL, COUNTRY, DOS, DOSDATA, FCBS, KEYBUF,
-    NUMLOCK, STACKS, SWITCHAR, SCREEN, VERSION, ANYDOS, IDLEHALT,
-    DEVICE*, INSTALL*, CHAIN, SET - see the command table below).
-
-    /// TODO: each of these is a real, separate piece of FreeDOS
-    /// kernel functionality (device driver loading, country/codepage
-    /// switching, FCB tables, stack-overflow protection, multi-config
-    /// menus, environment variables, ...), none of which is migrated
-    /// yet. Printing the directive name and otherwise doing nothing
-    /// lets CONFIG.SYS parsing continue past a line this kernel
-    /// can't yet act on, rather than failing the whole file (which
-    /// CfgFailure()'s "unrecognized directive" handling is for) or
-    /// silently miscompiling/crashing.
-*/
-STATIC VOID CfgNotImplemented(BYTE * pLine)
-{
-  UNREFERENCED_PARAMETER(pLine);
-  printf("CONFIG.SYS: directive not implemented yet, ignoring line %d\n", nCfgLine);
-  printf(">>>%s\n", pLine);
 }
 
 /*
@@ -1469,6 +1434,105 @@ error:
   CfgFailure(pLine);
 }
 
+STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
+{
+  exec_blk eb;
+  struct dhdr FAR *dhp;
+  struct dhdr FAR *next_dhp;
+  BOOL result;
+  seg base, start;
+
+  if (mode)
+  {
+    base = umb_base_seg;
+    start = umb_start;
+  }
+  else
+  {
+    base = base_seg;
+    start = LoL->first_mcb;
+  }
+
+  if (base == start)
+    base++;
+  base++;
+
+  /* Get the device driver name                                   */
+  GetStringArg(pLine, szBuf);
+
+  /* The driver is loaded at the top of allocated memory.         */
+  /* The device driver is paragraph aligned.                      */
+  eb.load.reloc = eb.load.load_seg = base;
+
+  CfgDbgPrintf(("Loading device driver %s at segment %04x\n", szBuf, base));
+/// TODO: implement init_DosExec first
+#if 0
+  if ((result = init_DosExec(3, &eb, szBuf)) != SUCCESS)
+  {
+    CfgFailure(pLine);
+    return result;
+  }
+
+  strcpy(szBuf, pLine);
+  /* uppercase the device driver command */
+  strupr(szBuf);
+
+  /* TE this fixes the loading of devices drivers with
+     multiple devices in it. NUMEGA's SoftIce is such a beast
+   */
+
+  /* add \r\n to the command line */
+  strcat(szBuf, " \r\n");
+
+  dhp = MK_FP(base, 0);
+
+  /* NOTE - Modification for multisegmented device drivers:          */
+  /*   In order to emulate the functionallity experienced with other */
+  /*   DOS operating systems, the original 'top' end address is      */
+  /*   updated with the end address returned from the INIT request.  */
+  /*   The updated end address is then used when issuing the next    */
+  /*   INIT request for the following device driver within the file  */
+
+  for (next_dhp = NULL; FP_OFF(next_dhp) != 0xffff &&
+       (result = init_device(dhp, szBuf, mode, &top)) == SUCCESS;
+       dhp = next_dhp)
+  {
+    next_dhp = MK_FP(FP_SEG(dhp), FP_OFF(dhp->dh_next));
+    /* Link in device driver and save LoL->nul_dev pointer to next */
+    dhp->dh_next = LoL->nul_dev.dh_next;
+    LoL->nul_dev.dh_next = dhp;
+  }
+
+  /* might have been the UMB driver or DOS=UMB */
+  if (UmbState == 2)
+    umb_init();
+#endif
+
+  return result;
+}
+
+STATIC VOID DeviceHigh(BYTE * pLine)
+{
+  if (UmbState == 1)
+  {
+    if (LoadDevice(pLine, MK_FP(umb_start + UMB_top, 0), TRUE) == DE_NOMEM)
+    {
+      printf("Not enough free memory in UMBs: loading low\n");
+      LoadDevice(pLine, lpTop, FALSE);
+    }
+  }
+  else
+  {
+    printf("UMBs unavailable!\n");
+    LoadDevice(pLine, lpTop, FALSE);
+  }
+}
+
+STATIC void Device(BYTE * pLine)
+{
+  LoadDevice(pLine, lpTop, FALSE);
+}
+
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
@@ -1510,8 +1574,8 @@ STATIC struct table commands[] = {
   {"ANYDOS", 1, SetAnyDos},       /* tom */
   {"IDLEHALT", 1, SetIdleHalt},   /* ea  */
 
-  {"DEVICE", 2, CfgNotImplemented},
-  {"DEVICEHIGH", 2, CfgNotImplemented},
+  {"DEVICE", 2, Device},
+  {"DEVICEHIGH", 2, DeviceHigh},
   {"INSTALL", 2, CmdInstall},
   {"INSTALLHIGH", 2, CmdInstallHigh},
   {"CHAIN", 2, CmdChain},
