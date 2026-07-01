@@ -92,6 +92,30 @@ struct config Config = {
   , 0                       /* default value for switches=/E:nnnn */
 };
 
+void CharMapSrvc(void) {
+  /// TODO:
+}
+
+nlsCountryInfoHardcoded_t nlsCountryInfoHardcoded = {
+  1,
+  0x001c,
+  {
+    1,                  /* CountryID */
+    437,                /* CodePage */
+    0,                  /* DateFormat */
+    "$",                /* CurrencyString */
+    ",",                /* ThousandSeparator */
+    ".",                /* DecimalPoint */
+    "-",                /* DateSeparator */
+    ":",                /* TimeSeparator */
+    0,                  /* CurrencyFormat */
+    2,                  /* CurrencyPrecision */
+    0,                  /* TimeFormat */
+    (void FAR *)CharMapSrvc,
+    ","                 /* DataSeparator */
+  }
+};
+
 #ifdef DEBUG
 #define InstallPrintf(x) printf x
 #else
@@ -1147,6 +1171,304 @@ STATIC VOID CmdSet(BYTE *pLine)
     printf("Invalid SET command: \"%s\"\n", szBuf);
 }
 
+STATIC VOID CmdChain(BYTE * pLine)
+{
+  struct CfgFile *cfg;
+  int fd;
+
+  InstallPrintf(("CHAIN: %s\n", pLine));
+  if (nCurChain >= MAX_CHAINS) {
+    CfgFailure(pLine);
+    return;
+  }
+  dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
+  strcpy(PriPathName, pLine);
+  if ((fd = open(x86_path, 0)) < 0) {
+    CfgFailure(pLine);
+    return;
+  }
+  cfg = &cfgFile[nCurChain++];
+  cfg->nFileDesc = nFileDesc;
+  cfg->nCfgLine = nCfgLine;
+  nFileDesc = fd;
+  nCfgLine = 0;
+}
+
+/*********************************************************************************
+    National specific things.
+    this handles only Date/Time/Currency, and NOT codepage things.
+    Some may consider this a hack, but I like to see 24 Hour support. tom.
+*********************************************************************************/
+
+#define _DATE_MDY 0 /* mm/dd/yy */
+#define _DATE_DMY 1  /* dd.mm.yy */
+#define _DATE_YMD 2  /* yy/mm/dd */
+
+#define _TIME_12 0
+#define _TIME_24 1
+
+struct CountrySpecificInfoSmall {
+  short CountryID;    /*  = W1 W437   # Country ID */
+  char  DateFormat;           /*    Date format: 0/1/2: U.S.A./Europe/Japan */
+  char  CurrencyString[3];    /* '$' ,'EUR'   */
+  char  ThousandSeparator;    /* ','          # Thousand's separator */
+  char  DecimalPoint;         /* '.'        # Decimal point        */
+  char  DateSeparator;        /* '-'  */
+  char  TimeSeparator;        /* ':'  */
+  char  CurrencyFormat;       /* = 0  # Currency format (bit array)  */
+  char  CurrencyPrecision;    /* = 2  # Currency precision           */
+  char  TimeFormat;           /* = 0  # time format: 0/1: 12/24 houres */
+};
+
+struct CountrySpecificInfoSmall specificCountriesSupported[] = {
+#include "country/kernel.tb1"
+};
+
+STATIC int LoadCountryInfoHardCoded(COUNT ctryCode)
+{
+  struct CountrySpecificInfoSmall *country;
+
+  /* printf("cntry: %u, CP%u, file=\"%s\"\n", ctryCode, codePage, filename);  */
+
+  for (country = specificCountriesSupported;
+       country < specificCountriesSupported + LENGTH(specificCountriesSupported);
+       country++)
+  {
+    if (country->CountryID == ctryCode)
+    {
+      nlsCountryInfoHardcoded.C.CountryID = country->CountryID;
+      nlsCountryInfoHardcoded.C.DateFormat = country->DateFormat;
+      nlsCountryInfoHardcoded.C.CurrencyString[0] = country->CurrencyString[0];
+      nlsCountryInfoHardcoded.C.CurrencyString[1] = country->CurrencyString[1];
+      nlsCountryInfoHardcoded.C.CurrencyString[2] = country->CurrencyString[2];
+      nlsCountryInfoHardcoded.C.ThousandSeparator[0] = country->ThousandSeparator;
+      nlsCountryInfoHardcoded.C.DecimalPoint[0] = country->DecimalPoint;
+      nlsCountryInfoHardcoded.C.DateSeparator[0] = country->DateSeparator;
+      nlsCountryInfoHardcoded.C.TimeSeparator[0] = country->TimeSeparator;
+      nlsCountryInfoHardcoded.C.CurrencyFormat = country->CurrencyFormat;
+      nlsCountryInfoHardcoded.C.CurrencyPrecision = country->CurrencyPrecision;
+      nlsCountryInfoHardcoded.C.TimeFormat = country->TimeFormat;
+      return 0;
+    }
+  }
+
+  printf("could not find country info for country ID %u\n", ctryCode);
+  printf("current supported countries are ");
+
+  for (country = specificCountriesSupported;
+       country < specificCountriesSupported + LENGTH(specificCountriesSupported);
+       country++)
+  {
+    printf("%u ", country->CountryID);
+  }
+  printf("\n");
+
+  return 1;
+}
+
+/*      LoadCountryInfo():
+ *      Searches a file in the COUNTRY.SYS format for an entry
+ *      matching the specified code page and country code, and loads
+ *      the corresponding information into memory. If code page is 0,
+ *      the default code page for the country will be used.
+ *
+ *      Returns TRUE if successful, FALSE if not.
+ */
+STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
+{
+  /* COUNTRY.SYS file data structures - see RBIL tables 2619-2622 */
+
+  struct {      /* file header */
+    char name[8];       /* "\377COUNTRY.SYS" */
+    char reserved[11];
+    ULONG offset;       /* offset of first entry in file */
+  } header;
+  struct {      /* entry */
+    int length;         /* length of entry, not counting this word, = 12 */
+    int country;        /* country ID */
+    int codepage;       /* codepage ID */
+    int reserved[2];
+    ULONG offset;       /* offset of country-subfunction-header in file */
+  } entry;
+  struct subf_hdr { /* subfunction header */
+    int length;         /* length of entry, not counting this word, = 6 */
+    int id;             /* subfunction ID */
+    ULONG offset;       /* offset within file of subfunction data entry */
+  };
+  static struct {   /* subfunction data */
+    char signature[8];  /* \377CTYINFO|UCASE|LCASE|FUCASE|FCHAR|COLLATE|DBCS|YESNO */
+    int length;         /* length of following table in bytes */
+    UBYTE buffer[256];
+  } subf_data;
+  struct subf_tbl {
+    char sig[8];        /* signature for each subfunction data */
+    int idx;            /* index of pointer in nls_hc.asm to be copied to */
+  };
+  static struct subf_tbl table[9] = {
+    {"\377       ", -1},  /* 0, unused */
+    {"\377CTYINFO", 5},   /* 1 */
+    {"\377UCASE  ", 0},   /* 2 */
+    {"\377LCASE  ", -1},  /* 3, not supported [yet] */
+    {"\377FUCASE ", 1},   /* 4 */
+    {"\377FCHAR  ", 2},   /* 5 */
+    {"\377COLLATE", 3},   /* 6 */
+    {"\377DBCS   ", 4},   /* 7, not supported [yet] */
+    {"\377YESNO  ", -1}   /* 35 */
+  };
+  static struct subf_hdr hdr[9];
+  static int entries, count;
+  int fd, i, subf_tbl_ndx;
+  char *filename = filenam == NULL ? "\\COUNTRY.SYS" : filenam;
+  BOOL rc = FALSE;
+  BYTE FAR *ptable;
+  void FAR *CharMapFn;
+
+  dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
+  strcpy(PriPathName, filename);
+  if ((fd = open(x86_path, 0)) < 0)
+  {
+    if (filenam == NULL)
+      return !LoadCountryInfoHardCoded(ctryCode);
+    printf("%s not found\n", filename);
+    return rc;
+  }
+  /* /// TODO: 
+  if (read(fd, &header, sizeof(header)) != sizeof(header))
+  {
+    printf("Error reading %s\n", filename);
+    goto ret;
+  }
+  if (memcmp(header.name, "\377COUNTRY", sizeof(header.name)))
+  {
+err:printf("%s has invalid format\n", filename);
+    goto ret;
+  }
+  if (lseek(fd, header.offset) == 0xffffffffL
+    || read(fd, &entries, sizeof(entries)) != sizeof(entries))
+    goto err;
+  for (i = 0; i < entries; i++)
+  {
+    if (read(fd, &entry, sizeof(entry)) != sizeof(entry) || entry.length != 12)
+      goto err;
+    if (entry.country != ctryCode || entry.codepage != codePage && codePage)
+      continue;
+    if (lseek(fd, entry.offset) == 0xffffffffL
+      || read(fd, &count, sizeof(count)) != sizeof(count)
+      || count > LENGTH(hdr)
+      || read(fd, hdr, sizeof(struct subf_hdr) * count)
+                      != sizeof(struct subf_hdr) * count)
+      goto err;
+
+    /* Note: we reuse i here as we only process 1 entry, goto after inner for ends outer for * /
+    for (i = 0; i < count; i++)
+    {
+      if (hdr[i].length != 6)
+        goto err;
+      subf_tbl_ndx = hdr[i].id;
+      if (subf_tbl_ndx == 3 || ((subf_tbl_ndx < 1 || subf_tbl_ndx > 7) && subf_tbl_ndx != 35))
+        continue;
+      if (subf_tbl_ndx == 35)
+        subf_tbl_ndx = 8;  /* 0 through 7 match, but subfunction 35 is 9th entry in table[] * /
+      if (lseek(fd, hdr[i].offset) == 0xffffffffL
+       || read(fd, &subf_data, 10) != 10
+       || memcmp(subf_data.signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
+       || memcmp(subf_data.signature, table[2].sig, 8))  /* UCASE for FUCASE ^* /
+       || read(fd, subf_data.buffer, subf_data.length) != subf_data.length)
+        goto err;
+      if (hdr[i].id == 1)
+      {
+        if (((struct CountrySpecificInfo *)subf_data.buffer)->CountryID
+                                                     != entry.country
+         || ((struct CountrySpecificInfo *)subf_data.buffer)->CodePage
+                                                     != entry.codepage
+         && codePage)
+          continue;
+        nlsPackageHardcoded.cntry = entry.country;
+        nlsPackageHardcoded.cp = entry.codepage;
+        subf_data.length =      /* MS-DOS "CTYINFO" is up to 38 bytes * /
+                min(subf_data.length, sizeof(struct CountrySpecificInfo));
+        CharMapFn = nlsCountryInfoHardcoded.C.CharMapFn;
+      }
+      if (hdr[i].id == 1)
+        ptable = (BYTE FAR *)&nlsPackageHardcoded.nlsExt.size;
+      else
+        ptable = nlsPackageHardcoded.nlsPointers[table[subf_tbl_ndx].idx].pointer;
+      if (hdr[i].id == 7)
+      {
+        if (subf_data.length == 0)
+        {
+          /* if DBCS table (in country.sys) is empty, clear internal table * /
+          *(DWORD *)(subf_data.buffer) = 0L;
+          fmemcpy(ptable, subf_data.buffer, 4);
+        }
+        else
+        {
+          fmemcpy(ptable + 2, subf_data.buffer, subf_data.length);
+          /* write length * /
+          *(UWORD *)(subf_data.buffer) = subf_data.length;
+          fmemcpy(ptable, subf_data.buffer, 2);
+        }
+        continue;
+      }
+
+      /* for 0-7 we store COUNTRY.SYS data directly in buffer, but yes/no characters we store in nls package directly * /
+      if (hdr[i].id == 35)
+      {
+        fmemcpy(&nlsPackageHardcoded.yeschar, subf_data.buffer, 2);
+        fmemcpy(&nlsPackageHardcoded.nochar, subf_data.buffer + 2, 2);
+      } else {
+          fmemcpy(ptable + 2, subf_data.buffer,
+                  /* skip length ^* /  subf_data.length);
+          if (hdr[i].id == 1) {
+              /* fixup user callable address in case we overwrote it * /
+              ((struct CountrySpecificInfo *)ptable)->CharMapFn = CharMapFn;
+          }
+      }
+    }
+    rc = TRUE;
+    goto ret;
+  }
+  */
+  printf("could not find country info for country ID %u\n", ctryCode);
+ret:
+  close(fd);
+  return rc;
+}
+
+STATIC VOID Country(BYTE * pLine)
+{
+  /* Format: COUNTRY = countryCode, [codePage], filename   */
+  COUNT ctryCode;
+  COUNT codePage = 0;
+  char  *filename = NULL;
+
+  if ((pLine = GetNumArg(pLine, &ctryCode)) == 0)
+    goto error;
+
+  pLine = skipwh(pLine);
+  if (*pLine == ',')
+  {
+    pLine = skipwh(pLine + 1);
+
+    if (*pLine != ',')
+      if ((pLine = GetNumArg(pLine, &codePage)) == 0)
+        goto error;
+
+    pLine = skipwh(pLine);
+    if (*pLine == ',')
+    {
+      GetStringArg(++pLine, szBuf);
+      filename = szBuf;
+    }
+  }
+
+  if (LoadCountryInfo(filename, ctryCode, codePage))
+    return;
+
+error:
+  CfgFailure(pLine);
+}
+
 STATIC struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
@@ -1168,7 +1490,7 @@ STATIC struct table commands[] = {
   {"BUFFERSHIGH", 1, CfgBuffersHigh}, /* as BUFFERS - we use HMA anyway */
 
   {"COMMAND", 1, InitPgm},
-  {"COUNTRY", 1, CfgNotImplemented},
+  {"COUNTRY", 1, Country},
   {"DOS", 1, Dosmem},
   {"DOSDATA", 1, DosData},
   {"FCBS", 1, Fcbs},
@@ -1192,7 +1514,7 @@ STATIC struct table commands[] = {
   {"DEVICEHIGH", 2, CfgNotImplemented},
   {"INSTALL", 2, CmdInstall},
   {"INSTALLHIGH", 2, CmdInstallHigh},
-  {"CHAIN", 2, CfgNotImplemented},
+  {"CHAIN", 2, CmdChain},
   {"SET", 2, CmdSet},
   /* default action                                               */
   {"", -1, CfgFailure}
@@ -1206,8 +1528,6 @@ STATIC BOOL SkipLine(char *pLine)
 
   if (originalskipconfigseconds >= 0)
   {
-/// TODO:
-#if 0
     if (originalskipconfigseconds > 0)
       printf("Press F8 to trace or F5 to skip CONFIG.SYS/AUTOEXEC.BAT");
 
@@ -1229,7 +1549,6 @@ STATIC BOOL SkipLine(char *pLine)
 
     if (SkipAllConfig)
       printf("Skipping CONFIG.SYS/AUTOEXEC.BAT\n");
-#endif
   }
 
   if (SkipAllConfig)
@@ -1528,37 +1847,30 @@ VOID DoConfig(int nPass)
     return
             0xffff : no key hit
             0xHHLL : scancode in upper half, ASCII in lower half
-
-    /// TODO: this codebase's C "kernel" runs as code that stands in
-    /// for real x86 instructions, rather than as a guest program
-    /// being interpreted - it is itself what services IRQ0 (timer)/
-    /// IRQ1 (keyboard) on every emulator tick (see kernel.c's
-    /// interrupt handlers). A real wait-for-N-seconds-or-keypress
-    /// loop in C here would block those handlers from ever running
-    /// again, freezing the timer and keyboard for both the guest and
-    /// this loop itself - i.e. it would never see a keypress arrive
-    /// or the timer advance, making a synchronous wait meaningless
-    /// (see the discussion that led to this comment). The "real"
-    /// fix is the same kind of CS:IP-parked BIOS callback this
-    /// codebase's bios_19h.c (INT 19h, F5/F8-equivalent reboot
-    /// timeout) already uses (set_bios_callback(), see i386.h) -
-    /// but that requires unwinding this call back out to the
-    /// emulator's main loop and resuming DoConfig()/SkipLine() later
-    /// (a setjmp()/longjmp() or explicit state-machine
-    /// restructuring), which is an architectural change well beyond
-    /// this iteration's actual goal (loading CONFIG.SYS). So for
-    /// now, this honestly always reports "no key" (the same value a
-    /// real keyboard would eventually report on timeout), ignoring
-    /// the requested timeout entirely - CONFIG.SYS always loads to
-    /// completion with no way to interrupt it via F5/F8, rather than
-    /// hanging or busy-looping pretending to wait.
-
-    Migrated from config.c (signature only; body replaced as above).
 */
+#define GetBiosTime() pload32(0x46c)
 UWORD GetBiosKey(int timeout)
 {
-  UNREFERENCED_PARAMETER(timeout);
-  return 0xffff;
+  iregs r;
+  ULONG startTime = GetBiosTime();
+  if (timeout >= 0)
+  {
+    do
+    {
+      /* optionally HLT here - timer will IRQ even if no keypress */
+      CPU_AX = 0x0100;             /* are there keys available ? */
+      bios_intcall(cpu, 0x16);
+      if (!zf) {
+        CPU_AX = 0x0000;
+        bios_intcall(cpu, 0x16);
+        return CPU_AX;
+      }
+    } while ((unsigned)(GetBiosTime() - startTime) < timeout * 18u);
+    return 0xffff;
+  }
+  CPU_AX = 0x0000;
+  bios_intcall(cpu, 0x16);
+  return CPU_AX;
 }
 
 STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)

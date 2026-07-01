@@ -38,6 +38,15 @@
 #define x86_DAP           MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256) // = 0x1CF4 /* 16 */
 #define x86_MASTER_ENV    MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256 + 16) // = 0x1D04 /* 128 */
 
+#include "hdr/nls.h"
+
+typedef struct {
+  char  ThisIsAConstantOne;
+  short TableSize;
+  struct CountrySpecificInfo C;
+} nlsCountryInfoHardcoded_t;
+extern nlsCountryInfoHardcoded_t nlsCountryInfoHardcoded;
+
 extern struct _KernelConfig InitKernelConfig;
 extern UWORD HMAFree;            /* first byte in HMA not yet used      */
 extern struct config Config;
