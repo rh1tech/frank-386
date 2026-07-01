@@ -1017,6 +1017,7 @@ VOID DoConfig(int nPass)
   /* do the table lookup and execute the handler for that         */
   /* function.                                                    */
 
+  BYTE* szLine = ARM_PTR(x86_szLine);
 #ifdef MEMDISK_ARGS
   for (; !bEof || (mdsk != NULL); nCfgLine++)
 #else
@@ -1024,8 +1025,7 @@ VOID DoConfig(int nPass)
 #endif
   {
     struct table *pEntry;
-    pLineStart = ARM_PTR(x86_szLine);
-    BYTE *szLine = ARM_PTR(x86_szLine);
+    pLineStart = szLine;
 
 #ifdef MEMDISK_ARGS
     if (!bEof)
