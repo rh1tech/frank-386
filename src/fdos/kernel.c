@@ -623,7 +623,6 @@ void pc_step(struct PC* pc);
 static bool cpu_far_call_waiter(CPU* cpu, bios_callback_params_t* params) {
     if (!params->done) {
         params->done = true;
-        drop_bios_callback(cpu, params);
     }
     return false;
 }
@@ -666,6 +665,7 @@ static void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
   while (!params.done)
     pc_step(pc);
 
+  drop_bios_callback(cpu, &params);
   SET_CS(save_cs);
   SET_IP(save_ip);
 }

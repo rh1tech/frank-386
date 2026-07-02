@@ -58,7 +58,6 @@ static bool bios_19h_waiter(CPU* cpu, bios_callback_params_t* params) {
         print_line("2", 2);
     } else {
         print_line("3", 2);
-        drop_bios_callback(cpu, params);
         params->done = true;
     }
 ex:
@@ -84,6 +83,7 @@ bool bios_19h(CPU* cpu) {
     while(!params.done) {
         pc_step(pc);
     }
+    drop_bios_callback(cpu, &params);
     params.done = false;
     print_line(" ", 2);
     /* Classic boot order used here: floppy A:, then first fixed disk C:.
@@ -93,7 +93,6 @@ bool bios_19h(CPU* cpu) {
         return false;
     }
     if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
-        drop_bios_callback(cpu, &params);
         boot_from(cpu, 0x80);
         return false;
     }

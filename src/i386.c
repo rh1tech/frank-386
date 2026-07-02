@@ -5379,32 +5379,6 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 	return cpu;
 }
 
-#ifdef I386_MODE
-void cpu_install_handlers(CPU* cpu) {
-    for(int i = 0; i < 256; ++i) {
-        handlers[i] = no_handler;
-    }
-    handlers[0x00] = bios_00h; // DIVIDE BY ZERO
-    handlers[0x05] = bios_05h; // PRINT SCREEN / BOUND EXCEPTION
-    handlers[0x08] = bios_08h; // IRQ0: Timer
-    handlers[0x09] = bios_09h; // IRQ1: Keyboard
-    handlers[0x10] = bios_10h; // VIDEO
-    handlers[0x11] = bios_11h; // EQUIPMENT LIST
-    handlers[0x12] = bios_12h; // Conventional RAM count
-    handlers[0x13] = bios_13h; // DISK
-    handlers[0x14] = bios_14h; // SERIAL
-    handlers[0x15] = bios_15h; // TSR
-    handlers[0x16] = bios_16h; // KEYBOARD
-    handlers[0x17] = bios_17h; // PRINTERS
-    handlers[0x18] = bios_18h; // BASIC
-    handlers[0x19] = bios_19h; // BOOTSTRAP
-    handlers[0x1A] = bios_1Ah; // CMOS TIME
-    handlers[0x21] = fdos_21h; // main DOS handler
-    handlers[0x29] = fdos_29h; // fast console output.
-    handlers[0xFF] = bios_FFh; // W/A BIOS callback
-}
-#endif
-
 #if !defined(_WIN32) && !defined(__wasm__)
 void cpui386_set_verbose() // for debugging
 {

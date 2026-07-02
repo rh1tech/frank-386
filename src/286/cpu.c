@@ -131,7 +131,7 @@ void cpu_init_286(CPU* cpu) {
     cpue->setexc = setexc;
     cpue->abort = i286_abort;
 }
-#ifndef I386_MODE
+
 void cpu_install_handlers(CPU* cpu) {
     for(int i = 0; i < 256; ++i) {
         handlers[i] = no_handler;
@@ -156,7 +156,6 @@ void cpu_install_handlers(CPU* cpu) {
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
 // TODO: INT 30h как far jump на CP/M entry
 }
-#endif
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION
 //#define CPU_LIMIT_SHIFT_COUNT

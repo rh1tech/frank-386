@@ -4,7 +4,6 @@
 static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
     if (!params->done) {
         params->done = true;
-        drop_bios_callback(cpu, params);
     }
 //    ifl = 1; // allow IRQ ?
     return false; // in a loop on the same CS:IP, no IRET required there
@@ -31,6 +30,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum) {
     while(!params.done) {
         pc_step(pc);
     }
+    drop_bios_callback(cpu, &params);
     params.done = false;
     // restore initial CS:IP
     SET_CS (cs);
