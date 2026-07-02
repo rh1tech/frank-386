@@ -266,6 +266,7 @@ set(EMU_CORE_SOURCES
     src/fdos/task.c
     src/fdos/fdos_21h.c
     src/fdos/fdos_29h.c
+    src/fdos/fdos_2fh.c
 
     # Peripheral chips
     src/i8042.c      # Keyboard controller
@@ -347,7 +348,7 @@ if(EMM)
     target_compile_definitions(${BUILD_NAME} PRIVATE EMULATE_LTEMS=1)
 endif()
 target_compile_definitions(${BUILD_NAME} PRIVATE
-    I386_MODE=1
+    #I386_MODE=1
     # Version information
     FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
     FRANK_386_VERSION_MINOR=${FRANK_386_VERSION_MINOR}

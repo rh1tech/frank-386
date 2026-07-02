@@ -153,6 +153,7 @@ void cpu_install_handlers(CPU* cpu) {
     handlers[0x1A] = bios_1Ah; // CMOS TIME
     handlers[0x21] = fdos_21h; // main DOS handler
     handlers[0x29] = fdos_29h; // fast console output.
+    handlers[0x2F] = fdos_2fh; // XMS
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
 // TODO: INT 30h как far jump на CP/M entry
 }
@@ -337,7 +338,7 @@ static INLINE void decodeflagsword(CPU* cpu, uint16_t x) {
 }
 
 static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
-    #if 0
+    #if 1
     {
         char buf[80];
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);

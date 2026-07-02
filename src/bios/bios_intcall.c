@@ -22,6 +22,14 @@ void bios_intcall(CPU* cpu, uint8_t intnum) {
         .done = false
     };
     set_bios_callback(cpu, &params, true);
+    {
+        char buf[80];
+        u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
+        u16 new_ip = getmem16(0, (uint16_t) intnum * 4);
+        int snprintf(char *s, size_t n, const char *fmt, ...);
+        snprintf(buf, 79, "INT %02Xh ARM? %04X:%04X->%04X:%04X AX:%04X", intnum, cs, ip, params.expected_cs, params.expected_ip, CPU_AX);
+        print_line(buf, 0);
+    }
     // to handle IRET by intcall_waiter:
     SET_CS ( params.expected_cs ); // -> FFEFF
     SET_IP ( params.expected_ip );

@@ -3,7 +3,7 @@
 #include "fdos.h"
 
 static bool no_handler(CPU* cpu) {
-    cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined");
+    cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined ");
 while(1); // remove it
     return true;
 }
@@ -210,6 +210,19 @@ bool fdos_21h(CPU* _cpu) {
     internal_data->Int21AX = CPU_AX;
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
+      /* Display String                                               */
+      case 0x09:
+        {
+          unsigned char c;
+          unsigned char FAR *bp = ARM_PTR( FP_DS_DX );
+
+          while ((c = *bp++) != '$')
+            write_char_stdout(c);
+
+          CPU_AL = c;
+        }
+        break;
+
       case 0x0E: // set drive
         CPU_AL = DosSelectDrv(CPU_DL);
         break;

@@ -13,6 +13,7 @@ void dos_printf(const char *fmt, ...);
 //void execrh(request FAR * rq, struct dhdr FAR * dhp);
 
 bool fdos_21h(CPU*); // MAIN DOS HANDLER
+bool fdos_2fh(CPU*); // XMS
 bool fdos_29h(CPU*); // FAST CONSOLE OUTPUT
 
 #endif // FBIOS_H
