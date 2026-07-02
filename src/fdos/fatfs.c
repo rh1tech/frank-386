@@ -739,12 +739,13 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
   internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), sftp);
 /*
    remote sub sft_count.
- */
+   /// TODO:
   if (sftp->sft_flags & SFT_FSHARED)
   {
     /// unreachable: see the function-level comment above.
     return network_redirector_fp(commitonly ? REM_FLUSH : REM_CLOSE, sftp);
   }
+ */
 
   if (sftp->sft_flags & SFT_FDEVICE)
   {
@@ -1261,4 +1262,551 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
 BOOL fcbmatch(const char *fcbname1, const char *fcbname2)
 {
   return memcmp(fcbname1, fcbname2, FNAME_SIZE + FEXT_SIZE) == 0;
+}
+
+/* Description.
+ *  Remove entries with D_LFN attribute preceeding the directory entry
+ *  pointed by fnp, fnode isn't modified (I hope).
+ * Return value. 
+ *  SUCCESS     - completed successfully.
+ *  DE_ACCESS   - error occurred, fnode is released.
+ * input: fnp with valid non-LFN directory entry, not equal to '..' or
+ *  '.'
+ */
+COUNT remove_lfn_entries(f_node_ptr fnp)
+{
+  unsigned original_diroff = fnp->f_dmp->dm_entry;
+
+  while (TRUE)
+  {
+    if (fnp->f_dmp->dm_entry == 0)
+      break;
+    fnp->f_dmp->dm_entry--;
+    if (dir_read(fnp) <= 0)
+      return DE_ACCESS;
+    if (fnp->f_dir.dir_attrib != D_LFN)
+      break;
+    fnp->f_dir.dir_name[0] = DELETED;
+    if (!dir_write(fnp)) return DE_ACCESS;
+  }
+  fnp->f_dmp->dm_entry = original_diroff;
+  if (dir_read(fnp) <= 0)
+    return DE_ACCESS;
+
+  return SUCCESS;
+}
+
+STATIC BOOL find_free(f_node_ptr fnp)
+{
+  COUNT rc;
+
+  while ((rc = dir_read(fnp)) == 1)
+  {
+    if (fnp->f_dir.dir_name[0] == DELETED)
+      return TRUE;
+    fnp->f_dmp->dm_entry++;
+  }
+  return rc >= 0;
+}
+
+/* clear out the blocks in the cluster for a directory */
+STATIC int clear_dir(f_node_ptr fnp, CLUSTER cluster)
+{
+  int idx;
+  for (idx = 0; idx <= fnp->f_dpb->dpb_clsmask; idx++)
+  {
+    struct buffer FAR *bp;
+
+    /* as we are overwriting it completely, don't read first */
+    bp = getblockOver(clus2phys(cluster, fnp->f_dpb) + idx,
+                      fnp->f_dpb->dpb_unit);
+#ifdef DISPLAY_GETBLOCK
+    printf("DIR (clear_dir)\n");
+#endif
+    if (bp == NULL)
+      return DE_ACCESS;
+    memset(bp->b_buffer, 0, BUFFERSIZE);
+    bp->b_flag |= BFR_DIRTY | BFR_VALID;
+
+    if (idx != 0)
+      bp->b_flag |= BFR_UNCACHE;        /* needs not be cached */
+  }
+  return SUCCESS;
+}
+
+STATIC COUNT extend_dir(f_node_ptr fnp)
+{
+  int ret;
+  CLUSTER cluster = extend(fnp);
+  if (cluster == LONG_LAST_CLUSTER)
+    return DE_HNDLDSKFULL;
+
+  ret = clear_dir(fnp, cluster);
+  if (ret != SUCCESS)
+    return ret;
+
+  if (!find_free(fnp))
+    return DE_HNDLDSKFULL;
+
+  /* flush the drive buffers so that all info is written          */
+  if (!flush_buffers(fnp->f_dpb->dpb_unit))
+    return DE_ACCESS;
+
+  return SUCCESS;
+
+}
+
+/* alloc_find_free: resets the directory                          */
+/* Then finds a spare directory entry and if not                  */
+/* available, tries to extend the directory.                      */
+STATIC int alloc_find_free(f_node_ptr fnp, char *path)
+{
+  fnp = split_path(path, fnp);
+
+  /* Get a free f_node pointer so that we can use */
+  /* it in building the new file.                 */
+  /* Note that if we're in the root and we don't  */
+  /* find an empty slot, we need to abort.        */
+  if (find_free(fnp) == 0)
+  {
+    if (fnp->f_dmp->dm_dircluster == 0)
+    {
+      return DE_TOOMANY;
+    }
+    else
+    {
+      /* Otherwise just expand the directory          */
+      int ret;
+
+      if ((ret = extend_dir(fnp)) != SUCCESS)
+        /* fnp already closed in extend_dir */
+        return ret;
+    }
+  }
+  return SUCCESS;
+}
+
+COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
+{
+  REG f_node_ptr fnp1;
+  REG f_node_ptr fnp2;
+  COUNT ret;
+  char *fcbname;
+
+  /* prevent renaming of the current directory of that drive */
+  dos_far_ptr _cds = get_cds(path1[0] - 'A');
+  struct cds* cdsp = (struct cds*)ARM_PTR( _cds );
+  if (!fstrcmp(path1, cdsp->cdsCurrentPath))
+    return DE_RMVCUDIR;
+
+  /* first check if the source file exists                        */
+  fnp1 = &fnode[0];
+  ret = find_fname(path1, attrib, fnp1);
+  if (ret != SUCCESS)
+    return ret;
+
+  /* Check that we don't have a duplicate name, so if we find     */
+  /* one, it's an error.                                          */
+  fnp2 = &fnode[1];
+  ret = find_fname(path2, attrib, fnp2);
+  if (ret != DE_FILENOTFND)
+    return ret == SUCCESS ? DE_ACCESS : ret;
+
+  fcbname = fnp2->f_dmp->dm_name_pat;
+  if (fnp1->f_dmp->dm_dircluster == fnp2->f_dmp->dm_dircluster)
+  {
+    /* rename in the same directory: change the directory entry in-place */
+    fnp2 = fnp1;
+    if ((ret = remove_lfn_entries(fnp1)) < 0)
+      return ret;
+  }
+  else
+  {
+    /* do not allow to rename directories between different directories  */
+    if (fnp1->f_dir.dir_attrib & D_DIR)
+      return DE_ACCESS;
+
+    /* create new entry in other directory */
+    ret = alloc_find_free(fnp2, path2);
+    if (ret != SUCCESS)
+      return ret;
+
+    if ((ret = remove_lfn_entries(fnp1)) < 0)
+      return ret;
+
+    /* init fnode for new file name to match old file name */
+    memcpy(&fnp2->f_dir, &fnp1->f_dir, sizeof(struct dirent));
+
+    /* Ok, so we can delete this one. Save the file info.           */
+    *(fnp1->f_dir.dir_name) = DELETED;
+
+    if (!dir_write(fnp1))
+      return DE_ACCESS;
+  }
+
+  /* put the fnode's name into the directory.                     */
+  memcpy(fnp2->f_dir.dir_name, fcbname, FNAME_SIZE + FEXT_SIZE);
+
+  /* SUCCESSful completion, return it                             */
+  return dir_write(fnp2) ? SUCCESS : DE_ACCESS;
+}
+
+COUNT dos_getfattr(BYTE * name)
+{
+  f_node_ptr fnp = &fnode[0];
+  int ret = find_fname(name, D_ALL, fnp);
+  return ret == SUCCESS ? fnp->f_dir.dir_attrib : ret;
+}
+
+COUNT dos_setfattr(BYTE * name, UWORD attrp)
+{
+  f_node_ptr fnp;
+  int rc;
+
+  /* JPP-If user tries to set VOLID or RESERVED bits, return error.
+     We used to also check for D_DIR here, but causes issues with deltree
+     which is trying to work around another issue.  So now we check
+     these here, and only report DE_ACCESS if user tries to set directory
+     bit on a non-directory entry.
+   */
+  if ((attrp & (D_VOLID | 0xC0)) != 0)
+    return DE_ACCESS;
+
+  fnp = &fnode[0];
+  rc = find_fname(name, D_ALL, fnp);
+  if (rc != SUCCESS)
+    return rc;
+
+  /* if caller tries to set DIR on non-directory, return error */
+  if ((attrp & D_DIR) && !(fnp->f_dir.dir_attrib & D_DIR))
+    return DE_ACCESS;
+
+  /* Set the attribute from the fnode and return          */
+  /* clear all attributes but DIR and VOLID */
+  fnp->f_dir.dir_attrib &= (D_VOLID | D_DIR);   /* JPP */
+
+  /* set attributes that user requested */
+  fnp->f_dir.dir_attrib |= attrp;       /* JPP */
+
+  /* close open files in compat mode, otherwise there was a critical error */
+  rc = merge_file_changes(fnp, -1);
+  if (rc == SUCCESS && !dir_write(fnp))
+    rc = DE_ACCESS;
+  return rc;
+}
+
+/*                                                              */
+/* Find free cluster in disk FAT table                          */
+/*                                                              */
+STATIC CLUSTER find_fat_free(f_node_ptr fnp)
+{
+  REG CLUSTER idx, size, cluster;
+  struct dpb FAR *dpbp = fnp->f_dpb;
+
+#ifdef DISPLAY_GETBLOCK
+  printf("[find_fat_free]\n");
+#endif
+
+  /* Start from optimized lookup point for start of FAT   */
+  idx = 2;
+  size = dpbp->dpb_size;
+
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+  {
+    if (dpbp->dpb_xcluster != UNKNCLUSTER)
+      idx = dpbp->dpb_xcluster;
+    size = dpbp->dpb_xsize;
+  }
+  else
+#endif
+  if (dpbp->dpb_cluster != UNKNCLUSTER)
+    idx = dpbp->dpb_cluster;
+
+  /* Search the FAT table looking for the first free      */
+  /* entry.                                               */
+  cluster = idx;
+  for (;;)
+  {
+#ifdef CHECK_FAT_DURING_CLUSTER_ALLOC /* slower but nice side effect ;-) */
+    if (next_cluster(dpbp, idx) == FREE)
+#else
+    if (is_free_cluster(dpbp, idx))
+#endif
+    {
+      cluster = idx;
+      break;
+    }
+    idx++;
+    /* wrap the search just in case there are free clusters before */
+    /* dpbp->dpb_(x)cluster (the fsinfo entry is just a hint!)     */
+    if (idx > size) idx = 2;
+    if (idx == cluster) {
+      /* No empty clusters, disk is FULL!                     */
+      cluster = UNKNCLUSTER;
+      idx = LONG_LAST_CLUSTER;
+      break;
+    }
+  }
+
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+  {
+    dpbp->dpb_xcluster = cluster;
+    /* return the free entry                                */
+    write_fsinfo(dpbp);
+    return idx;
+  }
+#endif
+
+  dpbp->dpb_cluster = (UWORD)cluster;
+  /* return the free entry                                */
+  return idx;
+}
+
+/* initialize directory entry (creation/access stamps 0 as per MS-DOS 7.10) */
+STATIC void init_direntry(struct dirent *dentry, unsigned attrib,
+                          CLUSTER cluster, char *name)
+{
+  memset(dentry, 0, sizeof(struct dirent));
+  memcpy(dentry->dir_name, name, FNAME_SIZE + FEXT_SIZE);
+#ifdef WITHFAT32
+  dentry->dir_start_high = (UWORD)(cluster >> 16);
+#endif
+  dentry->dir_start = (UWORD)cluster;
+  dentry->dir_attrib = (UBYTE)attrib;
+  /* set create and last modified time & date */
+  dentry->dir_crtime = dentry->dir_time = dos_gettime();
+  dentry->dir_crdate = dentry->dir_date = dos_getdate();
+}
+
+
+/*                                                              */
+/* create a directory - returns success or a negative error     */
+/* number                                                       */
+/*                                                              */
+COUNT dos_mkdir(BYTE * dir)
+{
+  REG f_node_ptr fnp;
+  CLUSTER free_fat, parent;
+  COUNT ret;
+
+  /* check that the resulting combined path does not exceed
+     the 67 MAX_CDSPATH limit. this leads to problems:
+     A) you can't CD to this directory later
+     B) you can't create files in this subdirectory
+     C) the created dir will not be found later, so you
+     can create an unlimited amount of same dirs. this space
+     is lost forever
+   */
+  if (strlen(dir) >= MAX_CDSPATH)  /* dir is already output of "truename" */
+    return DE_PATHNOTFND;
+
+  /* Check that we don't have a duplicate name, so if we  */
+  /* find one, it's an error.                             */
+  fnp = &fnode[0];
+  ret = find_fname(dir, D_ALL, fnp);
+  if (ret != DE_FILENOTFND)
+    return ret == SUCCESS ? DE_ACCESS : ret;
+
+  parent = fnp->f_dmp->dm_dircluster;
+
+  ret = alloc_find_free(fnp, dir);
+  if (ret != SUCCESS)
+    return ret;
+
+  /* get an empty cluster, so that we make it into a      */
+  /* directory.                                           */
+  /* TE this has to be done (and failed) BEFORE the dir entry */
+  /* is changed                                           */
+  free_fat = find_fat_free(fnp);
+
+  /* No empty clusters, disk is FULL! Translate into a    */
+  /* useful error message.                                */
+  if (free_fat == LONG_LAST_CLUSTER)
+    return DE_HNDLDSKFULL;
+
+  init_direntry(&fnp->f_dir, D_DIR, free_fat, fnp->f_dmp->dm_name_pat);
+
+  /* Mark the cluster in the FAT as used and create new dir there */
+  if (link_fat(fnp->f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* free->last */
+    return DE_HNDLDSKFULL; /* should never happen */
+
+  /* clean out the new directory */
+  ret = clear_dir(fnp, free_fat);
+  if (ret != SUCCESS)
+    return ret;
+
+  /* Write the new directory entry                         */
+  if (!dir_write(fnp))
+    return DE_ACCESS;
+
+  /* Craft the new directory. Note that if we're in a new  */
+  /* directory just under the root, ".." pointer is 0.     */
+
+  dir_init_fnode(fnp, free_fat);
+  fnp->f_dmp->dm_entry = 0;
+  find_free(fnp);
+
+  /* Create the "." entry                                 */
+  init_direntry(&fnp->f_dir, D_DIR, free_fat, ".          ");
+
+  /* And put it out                                       */
+  if (!dir_write(fnp))
+    return DE_ACCESS;
+
+  /* create the ".." entry                                */
+  if (!find_free(fnp) && ((ret = extend_dir(fnp)) != SUCCESS))
+    return ret;
+#ifdef WITHFAT32
+  if (ISFAT32(fnp->f_dpb) && parent == fnp->f_dpb->dpb_xrootclst)
+  {
+    parent = 0;
+  }
+#endif
+  /* use . to allow the compiler to merge duplicate strings */
+  init_direntry(&fnp->f_dir, D_DIR, parent, ".          ");
+  fnp->f_dir.dir_name[1] = '.';
+
+  /* and put it out                                       */
+  if (!dir_write(fnp))
+    return DE_ACCESS;
+
+  return SUCCESS;
+}
+
+/*                                                              */
+/* wipe out all FAT entries starting from st for create, delete, etc. */
+/*                                                              */
+STATIC VOID wipe_out_clusters(struct dpb FAR * dpbp, CLUSTER st)
+{
+  REG CLUSTER next;
+
+  /* Loop from start until either a FREE entry is         */
+  /* encountered (due to a fractured file system) of the  */
+  /* last cluster is encountered.                         */
+  while (st != LONG_LAST_CLUSTER) /* remove clusters at start until empty */
+  {
+    /* get the next cluster pointed to              */
+    next = next_cluster(dpbp, st);
+
+    /* just exit if a damaged file system exists    */
+    if (next <= 1)
+      return;
+
+    /* zap the FAT pointed to                       */
+    if (link_fat(dpbp, st, FREE) != SUCCESS) /* nonfree->free */
+      return; /* better abort on error */
+
+    /* and the start of free space pointer          */
+#ifdef WITHFAT32
+    if (ISFAT32(dpbp))
+    {
+      if ((dpbp->dpb_xcluster == UNKNCLUSTER) || (dpbp->dpb_xcluster > st))
+        dpbp->dpb_xcluster = st;
+    }
+    else
+#endif
+    if ((dpbp->dpb_cluster == UNKNCLUSTER) || (dpbp->dpb_cluster > (UWORD)st))
+      dpbp->dpb_cluster = (UWORD)st;
+
+    /* and just follow the linked list              */
+    st = next;
+  }
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+    write_fsinfo(dpbp);
+#endif
+}
+
+/* wipe out all FAT entries for create, delete, etc.            */
+/* called by delete_dir_entry and dos_open open in O_TRUNC mode */
+STATIC VOID wipe_out(f_node_ptr fnp)
+{
+  /* if not already free and valid file, do it */
+  CLUSTER cluster = getdstart(fnp->f_dpb, &fnp->f_dir);
+  if (cluster != FREE)
+    wipe_out_clusters(fnp->f_dpb, cluster);
+  /* no flushing here: could get lost chain or "crosslink seed" but */
+  /* it would be annoying if mass-deletes could not use BUFFERS...  */
+}
+
+STATIC COUNT delete_dir_entry(f_node_ptr fnp)
+{
+  COUNT rc;
+
+  /* Ok, so we can delete. Start out by           */
+  /* clobbering all FAT entries for this file     */
+  /* (or, in English, truncate the FAT).          */
+  if ((rc = remove_lfn_entries(fnp)) < 0)
+    return rc;
+
+  wipe_out(fnp);
+  *(fnp->f_dir.dir_name) = DELETED;
+
+  /* The directory has been modified, so set the  */
+  /* bit before closing it, allowing it to be     */
+  /* updated                                      */
+  if (!dir_write(fnp))
+    return DE_ACCESS;
+
+  /* SUCCESSful completion, return it             */
+  return SUCCESS;
+}
+
+COUNT dos_rmdir(BYTE * path)
+{
+  REG f_node_ptr fnp;
+
+  /* prevent removal of the current directory of that drive */
+  dos_far_ptr _cds = get_cds(path[0] - 'A');
+  struct cds* cdsp = (struct cds*)ARM_PTR(_cds);
+  if (!fstrcmp(path, cdsp->cdsCurrentPath))
+    return DE_RMVCUDIR;
+
+  /* Check that we're not trying to remove the root!      */
+  if (path[2] == '\\' && path[3] == '\0')
+    return DE_ACCESS;
+
+  /* Check that the directory is empty. Only the  */
+  /* "." and ".." are permissable.                */
+  fnp = dir_open(path, FALSE, &fnode[0]);
+  if (fnp == NULL)
+    return DE_PATHNOTFND;
+
+  /* Directories may have attributes, but if other than 'archive'      */
+  /* or 'read only' then deny i.e. do not allow (SYSTEM|HIDDEN)        */
+  /* directory to be deleted.                                          */
+  if (fnp->f_dir.dir_attrib & ~(D_DIR | D_RDONLY | D_ARCHIVE))
+    return DE_ACCESS;
+
+  dir_read(fnp);
+  /* 1st entry should be ".", else directory corrupt or not empty */
+  if (fnp->f_dir.dir_name[0] != '.' || fnp->f_dir.dir_name[1] != ' ')
+    return DE_ACCESS;
+
+  fnp->f_dmp->dm_entry++;
+  dir_read(fnp);
+  /* second entry should be ".." */
+  if (fnp->f_dir.dir_name[0] != '.' || fnp->f_dir.dir_name[1] != '.')
+    return DE_ACCESS;
+
+  /* Now search through the directory and make certain */
+  /* that there are no entries                         */
+  fnp->f_dmp->dm_entry++;
+  while (dir_read(fnp) == 1)
+  {
+    /* If anything was found, exit with an error.   */
+    if (fnp->f_dir.dir_name[0] != DELETED && fnp->f_dir.dir_attrib != D_LFN)
+      return DE_ACCESS;
+    fnp->f_dmp->dm_entry++;
+  }
+
+  /* next, split the passed dir into components (i.e. -   */
+  /* path to new directory and name of new directory      */
+  if (find_fname(path, D_ALL, fnp) != SUCCESS)
+    /* this error should not happen because dir_open() succeeded above */
+    return DE_PATHNOTFND;
+
+  return delete_dir_entry(fnp);
 }

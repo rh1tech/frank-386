@@ -98,20 +98,20 @@ COUNT DosClose(COUNT hndl);
 COUNT DosCloseSft(int sft_idx, BOOL commitonly);
 #define DosCommit(hndl) DosCloseSft(get_sft_idx(hndl), TRUE)
 UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc);
-COUNT DosGetCuDir(UBYTE drive, BYTE FAR * s);
-COUNT DosChangeDir(BYTE FAR * s);
+COUNT DosGetCuDir(UBYTE drive, dos_far_ptr * s);
+COUNT DosChangeDir(dos_far_ptr s);
 COUNT DosFindFirst(UCOUNT attr, BYTE FAR * name);
 COUNT DosFindNext(void);
 COUNT DosGetFtime(COUNT hndl, ddate * dp, dtime * tp);
 COUNT DosSetFtimeSft(int sft_idx, ddate dp, dtime tp);
 #define DosSetFtime(hndl, dp, tp) DosSetFtimeSft(get_sft_idx(hndl), (dp), (tp))
-COUNT DosGetFattr(BYTE FAR * name);
-COUNT DosSetFattr(BYTE FAR * name, UWORD attrp);
+COUNT DosGetFattr(dos_far_ptr name);
+COUNT DosSetFattr(dos_far_ptr name, UWORD attrp);
 UBYTE DosSelectDrv(UBYTE drv);
-COUNT DosDelete(BYTE FAR * path, int attrib);
-COUNT DosRename(BYTE FAR * path1, BYTE FAR * path2);
-COUNT DosRenameTrue(BYTE * path1, BYTE * path2, int attrib);
-COUNT DosMkRmdir(const char FAR * dir, int action);
+COUNT DosDelete(dos_far_ptr path, int attrib);
+COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2);
+COUNT DosRenameTrue(char* path1, char* path2, int attrib);
+COUNT DosMkRmdir(const dos_far_ptr dir, int action);
 struct dhdr FAR *IsDevice(const char FAR * FileName);
 BOOL IsShareInstalled(BOOL recheck);
 COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock);
@@ -301,7 +301,7 @@ size_t /* ASMCFUNC */ ASMPASCAL strlen(const char * s);
 #define fstrlen strlen
 char FAR * /*ASMCFUNC*/ ASMPASCAL _fstrcpy(char FAR * d, const char FAR * s);
 int /*ASMCFUNC*/ ASMPASCAL strcmp(const char * d, const char * s);
-int /*ASMCFUNC*/ ASMPASCAL fstrcmp(const char FAR * d, const char FAR * s);
+#define fstrcmp strcmp
 int /*ASMCFUNC*/ ASMPASCAL fstrncmp(const char FAR * d, const char FAR * s, size_t l);
 int /*ASMCFUNC*/ ASMPASCAL strncmp(const char * d, const char * s, size_t l);
 char * /*ASMCFUNC*/ ASMPASCAL strchr(const char * s, int c);
@@ -357,6 +357,7 @@ long DosMkTmp(BYTE FAR * pathname, UWORD attr);
 COUNT truename(dos_far_ptr src, char * dest, COUNT t);
 
 /* network.c */
+/* /// TODO:
 int network_redirector(unsigned cmd);
 int network_redirector_fp(unsigned cmd, void far *s);
 long ASMPASCAL network_redirector_mx(unsigned cmd, void far *s, void *arg);
@@ -367,7 +368,7 @@ long ASMPASCAL network_redirector_mx(unsigned cmd, void far *s, void *arg);
 #define remote_setfattr(attr) (int)network_redirector_mx(REM_SETATTR, NULL, (void *)attr)
 #define remote_printredir(dx,ax) (int)network_redirector_mx(REM_PRINTREDIR, MK_FP(0,dx),(void *)ax)
 #define QRemote_Fn(d,s) (int)network_redirector_mx(REM_FILENAME, d, (void *)&s)
-
+*/
 UWORD get_machine_name(BYTE FAR * netname);
 VOID set_machine_name(BYTE FAR * netname, UWORD name_num);
 

@@ -18,20 +18,22 @@ static int read_boot_sector(FIL *f)
     return readw86(BOOT_ADDR + 510) == 0xAA55;
 }
 
-void boot_from(CPU* cpu, uint8_t dl)
+static void boot_from(CPU* cpu, uint8_t dl, bool native)
 {
     CPU_DL = dl;
     /* IBM PC compatible entry point: physical 0000:7C00.
      * Some BIOSes use 07C0:0000; 0000:7C00 is the usual safe form. */
     SET_CS ( 0x0000 );
-    SET_IP ( 0x7C00 );
-// like after POST (bios-less solution):
+    SET_IP ( BOOT_ADDR >> 4 );
     SET_SS ( 0x0000 );
-    CPU_SP = 0x7C00;
-
-// FreeDOS kernel
-	_boot(cpu);
-	kernel(cpu);
+    CPU_SP = BOOT_ADDR >> 4;
+/// TODO: support to select native BIOS + guest DOS
+///    if (native) {
+        // Native FreeDOS kernel
+        _boot(cpu);
+        kernel(cpu);
+        __unreachable();
+//    }
 }
 
 /* TODO:
@@ -83,19 +85,23 @@ bool bios_19h(CPU* cpu) {
     while(!params.done) {
         pc_step(pc);
     }
+    print_line("                            ", 1);
+    print_line(" ", 2);
     drop_bios_callback(cpu, &params);
     params.done = false;
     print_line(" ", 2);
     /* Classic boot order used here: floppy A:, then first fixed disk C:.
     * No POST is done here; INT 19h is only bootstrap. */
     if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {
-        boot_from(cpu, 0x00);
+        boot_from(cpu, 0x00, false);
         return false;
     }
     if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
-        boot_from(cpu, 0x80);
+        boot_from(cpu, 0x80, false);
         return false;
     }
-    return bios_18h(cpu); // ROM Basic, or System halted
+//    bios_18h(cpu); // ROM Basic, or System halted
+    bios_printf(cpu, "No boot media, native DOS is selected\n");
+    boot_from(cpu, 0x00, true);
     __unreachable();
 }

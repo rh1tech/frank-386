@@ -1492,7 +1492,7 @@ invalid_path:
         mode, result, src);
 
   memset(dest, 0, 12);
-
+/* /// TODO:
   if (!(mode & CDS_MODE_SKIP_PHYSICAL) &&
       QRemote_Fn(dest, src) == SUCCESS && dest[0] != '\0')
   {
@@ -1506,7 +1506,7 @@ invalid_path:
     TNDBG("TN15 QRemote return result=%04X dest='%s'", result, dest);
     return result;
   }
-
+*/
   dest[0] = drNrToLetter(result & 0x1f);
   dest[1] = ':';
 

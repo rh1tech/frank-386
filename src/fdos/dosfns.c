@@ -1,45 +1,42 @@
-#include <pico.h>
-#include <pico/time.h>
-#include <hardware/pio.h>
-#include <ctype.h>
-#include "286/cpu.h"
 #include "bios/bios.h"
-#include "fdos.h"
-#include "i8254.h"
+#include "hdrs.h"
 
-#include "hdr/kconfig.h"
-#include "hdr/portab.h"
+/* DOS calls this to see if it's okay to open the file.
+    Returns a file_table entry number to use (>= 0) if okay
+    to open.  Otherwise returns < 0 and may generate a critical
+    error.  If < 0 is returned, it is the negated error return
+    code, so DOS simply negates this value and returns it in
+    AX. */
+int share_open_check(dos_far_ptr filename,  /* pointer to fully qualified filename */
+                     unsigned short pspseg, /* psp segment address of owner process */
+                     int openmode,          /* 0=read-only, 1=write-only, 2=read-write */
+                     int sharemode) {       /* SHARE_COMPAT, etc... */
+    UWORD save_ds = CPU_DS;
+    UWORD save_si = CPU_SI;
 
-#include "hdr/ddate.h"
-#include "hdr/dtime.h"
-#include "hdr/error.h"
-#include "hdr/clock.h"
-#include "hdr/device.h"
-#include "hdr/sft.h"
-#include "hdr/kbd.h"
-#include "hdr/fcb.h"
-#include "hdr/fat.h"
-#include "hdr/pcb.h"
-#include "hdr/dirmatch.h"
-#include "hdr/fnode.h"
-#include "hdr/mcb.h"
-#include "hdr/lol.h"
-#include "hdr/dcb.h"
-#include "hdr/cds.h"
-#include "hdr/tail.h"
-#include "hdr/process.h"
-#include "hdr/version.h"
-#include "proto.h"
-#include "globals.h"
-#include "hdr/debug.h"
-#include "hdr/buffer.h"
-#include "hdr/file.h"
-#include "config.h"
-#include "hdr/network.h"
-#include "init-mod.h"
-#include "dyndata.h"
+    SET_DS(FP_SEG(filename));
+    CPU_SI = FP_OFF(filename);
+    CPU_BX = pspseg;
+    CPU_CX = openmode;
+    CPU_DX = sharemode;
 
-#define printf(...) dos_printf(__VA_ARGS__)
+    CPU_AX = 0x10A0;
+    bios_intcall(cpu, 0x2F);
+
+    CPU_SI = save_si;
+    SET_DS(save_ds);
+
+    return (int16_t)CPU_AX;
+}
+
+/* DOS calls this to record the fact that it has successfully
+    closed a file, or the fact that the open for this file failed. */
+void share_close_file(int fileno) {  /* file_table entry number */
+    CPU_BX = fileno;
+    CPU_AX = 0x10A1;
+    bios_intcall(cpu, 0x2F);
+}
+
 
 /*    ConvertPathNameToFCBName/set_fcbname - convert PriPathName's final
     component into FCB (8.3, space-padded) form, stashed in
@@ -272,8 +269,9 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
       cmd = REM_OPEN;
       attrib = (BYTE)flags;
     }
-    status = (int)network_redirector_mx(cmd, sftp, (void *)(intptr_t)attrib);
-    if (status >= SUCCESS)
+    /// TODO:
+///    status = (int)network_redirector_mx(cmd, sftp, (void *)(intptr_t)attrib);
+///    if (status >= SUCCESS)
     {
       if (sftp->sft_count == 0)
         sftp->sft_count++;
@@ -531,6 +529,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
  *   Do remote first or return error.
  *   must have been opened from remote.
  */
+/* /// TODO:
   if (s->sft_flags & SFT_FSHARED)
   {
     /// unreachable: see the function-level comment above.
@@ -539,13 +538,13 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
 
     save_dta = internal_data->dta;
     internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), s);
-    internal_data->current_filepos = s->sft_posit;     /* needed for MSCDEX */
+    internal_data->current_filepos = s->sft_posit;     /* needed for MSCDEX * /
     internal_data->dta = bp;
     XferCount = remote_rw(mode == XFR_READ ? REM_READ : REM_WRITE, s, n);
     internal_data->dta = save_dta;
     return XferCount;
   }
-
+*/
   /* Do a device transfer if device                   */
   if (s->sft_flags & SFT_FDEVICE)
   {
@@ -771,4 +770,126 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
   p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
   p->ps_filetab[hndl] = (UBYTE)result;
   return hndl | (result & 0xffff0000l);
+}
+
+COUNT DosGetFattr(dos_far_ptr name)
+{
+  COUNT result;
+
+  result = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  if (result < SUCCESS)
+    return result;
+  
+/* /// Added check for "d:\", which returns 0x10 (subdirectory) under DOS.
+       - Ron Cemer */
+           /* Theoretically: If the redirectory's qualify function
+               doesn't return nonsense this check can be reduced to
+               PriPathname[3] == 0, because local path names always
+               have the three-byte string ?:\ and UNC path shouldn't
+               validy consist of just two slashes.
+               -- 2001/09/03 ska*/
+
+  if (PriPathName[3] == '\0')
+    return 0x10;
+
+  set_fcbname();
+/// TODO:
+///  if (result & IS_NETWORK)
+///    return network_redirector(REM_GETATTRZ);
+
+  if (result & IS_DEVICE)
+    return DE_FILENOTFND;
+
+  return dos_getfattr(PriPathName);
+}
+
+/* This function is almost identical to DosGetFattr().
+   Maybe it is nice to join both functions.
+       -- 2001/09/03 ska*/
+COUNT DosSetFattr(dos_far_ptr name, UWORD attrp)
+{
+  COUNT result;
+
+  result = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  if (result < SUCCESS)
+    return result;
+
+  set_fcbname();
+/// TODO:
+///  if (result & IS_NETWORK)
+///    return remote_setfattr(attrp);
+
+  if (result & IS_DEVICE)
+    return DE_FILENOTFND;
+
+  DebugPrintf(("DosSetFattr(%s)\n", name));
+  if (IsShareInstalled(TRUE))
+  {
+    /* SHARE closes the file if it is opened in
+     * compatibility mode, else generate a critical error.
+     * Here generate a critical error by opening in "rw compat" mode */
+    if ((result = share_open_check(linear_to_far(PriPathName), DOS_PSP, O_RDWR, 0)) < 0)
+      return result;
+    /* else dos_setfattr will close the file */
+    share_close_file(result);
+  }
+  return dos_setfattr(PriPathName, attrp);
+}
+
+COUNT DosMkRmdir(const dos_far_ptr dir, int action)
+{
+  COUNT result;
+
+  result = truename(dir, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  if (result < SUCCESS)
+    return result;
+
+  set_fcbname();
+/// TODO:
+///  if (result & IS_NETWORK)
+///    return network_redirector(action == 0x39 ? REM_MKDIR : REM_RMDIR);
+
+  if (result & IS_DEVICE)
+    return DE_ACCESS;
+
+  return (action == 0x39 ? dos_mkdir : dos_rmdir)(PriPathName);
+}
+
+COUNT DosRenameTrue(BYTE * path1, BYTE * path2, int attrib)
+{
+  if (path1[0] != path2[0])
+  {
+    return DE_DEVICE; /* not same device */
+  }
+  /// TODO:
+///  if (FP_OFF(current_ldt) == 0xFFFF || (current_ldt->cdsFlags & CDSNETWDRV))
+///    return network_redirector(REM_RENAME);
+
+///  if (IsShareInstalled(TRUE) && share_is_file_open(path1))
+///    return DE_ACCESS;
+
+  return dos_rename(path1, path2, attrib);
+}
+
+COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2)
+{
+  COUNT result;
+
+  result = truename(path2, SecPathName, CDS_MODE_CHECK_DEV_PATH);
+  if (result < SUCCESS)
+    return result;
+
+  if ((result & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE)
+    return DE_FILENOTFND;
+
+  result = truename(path1, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  if (result < SUCCESS)
+    return result;
+
+  set_fcbname();
+
+  if ((result & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE)
+    return DE_FILENOTFND;
+
+  return DosRenameTrue(PriPathName, SecPathName, D_ALL);
 }

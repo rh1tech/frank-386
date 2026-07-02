@@ -205,6 +205,7 @@ UBYTE DosSelectDrv(UBYTE drv)
 DOS 1+ - main DOS handler
 */
 bool fdos_21h(CPU* _cpu) {
+    COUNT rc;
     cpu = _cpu;
     internal_data->Int21AX = CPU_AX;
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
@@ -241,6 +242,47 @@ bool fdos_21h(CPU* _cpu) {
         CPU_BX = FP_OFF(internal_data->dta);
         SET_ES(FP_SEG(internal_data->dta));
         break;
+
+      /* Get (editable) DOS Version                                   */
+      case 0x30:
+      {
+        if (CPU_AL == 1) /* from RBIL, if AL=1 then return version_flags */
+            CPU_BH = LoL->version_flags;
+        else
+            CPU_BH = OEM_ID;
+        CPU_AX = ((psp*)ARM_PTR(x86_PSP))->ps_retdosver;
+        CPU_BL = REVISION_SEQ;
+        CPU_CX = 0; /* do not set this to a serial number!
+                      32RTM won't like non-zero values   */
+
+        if (ReturnAnyDosVersionExpected)
+        {
+          /* TE for testing purpose only and NOT
+            to be documented:
+            return programs, who ask for version == XX.YY
+            exactly this XX.YY.
+            this makes most MS programs more happy.
+          */
+          UBYTE FAR *retp = ARM_PTR ( MK_FP(CPU_CS, CPU_IP) );
+
+          if (retp[0] == 0x3d &&  /* cmp ax, xxyy */
+              (retp[3] == 0x75 || retp[3] == 0x74))       /* je/jne error    */
+          {
+            CPU_AL = retp[1];
+            CPU_AH = retp[2];
+          }
+          else if (retp[0] == 0x86 &&     /* xchg al,ah   */
+                  retp[1] == 0xc4 && retp[2] == 0x3d &&  /* cmp ax, xxyy */
+                  (retp[5] == 0x75 || retp[5] == 0x74))  /* je/jne error    */
+          {
+            CPU_AL = retp[4];
+            CPU_AH = retp[3];
+          }
+
+        }
+      }
+      break;
+
       case 0x37: /* DOS 2+ - SWITCHAR - GET/SET SWITCH CHARACTER */
         switch (CPU_AL) {
         case 0x00:              /* get switch character */
@@ -315,6 +357,45 @@ bool fdos_21h(CPU* _cpu) {
       }
         break;
 
+      /* Get/Set File Attributes                                      */
+      case 0x43:
+        switch (CPU_AL)
+        {
+          case 0x00:
+            rc = DosGetFattr(FP_DS_DX);
+            if (rc >= SUCCESS)
+              CPU_CX = rc;
+            break;
+
+          case 0x01:
+            rc = DosSetFattr(FP_DS_DX, CPU_CX);
+            CPU_AX = CPU_CX;
+            break;
+
+          case 0xff: /* DOS 7.20 (w98) extended name (128 char length) functions */
+          {
+            switch(CPU_CL)
+            {
+                  /* Dos Create Directory                                         */
+                  case 0x39:
+                  /* Dos Remove Directory                                         */
+                  case 0x3a:
+                    rc = DosMkRmdir(FP_DS_DX, CPU_CL);
+                    goto short_check;
+
+                  /* Dos rename file */
+                  case 0x56:
+                    rc = DosRename(FP_DS_DX, FP_ES_DI);
+                    goto short_check;
+
+                /* fall through to goto error_invaid */
+            }
+          }
+          default:
+            goto error_invalid;
+        }
+        goto short_check;
+
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       // BX = existing handle (old), CX = handle to redirect (new)
       {
@@ -367,6 +448,24 @@ bool fdos_21h(CPU* _cpu) {
       default:
         no_handler(_cpu);
     }
+    goto exit_dispatch;
+
+short_check:
+    if (rc < SUCCESS)
+        goto error_exit;
+    goto exit_dispatch;
+
+error_invalid:
+    rc = DE_INVLDFUNC;
+
+error_exit:
+    CPU_AX = (UWORD)(-rc);
+    if (internal_data->CritErrCode == SUCCESS)
+        internal_data->CritErrCode = CPU_AX;      /* Maybe set */
+    cf = 1;
+    goto exit_dispatch;
+
+exit_dispatch:
     flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
                    | (cpu->flags.value & 0x0041); // set them back from CPU
     writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
