@@ -605,18 +605,100 @@ const static struct lol lol = {
     .prn_str = "PRN",
 };
 
-static void x86_execrh() {
-  /// TODO: see execrh.asm
-  printf("KERNEL INIT TODO (x86_execrh)\n");
-  while(1);
+/* pc_step()/pc are declared the same way bios/bios_intcall.c declares
+   them (there is no shared header for it) - see that file for the
+   INT-call counterpart of the mechanism used below. */
+extern struct PC* pc;
+void pc_step(struct PC* pc);
+
+/*
+   cpu_far_call_waiter() - bios_callback_params_t callback fired when
+   the CPU reaches back the synthetic return address pushed by
+   cpu_far_call() below (i.e. the driver did RETF). Just like
+   bios_intcall.c's own waiter, it marks the wait done and drops the
+   callback; unlike an INT/IRET pair, a CALL/RETF pair never expects a
+   flags-restoring IRET at the trap address, so this always returns
+   false ("do not synthesize an IRET here").
+*/
+static bool cpu_far_call_waiter(CPU* cpu, bios_callback_params_t* params) {
+    if (!params->done) {
+        params->done = true;
+        drop_bios_callback(cpu, params);
+    }
+    return false;
 }
 
-WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp) {
+/*
+   cpu_far_call(cpu, seg, off) - synchronously CALL FAR seg:off in
+   guest (x86) code and wait for it to RETF back, by hand: push a
+   return CS:IP that lands inside the emulator's fake-BIOS trap page
+   (see bios/bios_FFh.c), set CS:IP to the target, and single-step the
+   CPU until that trap fires and reports the RETF happened.
+
+   This is the CALL/RETF analogue of bios_intcall()'s INT/IRET
+   mechanism (bios/bios_intcall.c) - reused here because DOS device
+   driver entry points (dh_strategy/dh_interrupt) are invoked with a
+   plain far call, not a software interrupt: no flags are pushed by
+   the caller, and none are expected to be popped by the callee.
+*/
+static void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
+{
+  UWORD save_cs = CPU_CS, save_ip = CPU_IP;
+  bios_callback_params_t params = {
+    .callback = cpu_far_call_waiter,
+    .expected_cs = 0xFFEF,
+    .expected_ip = 0x000F,
+    .done = false,
+  };
+
+  set_bios_callback(cpu, &params, true);
+
+  /* Emulate exactly what "CALL FAR seg:off" pushes: CS, then IP (so
+     that RETF - which pops IP, then CS - lands back here). */
+  CPU_SP -= 2;
+  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, params.expected_cs);
+  CPU_SP -= 2;
+  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, params.expected_ip);
+
+  SET_CS(seg);
+  SET_IP(off);
+
+  while (!params.done)
+    pc_step(pc);
+
+  SET_CS(save_cs);
+  SET_IP(save_ip);
+}
+
+/*
+   x86_execrh() - drive the standard MS-DOS/FreeDOS device driver
+   protocol for a loaded (real x86 machine code) driver:
+     1. ES:BX = far pointer to the request header, CALL FAR
+        dh_strategy - the driver stashes the pointer and returns.
+     2. CALL FAR dh_interrupt (no arguments) - the driver re-fetches
+        the pointer it stashed in step 1 and actually processes
+        rq->r_command.
+
+   dh_strategy/dh_interrupt are word *offsets* within the driver
+   header's own segment - see the comment on struct dhdr's x86 member
+   in hdr/device.h for why (that's also what keeps this layout
+   byte-for-byte compatible with real, unmodified .SYS driver files).
+*/
+static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far_ptr x86_dhp) {
+  UWORD hdr_seg = FP_SEG(x86_dhp);
+  SET_ES ( FP_SEG(x86_rq) );
+  CPU_BX = FP_OFF(x86_rq);
+  cpu_far_call(cpu, hdr_seg, dhp->x86.dh_strategy);
+  cpu_far_call(cpu, hdr_seg, dhp->x86.dh_interrupt);
+}
+
+/// TODO: dos_far_ptr rq
+WORD ASMPASCAL execrh(request* rq, /*struct dhdr*/ dos_far_ptr _dhp) {
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(_dhp);
   if (dhp->dh_attr & ATTR_NATIVE) {
       dhp->arm.dh_interrupt(rq);
   } else {
-      x86_execrh();
+    x86_execrh(linear_to_far(rq), dhp, _dhp);
   }
   return rq->r_status;
 }
@@ -713,7 +795,10 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
                  dos_far_ptr * r_top)
 {
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
-  request rq = { 0 };
+  CPU_SP -= sizeof(request);
+  dos_far_ptr x86_rq = MK_FP(CPU_SS, CPU_SP);
+  request* rq = (request*)ARM_PTR(x86_rq);
+  memset(rq, 0, sizeof(request));  
   char name[8];
 
   if (cmdLine) {
@@ -739,33 +824,33 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
     }
   }
 
-  rq.r_unit = 0;
-  rq.r_status = 0;
-  rq.r_command = C_INIT;
-  rq.r_length = sizeof(request);
-  rq.r_endaddr = *r_top;
-  rq.r_bpbptr = (void FAR *)(cmdLine ? cmdLine : "\n");
-  rq.r_firstunit = LoL->nblkdev;
+  rq->r_unit = 0;
+  rq->r_status = 0;
+  rq->r_command = C_INIT;
+  rq->r_length = sizeof(request);
+  rq->r_endaddr = *r_top;
+  rq->r_bpbptr = (void FAR *)(cmdLine ? cmdLine : "\n");
+  rq->r_firstunit = LoL->nblkdev;
 
-  execrh((request FAR *) & rq, x86_dhp);
+  execrh(rq, x86_dhp);
 
 /*
  *  Added needed Error handle
  */
-  if ((rq.r_status & (S_ERROR | S_DONE)) == S_ERROR)
-    return TRUE;
+  if ((rq->r_status & (S_ERROR | S_DONE)) == S_ERROR)
+      goto ok;
 
   if (cmdLine)
   {
     /* Don't link in device drivers which do not take up memory */
-    if ((struct dhdr*)ARM_PTR(rq.r_endaddr) == dhp)
-      return TRUE;
+    if ((struct dhdr*)ARM_PTR(rq->r_endaddr) == dhp)
+      goto ok;
 
     /* Don't link in block device drivers which indicate no units */
-    if (!(dhp->dh_attr & ATTR_CHAR) && !rq.r_nunits)
+    if (!(dhp->dh_attr & ATTR_CHAR) && !rq->r_nunits)
     {
-      rq.r_endaddr = x86_dhp;
-      return TRUE;
+      rq->r_endaddr = x86_dhp;
+      goto ok;
     }
 
 
@@ -775,7 +860,7 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
     /*   the used.  It is recommended that all the device drivers in   */
     /*   the file return the same address                              */
     if (FP_OFF(dhp->dh_next) == 0xffff) {
-        KernelAllocPara(FP_SEG(rq.r_endaddr) + (FP_OFF(rq.r_endaddr) + 15)/16 - FP_SEG(x86_dhp), 'D', name, mode);
+        KernelAllocPara(FP_SEG(rq->r_endaddr) + (FP_OFF(rq->r_endaddr) + 15)/16 - FP_SEG(x86_dhp), 'D', name, mode);
     }
 
     /* Another fix for multisegmented device drivers:                  */
@@ -784,12 +869,12 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
     /*   single driver file, save the end address returned from the    */
     /*   last INIT call which will then be passed as the end address   */
     /*   for the next INIT call.                                       */
-    *r_top = rq.r_endaddr;
+    *r_top = rq->r_endaddr;
   }
 
-  if (!(dhp->dh_attr & ATTR_CHAR) && (rq.r_nunits != 0))
+  if (!(dhp->dh_attr & ATTR_CHAR) && (rq->r_nunits != 0))
   {
-    dhp->dh_name[0] = rq.r_nunits;
+    dhp->dh_name[0] = rq->r_nunits;
     update_dcb(x86_dhp);
   }
 
@@ -798,7 +883,11 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
   else if (dhp->dh_attr & ATTR_CLOCK)
     LoL->clock = x86_dhp;
 
+  CPU_SP += sizeof(request);
   return FALSE;
+ok:
+  CPU_SP += sizeof(request);
+  return TRUE;
 }
 
 STATIC void InitIO()
@@ -976,14 +1065,14 @@ void fputlong(void *vp, ULONG l)
     panic-halt unconditionally so a bad pointer can never silently
     turn into "write somewhere in guest RAM" in any build.
 */
-dos_far_ptr linear_to_far(const BYTE *p)
+dos_far_ptr linear_to_far(const void *p)
 {
-  uint32_t lin = (uint32_t)(p - (intptr_t)X86_RAM_BASE);
-  if (lin > EFFECTIVE(MK_FP(-1, -1)))
+  if (!is_guest_ptr(p))
   {
     printf("PANIC: linear_to_far out of x86 guest RAM range %p\n", (const void *)p);
     for (;;) ;
   }
+  uint32_t lin = (uint32_t)(p - (intptr_t)X86_RAM_BASE);
   return MK_FP((UWORD)(lin >> 4), (UWORD)(lin & 0xF));
 }
 

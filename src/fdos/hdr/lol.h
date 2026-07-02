@@ -133,7 +133,7 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   unsigned short winInstanced; /* WinInit called                          */
   unsigned long  winStartupInfo[4];
   unsigned short instanceTable[5];
-  char os_release_str[6];
+  char os_release_str[10];
   char aux_str[4];
   char con_str[4];
   char prn_str[4];

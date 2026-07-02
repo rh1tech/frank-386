@@ -619,6 +619,34 @@ STATIC VOID Dosmem(BYTE * pLine)
   }
 }
 
+/*
+    umb_init() - upstream FreeDOS re-probes for UMBs here (UmbState==2:
+    "DOS=UMB was requested, but we don't have a UMB provider yet")
+    right after a device driver finishes loading, in case that driver
+    was itself an XMS/UMB provider (e.g. a HIMEM.SYS/UMBPCI-alike). It
+    does so by calling DetectXMSDriver() (probes INT 2Fh/AX=4300h,
+    then reads the XMS entry point via INT 2Fh/AX=4310h) and
+    UMB_get_largest() (an XMS call, AH=88h), both of which - like any
+    other DOS TSR/driver call - would need to invoke real x86 code
+    inside the freshly-loaded driver, via the same synchronous
+    CALL FAR bridge x86_execrh() uses (cpu_far_call(), kernel.c) to
+    call a loaded device driver's strategy/interrupt routines.
+
+    That part - actually detecting and driving a loaded XMS provider -
+    is not implemented in this port yet, so this is a deliberate no-op
+    stub rather than the missing symbol it was before (LoadDevice()
+    already called umb_init() with no definition anywhere in the
+    port, which would fail to link). UmbState simply stays at 2
+    ("DOS=UMB wanted, no provider found yet"): DEVICEHIGH=/LOADHIGH
+    continue to work exactly as before (see DeviceHigh() above, which
+    already falls back to loading low whenever UmbState != 1), just
+    without ever promoting UmbState to 1 unless a provider is wired up
+    here later.
+*/
+STATIC void umb_init(void)
+{
+}
+
 STATIC VOID InitPgm(BYTE * pLine)
 {
   static char init[NAMEMAX];
@@ -1437,8 +1465,8 @@ error:
 STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 {
   exec_blk eb;
-  struct dhdr FAR *dhp;
-  struct dhdr FAR *next_dhp;
+  dos_far_ptr dhp;
+  dos_far_ptr next_dhp;
   BOOL result;
   seg base, start;
 
@@ -1465,9 +1493,16 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   eb.load.reloc = eb.load.load_seg = base;
 
   CfgDbgPrintf(("Loading device driver %s at segment %04x\n", szBuf, base));
-/// TODO: implement init_DosExec first
-#if 0
-  if ((result = init_DosExec(3, &eb, szBuf)) != SUCCESS)
+
+  /* szBuf is native (ARM) memory; DosExec()/DosOpenSft() need the
+     filename in guest RAM, so copy it into the SDA's scratch path
+     buffer first - same idiom the CONFIG.SYS search loop above uses
+     (see x86_FAR_PTR(DOS_PSP, PriPathName) there). DosExec()'s "lp"
+     is, like init_device()'s cmdLine, an already-native pointer into
+     guest RAM (FAR is a no-op in this port) - not a dos_far_ptr. */
+  strcpy(SecPathName, szBuf);
+
+  if ((result = DosExec(EXEC_OVERLAY, &eb, (BYTE FAR *) SecPathName)) != SUCCESS)
   {
     CfgFailure(pLine);
     return result;
@@ -1493,20 +1528,27 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   /*   The updated end address is then used when issuing the next    */
   /*   INIT request for the following device driver within the file  */
 
-  for (next_dhp = NULL; FP_OFF(next_dhp) != 0xffff &&
+  for (next_dhp = MK_FP(0, 0); FP_OFF(next_dhp) != 0xffff &&
        (result = init_device(dhp, szBuf, mode, &top)) == SUCCESS;
        dhp = next_dhp)
   {
-    next_dhp = MK_FP(FP_SEG(dhp), FP_OFF(dhp->dh_next));
+    struct dhdr *p = (struct dhdr *) ARM_PTR(dhp);
+
+    /* dh_next chains multiple device headers within the *same*
+       loaded driver segment: only its offset is meaningful, the
+       segment is always this driver's own load segment (see
+       DosExec()'s relocation pass, which treats every loaded driver
+       image as living entirely in one segment). */
+    next_dhp = MK_FP(FP_SEG(dhp), FP_OFF(p->dh_next));
+
     /* Link in device driver and save LoL->nul_dev pointer to next */
-    dhp->dh_next = LoL->nul_dev.dh_next;
+    p->dh_next = LoL->nul_dev.dh_next;
     LoL->nul_dev.dh_next = dhp;
   }
 
   /* might have been the UMB driver or DOS=UMB */
   if (UmbState == 2)
     umb_init();
-#endif
 
   return result;
 }
@@ -2253,6 +2295,23 @@ PSP creation
 environment block
 MCB ownership by PSP  
   */
+  /* TODO: unlike DEVICE=/DEVICEHIGH= (LoadDevice(), above - now
+     working, see DosExec() in task.c), INSTALL= needs a *real* EXEC
+     (icmd->mode is EXEC_LOADNGO, not EXEC_OVERLAY): the program has
+     to get a PSP, an environment block, and actually run as its own
+     process before CONFIG.SYS processing continues. DosExec() only
+     implements EXEC_OVERLAY so far - see its comment in task.c for
+     exactly what's still missing (memory allocation for the child,
+     PSP/environment construction, and the CPU context switch itself:
+     child_psp()/patchPSP()/ExecMemAlloc()/exec_user()/return_user()
+     in upstream FreeDOS - none of which exist in this port yet). The
+     same gap is why P_0()/task.c can't start COMMAND.COM yet either.
+     "filename" above is also native (ARM) memory, same as config.c's
+     szBuf - would need copying into a guest-RAM buffer first (see
+     LoadDevice()'s use of SecPathName) before any future DosExec()
+     call here.
+  */
+
   ///if (init_DosExec(icmd->mode, &exb, filename) != SUCCESS)
   ///  CfgFailure(cmd);
 }

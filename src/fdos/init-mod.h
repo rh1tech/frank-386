@@ -84,11 +84,14 @@ dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode);
 int init_DosOpen(dos_far_ptr pathname, int flags);
 int read(int fd, dos_far_ptr dst, COUNT sz);
 int close(int fd);
-dos_far_ptr linear_to_far(const BYTE *p);
+dos_far_ptr linear_to_far(const void *p);
 VOID DoConfig(int nPass);
 void BIOS_drive_reset(CPU* cpu, unsigned drive);
 void blockio(CPU* cpu, request FAR *rq);
 int ASMPASCAL init_switchar(int chr);
+BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
+                 dos_far_ptr * r_top);
+COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
 
 inline static void rq_done(request FAR *rq) {
     rq->r_status = S_DONE;

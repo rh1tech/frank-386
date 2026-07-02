@@ -112,17 +112,35 @@
  *      structures
  */
 struct request;
-/* Device header */
+/* Device header.
+ *
+ * The x86 variant's dh_strategy/dh_interrupt are plain WORD *offsets*,
+ * not far pointers: real MS-DOS/FreeDOS device driver headers (the
+ * literal on-disk bytes of a .SYS file) store them as two 16-bit
+ * offsets, always implicitly within the same segment as the header
+ * itself (see x86_execrh() in kernel.c, which combines them with
+ * FP_SEG() of the header's own address). Keeping this variant at 4
+ * bytes total - the same size as the "arm" variant's single native
+ * function pointer - is what keeps this union's layout byte-for-byte
+ * compatible with the real, on-disk 18-byte header format
+ * (dh_next[4] + dh_attr[2] + strategy[2] + interrupt[2] + dh_name[8]).
+ * That compatibility is what makes it possible to load real,
+ * unmodified x86 .SYS driver files straight into guest RAM (see
+ * DosExec() in task.c) and run them as-is: if this union were instead
+ * sized for two 4-byte dos_far_ptr (8 bytes), dh_name would be read 4
+ * bytes past where every real driver file actually puts it.
+ */
 struct dhdr {
     /*struct dhdr*/ dos_far_ptr dh_next; // for x86 drivers only
     UWORD dh_attr;
     union {
       struct {
+        // no dh_strategy support for native drivers
         VOID(*dh_interrupt)(struct request *rq);
       } arm;
       struct {
-        dos_far_ptr dh_strategy;
-        dos_far_ptr dh_interrupt;
+        UWORD dh_strategy;    /* offset, within this header's own segment */
+        UWORD dh_interrupt;   /* offset, within this header's own segment */
       } x86;
     };
     UBYTE dh_name[8];

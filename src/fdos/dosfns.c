@@ -420,6 +420,73 @@ BOOL IsShareInstalled(BOOL recheck)
 
 
 /*
+    SftSeek(sft_idx, new_pos, mode) / DosSeek(hndl, new_pos, mode, rc) -
+    the real implementation behind INT 21h AH=42h (LSEEK).
+
+    Migrated from upstream FreeDOS dosfns.c. Differences from the
+    original:
+      - idx_to_sft()/lpCurSft follow the same dos_far_ptr-aware pattern
+        as the rest of this file (internal_data->lpCurSft instead of a
+        bare pointer).
+      - the SFT_FSHARED (network redirector) branch of SEEK_END is
+        dropped: it can only be reached through a network drive, and -
+        per DosOpenSft()'s IS_NETWORK branch above - no network drive
+        can ever exist in this codebase (no redirector to create one).
+        remote_lseek() is therefore not implemented; if that
+        assumption ever stops holding, this needs revisiting alongside
+        DosOpenSft()'s IS_NETWORK branch.
+*/
+STATIC COUNT SftSeek2(int sft_idx, LONG new_pos, unsigned mode, UDWORD *p_result)
+{
+  sft *s = idx_to_sft(sft_idx);
+
+  if (s == (sft *) - 1)
+    return DE_INVLDHNDL;
+
+  /* Test for invalid mode                        */
+  if (mode > SEEK_END)
+    return DE_INVLDFUNC;
+
+  internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), s);
+
+  /* Do special return for character devices      */
+  if (s->sft_flags & SFT_FDEVICE)
+  {
+    new_pos = 0;
+  }
+  else if (mode == SEEK_CUR)
+  {
+    new_pos += s->sft_posit;
+  }
+  else if (mode == SEEK_END)      /* seek from end of file */
+  {
+    new_pos += s->sft_size;
+  }
+
+  s->sft_posit = new_pos;
+
+  *p_result = (UDWORD)new_pos;
+  return SUCCESS;
+}
+
+COUNT SftSeek(int sft_idx, LONG new_pos, unsigned mode)
+{
+  UDWORD result;
+  return SftSeek2(sft_idx, new_pos, mode, &result);
+}
+
+ULONG DosSeek(unsigned hndl, LONG new_pos, COUNT mode, int *rc)
+{
+  int sft_idx = get_sft_idx(hndl);
+  UDWORD result;
+
+  *rc = SftSeek2(sft_idx, new_pos, mode, &result);
+  if (*rc == SUCCESS)
+    return result;
+  return (ULONG)*rc;
+}
+
+/*
     DosRWSft(sft_idx, n, bp, mode) - the real implementation behind
     INT 21h AH=3Fh/40h (read/write): dispatch to the network
     redirector, a character device, or rwblock() (regular files),
