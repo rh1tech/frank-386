@@ -619,32 +619,132 @@ STATIC VOID Dosmem(BYTE * pLine)
   }
 }
 
-/*
-    umb_init() - upstream FreeDOS re-probes for UMBs here (UmbState==2:
-    "DOS=UMB was requested, but we don't have a UMB provider yet")
-    right after a device driver finishes loading, in case that driver
-    was itself an XMS/UMB provider (e.g. a HIMEM.SYS/UMBPCI-alike). It
-    does so by calling DetectXMSDriver() (probes INT 2Fh/AX=4300h,
-    then reads the XMS entry point via INT 2Fh/AX=4310h) and
-    UMB_get_largest() (an XMS call, AH=88h), both of which - like any
-    other DOS TSR/driver call - would need to invoke real x86 code
-    inside the freshly-loaded driver, via the same synchronous
-    CALL FAR bridge x86_execrh() uses (cpu_far_call(), kernel.c) to
-    call a loaded device driver's strategy/interrupt routines.
+dos_far_ptr DetectXMSDriver(void)
+{
+    UWORD save_es = CPU_ES;
+    UWORD save_bx = CPU_BX;
 
-    That part - actually detecting and driving a loaded XMS provider -
-    is not implemented in this port yet, so this is a deliberate no-op
-    stub rather than the missing symbol it was before (LoadDevice()
-    already called umb_init() with no definition anywhere in the
-    port, which would fail to link). UmbState simply stays at 2
-    ("DOS=UMB wanted, no provider found yet"): DEVICEHIGH=/LOADHIGH
-    continue to work exactly as before (see DeviceHigh() above, which
-    already falls back to loading low whenever UmbState != 1), just
-    without ever promoting UmbState to 1 unless a provider is wired up
-    here later.
-*/
+    CPU_AX = 0x4300;
+    bios_intcall(cpu, 0x2F);
+
+    if (CPU_AL != 0x80)
+        return MK_FP(0, 0);
+
+    CPU_AX = 0x4310;
+    bios_intcall(cpu, 0x2F);
+
+    dos_far_ptr entry = MK_FP(CPU_ES, CPU_BX);
+
+    CPU_BX = save_bx;
+    SET_ES(save_es);
+
+    return entry;
+}
+
+static unsigned init_oem(void) {
+  bios_intcall(cpu, 0x12);
+  return CPU_AX;
+}
+
+STATIC seg prev_mcb(seg cur_mcb, seg start)
+{
+  /* determine prev mcb */
+  seg mcb_prev, mcb_next;
+  mcb_prev = mcb_next = start;
+  while (mcb_next < cur_mcb && para2far(mcb_next)->m_type == MCB_NORMAL)
+  {
+    mcb_prev = mcb_next;
+    mcb_next += para2far(mcb_prev)->m_size + 1;
+  }
+  return mcb_prev;
+}
+
+STATIC VOID mumcb_init(UCOUNT seg, UWORD size);
+STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type);
 STATIC void umb_init(void)
 {
+  UCOUNT umb_seg, umb_size;
+  seg umb_max;
+  dos_far_ptr xms_addr = DetectXMSDriver();
+
+  if (EFFECTIVE(xms_addr) == 0)
+    return;
+
+  if (UMB_get_largest(xms_addr, &umb_seg, &umb_size))
+  {
+    UmbState = 1;
+
+    /* reset root */
+    /* Note: since device drivers can change what is considered top of memory (e.g. move XBDA) we must requery */
+    ram_top = init_oem();
+    LoL->uppermem_root = ram_top * 64 - 1;
+
+    /* create link mcb (below) */
+    para2far(base_seg)->m_type = MCB_NORMAL;
+    para2far(base_seg)->m_size--;
+    mumcb_init(LoL->uppermem_root, umb_seg - LoL->uppermem_root - 1);
+
+    /* setup the real mcb for the devicehigh block */
+    mcb_init(umb_seg, umb_size - 2, MCB_NORMAL);
+
+    umb_base_seg = umb_max = umb_start = umb_seg;
+    UMB_top = umb_size;
+
+    /* there can be more UMBs !
+       this happens, if memory mapped devces are in between
+       like UMB memory c800..c8ff, d8ff..efff with device at d000..d7ff
+       However some of the xxxHIGH commands still only work with
+       the first UMB.
+    */
+
+    while (UMB_get_largest(xms_addr, &umb_seg, &umb_size))
+    {
+      seg umb_prev, umb_next;
+
+      /* setup the real mcb for the devicehigh block */
+      mcb_init(umb_seg, umb_size - 2, MCB_NORMAL);
+
+      /* determine prev and next umbs */
+      umb_prev = prev_mcb(umb_seg, LoL->uppermem_root);
+      umb_next = umb_prev + para2far(umb_prev)->m_size + 1;
+
+      if (umb_seg < umb_max)
+      {
+        if (umb_next - umb_seg - umb_size == 0)
+        {
+          /* should the UMB driver return
+             adjacent memory in several pieces */
+          umb_size += para2far(umb_next)->m_size + 1;
+          para2far(umb_seg)->m_size = umb_size;
+        }
+        else
+        {
+          /* create link mcb (above) */
+          mumcb_init(umb_seg + umb_size - 1, umb_next - umb_seg - umb_size);
+        }
+      }
+      else /* umb_seg >= umb_max */
+      {
+        umb_prev = umb_next;
+      }
+
+      if (umb_seg - umb_prev - 1 == 0)
+        /* should the UMB driver return
+           adjacent memory in several pieces */
+        para2far(prev_mcb(umb_prev, LoL->uppermem_root))->m_size += umb_size;
+      else
+      {
+        /* create link mcb (below) */
+        mumcb_init(umb_prev, umb_seg - umb_prev - 1);
+      }
+
+      if (umb_seg > umb_max)
+        umb_max = umb_seg;
+    }
+    para2far(umb_max)->m_size++;
+    para2far(umb_max)->m_type = MCB_LAST;
+    CfgDbgPrintf(("UMB Allocation completed: start at 0x%x\n", umb_base_seg));
+  }
 }
 
 STATIC VOID InitPgm(BYTE * pLine)

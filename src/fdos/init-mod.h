@@ -92,6 +92,7 @@ int ASMPASCAL init_switchar(int chr);
 BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
                  dos_far_ptr * r_top);
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
+int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size);
 
 inline static void rq_done(request FAR *rq) {
     rq->r_status = S_DONE;

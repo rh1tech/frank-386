@@ -640,7 +640,7 @@ static bool cpu_far_call_waiter(CPU* cpu, bios_callback_params_t* params) {
    plain far call, not a software interrupt: no flags are pushed by
    the caller, and none are expected to be popped by the callee.
 */
-static void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
+void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
 {
   UWORD save_cs = CPU_CS, save_ip = CPU_IP;
   bios_callback_params_t params = {

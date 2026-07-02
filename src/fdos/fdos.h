@@ -16,4 +16,6 @@ bool fdos_21h(CPU*); // MAIN DOS HANDLER
 bool fdos_2fh(CPU*); // XMS
 bool fdos_29h(CPU*); // FAST CONSOLE OUTPUT
 
+void cpu_far_call(CPU* cpu, uint16_t seg, uint16_t off);
+
 #endif // FBIOS_H
