@@ -5328,12 +5328,12 @@ CPU* cpu_new(int gen, CPU_CB **cb)
 	case 0: cpu = (CPU*)calloc(sizeof(CPU), 1); cpu->flags_mask = EFLAGS_MASK_86; break;
 	case 1: cpu = (CPU*)calloc(sizeof(CPU), 1); cpu->flags_mask = EFLAGS_MASK_186; break;
 	default:
-	        cpu = (CPU*)calloc(sizeof(CPU), 1); cpu->flags_mask = EFLAGS_MASK_286; break;
+	        cpu = (CPU*)calloc(sizeof(CPU), 1); gen = 2; cpu->flags_mask = EFLAGS_MASK_286; break;
 #else
 	case 3: cpu = (CPU*)calloc(sizeof(CPUI386), 1); cpu->flags_mask = EFLAGS_MASK_386; break;
 	case 4: cpu = (CPU*)calloc(sizeof(CPUI386), 1); cpu->flags_mask = EFLAGS_MASK_486; break;
 	default:
-	        cpu = (CPU*)calloc(sizeof(CPUI386), 1); cpu->flags_mask = EFLAGS_MASK_586; break;
+	        cpu = (CPU*)calloc(sizeof(CPUI386), 1); gen = 5; cpu->flags_mask = EFLAGS_MASK_586; break;
 #endif
 	}
 	cpu->gen = gen;

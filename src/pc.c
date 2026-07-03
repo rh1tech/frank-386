@@ -994,7 +994,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->bios = conf->bios;
 	pc->cpu->bios = pc->bios;
 	if (!pc->bios) {
-		cpu_install_handlers(pc->cpu);
+		cpu_install_bios_handlers(pc->cpu);
 	}
 	pc->vga_bios = conf->vga_bios;
 	pc->enable_serial = conf->enable_serial;
@@ -1473,6 +1473,10 @@ void bios_post(PC *pc) {
 //  do not trap custom timer (to be overriden by DOS)
 	point2iret(0x1C);
 	point2iret(0x77);
+// DOS (set it later, if required):
+	point2iret(0x21);
+	point2iret(0x29);
+	point2iret(0x2f);
 
 //	bios_19h(pc->cpu);
     pstore8(0xFFFF0, 0xCD); // INT 19h - bootstrap

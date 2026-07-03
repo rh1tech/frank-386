@@ -181,8 +181,9 @@ struct CPU {
 }; // should be the same in all implementations
 
 typedef struct CPU CPU;
-
-void cpu_install_handlers(CPU*);
+// native system support
+void cpu_install_bios_handlers(CPU*);
+void cpu_install_dos_handlers(CPU*);
 
 #if PREFETCH_ENABLED
    #define PREFETCH_RESET cpu->prefetch_base = (u32)-1;

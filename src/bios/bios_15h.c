@@ -151,6 +151,7 @@ Bit(s)  Description     (Table 00463)
 static bool bios_15h_41h(CPU* cpu) {
     static int old = -1; // -1 means, we have no prev. state
     static u32 start_us = 0;
+    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     u8 cond_type = CPU_AL;
     u8 wait4 = cond_type & 0b00000111;
     u8 comp_with = CPU_BH;
@@ -161,6 +162,7 @@ static bool bios_15h_41h(CPU* cpu) {
     } else { // address
         v = read86(((u32)CPU_ES << 4) + CPU_DI);
     }
+    bool res = true;
     if (!wait4) {
         if (old == -1) {
             old = v;
@@ -175,12 +177,12 @@ static bool bios_15h_41h(CPU* cpu) {
             CPU_AH = 0x80;
             old = -1;
             start_us = 0;
-            return true;
+            goto rt;
         }
         ifl = 1; // allow interrupt me by IRQ on next step
-        return false;
+        res = false;
+        goto rt;
     }
-    bool res = true;
     switch (wait4) {
     case 1: /* equal */
         res = (v == CPU_BH);
@@ -205,16 +207,20 @@ static bool bios_15h_41h(CPU* cpu) {
             CPU_AH = 0x80;
             old = -1;
             start_us = 0;
-            return true;
+            goto rt;
         }
         ifl = 1; // allow interrupt me by IRQ on next step
-        return res;
+        goto rt;
     }
 ok:
     old = -1;
     start_us = 0;
     cf = 0;
     CPU_AH = 0;
+rt:
+    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
+                   | (cpu->flags.value & 0x0041); // set them back from CPU
+    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
     return res;
 }
 

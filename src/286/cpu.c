@@ -132,8 +132,9 @@ void cpu_init_286(CPU* cpu) {
     cpue->abort = i286_abort;
 }
 
-void cpu_install_handlers(CPU* cpu) {
+void cpu_install_bios_handlers(CPU* cpu) {
     for(int i = 0; i < 256; ++i) {
+        if (i == 0x21 || i == 0x29 || i == 0x2f) continue;
         handlers[i] = no_handler;
     }
     handlers[0x00] = bios_00h; // DIVIDE BY ZERO
@@ -151,10 +152,22 @@ void cpu_install_handlers(CPU* cpu) {
     handlers[0x18] = bios_18h; // BASIC
     handlers[0x19] = bios_19h; // BOOTSTRAP
     handlers[0x1A] = bios_1Ah; // CMOS TIME
-    handlers[0x21] = fdos_21h; // main DOS handler
-    handlers[0x29] = fdos_29h; // fast console output.
-    handlers[0x2F] = fdos_2fh; // XMS
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
+}
+
+void cpu_install_dos_handlers(CPU* cpu) {
+    handlers[0x21] = fdos_21h; // main DOS handler
+	pstore16(0x21*4, 0x0021);
+	pstore16(0x21*4 + 2, 0xFFE0);
+
+    handlers[0x29] = fdos_29h; // fast console output.
+	pstore16(0x29*4, 0x0029);
+	pstore16(0x29*4 + 2, 0xFFE0);
+
+    handlers[0x2F] = fdos_2fh; // XMS
+	pstore16(0x2f*4, 0x002f);
+	pstore16(0x2f*4 + 2, 0xFFE0);
+
 // TODO: INT 30h как far jump на CP/M entry
 }
 

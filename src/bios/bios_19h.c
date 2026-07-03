@@ -125,12 +125,12 @@ static void boot_from(CPU* cpu, uint8_t dl, bool native)
     SET_SS ( 0x0000 );
     CPU_SP = BOOT_ADDR;
 /// TODO: support to select native BIOS + guest DOS
-//    if (native) {
+    if (native) {
         // Native FreeDOS kernel
         _boot(cpu);
         kernel(cpu);
         __unreachable();
-//    }
+    }
 }
 
 /* TODO:
