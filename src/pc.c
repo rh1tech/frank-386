@@ -1254,6 +1254,7 @@ void bios_post(PC *pc) {
 // POST
     const uint16_t ebda_seg = 0x9FC0;                 /* 1 KiB EBDA at 9FC00 */
     const uint32_t ebda_phys = (uint32_t)ebda_seg << 4;
+    reset_umb();
 
 	uint32_t ext_ram = phys_mem_size <= (1024 << 10) ? 0 : (phys_mem_size - (1024 << 10)) >> 10;
 	if (ext_ram > 0xFFFF)

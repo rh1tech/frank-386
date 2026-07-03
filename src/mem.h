@@ -30,6 +30,7 @@ void iomem_write16(void *iomem, uint32_t addr, uint16_t val);
 void iomem_write32(void *iomem, uint32_t addr, uint32_t val);
 bool iomem_write_string(void *iomem, uint32_t addr, uint32_t buf, int len);
 bool iomem_write_string_ptr(void *iomem, uint32_t addr, const uint8_t *buf, int len);
+void reset_umb();
 
 static inline uint8_t __attribute__((always_inline)) pload8(uint32_t addr)
 {
