@@ -18,17 +18,114 @@ static int read_boot_sector(FIL *f)
     return readw86(BOOT_ADDR + 510) == 0xAA55;
 }
 
+static uint32_t read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/*
+ * Read an El Torito no-emulation boot image from an ISO-9660 image.
+ *
+ * ISO-9660 uses 2048-byte logical sectors.  The Boot Record Volume
+ * Descriptor is at sector 17 and contains the absolute LBA of the El Torito
+ * boot catalog at offset 0x47.  The initial/default catalog entry at +0x20
+ * points to the boot image.
+ *
+ * Only no-emulation boot entries are accepted here.  Floppy/HDD emulation
+ * would require installing a CD-emulation INT 13h mapping, not merely loading
+ * a sector at 0000:7C00.
+ */
+static int read_iso_boot_sector(FIL *f)
+{
+    UINT br = 0;
+    uint8_t buf[2048];
+    uint32_t catalog_lba = 0;
+
+    if (!f || !f->obj.fs)
+        return 0;
+
+    for (uint32_t vd_lba = 16; vd_lba < 64; vd_lba++) {
+        if (f_lseek(f, vd_lba * 2048u) != FR_OK)
+            return 0;
+        if (f_read(f, buf, sizeof(buf), &br) != FR_OK || br != sizeof(buf))
+            return 0;
+
+        if (memcmp(buf + 1, "CD001", 5) != 0 || buf[6] != 0x01)
+            return 0;
+
+        if (buf[0] == 0x00 &&
+            memcmp(buf + 7, "EL TORITO SPECIFICATION", 23) == 0) {
+            catalog_lba = read_le32(buf + 0x47);
+            break;
+        }
+
+        if (buf[0] == 0xFF)
+            return 0;
+    }
+
+    if (catalog_lba == 0)
+        return 0;
+
+    if (f_lseek(f, catalog_lba * 2048u) != FR_OK)
+        return 0;
+    if (f_read(f, buf, sizeof(buf), &br) != FR_OK || br != sizeof(buf))
+        return 0;
+
+    /* Validation entry. */
+    if (buf[0] != 0x01 || buf[0x1E] != 0x55 || buf[0x1F] != 0xAA)
+        return 0;
+
+    uint8_t *entry = buf + 0x20;
+    if (entry[0] != 0x88)
+        return 0;
+
+    uint8_t media_type = entry[1] & 0x0F;
+    if (media_type > 4)
+        return 0;
+
+    uint16_t load_seg = (uint16_t)entry[2] | ((uint16_t)entry[3] << 8);
+    uint16_t sector_count = (uint16_t)entry[6] | ((uint16_t)entry[7] << 8);
+    uint32_t image_lba = read_le32(entry + 8);
+
+    if (load_seg != 0 && load_seg != 0x07C0)
+        return 0;
+    if (sector_count == 0)
+        sector_count = 4;
+
+    uint32_t bytes = (uint32_t)sector_count * 512u;
+    if (bytes < 512u)
+        return 0;
+    if (bytes > 2048u)
+        bytes = 2048u;
+
+    if (f_lseek(f, image_lba * 2048u) != FR_OK)
+        return 0;
+    if (f_read(f, PC_RAM + BOOT_ADDR, bytes, &br) != FR_OK || br < 512)
+        return 0;
+    /*
+     * El Torito no-emulation images are not necessarily PC boot sectors.
+     * ISOLINUX/GRUB-style CD boot images are validated by the boot catalog
+     * entry and may not contain the 55AA signature at offset 510.  Floppy
+     * and HDD emulation images, however, are disk boot sectors and should
+     * keep the traditional signature check.
+     */
+    if (media_type == 0x00)
+        return 1;
+    return readw86(BOOT_ADDR + 510) == 0xAA55;
+}
+
 static void boot_from(CPU* cpu, uint8_t dl, bool native)
 {
     CPU_DL = dl;
     /* IBM PC compatible entry point: physical 0000:7C00.
      * Some BIOSes use 07C0:0000; 0000:7C00 is the usual safe form. */
     SET_CS ( 0x0000 );
-    SET_IP ( BOOT_ADDR >> 4 );
+    SET_IP ( BOOT_ADDR );
     SET_SS ( 0x0000 );
-    CPU_SP = BOOT_ADDR >> 4;
+    CPU_SP = BOOT_ADDR;
 /// TODO: support to select native BIOS + guest DOS
-///    if (native) {
+//    if (native) {
         // Native FreeDOS kernel
         _boot(cpu);
         kernel(cpu);
@@ -97,6 +194,10 @@ bool bios_19h(CPU* cpu) {
         return false;
     }
     if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
+        boot_from(cpu, 0x80, false);
+        return false;
+    }
+    if (ata_is_inserted(0) && ata_is_cdrom(0) && read_iso_boot_sector(ata_get_file(0))) {
         boot_from(cpu, 0x80, false);
         return false;
     }

@@ -135,6 +135,12 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
         f_close(&ata[drivenum].fil);
         free(ata[drivenum].name);
         ata[drivenum].name = 0;
+        ata[drivenum].iscdrom = 0;
+        ata[drivenum].usable_size = 0;
+        ata[drivenum].cyls = 0;
+        ata[drivenum].heads = 0;
+        ata[drivenum].sects = 0;
+        ata[drivenum].drive_type = 0;
         if (disk_cdrom_change_cb)
             disk_cdrom_change_cb(drivenum, NULL);
         return;
@@ -144,7 +150,13 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
         f_close(&ata[drivenum].fil);
         free(ata[drivenum].name);
         ata[drivenum].name = 0;
-        hdcount--;
+        ata[drivenum].iscdrom = 0;
+        ata[drivenum].usable_size = 0;
+        ata[drivenum].cyls = 0;
+        ata[drivenum].heads = 0;
+        ata[drivenum].sects = 0;
+        ata[drivenum].drive_type = 0;
+        if (hdcount > 0) hdcount--;
     }
 }
 
