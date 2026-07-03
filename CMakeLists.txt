@@ -264,6 +264,7 @@ set(EMU_CORE_SOURCES
     src/fdos/chario.c
     src/fdos/kernel.c
     src/fdos/task.c
+    src/fdos/nls.c
     src/fdos/fdos_21h.c
     src/fdos/fdos_29h.c
     src/fdos/fdos_2fh.c

@@ -311,7 +311,39 @@ bool fdos_21h(CPU* _cpu) {
           break;
         }
         break;
+/// TODO: 
+#if 0
+        /* Get/Set Country Info                                         */
+      case 0x38:
+        {
+          UWORD cntry = CPU_AL;
 
+          if (cntry == 0xff)
+            cntry = CPU_BX;
+
+          if (0xffff == CPU_DX)
+          {
+            /* Set Country Code */
+            rc = DosSetCountry(cntry);
+          }
+          else
+          {
+            if (cntry == 0)
+              cntry--;
+            /* Get Country Information */
+            rc = DosGetCountryInformation(cntry, ARM_PTR ( FP_DS_DX ) );
+            if (rc >= SUCCESS)
+            {
+              if (cntry == (UWORD) - 1) {
+                struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+                cntry = nlsInfo->actPkg->cntry;
+              }
+              CPU_AX = CPU_BX = cntry;
+            }
+          }
+          goto short_check;
+        }
+#endif
       case 0x3d: // DOS 2+ - OPEN - OPEN EXISTING FILE
       {
         /* DS:DX = ASCIIZ pathname, AL = access mode.

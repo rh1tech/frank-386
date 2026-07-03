@@ -1399,7 +1399,18 @@ void bios_post(PC *pc) {
     pstore8(0xFFF74, 0xCD); // INT FFh — callback
     pstore8(0xFFF75, 0xFF);
     pstore8(0xFFF76, 0xCF); // IRET — fallback if phase2 returns false
-
+    pstore8(0xFFF77, 0x90); // NOP
+// NLS support
+	static const uint8_t x86_charmap_stub[] = {
+		0x3C, 0x61,       /* cmp al,'a' */
+		0x72, 0x06,       /* jb done */
+		0x3C, 0x7A,       /* cmp al,'z' */
+		0x77, 0x02,       /* ja done */
+		0x2C, 0x20,       /* sub al,20h */
+		0xCB              /* retf */
+	};	
+	for(int i = 0; i < sizeof(x86_charmap_stub); ++i) // 11 bytes [FFF78..FFF82]
+		pstore8(0xFFF78 + i, x86_charmap_stub[i]);
 // INT 15h support:
     const uint32_t table = 0xFFF10;
     pstore16(table + 0x00, 0x0008); /* number of bytes following */

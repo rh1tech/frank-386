@@ -30,6 +30,8 @@
 /* one byte alignment */
 #include "algnbyte.h"
 
+#pragma pack(push, 1)
+
 /*
  *	Description of the organization of NLS information -- 2000/02/13 ska
  *
@@ -356,7 +358,7 @@ struct CountrySpecificInfo {
                               */
   char  CurrencyPrecision;    /* = 2  # Currency precision           */
   char  TimeFormat;           /* = 0  # time format: 0/1: 12/24 houres */
-  void FAR *CharMapFn;        /* far pointer to user callable character mapping function */
+  intvec CharMapFn;           /* far pointer to user callable character mapping function */
   char  DataSeparator[2];     /* ',' ASCIIZ value */
                               /* 5 words reserved, should be 0 */
 };
@@ -411,6 +413,8 @@ struct nlsExtCntryInfo {
   char dataSep[2];              /* ASCIZ of separator in data records */
 };
 
+#define CharMapSrvc MK_FP(0xFFF0, 0x0078)
+
 struct nlsPointer {             /* Information of DOS-65-0X is addressed
                                    by a pointer */
   UBYTE subfct;                 /* number of the subfunction */
@@ -424,7 +428,7 @@ struct nlsPackage {             /* the contents of one chain item of the
                                    list of NLS packages */
   struct nlsPackage FAR *nxt;   /* next item in chain */
   UWORD cntry, cp;              /* country ID / codepage of this NLS pkg */
-  int flags;                    /* direct access and other flags */
+  UWORD flags;                  /* direct access and other flags */
   /* Note: Depending on the flags above all remaining
      portions may be omitted, if the external NLSFUNC-like
      MUX-14 processor does not require them and performs
@@ -432,7 +436,7 @@ struct nlsPackage {             /* the contents of one chain item of the
      fetch this information itself. */
   UWORD yeschar;                /* yes / no character DOS-65-23 */
   UWORD nochar;
-  unsigned numSubfct;           /* number of supported sub-functions */
+  UWORD numSubfct;              /* number of supported sub-functions */
   struct nlsPointer nlsPointers[5];     /* may grow dynamically */
   struct nlsExtCntryInfo nlsExt;
 };
@@ -476,24 +480,12 @@ struct nlsInfoBlock {           /* This block contains all information
   char FAR *fname;              /* filename from COUNTRY=;
                                    maybe tweaked by NLSFUNC */
   UWORD sysCodePage;            /* system code page */
-  unsigned flags;               /* implementation flags */
-#ifdef __GNUC__
-  /* need to initialize using explicit segment/offset */
-  union {
-    struct { struct nlsPackage *off; char *seg; };
-    struct nlsPackage FAR *p;
-  } actPkg, chain;
-  #define actPkg actPkg.p
-  #define chain chain.p
-#else
-  struct nlsPackage FAR *actPkg;        /* current NLS package */
-  struct nlsPackage FAR *chain; /* first item of info chain --
+  UWORD flags;                  /* implementation flags */
+  struct nlsPackage *actPkg;    /* current NLS package */
+  struct nlsPackage *chain;     /* first item of info chain --
                                    hardcoded U.S.A./CP437 */
-#endif
 };
 
-extern struct nlsInfoBlock ASM nlsInfo;
-extern struct nlsPackage      DOSFAR ASM nlsPackageHardcoded;
 extern BYTE FAR hcTablesStart[], hcTablesEnd[];
 
 /***********************************************************************
@@ -636,3 +628,22 @@ struct nlsCSys_loadPackage {
 /*& #define NLS_DEBUG */
 
 #endif
+
+/// for COUNTRY.SYS
+struct subf_hdr { /* subfunction header */
+  UWORD length;   /* length of entry, not counting this word, = 6 */
+  UWORD id;       /* subfunction ID */
+  ULONG offset;   /* offset within file of subfunction data entry */
+};
+
+struct subf_tbl {
+  char sig[8];    /* signature for each subfunction data */
+  int idx;        /* index of pointer in nls_hc.asm to be copied to */
+};
+
+struct subf_data {   /* subfunction data */
+  char signature[8];  /* \377CTYINFO|UCASE|LCASE|FUCASE|FCHAR|COLLATE|DBCS|YESNO */
+  UWORD length;       /* length of following table in bytes */
+  UBYTE buffer[256];
+};
+#pragma pack(pop)

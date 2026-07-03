@@ -90,20 +90,20 @@ handler_t handlers[256];
 void cpu_err_msg(CPU* cpu, const char* msg) {
     print_line(msg, 1);
     char buf[10];
-    snprintf(buf, 10, "AX: %04xh", CPU_AX); print_line(buf, 2);
-    snprintf(buf, 10, "BX: %04xh", CPU_BX); print_line(buf, 3);
-    snprintf(buf, 10, "CX: %04xh", CPU_CX); print_line(buf, 4);
-    snprintf(buf, 10, "DX: %04xh", CPU_DX); print_line(buf, 5);
-    snprintf(buf, 10, "SI: %04xh", CPU_SI); print_line(buf, 5);
-    snprintf(buf, 10, "DI: %04xh", CPU_DI); print_line(buf, 6);
-    snprintf(buf, 10, "BP: %04xh", CPU_BP); print_line(buf, 7);
-    snprintf(buf, 10, "DS: %04xh", CPU_DS); print_line(buf, 8);
-    snprintf(buf, 10, "SS: %04xh", CPU_SS); print_line(buf, 9);
-    snprintf(buf, 10, "FS: %04xh", CPU_FS); print_line(buf, 10);
-    snprintf(buf, 10, "GS: %04xh", CPU_GS); print_line(buf, 11);
-    snprintf(buf, 10, "ES: %04xh", CPU_ES); print_line(buf, 12);
-    snprintf(buf, 10, "CS: %04xh", CPU_CS); print_line(buf, 13);
-    snprintf(buf, 10, "IP: %04xh", CPU_IP); print_line(buf, 14);
+    snprintf(buf, 10, "AX: %04xh ", CPU_AX); print_line(buf, 2);
+    snprintf(buf, 10, "BX: %04xh ", CPU_BX); print_line(buf, 3);
+    snprintf(buf, 10, "CX: %04xh ", CPU_CX); print_line(buf, 4);
+    snprintf(buf, 10, "DX: %04xh ", CPU_DX); print_line(buf, 5);
+    snprintf(buf, 10, "SI: %04xh ", CPU_SI); print_line(buf, 6);
+    snprintf(buf, 10, "DI: %04xh ", CPU_DI); print_line(buf, 7);
+    snprintf(buf, 10, "BP: %04xh ", CPU_BP); print_line(buf, 8);
+    snprintf(buf, 10, "DS: %04xh ", CPU_DS); print_line(buf, 9);
+    snprintf(buf, 10, "SS: %04xh ", CPU_SS); print_line(buf, 10);
+    snprintf(buf, 10, "FS: %04xh ", CPU_FS); print_line(buf, 11);
+    snprintf(buf, 10, "GS: %04xh ", CPU_GS); print_line(buf, 12);
+    snprintf(buf, 10, "ES: %04xh ", CPU_ES); print_line(buf, 13);
+    snprintf(buf, 10, "CS: %04xh ", CPU_CS); print_line(buf, 14);
+    snprintf(buf, 10, "IP: %04xh ", CPU_IP); print_line(buf, 15);
 }
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "ERROR: no handler defined");

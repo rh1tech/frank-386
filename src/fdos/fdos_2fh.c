@@ -449,7 +449,8 @@ bool fdos_2fh(CPU* cpu) {
         SET_ES ( params.expected_cs );
         CPU_BX = params.expected_ip ;
     }
-    else 
-        no_handler(cpu);
+    else { 
+        /// TODO: no_handler(cpu);
+    }
     return true;
 }

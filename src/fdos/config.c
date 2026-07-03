@@ -81,10 +81,6 @@ struct config Config = {
   , 0                       /* default value for switches=/E:nnnn */
 };
 
-void CharMapSrvc(void) {
-  /// TODO:
-}
-
 nlsCountryInfoHardcoded_t nlsCountryInfoHardcoded = {
   1,
   0x001c,
@@ -100,7 +96,7 @@ nlsCountryInfoHardcoded_t nlsCountryInfoHardcoded = {
     0,                  /* CurrencyFormat */
     2,                  /* CurrencyPrecision */
     0,                  /* TimeFormat */
-    (void FAR *)CharMapSrvc,
+    CharMapSrvc,
     ","                 /* DataSeparator */
   }
 };
@@ -1359,6 +1355,7 @@ STATIC int LoadCountryInfoHardCoded(COUNT ctryCode)
   return 1;
 }
 
+#pragma pack(push, 1)
 /*      LoadCountryInfo():
  *      Searches a file in the COUNTRY.SYS format for an entry
  *      matching the specified code page and country code, and loads
@@ -1369,34 +1366,6 @@ STATIC int LoadCountryInfoHardCoded(COUNT ctryCode)
  */
 STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
 {
-  /* COUNTRY.SYS file data structures - see RBIL tables 2619-2622 */
-
-  struct {      /* file header */
-    char name[8];       /* "\377COUNTRY.SYS" */
-    char reserved[11];
-    ULONG offset;       /* offset of first entry in file */
-  } header;
-  struct {      /* entry */
-    int length;         /* length of entry, not counting this word, = 12 */
-    int country;        /* country ID */
-    int codepage;       /* codepage ID */
-    int reserved[2];
-    ULONG offset;       /* offset of country-subfunction-header in file */
-  } entry;
-  struct subf_hdr { /* subfunction header */
-    int length;         /* length of entry, not counting this word, = 6 */
-    int id;             /* subfunction ID */
-    ULONG offset;       /* offset within file of subfunction data entry */
-  };
-  static struct {   /* subfunction data */
-    char signature[8];  /* \377CTYINFO|UCASE|LCASE|FUCASE|FCHAR|COLLATE|DBCS|YESNO */
-    int length;         /* length of following table in bytes */
-    UBYTE buffer[256];
-  } subf_data;
-  struct subf_tbl {
-    char sig[8];        /* signature for each subfunction data */
-    int idx;            /* index of pointer in nls_hc.asm to be copied to */
-  };
   static struct subf_tbl table[9] = {
     {"\377       ", -1},  /* 0, unused */
     {"\377CTYINFO", 5},   /* 1 */
@@ -1408,13 +1377,11 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
     {"\377DBCS   ", 4},   /* 7, not supported [yet] */
     {"\377YESNO  ", -1}   /* 35 */
   };
-  static struct subf_hdr hdr[9];
-  static int entries, count;
   int fd, i, subf_tbl_ndx;
   char *filename = filenam == NULL ? "\\COUNTRY.SYS" : filenam;
   BOOL rc = FALSE;
   BYTE FAR *ptable;
-  void FAR *CharMapFn;
+  dos_far_ptr CharMapFn;
 
   dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
   strcpy(PriPathName, filename);
@@ -1425,35 +1392,70 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
     printf("%s not found\n", filename);
     return rc;
   }
-  /* /// TODO: 
-  if (read(fd, &header, sizeof(header)) != sizeof(header))
+
+  /* COUNTRY.SYS file data structures - see RBIL tables 2619-2622 */
+  struct header {      /* file header */
+    char name[8];       /* "\377COUNTRY.SYS" */
+    char reserved[11];
+    ULONG offset;       /* offset of first entry in file */
+  };
+  u16 sp = CPU_SP;
+  CPU_SP -= sizeof(struct header);
+  dos_far_ptr x86_header = MK_FP (CPU_SS, CPU_SP);
+  struct header* header = (struct header*)ARM_PTR(x86_header);
+  if (read(fd, x86_header, sizeof(struct header)) != sizeof(struct header))
   {
     printf("Error reading %s\n", filename);
     goto ret;
   }
-  if (memcmp(header.name, "\377COUNTRY", sizeof(header.name)))
+
+  if (memcmp(header->name, "\377COUNTRY", sizeof(header->name)))
   {
 err:printf("%s has invalid format\n", filename);
     goto ret;
   }
-  if (lseek(fd, header.offset) == 0xffffffffL
-    || read(fd, &entries, sizeof(entries)) != sizeof(entries))
+
+  dos_far_ptr x86_entries = x86_nlsEntries;
+  UWORD* p_entries = (UWORD*)ARM_PTR(x86_entries);
+  if (lseek(fd, header->offset) == 0xffffffffL || read(fd, x86_entries, sizeof(UWORD)) != sizeof(*p_entries))
     goto err;
-  for (i = 0; i < entries; i++)
+
+  struct entry {      /* entry */
+    UWORD length;       /* length of entry, not counting this word, = 12 */
+    UWORD country;      /* country ID */
+    UWORD codepage;     /* codepage ID */
+    UWORD reserved[2];
+    ULONG offset;       /* offset of country-subfunction-header in file */
+  };
+  CPU_SP -= sizeof(struct entry);
+  dos_far_ptr x86_entry = MK_FP(CPU_SS, CPU_SP);
+  struct entry* entry = (struct entry*)ARM_PTR(x86_entry);
+
+  dos_far_ptr x86_count = x86_nlsCount;
+  UWORD* p_count = (UWORD*)ARM_PTR(x86_count);
+
+  dos_far_ptr x86_hdr = x86_subf_hdr;
+  struct subf_hdr* hdr = (struct subf_hdr*)ARM_PTR(x86_hdr);
+
+  dos_far_ptr x86_subf_data_ = x86_subf_data;
+  struct subf_data* subf_data = (struct subf_data*)ARM_PTR(x86_subf_data_);
+
+  struct nlsPackage* nlsPackageHardcoded = (struct nlsPackage*)ARM_PTR(_nlsPackageHardcoded);
+
+  for (i = 0; i < *p_entries; i++)
   {
-    if (read(fd, &entry, sizeof(entry)) != sizeof(entry) || entry.length != 12)
+    if (read(fd, x86_entry, sizeof(struct entry)) != sizeof(struct entry) || entry->length != 12)
       goto err;
-    if (entry.country != ctryCode || entry.codepage != codePage && codePage)
+    if (entry->country != ctryCode || entry->codepage != codePage && codePage)
       continue;
-    if (lseek(fd, entry.offset) == 0xffffffffL
-      || read(fd, &count, sizeof(count)) != sizeof(count)
-      || count > LENGTH(hdr)
-      || read(fd, hdr, sizeof(struct subf_hdr) * count)
-                      != sizeof(struct subf_hdr) * count)
+    if (lseek(fd, entry->offset) == 0xffffffffL
+      || read(fd, x86_count, sizeof(UWORD)) != sizeof(UWORD)
+      || *p_count > 9
+      || read(fd, x86_hdr, sizeof(struct subf_hdr) * *p_count) != sizeof(struct subf_hdr) * *p_count)
       goto err;
 
-    /* Note: we reuse i here as we only process 1 entry, goto after inner for ends outer for * /
-    for (i = 0; i < count; i++)
+    /* Note: we reuse i here as we only process 1 entry, goto after inner for ends outer for */
+    for (i = 0; i < *p_count; i++)
     {
       if (hdr[i].length != 6)
         goto err;
@@ -1461,59 +1463,59 @@ err:printf("%s has invalid format\n", filename);
       if (subf_tbl_ndx == 3 || ((subf_tbl_ndx < 1 || subf_tbl_ndx > 7) && subf_tbl_ndx != 35))
         continue;
       if (subf_tbl_ndx == 35)
-        subf_tbl_ndx = 8;  /* 0 through 7 match, but subfunction 35 is 9th entry in table[] * /
+        subf_tbl_ndx = 8;  /* 0 through 7 match, but subfunction 35 is 9th entry in table[] */
       if (lseek(fd, hdr[i].offset) == 0xffffffffL
-       || read(fd, &subf_data, 10) != 10
-       || memcmp(subf_data.signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
-       || memcmp(subf_data.signature, table[2].sig, 8))  /* UCASE for FUCASE ^* /
-       || read(fd, subf_data.buffer, subf_data.length) != subf_data.length)
+       || read(fd, x86_subf_data_, 10) != 10
+       || memcmp(subf_data->signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
+       || memcmp(subf_data->signature, table[2].sig, 8))  /* UCASE for FUCASE ^*/
+       || read(fd, x86_subf_data_buffer, subf_data->length) != subf_data->length)
         goto err;
       if (hdr[i].id == 1)
       {
-        if (((struct CountrySpecificInfo *)subf_data.buffer)->CountryID
-                                                     != entry.country
-         || ((struct CountrySpecificInfo *)subf_data.buffer)->CodePage
-                                                     != entry.codepage
+        if (((struct CountrySpecificInfo *)subf_data->buffer)->CountryID
+                                                     != entry->country
+         || ((struct CountrySpecificInfo *)subf_data->buffer)->CodePage
+                                                     != entry->codepage
          && codePage)
           continue;
-        nlsPackageHardcoded.cntry = entry.country;
-        nlsPackageHardcoded.cp = entry.codepage;
-        subf_data.length =      /* MS-DOS "CTYINFO" is up to 38 bytes * /
-                min(subf_data.length, sizeof(struct CountrySpecificInfo));
+        nlsPackageHardcoded->cntry = entry->country;
+        nlsPackageHardcoded->cp = entry->codepage;
+        subf_data->length =      /* MS-DOS "CTYINFO" is up to 38 bytes */
+                min(subf_data->length, sizeof(struct CountrySpecificInfo));
         CharMapFn = nlsCountryInfoHardcoded.C.CharMapFn;
       }
       if (hdr[i].id == 1)
-        ptable = (BYTE FAR *)&nlsPackageHardcoded.nlsExt.size;
+        ptable = (BYTE FAR *)&nlsPackageHardcoded->nlsExt.size;
       else
-        ptable = nlsPackageHardcoded.nlsPointers[table[subf_tbl_ndx].idx].pointer;
+        ptable = nlsPackageHardcoded->nlsPointers[table[subf_tbl_ndx].idx].pointer;
       if (hdr[i].id == 7)
       {
-        if (subf_data.length == 0)
+        if (subf_data->length == 0)
         {
-          /* if DBCS table (in country.sys) is empty, clear internal table * /
-          *(DWORD *)(subf_data.buffer) = 0L;
-          fmemcpy(ptable, subf_data.buffer, 4);
+          /* if DBCS table (in country.sys) is empty, clear internal table */
+          *(DWORD *)(subf_data->buffer) = 0L;
+          memcpy(ptable, subf_data->buffer, 4);
         }
         else
         {
-          fmemcpy(ptable + 2, subf_data.buffer, subf_data.length);
-          /* write length * /
-          *(UWORD *)(subf_data.buffer) = subf_data.length;
-          fmemcpy(ptable, subf_data.buffer, 2);
+          memcpy(ptable + 2, subf_data->buffer, subf_data->length);
+          /* write length */
+          *(UWORD *)(subf_data->buffer) = subf_data->length;
+          memcpy(ptable, subf_data->buffer, 2);
         }
         continue;
       }
 
-      /* for 0-7 we store COUNTRY.SYS data directly in buffer, but yes/no characters we store in nls package directly * /
+      /* for 0-7 we store COUNTRY.SYS data directly in buffer, but yes/no characters we store in nls package directly */
       if (hdr[i].id == 35)
       {
-        fmemcpy(&nlsPackageHardcoded.yeschar, subf_data.buffer, 2);
-        fmemcpy(&nlsPackageHardcoded.nochar, subf_data.buffer + 2, 2);
+        memcpy(&nlsPackageHardcoded->yeschar, subf_data->buffer, 2);
+        memcpy(&nlsPackageHardcoded->nochar, subf_data->buffer + 2, 2);
       } else {
-          fmemcpy(ptable + 2, subf_data.buffer,
-                  /* skip length ^* /  subf_data.length);
+          memcpy(ptable + 2, subf_data->buffer,
+                  /* skip length ^*/  subf_data->length);
           if (hdr[i].id == 1) {
-              /* fixup user callable address in case we overwrote it * /
+              /* fixup user callable address in case we overwrote it */
               ((struct CountrySpecificInfo *)ptable)->CharMapFn = CharMapFn;
           }
       }
@@ -1521,12 +1523,13 @@ err:printf("%s has invalid format\n", filename);
     rc = TRUE;
     goto ret;
   }
-  */
   printf("could not find country info for country ID %u\n", ctryCode);
 ret:
+  CPU_SP = sp;
   close(fd);
   return rc;
 }
+#pragma pack(pop)
 
 STATIC VOID Country(BYTE * pLine)
 {
