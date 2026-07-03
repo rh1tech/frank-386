@@ -37,7 +37,7 @@ COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice,
 /* common - call the clock driver */
 void ExecuteClockDriverRequest(BYTE command)
 {
-  BinaryCharIO(&LoL->clock, sizeof(struct ClockRecord), &internal_data->ClkRecord, command);
+  BinaryCharIO(&LoL->clock, sizeof(struct ClockRecord), linear_to_far(&internal_data->ClkRecord), command);
 }
 
 const UWORD days[2][13] = {
@@ -440,6 +440,19 @@ bool fdos_21h(CPU* _cpu) {
             goto error_invalid;
         }
         goto short_check;
+        /* Device I/O Control                                           */
+      case 0x44:
+        rc = DosDevIOctl();      /* can set critical error code! */
+
+        if (rc < SUCCESS)
+        {
+          CPU_AX = -rc;
+          if (rc != DE_DEVICE && rc != DE_ACCESS)
+            internal_data->CritErrCode = CPU_AX;
+          goto error_carry;
+        }
+        cf = 0;
+        break;
 
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       // BX = existing handle (old), CX = handle to redirect (new)
@@ -634,6 +647,9 @@ error_exit:
     cf = 1;
     goto exit_dispatch;
 
+error_carry:
+    cf = 1;
+
 exit_dispatch:
     flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
                    | (cpu->flags.value & 0x0041); // set them back from CPU
@@ -647,8 +663,6 @@ UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
     CPU_CX = count;
     SET_DS ( FP_SEG(buf) );
     CPU_DX = FP_OFF(buf);
-///    fdos_21h(cpu);
-/// TODO:
     bios_intcall(cpu, 0x21);
     return cf ? (UCOUNT)-1 : CPU_AX;
 }

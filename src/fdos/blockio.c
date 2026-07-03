@@ -62,8 +62,7 @@
 */
 _Static_assert(sizeof(request) == 30, "request no longer fits in internal_data->IoReqHdr[30], see lol.h");
 
-UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE *buf, UWORD numblocks,
-              COUNT mode)
+UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mode)
 {
   struct dpb *dpbp = get_dpb(dsk);
   struct dhdr *dpb_device;
@@ -124,14 +123,14 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE *buf, UWORD numblocks,
      * Then transfer block through deblock_buf (DiskTransferBuffer doesn't work!)
      * (But this won't work for multi-block HMA transfers... are there any?)
      */
-    if (is_guest_ptr(buf) && (uintptr_t)buf >= (uintptr_t)ARM_PTR(MK_FP(0xa000, 0)) && numblocks == 1 && LoL->bufloc != LOC_CONV)
+    if (EFFECTIVE(buf) >= 0xa0000 && numblocks == 1 && LoL->bufloc != LOC_CONV)
     {
-      IoReqHdrD.r_trans = (BYTE *)ARM_PTR(LoL->deblock_buf);
+      IoReqHdrD.r_trans = LoL->deblock_buf;
       if (mode == DSKWRITE)
-        fmemcpy(LoL->deblock_buf, linear_to_far(buf), dpbp->dpb_secsize);
+        fmemcpy(LoL->deblock_buf, buf, dpbp->dpb_secsize);
       execrh(&IoReqHdrD, dpbp->dpb_device);
       if (mode == DSKREAD)
-        fmemcpy(linear_to_far(buf), LoL->deblock_buf, dpbp->dpb_secsize);
+        fmemcpy(buf, LoL->deblock_buf, dpbp->dpb_secsize);
     }
     else
     {
@@ -339,7 +338,6 @@ STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
   return bp;
 }
 
-
 /*      Write one disk buffer                                           */
 STATIC BOOL flush1(struct buffer *bp)
 {
@@ -361,7 +359,7 @@ STATIC BOOL flush1(struct buffer *bp)
     }
     while (b_copies--)
     {
-      if (dskxfer(bp->b_unit, blkno, bp->b_buffer, 1, DSKWRITE))
+      if (dskxfer(bp->b_unit, blkno, linear_to_far(bp->b_buffer), 1, DSKWRITE))
         ok = FALSE;
       blkno += b_offset;
     }
@@ -400,7 +398,7 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
          buf_seg_off((struct buffer *)bp->b_buffer),
          bp->b_next, bp->b_prev);
 */  
-  if (!overwrite && dskxfer(dsk, blkno, bp->b_buffer, 1, DSKREAD))
+  if (!overwrite && dskxfer(dsk, blkno, linear_to_far(bp->b_buffer), 1, DSKREAD))
   {
     return NULL;
   }

@@ -193,7 +193,7 @@ extern char DosDataSeg[];
 static inline bool is_guest_ptr(const void *p) {
     uintptr_t a = (uintptr_t)p;
     return a >= (uintptr_t)X86_RAM_BASE &&
-           a <  (uintptr_t)X86_RAM_BASE + (16ul << 20);
+           a <  (uintptr_t)X86_RAM_BASE + (1ul << 20) + (64ul << 10);
 }
 
 #pragma pack(push, 1)

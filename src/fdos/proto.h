@@ -44,8 +44,7 @@ BOOL flush(void);
 BOOL fill(REG struct buffer FAR * bp, ULONG blkno, COUNT dsk);
 BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mode);
 /* *** Changed on 9/4/00  BER */
-UWORD dskxfer(COUNT dsk, ULONG blkno, BYTE * buf, UWORD numblocks,
-              COUNT mode);
+UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mode);
 /* *** End of change */
 void AllocateHMASpace (size_t lowbuffer, size_t highbuffer);
 
@@ -59,8 +58,7 @@ void handle_break(dos_far_ptr *pdev, int sft_out);
 
 /* chario.c */
 dos_far_ptr/*struct dhdr*/ sft_to_dev(sft *s);
-long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, void FAR * bp,
-                  unsigned command);
+long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, dos_far_ptr bp, unsigned command);
 int ndread(dos_far_ptr *pdev);
 int StdinBusy(void);
 void con_flush(dos_far_ptr *pdev);
@@ -232,7 +230,7 @@ UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count);
 #endif
 
 /* ioctl.c */
-COUNT DosDevIOctl(lregs * r);
+COUNT DosDevIOctl();
 
 /* memmgr.c */
 seg far2para(VOID FAR * p);

@@ -390,7 +390,7 @@ typedef struct request {
     } _r_bpb;
     struct {
       BYTE _r_meddesc;          /*  MEDIA Descriptor    */
-      BYTE FAR * _r_trans;      /*  Transfer Address    */
+      dos_far_ptr _r_trans;     /*  Transfer Address    */
       UWORD _r_count;           /*  Byte/Sector Count   */
       UWORD _r_start;           /*  Starting Sector No. */
       BYTE FAR * _r_vid;        /* Pointer to volume id */
@@ -406,11 +406,11 @@ typedef struct request {
       UWORD _r_di;              /* (PC DOS 7 Technical Update, pp 104,105) */
       union
       {
-        struct gblkio FAR *_r_io;
-        struct gblkrw FAR *_r_rw;
-        struct gblkfv FAR *_r_fv;
-        struct Gioc_media FAR *_r_gioc;
-        struct Access_info FAR *_r_ai;
+        dos_far_ptr /*struct gblkio*/ _r_io;
+        dos_far_ptr /*struct gblkrw*/ _r_rw;
+        dos_far_ptr /*struct gblkfv*/ _r_fv;
+        dos_far_ptr /*struct Gioc_media*/ _r_gioc;
+        dos_far_ptr /*struct Access_info*/ _r_ai;
       } _r_par;                 /* Pointer to param. block from 440C/440D */
     } _r_gen;
   } _r_x;

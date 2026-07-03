@@ -137,7 +137,7 @@ STATIC int DeviceOpenSft(struct dhdr *dhp, sft *sftp)
      * then issue an Open request to the driver
      */
     dos_far_ptr dev = sftp->sft_dev;
-    if (BinaryCharIO(&dev, 0, NULL, C_OPEN) != SUCCESS)
+    if (BinaryCharIO(&dev, 0, MK_FP(0,0), C_OPEN) != SUCCESS)
       return DE_ACCESS;
   }
   return SUCCESS;
@@ -553,7 +553,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
     /* Now handle raw and cooked modes      */
     if (s->sft_flags & SFT_FBINARY)
     {
-      long rc = BinaryCharIO(&dev, n, ARM_PTR(bp),
+      long rc = BinaryCharIO(&dev, n, bp,
                              mode == XFR_READ ? C_INPUT : C_OUTPUT);
       if (mode == XFR_WRITE && rc > 0 && (s->sft_flags & SFT_FCONOUT))
       {

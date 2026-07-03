@@ -301,8 +301,8 @@ static void ConIntr(request FAR *rq) {
         cpu_save_regs(cpu, &saved);
         CPU_AH = 0x00;              /* INT 16h AH=00h: read keystroke */
         bios_intcall(cpu, 0x16);    /* returns false (re-enters) until key ready */
-        if (rq->r_count > 0 && rq->r_trans) {
-            BYTE FAR *p = rq->r_trans;
+        if (rq->r_count > 0 && EFFECTIVE(rq->r_trans)) {
+            BYTE FAR *p = ARM_PTR(rq->r_trans);
             *p = CPU_AL;
             rq->r_count = 1;
         } else {
@@ -317,7 +317,7 @@ static void ConIntr(request FAR *rq) {
         /* teletype output via INT 10h AH=0Eh */
         cpu_save_regs(cpu, &saved);
         {
-            BYTE FAR *p   = rq->r_trans;
+            BYTE FAR *p   = ARM_PTR(rq->r_trans);
             UWORD     cnt = rq->r_count;
             while (cnt--) {
                 CPU_AH = 0x0E;
@@ -489,7 +489,7 @@ static void ClkEntry(request FAR *rq) {
 
         clk.clkDays = DaysSinceEpoch;
 
-        memcpy(rq->r_trans, &clk, sizeof(struct ClockRecord));
+        memcpy(ARM_PTR(rq->r_trans), &clk, sizeof(struct ClockRecord));
       }
         rq_done(rq);
         break;
@@ -504,7 +504,7 @@ static void ClkEntry(request FAR *rq) {
             break;
         }
 
-        memcpy(&clk, rq->r_trans, sizeof(struct ClockRecord));
+        memcpy(&clk, ARM_PTR(rq->r_trans), sizeof(struct ClockRecord));
 
         /*
          * Store DOS date counter.
@@ -1181,21 +1181,7 @@ void fputlong(void *vp, ULONG l)
 
 /*
     linear_to_far(p) - turn a native ARM pointer into a guest seg:off
-    pair, for code (like LBA_Transfer below) that needs to load a real
-    CPU_ES/CPU_BX pair before calling bios_13h().
-
-    Request packets in this codebase carry r_trans as a plain native
-    pointer (FAR expands to nothing on this "linear architecture", see
-    portab.h), so by the time a request reaches here the original DOS
-    segment:offset the caller used is no longer available - only the
-    resulting linear guest address is. We therefore normalize with
-    offset = addr & 0xF, segment = addr >> 4, which always reproduces
-    the same linear address and keeps the offset far from the 0xFFFF
-    boundary. This is also an honest match for this platform: bios_13h
-    services the transfer with a plain linear address (see int13_transfer_lba
-    in bios_13h.c), it does not emulate the real-8086 same-segment offset
-    wraparound that the original 64K DMA boundary check in dsk.c exists
-    to avoid, so a tight, boundary-safe normalization here is sufficient.
+    pair
 
     SAFETY: p must point inside the 1MB guest RAM window
     [X86_RAM_BASE, X86_RAM_BASE + 0x100000). If p is outside that
@@ -1217,6 +1203,8 @@ dos_far_ptr linear_to_far(const void *p)
     for (;;) ;
   }
   uint32_t lin = (uint32_t)(p - (intptr_t)X86_RAM_BASE);
+  if (lin >= 0x100000)
+    return MK_FP(0xFFFF, (UWORD)(lin - 0xFFFF0));
   return MK_FP((UWORD)(lin >> 4), (UWORD)(lin & 0xF));
 }
 

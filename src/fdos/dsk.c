@@ -72,17 +72,14 @@ STATIC WORD diskchange(ddt *pddt)
 }
 
 STATIC int LBA_Transfer(CPU* cpu,
-    ddt *pddt, UWORD mode, BYTE *buffer,
+    ddt *pddt, UWORD mode, dos_far_ptr buffer,
     ULONG LBA_address, unsigned totaltodo,
     UWORD *transferred);
 
 STATIC WORD RWzero(CPU *cpu, ddt *pddt, UWORD mode)
 {
   UWORD done = 0;
-
-  return LBA_Transfer(cpu, pddt, mode,
-                      (BYTE *)ARM_PTR(DiskTransferBuffer),
-                      pddt->ddt_offset, 1, &done);
+  return LBA_Transfer(cpu, pddt, mode, DiskTransferBuffer, pddt->ddt_offset, 1, &done);
 }
 
 STATIC WORD getbpb(CPU *cpu, ddt *pddt)
@@ -220,14 +217,10 @@ STATIC int ddt_LBA_to_CHS(ULONG LBA_address, struct CHS *chs,
     original algorithm and stays correct if buffer addressing changes
     later.
 */
-STATIC unsigned DMA_max_transfer(const BYTE *buffer, unsigned count)
+STATIC unsigned DMA_max_transfer(dos_far_ptr buffer, unsigned count)
 {
-  dos_far_ptr fp = linear_to_far(buffer);
-  unsigned dma_off = FP_OFF(fp);
-  unsigned sectors_to_dma_boundary = (dma_off == 0 ?
-    0xffff / LoL->maxsecsize :
-    (UWORD)(-dma_off) / LoL->maxsecsize);
-
+  unsigned dma_off = FP_OFF(buffer);
+  unsigned sectors_to_dma_boundary = (dma_off == 0 ? 0xffff / LoL->maxsecsize : (UWORD)(-dma_off) / LoL->maxsecsize);
   return min(count, sectors_to_dma_boundary);
 }
 
@@ -287,7 +280,7 @@ STATIC WORD dskerr(COUNT code)
         needed for DosOpen().
 */
 STATIC int LBA_Transfer(CPU* cpu,
-    ddt *pddt, UWORD mode, BYTE *buffer,
+    ddt *pddt, UWORD mode, dos_far_ptr buffer,
     ULONG LBA_address, unsigned totaltodo,
     UWORD *transferred)
 {
@@ -328,7 +321,7 @@ STATIC int LBA_Transfer(CPU* cpu,
       count = DMA_max_transfer(buffer, totaltodo);
     }
 
-    if (((intptr_t)buffer - (intptr_t)X86_RAM_BASE) >= 0xa0000 || count == 0)
+    if (EFFECTIVE(buffer) >= 0xa0000 || count == 0)
     {
       transfer_address = (BYTE *)ARM_PTR(DiskTransferBuffer);
       transfer_far = DiskTransferBuffer;
@@ -336,13 +329,13 @@ STATIC int LBA_Transfer(CPU* cpu,
 
       if ((mode & 0xff00) == (LBA_WRITE & 0xff00))
       {
-        fmemcpy(DiskTransferBuffer, linear_to_far(buffer), bytes_sector);
+        fmemcpy(DiskTransferBuffer, buffer, bytes_sector);
       }
     }
     else
     {
-      transfer_address = buffer;
-      transfer_far = linear_to_far(buffer);
+      transfer_address = (BYTE *)ARM_PTR(buffer);
+      transfer_far = buffer;
     }
 
     for (num_retries = 0; num_retries < N_RETRY; num_retries++)
@@ -432,14 +425,14 @@ STATIC int LBA_Transfer(CPU* cpu,
     if (transfer_address == (BYTE *)ARM_PTR(DiskTransferBuffer) &&
         (mode & 0xff00) == (LBA_READ & 0xff00))
     {
-      fmemcpy(linear_to_far(buffer), DiskTransferBuffer, bytes_sector);
+      fmemcpy(buffer, DiskTransferBuffer, bytes_sector);
     }
 
     *transferred += count;
     LBA_address += count;
     totaltodo -= count;
 
-    buffer += count * bytes_sector;
+    ADD_OFF(buffer, count * bytes_sector);
   }
 
   return 0;

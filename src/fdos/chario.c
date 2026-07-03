@@ -78,7 +78,12 @@ extern CPU *cpu;
 
 STATIC int CharIO(dos_far_ptr *pdev, unsigned char ch, unsigned command)
 {
-  int err = (int)BinaryCharIO(pdev, 1, &ch, command);
+  --CPU_SP;
+  dos_far_ptr x86_c = MK_FP(CPU_SS, CPU_SP);
+  write86(EFFECTIVE(x86_c), ch);
+  int err = (int)BinaryCharIO(pdev, 1, x86_c, command);
+  ch = read86(EFFECTIVE(x86_c));
+  ++CPU_SP;
   if (err == 0)
     return 256;
   if (err < 0)
@@ -113,8 +118,7 @@ STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
   return SUCCESS;
 }
 
-long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, void FAR * bp,
-                  unsigned command)
+long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, dos_far_ptr bp, unsigned command)
 {
   int err;
   do

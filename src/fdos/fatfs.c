@@ -490,7 +490,7 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
 
       if (dskxfer(fnp->f_dpb->dpb_unit,
                   currentblock,
-                  buffer, sectors_to_xfer,
+                  x86_buffer, sectors_to_xfer,
                   mode == XFR_READ ? DSKREAD : DSKWRITE))
       {
         fnp->f_offset = startoffset;
@@ -756,7 +756,7 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
        * then issue a Close request to the driver
        */
       dos_far_ptr devp = sftp->sft_dev;
-      if (BinaryCharIO(&devp, 0, NULL, C_CLOSE) != SUCCESS)
+      if (BinaryCharIO(&devp, 0, MK_FP(0,0), C_CLOSE) != SUCCESS)
         return DE_INVLDHNDL;
     }
     /* now just drop the count if a device */
