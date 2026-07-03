@@ -1485,6 +1485,7 @@ void bios_post(PC *pc) {
 	point2iret(0x1C);
 	point2iret(0x77);
 // DOS (set it later, if required):
+	point2iret(0x20);
 	point2iret(0x21);
 	point2iret(0x29);
 	point2iret(0x2f);

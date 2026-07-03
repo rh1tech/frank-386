@@ -254,6 +254,7 @@ set(EMU_CORE_SOURCES
     src/fdos/initdisk.c
     src/fdos/dyninit.c
     src/fdos/config.c
+    src/fdos/memmgr.c
     src/fdos/inithma.c
     src/fdos/dsk.c
     src/fdos/dosfns.c

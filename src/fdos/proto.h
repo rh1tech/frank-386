@@ -344,12 +344,12 @@ const UWORD *is_leap_year_monthdays(UWORD year);
 UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth);
 
 /* task.c */
-VOID new_psp(seg para, seg cur_psp);
-VOID child_psp(seg para, seg cur_psp, int psize);
-VOID return_user(void);
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
+COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
+COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
 ULONG SftGetFsize(int sft_idx);
-VOID InitPSP(VOID);
+void request_terminate(UBYTE exit_code, UBYTE exit_type);
+UWORD DosGetRetCode(void);
 
 /* newstuff.c */
 int SetJFTSize(UWORD nHandles);

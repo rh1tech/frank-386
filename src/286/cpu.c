@@ -156,6 +156,10 @@ void cpu_install_bios_handlers(CPU* cpu) {
 }
 
 void cpu_install_dos_handlers(CPU* cpu) {
+    handlers[0x20] = fdos_20h; // old-style (CP/M) terminate
+	pstore16(0x20*4, 0x0020);
+	pstore16(0x20*4 + 2, 0xFFE0);
+
     handlers[0x21] = fdos_21h; // main DOS handler
 	pstore16(0x21*4, 0x0021);
 	pstore16(0x21*4 + 2, 0xFFE0);

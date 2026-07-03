@@ -311,8 +311,8 @@ bool fdos_21h(CPU* _cpu) {
           break;
         }
         break;
-/// TODO: 
-#if 0
+/// TODO: ensure
+#if 1
         /* Get/Set Country Info                                         */
       case 0x38:
         {
@@ -490,7 +490,130 @@ bool fdos_21h(CPU* _cpu) {
       case 0x62: // DOS 3.0+ - GET CURRENT PSP ADDRESS
         CPU_BX = internal_data->cu_psp;
         break;
-      default:
+
+        /* Terminate process (old-style, CP/M-compatible; same as
+           INT 20h - see fdos_20h() - and equivalent to AH=4Ch with
+           AL=0) */
+      case 0x00:
+        request_terminate(0, 0);
+        cf = 0;
+        break;
+
+        /* Terminate process with return code                          */
+      case 0x4c:
+        request_terminate(CPU_AL, 0);
+        cf = 0;
+        break;
+
+        /* Get return code (ERRORLEVEL)                                 */
+      case 0x4d:
+        CPU_AX = DosGetRetCode();
+        cf = 0;
+        break;
+
+        /* EXEC - load and/or execute a program                        */
+      case 0x4b: {
+          exec_blk *ep = (exec_blk *) ARM_PTR(MK_FP(CPU_ES, CPU_BX));
+          BYTE *lp = (BYTE *) ARM_PTR(FP_DS_DX);
+
+          rc = DosExec(CPU_AL, ep, lp);
+          if (rc < SUCCESS)
+          {
+            CPU_AX = (UWORD) (-rc);
+            cf = 1;
+          }
+          else
+            cf = 0;
+        }
+        break;
+
+        /* Allocate memory                                              */
+      case 0x48: {
+          seg para;
+          UWORD asize = 0;
+
+          rc = DosMemAlloc(CPU_BX, internal_data->mem_access_mode, &para, &asize);
+          if (rc < SUCCESS)
+          {
+            CPU_BX = asize;
+            CPU_AX = (UWORD) (-rc);
+            cf = 1;
+          }
+          else
+          {
+            CPU_AX = para + 1;  /* segment of the usable block, not the MCB itself */
+            cf = 0;
+          }
+        }
+        break;
+
+        /* Free memory                                                  */
+      case 0x49:
+        rc = DosMemFree(CPU_ES - 1);
+        if (rc < SUCCESS)
+        {
+          CPU_AX = (UWORD) (-rc);
+          cf = 1;
+        }
+        else
+          cf = 0;
+        break;
+
+        /* Resize (grow/shrink) an allocated memory block               */
+      case 0x4a: {
+          UWORD maxsize = 0;
+
+          rc = DosMemChange(CPU_ES, CPU_BX, &maxsize);
+          if (rc < SUCCESS)
+          {
+            CPU_BX = maxsize;
+            CPU_AX = (UWORD) (-rc);
+            cf = 1;
+          }
+          else
+            cf = 0;
+        }
+        break;
+
+        /* Get/Set memory allocation strategy, get/set UMB link state   */
+      case 0x58:
+        switch (CPU_AL)
+        {
+          case 0x00:            /* get allocation strategy */
+            CPU_AX = internal_data->mem_access_mode;
+            cf = 0;
+            break;
+          case 0x01:            /* set allocation strategy */
+            if (CPU_BL != FIRST_FIT && CPU_BL != BEST_FIT && CPU_BL != LAST_FIT &&
+                CPU_BL != FIRST_FIT_UO && CPU_BL != BEST_FIT_UO && CPU_BL != LAST_FIT_UO &&
+                CPU_BL != FIRST_FIT_U && CPU_BL != BEST_FIT_U && CPU_BL != LAST_FIT_U)
+            {
+              rc = DE_INVLDFUNC;
+              CPU_AX = (UWORD) (-rc);
+              cf = 1;
+            }
+            else
+            {
+              internal_data->mem_access_mode = CPU_BL;
+              cf = 0;
+            }
+            break;
+          case 0x02:            /* get UMB link state */
+            CPU_AL = LoL->uppermem_link & 1;
+            cf = 0;
+            break;
+          case 0x03:            /* set UMB link state */
+            DosUmbLink(CPU_BX ? 1 : 0);
+            cf = 0;
+            break;
+          default:
+            rc = DE_INVLDFUNC;
+            CPU_AX = (UWORD) (-rc);
+            cf = 1;
+        }
+        break;
+
+        default:
         no_handler(_cpu);
     }
     goto exit_dispatch;
@@ -498,6 +621,7 @@ bool fdos_21h(CPU* _cpu) {
 short_check:
     if (rc < SUCCESS)
         goto error_exit;
+    cf = 0;
     goto exit_dispatch;
 
 error_invalid:
@@ -523,8 +647,9 @@ UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
     CPU_CX = count;
     SET_DS ( FP_SEG(buf) );
     CPU_DX = FP_OFF(buf);
-    fdos_21h(cpu);
-/// TODO:    bios_intcall(cpu, 0x21);
+///    fdos_21h(cpu);
+/// TODO:
+    bios_intcall(cpu, 0x21);
     return cf ? (UCOUNT)-1 : CPU_AX;
 }
 
@@ -533,4 +658,16 @@ int init_switchar(int ch) {
   CPU_DL = (BYTE)ch;
   bios_intcall(cpu, 0x21);
   return CPU_AL == 0x00 ? 0 : -1;
+}
+
+
+/* INT 20h - old-style (CP/M-compatible) terminate: no return code.
+   Equivalent to INT 21h AH=00h/4Ch AL=0 - see request_terminate() in
+   task.c. Kept separate from fdos_21h() because it's a different
+   interrupt vector (handlers[0x20], registered in 286/cpu.c), not a
+   sub-function of INT 21h. */
+bool fdos_20h(CPU* _cpu) {
+    cpu = _cpu;
+    request_terminate(0, 0);
+    return true;
 }

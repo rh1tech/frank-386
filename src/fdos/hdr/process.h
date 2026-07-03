@@ -36,8 +36,7 @@
 #define P_OVERLAY 2             /* child replaces parent, parent no longer exists */
 
 /*  Modes available as the first argument to DosExec() (task.c) - same
-    values as INT 21h AH=4Bh's AL. Only EXEC_OVERLAY is implemented in
-    this port; see the comment on DosExec() in task.c. */
+    values as INT 21h AH=4Bh's AL. */
 #define EXEC_LOADNGO    0
 #define EXEC_LOAD       1
 #define EXEC_OVERLAY    3

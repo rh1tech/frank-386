@@ -1602,10 +1602,14 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
      buffer first - same idiom the CONFIG.SYS search loop above uses
      (see x86_FAR_PTR(DOS_PSP, PriPathName) there). DosExec()'s "lp"
      is, like init_device()'s cmdLine, an already-native pointer into
-     guest RAM (FAR is a no-op in this port) - not a dos_far_ptr. */
-  strcpy(SecPathName, szBuf);
+     guest RAM (FAR is a no-op in this port) - not a dos_far_ptr.
+     PriPathName, not SecPathName: DosExec() uses SecPathName itself
+     as scratch space (ExeHeader/TempExeBlock, see task.c) for the
+     duration of the call, so writing the filename there too would let
+     it clobber the tail of its own argument on long paths. */
+  strcpy(PriPathName, szBuf);
 
-  if ((result = DosExec(EXEC_OVERLAY, &eb, (BYTE FAR *) SecPathName)) != SUCCESS)
+  if ((result = DosExec(EXEC_OVERLAY, &eb, (BYTE FAR *) PriPathName)) != SUCCESS)
   {
     CfgFailure(pLine);
     return result;
@@ -2381,42 +2385,30 @@ STATIC VOID InstallExec(struct instCmds *icmd)
 
   exb.exec.env_seg = 0;
   exb.exec.cmd_line = (CommandTail FAR *)args;
-  exb.exec.fcb_1 = exb.exec.fcb_2 = NULL; /// may be after dos_far_ptr MK_FP(0xffff, 0xffff);
-
+  exb.exec.fcb_1 = exb.exec.fcb_2 = (fcb FAR *) -1L;
+  /* "no FCBs to copy" - see patchPSP() in task.c.
+    NULL would mean "copy 16 bytes from address 0" and crash. */
   InstallPrintf(("INSTALL exec file='%s' tail_len=%u tail='%s'\n", filename, *args, args + 1));
 
-  /// TODO:
-  /*
-INT 21h AH=4Bh EXEC
-INT 21h AH=4Ch terminate
-INT 21h AH=48h alloc
-INT 21h AH=49h free
-INT 21h AH=4Ah resize
-INT 21h AX=5800/5801 allocation strategy
-COM/EXE loader: DosExec / DosComLoader / DosExeLoader
-PSP creation
-environment block
-MCB ownership by PSP  
-  */
-  /* TODO: unlike DEVICE=/DEVICEHIGH= (LoadDevice(), above - now
-     working, see DosExec() in task.c), INSTALL= needs a *real* EXEC
-     (icmd->mode is EXEC_LOADNGO, not EXEC_OVERLAY): the program has
-     to get a PSP, an environment block, and actually run as its own
-     process before CONFIG.SYS processing continues. DosExec() only
-     implements EXEC_OVERLAY so far - see its comment in task.c for
-     exactly what's still missing (memory allocation for the child,
-     PSP/environment construction, and the CPU context switch itself:
-     child_psp()/patchPSP()/ExecMemAlloc()/exec_user()/return_user()
-     in upstream FreeDOS - none of which exist in this port yet). The
-     same gap is why P_0()/task.c can't start COMMAND.COM yet either.
-     "filename" above is also native (ARM) memory, same as config.c's
-     szBuf - would need copying into a guest-RAM buffer first (see
-     LoadDevice()'s use of SecPathName) before any future DosExec()
-     call here.
-  */
+  /* filename is native (ARM) memory; DosExec() needs it in guest RAM -
+     same requirement as LoadDevice()'s szBuf, above (see its comment
+     for why PriPathName specifically, not SecPathName). */
+  strcpy(PriPathName, filename);
 
-  ///if (init_DosExec(icmd->mode, &exb, filename) != SUCCESS)
-  ///  CfgFailure(cmd);
+  {
+    /* icmd->mode is an allocation-strategy value (FIRST_FIT or
+       FIRST_FIT_U for INSTALL=/INSTALLHIGH= respectively - see
+       CmdInstall()/CmdInstallHigh() above), not an exec mode: DOS
+       always actually runs an INSTALL= program with EXEC_LOADNGO,
+       just possibly preferring UMB for its allocations. This mirrors
+       upstream's own set_strategy(cmd->mode) before InstallExec(). */
+    UBYTE saved_mem_access_mode = internal_data->mem_access_mode;
+
+    internal_data->mem_access_mode = icmd->mode;
+    if (DosExec(EXEC_LOADNGO, &exb, (BYTE FAR *) PriPathName) != SUCCESS)
+      CfgFailure(cmd);
+    internal_data->mem_access_mode = saved_mem_access_mode;
+  }
 }
 
 VOID DoInstall(void)

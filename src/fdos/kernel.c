@@ -1054,7 +1054,7 @@ static void set_DTA(dos_far_ptr p) {
     bios_intcall(cpu, 0x21);
 }
 
-static dos_far_ptr getvec(uint8_t intno) {
+dos_far_ptr getvec(uint8_t intno) {
     uint32_t res = pload32(4ul * intno);
     return *(dos_far_ptr*)&res;
 }
