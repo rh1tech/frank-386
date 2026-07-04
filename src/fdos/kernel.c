@@ -230,7 +230,7 @@ KernelConfig InitKernelConfig = {
     .Version_Revision = 43,
     .Version_Release = 1,
     .CheckDebugger = 0,
-    .Verbose = 0,
+    .Verbose = 1, ////
     .PartitionMode = 0x1F
 };
 

@@ -16,6 +16,8 @@ ULONG call_nls(UWORD bp,
                UWORD bufsize)
 {
     dos_far_ptr x86_ptr = x86_nlsInfo;
+    CPU_regs regs;
+    cpu_save_regs(cpu, &regs);
     SET_DS ( FP_SEG (x86_ptr) );
     CPU_SI = FP_OFF (x86_ptr);
     if (buf) {
@@ -32,7 +34,9 @@ ULONG call_nls(UWORD bp,
     CPU_BX = cp;
     CPU_AX = (0x14u << 8) | (subfct & 0x00ff);
     bios_intcall(cpu, 0x2F);
-    return ((ULONG)CPU_BX << 16) | CPU_AX;
+    ULONG res =((ULONG)CPU_BX << 16) | CPU_AX;
+    cpu_restore_regs(cpu, &regs);
+    return res;
 }
 /*== DS:SI _always_ points to global NLS info structure <-> no
  * subfct can use these registers for anything different. ==ska*/

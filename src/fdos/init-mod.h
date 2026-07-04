@@ -84,8 +84,7 @@ VOID PostConfig(VOID);
 VOID configDone(VOID);
 VOID DoInstall(void);
 void P_0(CPU* cpu, struct config*);
-/// TODO:
-inline static int MoveKernelToHMA() { return 0; }
+int MoveKernelToHMA(void);
 dos_far_ptr HMAalloc(COUNT bytesToAllocate);
 dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode);
 dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode);
@@ -103,6 +102,7 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
 int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size);
 ULONG ASMPASCAL lseek(int fd, long position);
+dos_far_ptr DetectXMSDriver(void);
 
 inline static void rq_done(request FAR *rq) {
     rq->r_status = S_DONE;
