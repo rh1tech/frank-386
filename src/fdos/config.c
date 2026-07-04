@@ -1547,7 +1547,6 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 {
   exec_blk eb;
   dos_far_ptr dhp;
-  dos_far_ptr next_dhp;
   BOOL result;
   seg base, start;
 
@@ -1612,12 +1611,14 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   /*   updated with the end address returned from the INIT request.  */
   /*   The updated end address is then used when issuing the next    */
   /*   INIT request for the following device driver within the file  */
-
-  for (next_dhp = MK_FP(0, 0); FP_OFF(next_dhp) != 0xffff &&
-       (result = init_device(dhp, szBuf, mode, &top)) == SUCCESS;
-       dhp = next_dhp)
+  dos_far_ptr next_dhp = MK_FP(0, 0);
+  while (FP_OFF(next_dhp) != 0xffff)
   {
     struct dhdr *p = (struct dhdr *) ARM_PTR(dhp);
+    p->dh_attr &= ~ATTR_NATIVE; /// TODO: imaging how native drivers should load
+    if ((result = init_device(dhp, szBuf, mode, &top)) != SUCCESS) {
+      break;
+    }
 
     /* dh_next chains multiple device headers within the *same*
        loaded driver segment: only its offset is meaningful, the
@@ -1629,6 +1630,8 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
     /* Link in device driver and save LoL->nul_dev pointer to next */
     p->dh_next = LoL->nul_dev.dh_next;
     LoL->nul_dev.dh_next = dhp;
+
+    dhp = next_dhp;
   }
 
   /* might have been the UMB driver or DOS=UMB */

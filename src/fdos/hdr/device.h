@@ -154,7 +154,7 @@ struct dhdr {
 #define ATTR_EXCALLS    0x0800
 #define ATTR_RAW        0x0400
 #define ATTR_NATIVE     0x0200 // for RP2350 only for now
-#define ATTR_RESETVED   0x0100
+#define ATTR_RESERVED   0x0100
 #define ATTR_QRYIOCTL   0x0080
 #define ATTR_GENIOCTL   0x0040
 #define ATTR_FASTCON    0x0010
