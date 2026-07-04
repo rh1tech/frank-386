@@ -1640,6 +1640,10 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 
 STATIC VOID DeviceHigh(BYTE * pLine)
 {
+  /* might have been the UMB driver or DOS=UMB */
+  if (UmbState == 2)
+    umb_init();
+
   if (UmbState == 1)
   {
     if (LoadDevice(pLine, MK_FP(umb_start + UMB_top, 0), TRUE) == DE_NOMEM)

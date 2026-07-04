@@ -356,18 +356,21 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
         case REQUEST_UMB: {
             // Request Upper Memory Block (Function 10h):
             if (CPU_DX == 0xFFFF) {
-                // Query largest available block
-                if (umb_blocks_allocated < UMB_BLOCKS_COUNT) {
-                    uint16_t sz = 0;
-                    const umb_t *umb_block = get_largest_free_umb_block(&sz);
-                    if (umb_block != NULL) {
-                        CPU_AX = 1;
-                        CPU_BX = umb_block->segment;
-                        CPU_DX = sz;
-                        CPU_BL = 0;
-                        break;
-                    }
+                /*
+                 * Probe largest available block by requesting an
+                 * impossibly large UMB. XMS returns B0h and the
+                 * largest available size in DX.
+                 */
+                uint16_t sz = 0;
+                const umb_t *umb_block = get_largest_free_umb_block(&sz);
+                CPU_AX = 0;
+                CPU_DX = sz;
+                if (umb_block != NULL && sz != 0) {
+                    CPU_BL = 0xB0;
+                } else {
+                    CPU_BL = 0xB1;
                 }
+                break;
             } else {
                 const uint16_t requested_size = CPU_DX;
                 umb_t *umb_block = get_free_umb_block(requested_size);
