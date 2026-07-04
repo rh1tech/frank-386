@@ -59,7 +59,7 @@ struct xdpbforformat {
 
     struct {
       UDWORD unknown;
-      bpb FAR *bpbp;
+      dos_far_ptr /*bpb FAR **/ bpbp;
       UDWORD reserved[2];
     } rebuilddpb;
 

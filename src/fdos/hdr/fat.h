@@ -141,16 +141,9 @@ _Static_assert(sizeof(struct lfn_entry) == 32,
 /* filesystem sizeof(dirent) - may be different from core               */
 /*                                                                      */
 
-#ifdef WITHFAT32
 struct dpb;
 CLUSTER getdstart(struct dpb FAR *dpbp, struct dirent *dentry);
 void setdstart(struct dpb FAR *dpbp, struct dirent *dentry, CLUSTER value);
-#else
-#define getdstart(dpbp, dentry) \
-  ((dentry)->dir_start)
-#define setdstart(dpbp, dentry, value) \
-  (((dentry)->dir_start) = (UWORD)(value))
-#endif
 
 #define DIR_NAME        0
 #define DIR_EXT         FNAME_SIZE

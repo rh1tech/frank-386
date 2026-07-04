@@ -802,7 +802,7 @@ COUNT DosClose(COUNT hndl)
   /* We must close the (valid) file handle before any critical error */
   /* may occur, else e.g. ABORT will try to close the file twice,    */
   /* the second time after stdout is already closed */
-  p->ps_filetab[hndl] = 0xff;
+  ((UBYTE *) ARM_PTR(p->ps_filetab))[hndl] = 0xff;
   /* Get the SFT block that contains the SFT      */
   return DosCloseSft(sft_idx, FALSE);
 }
@@ -915,7 +915,7 @@ STATIC int rqblockio(unsigned char command, struct dpb FAR * dpbp)
   MediaReqHdrD.r_status = 0;
 
   if (command == C_BLDBPB) /* help USBASPI.SYS & DI1000DD.SYS (TE) */
-    MediaReqHdrD.r_bpfat = (boot*)ARM_PTR(DiskTransferBuffer);
+    MediaReqHdrD.r_bpfat = DiskTransferBuffer;
   execrh((request FAR *) & MediaReqHdrD, dpbp->dpb_device);
   if ((MediaReqHdrD.r_status & S_ERROR) || !(MediaReqHdrD.r_status & S_DONE))
   {
@@ -1072,12 +1072,12 @@ COUNT media_check(struct dpb *dpbp)
         return ret;
 #ifdef WITHFAT32
       /* extend dpb only for internal or FAT32 devices */
-      bpb_to_dpb(MediaReqHdrD.r_bpptr, dpbp,
-                 MediaReqHdrD.r_bpptr->bpb_nfsect == 0 ||
+      bpb_to_dpb((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr), dpbp,
+                 ((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr))->bpb_nfsect == 0 ||
                  !is_guest_ptr(dpbp)
       );
 #else
-      bpb_to_dpb(MediaReqHdr.r_bpptr, dpbp);
+      bpb_to_dpb((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr), dpbp);
 #endif
       return SUCCESS;
   }

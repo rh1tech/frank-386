@@ -167,7 +167,7 @@ STATIC void block_build_bpb(CPU *cpu, request FAR *rq)
     return;
   }
 
-  rq->r_bpptr = &pddt->ddt_bpb;
+  rq->r_bpptr = linear_to_far(&pddt->ddt_bpb);
   rq_done(rq);
 }
 

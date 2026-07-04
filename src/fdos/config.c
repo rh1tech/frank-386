@@ -2340,38 +2340,58 @@ VOID configDone(VOID)
 
 STATIC VOID InstallExec(struct instCmds *icmd)
 {
-  BYTE filename[128];
-  BYTE *args;
-  BYTE *d;
   BYTE *cmd = (BYTE *)icmd->buffer;
+  BYTE *s;
+  UWORD namelen, taillen;
+  dos_far_ptr x86_filename, x86_tail;
+  BYTE *filename, *tail;
   exec_blk exb;
 
   cmd = skipwh(cmd);
 
-  for (args = cmd, d = filename; ; args++, d++)
-  {
-    *d = *args;
-    if (*d <= 0x20 || *d == '/')
-      break;
-  }
-  *d = 0;
+  for (s = cmd; *s > 0x20 && *s != '/'; s++)
+    ;
+  namelen = (UWORD) (s - cmd);
 
-  args--;
-  *args = strlen((char *)&args[1]);
-  args[*args + 1] = '\r';
-  args[*args + 2] = 0;
+  taillen = 0;
+  while (s[taillen] && taillen < CTBUFFERSIZE - 1)
+    taillen++;
+
+  /* exec_blk.exec.cmd_line (like DosExec()'s "lp" filename argument -
+     see LoadDevice()'s identical requirement for szBuf, above) is a
+     dos_far_ptr: it has to point at guest RAM, since the CommandTail
+     it addresses ends up copied into the new process's PSP by
+     patchPSP() using an ordinary far-pointer dereference. icmd->buffer
+     is native (ARM) memory, so borrow some guest stack space for a
+     guest-RAM copy of the filename and the CommandTail - same
+     technique init_device() (kernel.c) uses for its request packet,
+     and MakeFATChain()/etc. already use elsewhere in this file. */
+  CPU_SP -= (namelen + 1) + (taillen + 3);
+  x86_filename = MK_FP(CPU_SS, CPU_SP);
+  x86_tail = MK_FP(CPU_SS, CPU_SP + namelen + 1);
+  filename = (BYTE *) ARM_PTR(x86_filename);
+  tail = (BYTE *) ARM_PTR(x86_tail);
+
+  memcpy(filename, cmd, namelen);
+  filename[namelen] = 0;
+
+  tail[0] = (BYTE) taillen;
+  memcpy(tail + 1, s, taillen);
+  tail[taillen + 1] = '\r';
+  tail[taillen + 2] = 0;
 
   exb.exec.env_seg = 0;
-  exb.exec.cmd_line = (CommandTail FAR *)args;
-  exb.exec.fcb_1 = exb.exec.fcb_2 = (fcb FAR *) -1L;
-  /* "no FCBs to copy" - see patchPSP() in task.c.
-    NULL would mean "copy 16 bytes from address 0" and crash. */
-  InstallPrintf(("INSTALL exec file='%s' tail_len=%u tail='%s'\n", filename, *args, args + 1));
+  exb.exec.cmd_line = x86_tail;
+  exb.exec.fcb_1 = exb.exec.fcb_2 = MK_FP(0xffff, 0xffff);  /* "no FCBs
+                                                                to copy" -
+                                                                see
+                                                                far_is_end()/
+                                                                patchPSP()
+                                                                in
+                                                                task.c */
 
-  /* filename is native (ARM) memory; DosExec() needs it in guest RAM -
-     same requirement as LoadDevice()'s szBuf, above (see its comment
-     for why PriPathName specifically, not SecPathName). */
-  strcpy(PriPathName, filename);
+  InstallPrintf(("INSTALL exec file='%s' tail_len=%u tail='%s'\n",
+                 filename, tail[0], tail + 1));
 
   {
     /* icmd->mode is an allocation-strategy value (FIRST_FIT or
@@ -2383,10 +2403,12 @@ STATIC VOID InstallExec(struct instCmds *icmd)
     UBYTE saved_mem_access_mode = internal_data->mem_access_mode;
 
     internal_data->mem_access_mode = icmd->mode;
-    if (DosExec(EXEC_LOADNGO, &exb, (BYTE FAR *) PriPathName) != SUCCESS)
+    if (DosExec(EXEC_LOADNGO, &exb, filename) != SUCCESS)
       CfgFailure(cmd);
     internal_data->mem_access_mode = saved_mem_access_mode;
   }
+
+  CPU_SP += (namelen + 1) + (taillen + 3);
 }
 
 VOID DoInstall(void)

@@ -451,7 +451,8 @@ bool fdos_21h(CPU* _cpu) {
             internal_data->CritErrCode = CPU_AX;
           goto error_carry;
         }
-        goto short_check;
+        cf = 0;
+        break;
 
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       // BX = existing handle (old), CX = handle to redirect (new)
@@ -459,8 +460,9 @@ bool fdos_21h(CPU* _cpu) {
         unsigned old_hndl = CPU_BX;
         unsigned new_hndl = CPU_CX;
         psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+        UBYTE *filetab = (UBYTE *) ARM_PTR(p->ps_filetab);
 
-        if (old_hndl >= p->ps_maxfiles || p->ps_filetab[old_hndl] == 0xff)
+        if (old_hndl >= p->ps_maxfiles || filetab[old_hndl] == 0xff)
         {
           cf = 1;
           CPU_AX = (UWORD)(-DE_INVLDHNDL);
@@ -475,12 +477,12 @@ bool fdos_21h(CPU* _cpu) {
         if (new_hndl != old_hndl)
         {
           /* close new handle if open */
-          if (p->ps_filetab[new_hndl] != 0xff)
+          if (filetab[new_hndl] != 0xff)
             DosClose(new_hndl);
 
           /* copy SFT index and bump ref count */
-          p->ps_filetab[new_hndl] = p->ps_filetab[old_hndl];
-          idx_to_sft(p->ps_filetab[new_hndl])->sft_count++;
+          filetab[new_hndl] = filetab[old_hndl];
+          idx_to_sft(filetab[new_hndl])->sft_count++;
         }
         cf = 0;
       }

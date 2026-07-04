@@ -939,11 +939,26 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
                  dos_far_ptr * r_top)
 {
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
-  CPU_SP -= sizeof(request);
-  dos_far_ptr x86_rq = MK_FP(CPU_SS, CPU_SP);
-  request* rq = (request*)ARM_PTR(x86_rq);
-  memset(rq, 0, sizeof(request));  
+  const char *cmdstr = cmdLine ? cmdLine : "\n";
+  size_t cmdlen = strlen(cmdstr) + 1;
+  dos_far_ptr x86_cmdline;
+  dos_far_ptr x86_rq;
+  request* rq;
   char name[8];
+
+  /* rq, and (for C_INIT) a guest-RAM copy of the command line, both
+     live on the *guest* stack. The command-line copy matters because
+     r_bpbptr is dos_far_ptr (see device.h) - a real driver reads it
+     as a genuine far pointer during C_INIT (that's the standard DOS
+     convention for passing DEVICE=/DEVICEHIGH= switches through to
+     the driver) - so it can't point at cmdLine/"\n" directly, which
+     are native (ARM) memory the driver has no way to address. */
+  CPU_SP -= sizeof(request) + cmdlen;
+  x86_cmdline = MK_FP(CPU_SS, CPU_SP);
+  x86_rq = MK_FP(CPU_SS, CPU_SP + cmdlen);
+  rq = (request*)ARM_PTR(x86_rq);
+  memset(rq, 0, sizeof(request));
+  strcpy((char *) ARM_PTR(x86_cmdline), cmdstr);
 
   if (cmdLine) {
     char *p, *q, ch;
@@ -973,7 +988,7 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
   rq->r_command = C_INIT;
   rq->r_length = sizeof(request);
   rq->r_endaddr = *r_top;
-  rq->r_bpbptr = (void FAR *)(cmdLine ? cmdLine : "\n");
+  rq->r_bpbptr = x86_cmdline;
   rq->r_firstunit = LoL->nblkdev;
 
   execrh(rq, x86_dhp);
@@ -1106,7 +1121,7 @@ STATIC void PSPInit(void)
   memset(p->ps_files, 0xff, 20);
 
   /* open file table pointer                              */
-  p->ps_filetab = p->ps_files;
+  p->ps_filetab = linear_to_far(p->ps_files);
 
   /* default system version for int21/ah=30               */
   p->ps_retdosver = (LoL->os_setver_minor << 8) + LoL->os_setver_major;

@@ -172,6 +172,7 @@ STATIC void child_psp(seg para, seg cur_psp, int psize)
 {
   psp *p = (psp *) ARM_PTR(MK_FP(para, 0));
   psp *q = (psp *) ARM_PTR(MK_FP(cur_psp, 0));
+  UBYTE *q_filetab = (UBYTE *) ARM_PTR(q->ps_filetab);
   int i;
 
   new_psp(para, cur_psp);
@@ -183,7 +184,7 @@ STATIC void child_psp(seg para, seg cur_psp, int psize)
 
   p->ps_maxfiles = 20;
   memset(p->ps_files, 0xff, 20);
-  p->ps_filetab = p->ps_files;
+  p->ps_filetab = linear_to_far(p->ps_files);
 
   /* Inherit all of the parent's open handles.
 
@@ -194,9 +195,9 @@ STATIC void child_psp(seg para, seg cur_psp, int psize)
      most programs never set. */
   for (i = 0; i < 20; i++)
   {
-    if (q->ps_filetab[i] != 0xff)
+    if (q_filetab[i] != 0xff)
     {
-      p->ps_files[i] = q->ps_filetab[i];
+      p->ps_files[i] = q_filetab[i];
       idx_to_sft(p->ps_files[i])->sft_count++;
     }
   }
@@ -221,11 +222,11 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
   ++pspseg;
   p = (psp *) ARM_PTR(MK_FP(pspseg, 0));
 
-  memcpy(&p->ps_cmd, exb->exec.cmd_line, sizeof(CommandTail));
-  if (exb->exec.fcb_1 != (fcb *) -1L)
+  memcpy(&p->ps_cmd, ARM_PTR(exb->exec.cmd_line), sizeof(CommandTail));
+  if (!far_is_end(exb->exec.fcb_1))
   {
-    memcpy(&p->ps_fcb1, exb->exec.fcb_1, 16);
-    memcpy(&p->ps_fcb2, exb->exec.fcb_2, 16);
+    memcpy(&p->ps_fcb1, ARM_PTR(exb->exec.fcb_1), 16);
+    memcpy(&p->ps_fcb2, ARM_PTR(exb->exec.fcb_2), 16);
   }
 
   pspmcb->m_psp = pspseg;
@@ -407,15 +408,14 @@ STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
   p->ps_prevpsp = MK_FP(internal_data->cu_psp, 0);
 
   if (mode == EXEC_LOADNGO)
-    return exec_run_child(linear_to_far(exp->exec.start_addr),
-                          linear_to_far(exp->exec.stack),
+    return exec_run_child(exp->exec.start_addr, exp->exec.stack,
                           ds, fcbcode, ds);
 
   /* mode == EXEC_LOAD: don't run it, just hand the caller back the
      entry point/stack we computed (exp->exec.start_addr/stack) plus
      fcbcode pushed onto that stack, matching INT21/4B AL=1. */
-  exp->exec.stack -= 2;
-  *((UWORD *) (exp->exec.stack)) = fcbcode;
+  exp->exec.stack.offset -= 2;
+  *((UWORD *) ARM_PTR(exp->exec.stack)) = fcbcode;
   return SUCCESS;
 }
 
@@ -555,8 +555,8 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
     p->ps_reentry = MK_FP(0xc - asize, asize << 4);
     asize <<= 4;
     asize += 0x10e;
-    exp->exec.stack = (BYTE *) ARM_PTR(MK_FP(mem, asize));
-    exp->exec.start_addr = (BYTE *) ARM_PTR(MK_FP(mem, 0x100));
+    exp->exec.stack = MK_FP(mem, asize);
+    exp->exec.start_addr = MK_FP(mem, 0x100);
     *((UWORD *) ARM_PTR(MK_FP(mem, asize))) = 0;
     load_transfer(mem, exp, fcbcode, mode);
   }
@@ -706,10 +706,8 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
 
     child_psp(mem, internal_data->cu_psp, mem + asize);
     fcbcode = patchPSP(mem - 1, env, exp, namep);
-    exp->exec.stack =
-      (BYTE *) ARM_PTR(MK_FP(ExeHeader.exInitSS + start_seg, ExeHeader.exInitSP));
-    exp->exec.start_addr =
-      (BYTE *) ARM_PTR(MK_FP(ExeHeader.exInitCS + start_seg, ExeHeader.exInitIP));
+    exp->exec.stack = MK_FP(ExeHeader.exInitSS + start_seg, ExeHeader.exInitSP);
+    exp->exec.start_addr = MK_FP(ExeHeader.exInitCS + start_seg, ExeHeader.exInitIP);
     load_transfer(mem, exp, fcbcode, mode);
   }
   return SUCCESS;
@@ -788,7 +786,9 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
   UBYTE mode = Config->cfgP_0_startmode;
 
   /* build exec block and save all parameters here as init part will vanish! */
-  exb.exec.fcb_1 = exb.exec.fcb_2 = (fcb FAR *)-1L;
+  exb.exec.fcb_1 = exb.exec.fcb_2 = MK_FP(0xffff, 0xffff);  /* "no FCBs" - see
+                                                                far_is_end()/
+                                                                patchPSP() */
   exb.exec.env_seg = DOS_PSP + 8;
   fstrcpy(Shell, Config->cfgInit);
   /* join name and tail */
@@ -808,8 +808,11 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
     /* terminate name and tail */
     *tailp =  *(endp + 2) = '\0';
     /* ctCount: just past '\0' do not count the "\r\n" */
-    exb.exec.cmd_line = (CommandTail *)(tailp + 1);
-    exb.exec.cmd_line->ctCount = endp - tailp - 2;
+    {
+      CommandTail *ct = (CommandTail *)(tailp + 1);
+      ct->ctCount = endp - tailp - 2;
+      exb.exec.cmd_line = linear_to_far(ct);
+    }
 #ifdef DEBUG
     DebugPrintf(("Process 0 starting: %s%s\n\n", Shell, tailp + 2));
 #endif

@@ -314,7 +314,7 @@ struct gblkrw                   /* for read / write track */
   UWORD gbrw_cyl;
   UWORD gbrw_sector;
   UWORD gbrw_nsecs;
-  UBYTE FAR *gbrw_buffer;
+  dos_far_ptr gbrw_buffer;
 };
 
 struct Gioc_media {
@@ -375,25 +375,29 @@ typedef struct request {
     struct {
       UBYTE _r_nunits;          /*  number of units     */
       dos_far_ptr _r_endaddr;   /*  Ending Address      */
-      bpb *FAR * _r_bpbptr;     /*  ptr to BPB array    */
+      dos_far_ptr _r_bpbptr;    /*  ptr to BPB array (or, during
+                                    C_INIT, to the rest of the
+                                    DEVICE=/DEVICEHIGH= line, per
+                                    real DOS convention - see
+                                    init_device() in kernel.c) */
       UBYTE _r_firstunit;
     } _r_init;
     struct {
       BYTE _r_meddesc;          /*  MEDIA Descriptor    */
       BYTE _r_retcode;          /*  Return Code         */
-      BYTE FAR * _r_vid;        /* volume id */
+      dos_far_ptr _r_vid;       /* volume id */
     } _r_media;
     struct {
       BYTE _r_meddesc;          /*  MEDIA Descriptor    */
-      boot FAR * _r_fat;        /*  boot sector pointer */
-      bpb FAR * _r_bpbpt;       /*  ptr to BPB table    */
+      dos_far_ptr _r_fat;       /*  boot sector pointer */
+      dos_far_ptr _r_bpbpt;     /*  ptr to BPB table    */
     } _r_bpb;
     struct {
       BYTE _r_meddesc;          /*  MEDIA Descriptor    */
       dos_far_ptr _r_trans;     /*  Transfer Address    */
       UWORD _r_count;           /*  Byte/Sector Count   */
       UWORD _r_start;           /*  Starting Sector No. */
-      BYTE FAR * _r_vid;        /* Pointer to volume id */
+      dos_far_ptr _r_vid;       /* Pointer to volume id */
       LONG _r_huge;             /* for > 32Mb drives    */
     } _r_rw;
     struct {

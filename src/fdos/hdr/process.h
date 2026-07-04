@@ -50,11 +50,11 @@ typedef struct {
     } _load;
     struct {
       UWORD env_seg;
-      CommandTail FAR *cmd_line;
-      fcb FAR *fcb_1;
-      fcb FAR *fcb_2;
-      BYTE FAR *stack;
-      BYTE FAR *start_addr;
+      dos_far_ptr cmd_line;
+      dos_far_ptr fcb_1;
+      dos_far_ptr fcb_2;
+      dos_far_ptr stack;
+      dos_far_ptr start_addr;
     } _exec;
   } ldata;
 } exec_blk;
@@ -82,9 +82,9 @@ typedef struct {
   UWORD ps_parent;              /* 16 parent psp segment           */
   UBYTE ps_files[20];           /* 18 file table - 0xff is unused  */
   UWORD ps_environ;             /* 2c environment paragraph        */
-  BYTE FAR *ps_stack;           /* 2e user stack pointer - int 21  */
+  dos_far_ptr ps_stack;         /* 2e user stack pointer - int 21  */
   UWORD ps_maxfiles;            /* 32 maximum open files           */
-  UBYTE FAR *ps_filetab;        /* 34 open file table pointer      */
+  dos_far_ptr ps_filetab;       /* 34 open file table pointer      */
   dos_far_ptr ps_prevpsp;       /* 38 previous psp pointer         */
   UBYTE ps_dbcs_inputmode;      /* 3c unused,see int21/6301h/6302h */
   UBYTE ps_truename;            /* 3d unused,append truename flag int2f/B711h */

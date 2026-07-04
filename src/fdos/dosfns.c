@@ -380,7 +380,7 @@ int get_sft_idx(unsigned hndl)
   if (hndl >= p->ps_maxfiles)
     return DE_INVLDHNDL;
 
-  idx = p->ps_filetab[hndl];
+  idx = ((UBYTE *) ARM_PTR(p->ps_filetab))[hndl];
   return idx == 0xff ? DE_INVLDHNDL : idx;
 }
 
@@ -735,7 +735,7 @@ struct dhdr *IsDevice(const char *fname)
 STATIC long get_free_hndl(void)
 {
   psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  UBYTE *q = p->ps_filetab;
+  UBYTE *q = (UBYTE *) ARM_PTR(p->ps_filetab);
   UBYTE *r = (UBYTE *)memchr(q, 0xff, p->ps_maxfiles);
   if (r == NULL) return DE_TOOMANY;
   return (unsigned)(r - q);
@@ -768,7 +768,7 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
     return result;
 
   p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  p->ps_filetab[hndl] = (UBYTE)result;
+  ((UBYTE *) ARM_PTR(p->ps_filetab))[hndl] = (UBYTE)result;
   return hndl | (result & 0xffff0000l);
 }
 
