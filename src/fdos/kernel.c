@@ -1042,10 +1042,10 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
   else if (dhp->dh_attr & ATTR_CLOCK)
     LoL->clock = x86_dhp;
 
-  CPU_SP += sizeof(request);
+  CPU_SP += sizeof(request) + cmdlen;
   return FALSE;
 ok:
-  CPU_SP += sizeof(request);
+  CPU_SP += sizeof(request) + cmdlen;
   return TRUE;
 }
 

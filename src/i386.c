@@ -986,7 +986,7 @@ static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
 	cpu->ifetch.laddr = laddr & (~4095ul);
 	cpu->ifetch.xaddr = res.addr1 ^ laddr;
 	if (!in_iomem(res.addr1)
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
 	 && res.addr1 + 15 < phys_mem_size
 #endif
 	) {

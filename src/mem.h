@@ -13,7 +13,7 @@
 
 #define PC_RAM ((uint8_t*)0x11000000)
 #define PC_RAM32 ((uint32_t*)0x11000000)
-#define CHECH_RAM_BOARDER_ENABLED 1
+#define CHECK_RAM_BOARDER_ENABLED 0
 extern unsigned long phys_mem_size;
 extern void* g_pc;
 
@@ -42,7 +42,7 @@ static inline uint8_t __attribute__((always_inline)) pload8(uint32_t addr)
         return *ems_host_ptr(addr);
     }
 #endif
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
 		return 0xFF;
 	}
@@ -60,7 +60,7 @@ static inline uint16_t __attribute__((always_inline)) pload16(uint32_t addr)
         return *(uint16_t*)ems_host_ptr(addr);
     }
 #endif
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
 		return 0xFFFF;
 	}
@@ -78,7 +78,7 @@ static inline uint32_t __attribute__((always_inline)) pload32(uint32_t addr)
         return *(uint32_t*)ems_host_ptr(addr);
     }
 #endif
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
 		return 0xFFFFFFFF;
 	}
@@ -97,7 +97,7 @@ static inline void __attribute__((always_inline)) pstore8(uint32_t addr, uint8_t
         return;
     }
 #endif
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
 		return;
 	}
@@ -116,7 +116,7 @@ static inline void __attribute__((always_inline)) pstore16(uint32_t addr, uint16
         return;
     }
 #endif
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
 		return;
 	}
@@ -135,7 +135,7 @@ static inline void __attribute__((always_inline)) pstore32(uint32_t addr, uint32
         return;
     }
 #endif
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
 	if (unlikely(addr >= phys_mem_size)) {
 		return;
 	}
@@ -175,7 +175,7 @@ pstore_block(uint32_t dst, uint32_t src, int len)
 #endif
 
     if (likely(!VGA_WINDOW(dst) && !VGA_WINDOW(dst + len - 1))) {
-#if CHECH_RAM_BOARDER_ENABLED
+#if CHECK_RAM_BOARDER_ENABLED
         if (unlikely((uint32_t)(dst + len) > phys_mem_size)) return false;
 #endif
         const uint8_t *s = PC_RAM + src;
