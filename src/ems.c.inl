@@ -4,9 +4,6 @@
 #define EMS_PSRAM_OFFSET ((EMU_MEM_SIZE_MB * 1024 - 2048ul) << 10)
 #define EMS ((uint8_t*)0x11000000 + EMS_PSRAM_OFFSET)
 
-#define EMS_START (0xD0000ul)
-#define EMS_END   (0xE0000ul)
-
 extern uint8_t ems_pages[4];
 
 static inline uint32_t physical_address(const uint32_t address) {

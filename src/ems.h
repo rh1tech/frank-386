@@ -20,10 +20,6 @@
 #define EMS_PSRAM_OFFSET ((EMU_MEM_SIZE_MB * 1024 - 2048ul) << 10)
 #define EMS_BASE_PTR     ((uint8_t *)0x11000000 + EMS_PSRAM_OFFSET)
 
-/* Guest physical window occupied by the four 16-KB EMS frames */
-#define EMS_START  (0xD0000ul)
-#define EMS_END    (0xE0000ul)
-
 /* Page-selector array — defined once in pc.c */
 extern uint8_t ems_pages[4];
 

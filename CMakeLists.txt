@@ -348,7 +348,11 @@ elseif(AUDIO_TYPE STREQUAL "PWM")
 endif()
 
 if(EMM)
-    target_compile_definitions(${BUILD_NAME} PRIVATE EMULATE_LTEMS=1)
+    target_compile_definitions(${BUILD_NAME} PRIVATE
+        EMULATE_LTEMS=1
+        EMS_START=0xC0000ul
+        EMS_END=0xD0000ul
+    )
 endif()
 target_compile_definitions(${BUILD_NAME} PRIVATE
     #I386_MODE=1
