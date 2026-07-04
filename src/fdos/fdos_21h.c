@@ -451,8 +451,7 @@ bool fdos_21h(CPU* _cpu) {
             internal_data->CritErrCode = CPU_AX;
           goto error_carry;
         }
-        cf = 0;
-        break;
+        goto short_check;
 
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       // BX = existing handle (old), CX = handle to redirect (new)

@@ -140,7 +140,7 @@ dos_far_ptr DetectXMSDriver(void)
     bios_intcall(cpu, 0x2F);
     dos_far_ptr entry = MK_FP(CPU_ES, CPU_BX);
     CPU_BX = save_bx;
-    SET_ES(save_es);
+    SET_ES ( save_es );
     return entry;
 }
 

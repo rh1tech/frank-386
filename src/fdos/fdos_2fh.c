@@ -264,6 +264,7 @@ umb_t *get_free_umb_block(const uint16_t size) {
 }
 
 static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
+//    printf("xms_handler(%02xh)\n", CPU_AH);
     switch (CPU_AH) {
         case XMS_VERSION:
             // Get XMS Version
@@ -424,9 +425,10 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             break;
     }
 
-    SET_CS ( read86(((u32)CPU_SS << 4) + CPU_SP + 2) );
-    CPU_IP = read86(((u32)CPU_SS << 4) + CPU_SP);
+    SET_CS ( readw86(((u32)CPU_SS << 4) + CPU_SP + 2) );
+    CPU_IP = readw86(((u32)CPU_SS << 4) + CPU_SP);
     CPU_SP += 4;
+//    printf("xms_handler RETF to %04x:%04x\n", CPU_CS, CPU_IP);
     return false;
 }
 
@@ -450,7 +452,8 @@ bool fdos_2fh(CPU* cpu) {
         CPU_BX = params.expected_ip ;
     }
     else { 
-        /// TODO: no_handler(cpu);
+        /// TODO:
+         no_handler(cpu);
     }
     return true;
 }
