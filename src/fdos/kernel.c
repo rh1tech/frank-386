@@ -796,10 +796,7 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
   printf("cpu_far_call @ CS:IP=%04x:%04x SS:SP=%04x:%04x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP);
 
   set_bios_callback(cpu, &params, true);
-/*
-  printf("cpu_far_call callback node=%p ret=%04x:%04x chain=%p done=%d\n",
-         &params, params.expected_cs, params.expected_ip,
-         params.chain, params.done); */
+  printf("cpu_far_call callback node=%p ret=%04x:%04x\n",  &params, params.expected_cs, params.expected_ip);
   /* Emulate exactly what "CALL FAR seg:off" pushes: CS, then IP (so
      that RETF - which pops IP, then CS - lands back here). */
   CPU_SP -= 2;
@@ -845,7 +842,7 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
    byte-for-byte compatible with real, unmodified .SYS driver files).
 */
 static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far_ptr x86_dhp) {
- // ifl = 1;
+  ifl = 0;
  // df = 0;
   /*
    * C analogue of FreeDOS kernel/execrh.asm.

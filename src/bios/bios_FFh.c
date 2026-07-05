@@ -28,6 +28,7 @@ bool bios_FFh(CPU* cpu) { // W/A BIOS callback
             return node->callback(cpu, node);
         }
     }
+    printf("no callback found, let try default\n");
     return bios_no_callback(cpu, &root);
 }
 
