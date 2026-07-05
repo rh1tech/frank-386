@@ -2623,7 +2623,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define EFLAGS_MASK_86  0x0fd7
 #define EFLAGS_MASK_186 0x0fd7
-#define EFLAGS_MASK_286 0x7fd7
+#define EFLAGS_MASK_286 0x0fd7
 #define EFLAGS_MASK_386 0x37fd7
 #define EFLAGS_MASK_486 0x77fd7
 #define EFLAGS_MASK_586 0x277fd7

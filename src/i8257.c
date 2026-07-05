@@ -314,14 +314,15 @@ void __not_in_flash_func(i8257_dma_hold_DREQ)(IsaDma *obj, int nchan)
     // НЕ вызываем i8257_dma_run — это сделает pc_step
 }
 
-void i8257_dma_release_DREQ(IsaDma *obj, int nchan)
+// core1
+void __not_in_flash_func(i8257_dma_release_DREQ)(IsaDma *obj, int nchan)
 {
     I8257State *d = I8257(obj);
     int ichan;
 
     ichan = nchan & 3;
     d->status &= ~(1 << (ichan + 4));
-    i8257_dma_run(d);
+    // НЕ вызываем i8257_dma_run — это сделает pc_step
 }
 
 static void __not_in_flash_func(i8257_channel_run)(I8257State *d, int ichan)

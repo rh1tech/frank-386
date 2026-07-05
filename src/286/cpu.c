@@ -351,7 +351,9 @@ static INLINE void writerm8(CPU* cpu, uint8_t rmval, uint8_t value) {
 }
 
 static INLINE uint16_t makeflagsword(CPU* cpu) {
-    return 2 | (cpu->flags.value & cpu->flags_mask);
+    if (cpu->gen == 2)
+        return 2 | (cpu->flags.value & cpu->flags_mask);
+    return 0xF002 | cpu->flags.value;
 }
 
 static INLINE void decodeflagsword(CPU* cpu, uint16_t x) {

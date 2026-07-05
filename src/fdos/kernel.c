@@ -230,7 +230,7 @@ KernelConfig InitKernelConfig = {
     .Version_Revision = 43,
     .Version_Release = 1,
     .CheckDebugger = 0,
-    .Verbose = 1, ////
+    .Verbose = 0,
     .PartitionMode = 0x1F
 };
 
@@ -793,10 +793,10 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
     .expected_ip = 0x000F,
     .done = false,
   };
-  printf("cpu_far_call @ CS:IP=%04x:%04x SS:SP=%04x:%04x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP);
+///  printf("cpu_far_call @ CS:IP=%04x:%04x SS:SP=%04x:%04x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP);
 
   set_bios_callback(cpu, &params, true);
-  printf("cpu_far_call callback node=%p ret=%04x:%04x\n",  &params, params.expected_cs, params.expected_ip);
+///  printf("cpu_far_call callback node=%p ret=%04x:%04x\n",  &params, params.expected_cs, params.expected_ip);
   /* Emulate exactly what "CALL FAR seg:off" pushes: CS, then IP (so
      that RETF - which pops IP, then CS - lands back here). */
   CPU_SP -= 2;
