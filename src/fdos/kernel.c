@@ -796,17 +796,19 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
   printf("cpu_far_call @ CS:IP=%04x:%04x SS:SP=%04x:%04x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP);
 
   set_bios_callback(cpu, &params, true);
-
+/*
   printf("cpu_far_call callback node=%p ret=%04x:%04x chain=%p done=%d\n",
          &params, params.expected_cs, params.expected_ip,
-         params.chain, params.done);
+         params.chain, params.done); */
   /* Emulate exactly what "CALL FAR seg:off" pushes: CS, then IP (so
      that RETF - which pops IP, then CS - lands back here). */
   CPU_SP -= 2;
-  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, params.expected_cs);
+  putmem8(CPU_SS, CPU_SP, params.expected_cs & 0xff);
+  putmem8(CPU_SS, (CPU_SP + 1) & 0xffff, params.expected_cs >> 8);
   CPU_SP -= 2;
-  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, params.expected_ip);
-  
+  putmem8(CPU_SS, CPU_SP, params.expected_ip & 0xff);
+  putmem8(CPU_SS, (CPU_SP + 1) & 0xffff, params.expected_ip >> 8);
+
   SET_CS(seg);
   SET_IP(off);
 

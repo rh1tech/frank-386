@@ -94,5 +94,5 @@ bool bios_05h(CPU* cpu) {
     else
         pstore8(0x500, 0x00);
 
-        return true;
+    return true;
 }

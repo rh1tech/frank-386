@@ -1483,6 +1483,8 @@ void bios_post(PC *pc) {
 
 // like VGA BIOS banner:
 	vga_bios_baner(pc->cpu);
+// BREAKPOINT (no DOS/BIOS support)
+	point2iret(0x03);
 //  do not trap custom timer (to be overriden by DOS)
 	point2iret(0x1C);
 	point2iret(0x77);

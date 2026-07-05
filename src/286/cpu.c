@@ -60,7 +60,8 @@ void cpu_enable_fpu(CPU* cpu);
 
 static INLINE void push(CPU* cpu, uint16_t pushval) {
     CPU_SP = CPU_SP - 2;
-    putmem16(CPU_SS, CPU_SP, pushval);
+    putmem8(CPU_SS, CPU_SP, pushval & 0xff);
+    putmem8(CPU_SS, (CPU_SP + 1) & 0xffff, pushval >> 8);
 }
 
 static void reset(CPU* cpu) {
@@ -292,7 +293,8 @@ __not_in_flash() void getea(CPU* cpu, uint8_t rmval) {
 }
 
 static INLINE uint16_t pop(CPU* cpu) {
-    uint16_t tempval = getmem16(CPU_SS, CPU_SP);
+    uint16_t tempval = getmem8(CPU_SS, CPU_SP)
+                     | ((uint16_t)getmem8(CPU_SS, (CPU_SP + 1) & 0xffff) << 8);
     CPU_SP = CPU_SP + 2;
     return tempval;
 }
@@ -358,7 +360,7 @@ static INLINE void decodeflagsword(CPU* cpu, uint16_t x) {
 
 static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
     #if 1
-    {
+    if (intnum != 0x1C && intnum != 0x08) {
         char buf[80];
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
         u16 new_ip = getmem16(0, (uint16_t) intnum * 4);
