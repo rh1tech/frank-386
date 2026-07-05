@@ -429,7 +429,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
     }
 
     SET_CS ( readw86(((u32)CPU_SS << 4) + CPU_SP + 2) );
-    CPU_IP = readw86(((u32)CPU_SS << 4) + CPU_SP);
+    SET_IP ( readw86(((u32)CPU_SS << 4) + CPU_SP) );
     CPU_SP += 4;
 //    printf("xms_handler RETF to %04x:%04x\n", CPU_CS, CPU_IP);
     return false;
