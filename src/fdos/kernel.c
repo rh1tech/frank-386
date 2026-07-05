@@ -843,14 +843,78 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
    byte-for-byte compatible with real, unmodified .SYS driver files).
 */
 static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far_ptr x86_dhp) {
+  /*
+   * C analogue of FreeDOS kernel/execrh.asm.
+   *
+   * Original flow:
+   *   push si
+   *   push ds
+   *   lds  si,[dhp]     ; DS:SI = device header
+   *   les  bx,[rhp]     ; ES:BX = request header
+   *   mov  ax,[si+6]    ; strategy offset
+   *   mov  [dhp],ax     ; far ptr keeps original segment
+   *   push si
+   *   push di
+   *   call far [dhp]
+   *   pop  di
+   *   pop  si
+   *   mov  ax,[si+8]    ; interrupt offset
+   *   mov  [dhp],ax
+   *   call far [dhp]
+   *   sti
+   *   cld
+   *   pop  ds
+   *   pop  si
+   */
+
   UWORD hdr_seg = FP_SEG(x86_dhp);
+  UWORD hdr_off = FP_OFF(x86_dhp);
+
+  /* push si; push ds */
+  CPU_SP -= 2;
+  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_SI);
+  CPU_SP -= 2;
+  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_DS);
+
+  /* lds si,[dhp] */
+  SET_DS ( hdr_seg );
+  CPU_SI = hdr_off;
+
+  /* les bx,[rhp] */
   SET_ES ( FP_SEG(x86_rq) );
   CPU_BX = FP_OFF(x86_rq);
+
   printf("x86_execrh: dh_strategy @ %04x:%04x stack: %04x:%04x\n", hdr_seg, dhp->x86.dh_strategy, CPU_SS, CPU_SP);
-  printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n", CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
+  printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n",
+       CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
+
+  /* push si; push di */
+  CPU_SP -= 2;
+  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_SI);
+  CPU_SP -= 2;
+  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_DI);
+
   cpu_far_call(cpu, hdr_seg, dhp->x86.dh_strategy);
+
+  /* pop di; pop si */
+  CPU_DI = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
+  CPU_SP += 2;
+  CPU_SI = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
+  CPU_SP += 2;
+
   printf("x86_execrh: dh_interrupt @ %04x:%04x\n", hdr_seg, dhp->x86.dh_interrupt);
   cpu_far_call(cpu, hdr_seg, dhp->x86.dh_interrupt);
+
+  /* sti; cld */
+  cpu->flags.value |= IF;
+  cpu->flags.value &= ~DF;
+
+  /* pop ds; pop si */
+  SET_DS(readw86(((uint32_t)CPU_SS << 4) + CPU_SP));
+  CPU_SP += 2;
+  CPU_SI = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
+  CPU_SP += 2;
+
   printf("x86_execrh: done\n");
 }
 
