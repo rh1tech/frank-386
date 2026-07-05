@@ -69,13 +69,6 @@
 void modregrm(CPU* cpu);
 void getea(CPU* cpu, uint8_t rmval);
 
-inline static void print_line2(const char* s, int row, int col) {
-    if (!s) return;
-    for (; col < 80 && *s; ++col) {
-        print_char(*s++, row, col);
-    }
-}
-
 #define CPU_ES cpu->ext_accessors->get_seg16(cpu, SEG_ES)
 #define CPU_CS cpu->ext_accessors->get_seg16(cpu, SEG_CS)
 #define CPU_SS cpu->ext_accessors->get_seg16(cpu, SEG_SS)

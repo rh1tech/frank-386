@@ -27,7 +27,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum) {
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
         u16 new_ip = getmem16(0, (uint16_t) intnum * 4);
         int snprintf(char *s, size_t n, const char *fmt, ...);
-        snprintf(buf, 79, "INT %02Xh ARM? %04X:%04X->%04X:%04X AX:%04X", intnum, cs, ip, params.expected_cs, params.expected_ip, CPU_AX);
+        snprintf(buf, 79, "INT %02Xh ARM? %04X:%04X->%04X:%04X AX:%04X  ", intnum, cs, ip, params.expected_cs, params.expected_ip, CPU_AX);
         print_line(buf, 0);
     }
     // to handle IRET by intcall_waiter:

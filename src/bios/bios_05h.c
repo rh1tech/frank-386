@@ -23,7 +23,7 @@ bool bios_05h(CPU* cpu) {
     uint16_t ret_cs = getmem16(CPU_SS, CPU_SP + 4);
 
     if (getmem8(ret_cs, ret_ip) == 0x62) {
-        print_line("BOUND EXCEPTION", 0);
+        print_line("BOUND EXCEPTION ! ", 0);
         #if 0
         CPU_IP += 1;
         /* Set IF=1 in the flags word already pushed on stack by intcall86,

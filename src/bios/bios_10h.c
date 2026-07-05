@@ -1680,27 +1680,11 @@ static bool bios_10h_09h(CPU* cpu)
     return true;
 }
 
-/*
-AH = 0Eh
-AL = character to write
-BH = page number
-BL = foreground color (graphics modes only)
-
-Return:
-Nothing
-
-Desc: Display a character on the screen, advancing the cursor and scrolling the screen as necessary
-
-Notes: Characters 07h (BEL), 08h (BS), 0Ah (LF), and 0Dh (CR) are interpreted and do the expected things.
- IBM PC ROMs dated 1981/4/24 and 1981/10/19 require that BH be the same as the current active page
-*/
-static bool bios_10h_0Eh(CPU* cpu) {
-    uint8_t ch = CPU_AL;
+bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page) {
     uint8_t mode = read86(0x449);
     uint16_t cols = readw86(0x44A);
     uint16_t page_size = readw86(0x44C);
     uint8_t active_page = read86(0x462);
-    uint8_t page = CPU_BH;
     uint8_t rows_minus_1 = read86(0x484);
     if (cols == 0)
         cols = 80;
@@ -1792,6 +1776,24 @@ static bool bios_10h_0Eh(CPU* cpu) {
     writew86(0x450 + ((uint16_t)page * 2), cur);
     bios_10h_set_crtc_cursor(cpu, page, row, col);
     return true;
+}
+
+/* TELETYPE OUTPUT
+AH = 0Eh
+AL = character to write
+BH = page number
+BL = foreground color (graphics modes only)
+
+Return:
+Nothing
+
+Desc: Display a character on the screen, advancing the cursor and scrolling the screen as necessary
+
+Notes: Characters 07h (BEL), 08h (BS), 0Ah (LF), and 0Dh (CR) are interpreted and do the expected things.
+ IBM PC ROMs dated 1981/4/24 and 1981/10/19 require that BH be the same as the current active page
+*/
+static bool bios_10h_0Eh(CPU* cpu) {
+    return bios_teletype(cpu, CPU_AL, CPU_BH);
 }
 
 /*

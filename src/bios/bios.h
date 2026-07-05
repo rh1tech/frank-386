@@ -30,6 +30,7 @@ bool set_bios_callback(CPU*, bios_callback_params_t*, bool reenter);
 bool drop_bios_callback(CPU*, bios_callback_params_t*);
 void bios_intcall(CPU*, uint8_t); // sync call
 
+bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page);
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9
 void bios_10h_install_rom_fonts(CPU*); // INT 10h support
 void vga_bios_baner(CPU* cpu);

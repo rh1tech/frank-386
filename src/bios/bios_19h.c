@@ -175,14 +175,14 @@ extern struct PC* pc;
 void pc_step(struct PC* pc, size_t max_ops);
 
 bool bios_19h(CPU* cpu) {
-    print_line("Press Win+F12 to enter Setup", 1);
+    print_line("Press Win+F12 to enter Setup ", 1);
     SET_CS ( 0xFFEF ); // -> FFEFF
     SET_IP ( 0x000F );
     set_bios_callback(cpu, &params, false);
     while(!params.done) {
         pc_step(pc, 4096);
     }
-    print_line("                            ", 1);
+    print_line("                             ", 1);
     print_line(" ", 2);
     drop_bios_callback(cpu, &params);
     params.done = false;
