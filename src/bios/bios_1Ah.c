@@ -99,7 +99,7 @@ bool bios_1Ah(CPU* cpu)
     }
 ret:
     flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
-                   | (cpu->flags.value & 0x0041); // set them back from CPU
+                   | (cpu_getflags(cpu) & 0x0041); // set them back from CPU
     writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
     return true;
 }

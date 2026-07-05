@@ -312,7 +312,7 @@ static void save_ctx(CPU * cpu, struct saved_cpu_ctx *s)
   s->ax = CPU_AX; s->bx = CPU_BX; s->cx = CPU_CX; s->dx = CPU_DX;
   s->si = CPU_SI; s->di = CPU_DI; s->bp = CPU_BP; s->sp = CPU_SP;
   s->cs = CPU_CS; s->ds = CPU_DS; s->es = CPU_ES; s->ss = CPU_SS;
-  s->ip = CPU_IP; s->flags = cpu->flags.value;
+  s->ip = CPU_IP; s->flags = cpu_getflags(cpu);
 }
 
 static void restore_ctx(CPU * cpu, struct saved_cpu_ctx *s)
@@ -322,7 +322,7 @@ static void restore_ctx(CPU * cpu, struct saved_cpu_ctx *s)
   SET_DS(s->ds); SET_ES(s->es);
   CPU_AX = s->ax; CPU_BX = s->bx; CPU_CX = s->cx; CPU_DX = s->dx;
   CPU_SI = s->si; CPU_DI = s->di; CPU_BP = s->bp;
-  cpu->flags.value = s->flags;
+  cpu_setflags(cpu, s->flags, 0xFFFF);
 }
 
 /* Called synchronously from INT 20h and INT 21h AH=00h/4Ch (see
@@ -368,9 +368,7 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   CPU_DI = FP_OFF(stack);
   CPU_BP = 0x091e;               /* matches upstream: some programs
                                      expect 0x09 in BP's high byte */
-  cpu->flags.value = 0x0200;     /* IF=1, everything else clear
-                                     (including CF - the child starts
-                                     "successful") */
+  ifl = 1; /* IF=1, everything else clear (including CF - the child starts "successful") */
 
   terminate_flag = false;
   while (!terminate_flag)

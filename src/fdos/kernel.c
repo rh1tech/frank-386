@@ -845,7 +845,8 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
    byte-for-byte compatible with real, unmodified .SYS driver files).
 */
 static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far_ptr x86_dhp) {
-  ifl = 0;    /* no async IRQ while calling driver entry */  
+ // ifl = 1;
+ // df = 0;
   /*
    * C analogue of FreeDOS kernel/execrh.asm.
    *

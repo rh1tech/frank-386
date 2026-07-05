@@ -3410,7 +3410,7 @@ bool bios_10h(CPU* cpu) {
 err:
     cf = 1; // unsuported unknown function
     flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
-                   | (cpu->flags.value & 0x0041); // set them back from CPU
+                   | (cpu_getflags(cpu) & 0x0041); // set them back from CPU
     writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
 ok:
     return true;
