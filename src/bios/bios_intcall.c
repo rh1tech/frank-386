@@ -10,7 +10,7 @@ static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
 }
 
 extern struct PC* pc;
-void pc_step(struct PC* pc);
+void pc_step(struct PC* pc, size_t max_ops);
 
 void bios_intcall(CPU* cpu, uint8_t intnum) {
     u16 cs = CPU_CS;
@@ -36,7 +36,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum) {
     // set CS:IP/flags, prep stack, and on IRET will recover
     cpu_intcall(cpu, intnum);
     while(!params.done) {
-        pc_step(pc);
+        pc_step(pc, 10); /// TODO: a lot of?
     }
     drop_bios_callback(cpu, &params);
     params.done = false;

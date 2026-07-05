@@ -753,7 +753,7 @@ const static struct lol lol = {
    them (there is no shared header for it) - see that file for the
    INT-call counterpart of the mechanism used below. */
 extern struct PC* pc;
-void pc_step(struct PC* pc);
+void pc_step(struct PC* pc, size_t max_ops);
 
 /*
    cpu_far_call_waiter() - bios_callback_params_t callback fired when
@@ -793,21 +793,35 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
     .expected_ip = 0x000F,
     .done = false,
   };
+  printf("cpu_far_call @ CS:IP=%04x:%04x SS:SP=%04x:%04x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP);
 
   set_bios_callback(cpu, &params, true);
 
+  printf("cpu_far_call callback node=%p ret=%04x:%04x chain=%p done=%d\n",
+         &params, params.expected_cs, params.expected_ip,
+         params.chain, params.done);
   /* Emulate exactly what "CALL FAR seg:off" pushes: CS, then IP (so
      that RETF - which pops IP, then CS - lands back here). */
   CPU_SP -= 2;
   writew86(((uint32_t)CPU_SS << 4) + CPU_SP, params.expected_cs);
   CPU_SP -= 2;
   writew86(((uint32_t)CPU_SS << 4) + CPU_SP, params.expected_ip);
-
+  
   SET_CS(seg);
   SET_IP(off);
 
-  while (!params.done)
-    pc_step(pc);
+  while (!params.done) {
+    pc_step(pc, 4096);
+    /*
+    if (CPU_CS == params.expected_cs && CPU_IP == params.expected_ip) {
+        printf("cpu_far_call reached return %04x:%04x SP=%04x\n",
+               CPU_CS, CPU_IP, CPU_SP);
+    }
+    u8 op = pload8((((u32)(CPU_CS)) << 4) + CPU_IP);
+    printf("cpu_far_call waits x86 on CS:IP=%04x:%04x SS:SP=%04x:%04x opcode=%02x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP, op);
+    sleep_ms(1000);
+    */
+  }
 
   drop_bios_callback(cpu, &params);
   SET_CS(save_cs);
@@ -832,15 +846,19 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   UWORD hdr_seg = FP_SEG(x86_dhp);
   SET_ES ( FP_SEG(x86_rq) );
   CPU_BX = FP_OFF(x86_rq);
+  printf("x86_execrh: dh_strategy @ %04x:%04x stack: %04x:%04x\n", hdr_seg, dhp->x86.dh_strategy, CPU_SS, CPU_SP);
+  printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n", CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
   cpu_far_call(cpu, hdr_seg, dhp->x86.dh_strategy);
+  printf("x86_execrh: dh_interrupt @ %04x:%04x\n", hdr_seg, dhp->x86.dh_interrupt);
   cpu_far_call(cpu, hdr_seg, dhp->x86.dh_interrupt);
+  printf("x86_execrh: done\n");
 }
 
 /// TODO: dos_far_ptr rq
 WORD ASMPASCAL execrh(request* rq, /*struct dhdr*/ dos_far_ptr _dhp) {
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(_dhp);
   if (dhp->dh_attr & ATTR_NATIVE) {
-      dhp->arm.dh_interrupt(rq);
+    dhp->arm.dh_interrupt(rq);
   } else {
     x86_execrh(linear_to_far(rq), dhp, _dhp);
   }

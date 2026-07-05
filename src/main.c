@@ -1105,7 +1105,7 @@ int main(void) {
 
         // Run CPU steps - batch multiple steps for efficiency
         for (int i = 0; i < 10; i++) {
-            pc_step(pc);
+            pc_step(pc, 4096);
         }
 
         // Poll keyboard less frequently (every 20 iterations ~5ms)

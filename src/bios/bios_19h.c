@@ -172,7 +172,7 @@ static bios_callback_params_t params = {
 };
 
 extern struct PC* pc;
-void pc_step(struct PC* pc);
+void pc_step(struct PC* pc, size_t max_ops);
 
 bool bios_19h(CPU* cpu) {
     print_line("Press Win+F12 to enter Setup", 1);
@@ -180,7 +180,7 @@ bool bios_19h(CPU* cpu) {
     SET_IP ( 0x000F );
     set_bios_callback(cpu, &params, false);
     while(!params.done) {
-        pc_step(pc);
+        pc_step(pc, 4096);
     }
     print_line("                            ", 1);
     print_line(" ", 2);

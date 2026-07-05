@@ -758,7 +758,7 @@ void pc_vga_step(void *o)
 	}
 }
 
-void __not_in_flash_func(pc_step)(PC *pc)
+void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
 {
 	/* reset_request is handled in main.c via load_bios_and_reset() */
 	int refresh = vga_step(pc->vga);
@@ -778,13 +778,15 @@ void __not_in_flash_func(pc_step)(PC *pc)
 			pc->full_update = 0;
 	}
 	if (pc->paused) return;
+	if (max_ops > 4096) max_ops = 4096;
 	if (pc->adlib_enabled) {
-		for (int i = 0; i < 409; ++i) {
-			cpu_step(pc->cpu, 10);
+		int i = 0;
+		do  {
+			cpu_step(pc->cpu, max_ops > 10 ? 10 : max_ops);
 			adlib_core0(pc->adlib);
-		}
+		} while ( ++i < max_ops / 10 );
 	} else {
-		cpu_step(pc->cpu, 4096);
+		cpu_step(pc->cpu, max_ops);
 	}
 
 #if 0

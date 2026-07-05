@@ -25,7 +25,7 @@
 /* pc_step()/pc - same declaration bios/bios_intcall.c and
    kernel.c's cpu_far_call() use; there is no shared header for it. */
 extern struct PC* pc;
-void pc_step(struct PC* pc);
+void pc_step(struct PC* pc, size_t max_ops);
 
 #define ExeHeader (*(exe_header *)(SecPathName + 0))
 #define TempExeBlock (*(exec_blk *)(SecPathName + sizeof(exe_header)))
@@ -374,7 +374,7 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
 
   terminate_flag = false;
   while (!terminate_flag)
-    pc_step(pc);
+    pc_step(pc, 4096);
   terminate_flag = saved_terminate_flag;
 
   /* --- child terminated: free its resources (return_user()'s

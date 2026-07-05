@@ -944,6 +944,8 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
         if (!cpu->bios) {
             u32 ip32 = (((u32)CPU_CS << 4) + CPU_IP);
             if ((ip32 >> 8) == 0xFFE) {
+            //    printf("fake BIOS trap phys=%05lx int=%02x CS:IP=%04x:%04x\n",
+            //           (unsigned long)ip32, (uint8_t)ip32, CPU_CS, CPU_IP);
                 if (rp2350_bios_handler(cpu, (uint8_t)ip32)) { // normal flow IRET is expected
                     CPU_IP = 0x0006;
                     CPU_CS = 0xFFF0; // reusable IRET (pc.c)
