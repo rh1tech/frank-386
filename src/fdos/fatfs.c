@@ -916,7 +916,7 @@ STATIC int rqblockio(unsigned char command, struct dpb FAR * dpbp)
 
   if (command == C_BLDBPB) /* help USBASPI.SYS & DI1000DD.SYS (TE) */
     MediaReqHdrD.r_bpfat = DiskTransferBuffer;
-  execrh((request FAR *) & MediaReqHdrD, dpbp->dpb_device);
+  execrh(linear_to_far( &MediaReqHdrD ), dpbp->dpb_device);
   if ((MediaReqHdrD.r_status & S_ERROR) || !(MediaReqHdrD.r_status & S_DONE))
   {
     FOREVER

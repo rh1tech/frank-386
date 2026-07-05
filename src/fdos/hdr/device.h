@@ -530,13 +530,7 @@ COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice, int mo
 /* sysclk.c */
 WORD ASMCFUNC FAR clk_driver(rqptr rp);
 
-/* execrh.asm */
-#if defined(__WATCOMC__) && _M_IX86 >= 300
-WORD execrh(request FAR *, struct dhdr FAR *);
-#pragma aux execrh "^" __parm __reverse __routine [] __modify [__ax __bx __cx __dx __es __fs __gs]
-#else
-WORD ASMPASCAL execrh(request FAR * rq, /*struct dhdr*/ dos_far_ptr _dhp);
-#endif
+WORD execrh(/*request*/ dos_far_ptr rq, /*struct dhdr*/ dos_far_ptr dhp);
 
 /*
  *      end of device.h

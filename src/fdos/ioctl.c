@@ -263,7 +263,7 @@ int DosDevIOctl(lregs * r)
   CharReqHdr.r_length = sizeof(request);
   CharReqHdr.r_status = 0;
 
-  execrh(&CharReqHdr, x86_dev);
+  execrh(linear_to_far( &CharReqHdr ), x86_dev);
 
   if (CharReqHdr.r_status & S_ERROR)
   {

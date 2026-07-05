@@ -98,7 +98,7 @@ STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
   CharReqHdr.r_unit = 0;
   CharReqHdr.r_status = 0;
   CharReqHdr.r_length = sizeof(request);
-  execrh(&CharReqHdr, *pdev);
+  execrh(linear_to_far( &CharReqHdr ), *pdev);
   if (CharReqHdr.r_status & S_ERROR)
   {
     for (;;) {

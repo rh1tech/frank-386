@@ -50,11 +50,6 @@
     request packet. Migrated from blockio.c.
 
     Differences from the original:
-      - "buf" is a native ARM pointer here (matching r_trans's type,
-        see linear_to_far()/blockio() above), not a far pointer; the
-        HMA-deblocking special case below uses linear_to_far() to get
-        a far pointer only where one is actually needed (fmemcpy()/the
-        FP_SEG() >= 0xa000 test).
       - block_error()/CriticalError() are minimal stubs in this
         codebase (always FAIL, see fdos_21h.c) - there is no
         interactive Abort/Retry/Ignore yet, so a disk error here
@@ -128,30 +123,14 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
       IoReqHdrD.r_trans = LoL->deblock_buf;
       if (mode == DSKWRITE)
         fmemcpy(LoL->deblock_buf, buf, dpbp->dpb_secsize);
-      execrh(&IoReqHdrD, dpbp->dpb_device);
+      execrh(linear_to_far( &IoReqHdrD ), dpbp->dpb_device);
       if (mode == DSKREAD)
         fmemcpy(buf, LoL->deblock_buf, dpbp->dpb_secsize);
     }
     else
     {
       IoReqHdrD.r_trans = buf;
-/*
-      if (is_guest_ptr(buf))
-      {
-        dos_far_ptr fp = linear_to_far(buf);
-        UWORD seg = FP_SEG(fp);
-        UWORD off = FP_OFF(fp);
-        ULONG linear1 = ((ULONG)seg << 4) + off;
-        ULONG linear2 = (ULONG)((uintptr_t)buf - (uintptr_t)X86_RAM_BASE);
-        ULONG len = (ULONG)numblocks * dpbp->dpb_secsize;
-
-        printf("dskxfer %s dsk=%d blk=%lu cnt=%u sec=%u bufp=%p fp=%04X:%04X lin_fp=%05lX lin_ptr=%05lX end=%05lX\n",
-               mode == DSKREAD ? "READ" : "WRITE",
-               dsk, (unsigned long)blkno, numblocks, dpbp->dpb_secsize,
-               buf, seg, off, linear1, linear2, linear2 + len);
-      }
-*/      
-      execrh(&IoReqHdrD, dpbp->dpb_device);
+      execrh(linear_to_far( &IoReqHdrD ), dpbp->dpb_device);
     }
     if ((IoReqHdrD.r_status & (S_ERROR | S_DONE)) == S_DONE)
       break;

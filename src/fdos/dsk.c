@@ -206,16 +206,6 @@ STATIC int ddt_LBA_to_CHS(ULONG LBA_address, struct CHS *chs,
 /*
     Test for 64K boundary crossing and return count small enough not
     to exceed the threshold.
-
-    Migrated from DMA_max_transfer() in dsk.c, but adapted to this
-    platform: see linear_to_far() above for why r_trans buffers are
-    normalized to a small offset (< 0x10) before being loaded into
-    CPU_ES/CPU_BX. With that normalization the boundary is effectively
-    never hit (bios_13h's int13_transfer_lba() also walks a plain linear
-    address, with no real-8086 same-segment wraparound to guard against
-    here), but the check is kept so the control flow still matches the
-    original algorithm and stays correct if buffer addressing changes
-    later.
 */
 STATIC unsigned DMA_max_transfer(dos_far_ptr buffer, unsigned count)
 {
@@ -295,12 +285,6 @@ STATIC int LBA_Transfer(CPU* cpu,
   UWORD bytes_sector = pddt->ddt_bpb.bpb_nbyte;   /* bytes per sector, usually 512 */
 
   *transferred = 0;
-
-  /* buffer is range-checked lazily: DMA_max_transfer() and
-     linear_to_far() below both call linear_to_far() on every loop
-     iteration before buffer is ever loaded into a CPU register, so
-     an out-of-range buffer is caught (panic-halt, see linear_to_far())
-     before any guest memory access happens. */
 
   /// TODO: low-level track format (LBA_FORMAT) is not implemented yet.
   if (mode == LBA_FORMAT)

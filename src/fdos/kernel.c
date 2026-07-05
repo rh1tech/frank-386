@@ -854,13 +854,13 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   printf("x86_execrh: done\n");
 }
 
-/// TODO: dos_far_ptr rq
-WORD ASMPASCAL execrh(request* rq, /*struct dhdr*/ dos_far_ptr _dhp) {
+WORD execrh(/*request*/ dos_far_ptr _rq, /*struct dhdr*/ dos_far_ptr _dhp) {
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(_dhp);
+  request* rq = (request*)ARM_PTR(_rq);
   if (dhp->dh_attr & ATTR_NATIVE) {
     dhp->arm.dh_interrupt(rq);
   } else {
-    x86_execrh(linear_to_far(rq), dhp, _dhp);
+    x86_execrh(_rq, dhp, _dhp);
   }
   return rq->r_status;
 }
@@ -1009,7 +1009,7 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
   rq->r_bpbptr = x86_cmdline;
   rq->r_firstunit = LoL->nblkdev;
 
-  execrh(rq, x86_dhp);
+  execrh(x86_rq, x86_dhp);
 
 /*
  *  Added needed Error handle
