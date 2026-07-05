@@ -39,14 +39,12 @@ bool bios_08h(CPU* cpu)
         }
     }
     /* 3: chain to INT 1Ch (user tick hook)
-    Moved to: void load_bios_and_reset(PC *pc)
     int 1Ch
     out 20h, 20h
     iret    
     */
+    bios_intcall(cpu, 0x1C);
+    cpu_portout8(0x20, 0x20);
 
-    SET_CS ( 0xFFF0 );
-    SET_IP ( 0x0000 );
-
-    return false;
+    return true;
 }

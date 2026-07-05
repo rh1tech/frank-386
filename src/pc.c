@@ -1383,14 +1383,8 @@ void bios_post(PC *pc) {
 		pstore16(ipa*4, ipa);
 		pstore16(ipa*4 + 2, 0xFFE0);
 	}
-// IRQ0: Timer specific W/A
-    pstore8(0xFFF00, 0xCD); // INT 1Ch
-    pstore8(0xFFF01, 0x1C);
-    pstore8(0xFFF02, 0xB0); // MOV AL, 20h
-    pstore8(0xFFF03, 0x20);
-    pstore8(0xFFF04, 0xE6); // OUT 20h, AL  <- EOI
-    pstore8(0xFFF05, 0x20);
-    pstore8(0xFFF06, 0xCF); // IRET 0xFFF0:0006 - reusable IRET
+ // reusable IRET
+    pstore8(0xFFF06, 0xCF);
 // IRQ1 INT 15h/4Fh keyboard intercept stub: 0xFFF70..0xFFF7A
 //   0xFFF70 = scratch byte (scan code, written by bios_09h phase1)
 //   0xFFF71 = stub entry point

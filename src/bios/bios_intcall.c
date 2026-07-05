@@ -22,7 +22,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum) {
         .done = false
     };
     set_bios_callback(cpu, &params, true);
-    {
+    if (intnum != 0x1C) {
         char buf[80];
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
         u16 new_ip = getmem16(0, (uint16_t) intnum * 4);
