@@ -1615,7 +1615,10 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   while (FP_OFF(next_dhp) != 0xffff)
   {
     struct dhdr *p = (struct dhdr *) ARM_PTR(dhp);
-    p->dh_attr &= ~ATTR_NATIVE; /// TODO: imaging how native drivers should load
+    /* /// TODO:
+     native external drivers need a separate load path, e.g. DEVICENATIVE.
+     ATTR_NATIVE cannot be trusted in disk-loaded DOS driver headers. */
+    p->dh_attr &= ~ATTR_NATIVE;
     if ((result = init_device(dhp, szBuf, mode, &top)) != SUCCESS) {
       break;
     }

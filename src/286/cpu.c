@@ -29,10 +29,12 @@ void set_reg8(struct CPU* cpu, u8 regn, u8 v);
 void set_reg16(struct CPU* cpu, u8 regn, u16 v);
 void set_reg32(struct CPU* cpu, u8 regn, u32 v);
 static u16 IRAM_ATTR get_seg16(const struct CPU* _cpu, u8 segn) {
-	return segregs32[segn];
+    (void)_cpu;
+	return getsegreg(segn);
 }
 static void IRAM_ATTR set_seg16(struct CPU* _cpu, u8 segn, u16 v) {
-	segregs32[segn] = v;
+    (void)_cpu;
+    putsegreg(segn, v);
 }
 static void IRAM_ATTR set_flag(CPU* cpu, u32 mask, bool val)
 {
