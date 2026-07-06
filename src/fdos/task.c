@@ -405,9 +405,14 @@ STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
   p->ps_parent = internal_data->cu_psp;
   p->ps_prevpsp = MK_FP(internal_data->cu_psp, 0);
 
-  if (mode == EXEC_LOADNGO)
-    return exec_run_child(exp->exec.start_addr, exp->exec.stack,
-                          ds, fcbcode, ds);
+  if (mode == EXEC_LOADNGO) {
+    CfgDbgPrintf(("LOAD psp=%04x entry=%04x:%04x stack=%04x:%04x ds=%04x ax=%04x\n",
+                  ds,
+                  FP_SEG(exp->exec.start_addr), FP_OFF(exp->exec.start_addr),
+                  FP_SEG(exp->exec.stack), FP_OFF(exp->exec.stack),
+                  ds, fcbcode));
+    return exec_run_child(exp->exec.start_addr, exp->exec.stack, ds, fcbcode, ds);
+  }
 
   /* mode == EXEC_LOAD: don't run it, just hand the caller back the
      entry point/stack we computed (exp->exec.start_addr/stack) plus
@@ -811,9 +816,7 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
       ct->ctCount = endp - tailp - 2;
       exb.exec.cmd_line = linear_to_far(ct);
     }
-#ifdef DEBUG
-    DebugPrintf(("Process 0 starting: %s%s\n\n", Shell, tailp + 2));
-#endif
+    CfgDbgPrintf(("EXEC file='%s' tail='%s'\n", Shell, tailp + 2));
     res_DosExec(mode, &exb, Shell);
     /* only reached once the shell terminates (or couldn't be
        started at all) - matches upstream: P_0's loop always falls

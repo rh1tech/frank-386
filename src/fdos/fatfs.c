@@ -639,7 +639,8 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
   update_pointers:
     ret_cnt += xfr_cnt;
     to_xfer -= xfr_cnt;
-    buffer += xfr_cnt;
+    x86_buffer = ADD_OFF(x86_buffer, xfr_cnt);
+    buffer = ARM_PTR (x86_buffer);
     if (mode == XFR_WRITE)
     {
       if (fnp->f_offset > fnp->f_dir.dir_size)

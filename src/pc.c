@@ -1488,6 +1488,8 @@ void bios_post(PC *pc) {
 	point2iret(0x21);
 	point2iret(0x29);
 	point2iret(0x2f);
+// IRQ14 - HARD DISK CONTROLLER OPERATION COMPLETE (AT and later)
+	point2iret(0x76);
 
 //	bios_19h(pc->cpu);
     pstore8(0xFFFF0, 0xCD); // INT 19h - bootstrap

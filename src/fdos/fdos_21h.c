@@ -309,6 +309,18 @@ bool fdos_21h(CPU* _cpu) {
         }
       }
       break;
+        /* Get Interrupt Vector                                         */
+      case 0x35:
+      {
+        /* AL = interrupt number.  Return current vector in ES:BX.
+           Upstream handles this in the re-entrant INT 21h front path as
+           p = getvec(AL); ES = FP_SEG(p); BX = FP_OFF(p). */
+        uint32_t vec = (uint32_t)CPU_AL * 4u;
+        CPU_BX = pload16(vec);
+        SET_ES(pload16(vec + 2u));
+        cf = 0;
+      }
+        break;
 
       case 0x37: /* DOS 2+ - SWITCHAR - GET/SET SWITCH CHARACTER */
         switch (CPU_AL) {
@@ -395,6 +407,7 @@ bool fdos_21h(CPU* _cpu) {
         }
       }
         break;
+
      case 0x3f: // DOS 2+ - READ - READ FROM FILE OR DEVICE
       {
         /* BX = file handle, CX = byte count, DS:DX = buffer.
