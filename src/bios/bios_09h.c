@@ -28,8 +28,47 @@
 #define IRQ1_STUB_CS  0xFFF0u
 #define IRQ1_STUB_IP  0x0071u    /* CS:IP = 0xFFF0:0071 → phys 0xFFF71 */
 
+static uint16_t translate_bios_key(uint8_t scan, uint8_t ascii, uint8_t flags) {
+    bool shift = (flags & (KBD_FLAG_LSHIFT | KBD_FLAG_RSHIFT)) != 0;
+    bool ctrl  = (flags & KBD_FLAG_CTRL) != 0;
+    bool alt   = (flags & KBD_FLAG_ALT) != 0;
+    /* BIOS-compatible scan codes for modified function keys.
+     * F1..F10 are 3B00..4400 without modifiers. Since these keys already
+     * have ASCII=00h, Alt/Ctrl/Shift are encoded by changing the scan byte.
+     */
+    if (scan >= 0x3B && scan <= 0x44) {
+        if (alt)
+            return (uint16_t)(0x68u + (scan - 0x3Bu)) << 8;
+        if (ctrl)
+            return (uint16_t)(0x5Eu + (scan - 0x3Bu)) << 8;
+        if (shift)
+            return (uint16_t)(0x54u + (scan - 0x3Bu)) << 8;
+    }
+    /* F11/F12 enhanced keyboard scan codes. */
+    if (scan == 0x57 || scan == 0x58) {
+        uint8_t n = scan - 0x57u;
+        if (alt)
+            return (uint16_t)(0x8Bu + n) << 8;
+        if (ctrl)
+            return (uint16_t)(0x89u + n) << 8;
+        if (shift)
+            return (uint16_t)(0x87u + n) << 8;
+        return (uint16_t)(0x85u + n) << 8;
+    }
+    return ((uint16_t)scan << 8) | ascii;
+}
+
 static char scan_to_ascii(uint8_t scan, bool shift, bool ctrl, bool caps)
 {
+    /* Keypad operator keys have BIOS ASCII even though their set-1
+     * scan codes are outside the main alphanumeric table.  Some DOS
+     * programs ignore scan-only 4A00/4E00 and expect 4A2D/4E2B. */
+    switch (scan) {
+    case 0x37: return '*';
+    case 0x4A: return '-';
+    case 0x4E: return '+';
+    default: break;
+    }    
     if (ctrl) {
         char base;
         /* Ctrl+A..Ctrl+Z */
@@ -191,7 +230,7 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
             shift ^= 1;
         
         uint8_t ascii = (uint8_t)scan_to_ascii(scan, shift, ctrl, caps);
-        uint16_t ax = ((uint16_t)scan << 8) | ascii;
+        uint16_t ax = translate_bios_key(scan, ascii, flags);
 
         if (flags1 & KF1_LAST_E0) {
             /* E0+1Ch = extended Enter → 0xE00D (SeaBIOS key_ext_enter) */

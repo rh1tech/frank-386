@@ -33,6 +33,7 @@ typedef struct CPUI386 {
 	uword excerr;
 
 	const char *bios;
+	bool native_done;
 
 #if PREFETCH_ENABLED
 /* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
@@ -3992,6 +3993,8 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
   OptAddr meml;
   uword addr;
   for (; stepcount > 0; stepcount--) {
+	if (cpu->native_done) break;
+
 	if (!cpu->bios && (!(cpu->cr0 & 1) || (cpu->flags & VM))) {
 		u32 phys = cpu->seg[SEG_CS].base + (cpu->next_ip & 0xffffu);
 		if ((phys >> 8) == 0xFFE) {

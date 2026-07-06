@@ -766,7 +766,9 @@ void pc_step(struct PC* pc, size_t max_ops);
 */
 static bool cpu_far_call_waiter(CPU* cpu, bios_callback_params_t* params) {
     if (!params->done) {
+        ifl = 0; // no IRQ alloweed this time
         params->done = true;
+        cpu->native_done = true;
     }
     return false;
 }
@@ -794,7 +796,7 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
     .done = false,
   };
 ///  printf("cpu_far_call @ CS:IP=%04x:%04x SS:SP=%04x:%04x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP);
-
+  cpu->native_done = false;
   set_bios_callback(cpu, &params, true);
 ///  printf("cpu_far_call callback node=%p ret=%04x:%04x\n",  &params, params.expected_cs, params.expected_ip);
   /* Emulate exactly what "CALL FAR seg:off" pushes: CS, then IP (so
@@ -810,7 +812,7 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
   SET_IP(off);
 
   while (!params.done) {
-    pc_step(pc, 4096);
+    pc_step(pc, 4096); /// ???
     /*
     if (CPU_CS == params.expected_cs && CPU_IP == params.expected_ip) {
         printf("cpu_far_call reached return %04x:%04x SP=%04x\n",
@@ -821,7 +823,7 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
     sleep_ms(1000);
     */
   }
-
+  cpu->native_done = false;
   drop_bios_callback(cpu, &params);
   SET_CS(save_cs);
   SET_IP(save_ip);
@@ -842,8 +844,9 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
    byte-for-byte compatible with real, unmodified .SYS driver files).
 */
 static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far_ptr x86_dhp) {
-  ifl = 0;
- // df = 0;
+  bool ifl_old = ifl;
+//  ifl = 1;
+//  df = 0;
   /*
    * C analogue of FreeDOS kernel/execrh.asm.
    *
@@ -871,7 +874,15 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   UWORD hdr_seg = FP_SEG(x86_dhp);
   UWORD hdr_off = FP_OFF(x86_dhp);
 
-  /* push si; push ds */
+  /* push bp; mov bp,sp; push si; push ds
+   *
+   * Match FreeDOS execrh.asm prologue. Some real drivers do not
+   * preserve BP; execrh must preserve the caller's BP across both
+   * driver entry points.
+   */
+  CPU_SP -= 2;
+  writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_BP);
+  CPU_BP = CPU_SP;
   CPU_SP -= 2;
   writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_SI);
   CPU_SP -= 2;
@@ -886,8 +897,7 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   CPU_BX = FP_OFF(x86_rq);
 
   printf("x86_execrh: dh_strategy @ %04x:%04x stack: %04x:%04x\n", hdr_seg, dhp->x86.dh_strategy, CPU_SS, CPU_SP);
-  printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n",
-       CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
+  printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n", CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
 
   /* push si; push di */
   CPU_SP -= 2;
@@ -896,6 +906,7 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_DI);
 
   cpu_far_call(cpu, hdr_seg, dhp->x86.dh_strategy);
+  ifl = ifl_old;
 
   /* pop di; pop si */
   CPU_DI = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
@@ -915,7 +926,8 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   CPU_SP += 2;
   CPU_SI = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
   CPU_SP += 2;
-
+  CPU_BP = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
+  CPU_SP += 2;
   printf("x86_execrh: done\n");
 }
 

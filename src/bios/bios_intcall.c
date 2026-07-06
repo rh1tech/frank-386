@@ -3,9 +3,12 @@
 
 static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
     if (!params->done) {
+        ifl = 0; /// no more IRQ till return to normal flow
         params->done = true;
+        cpu->native_done = true;
+    } else {
+        ifl = 1; // allow IRQ
     }
-//    ifl = 1; // allow IRQ ?
     return false; // in a loop on the same CS:IP, no IRET required there
 }
 
@@ -33,12 +36,16 @@ void bios_intcall(CPU* cpu, uint8_t intnum) {
     // to handle IRET by intcall_waiter:
     SET_CS ( params.expected_cs ); // -> FFEFF
     SET_IP ( params.expected_ip );
+    bool old_ifl = ifl;
     // set CS:IP/flags, prep stack, and on IRET will recover
     cpu_intcall(cpu, intnum);
+    cpu->native_done = false;
     while(!params.done) {
-        pc_step(pc, 10); /// TODO: a lot of?
+        pc_step(pc, 4096); /// TODO: a lot of?
     }
+    cpu->native_done = false;
     drop_bios_callback(cpu, &params);
+    ifl = old_ifl;
     params.done = false;
     // restore initial CS:IP
     SET_CS (cs);

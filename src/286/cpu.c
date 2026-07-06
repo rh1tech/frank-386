@@ -361,7 +361,7 @@ static INLINE void decodeflagsword(CPU* cpu, uint16_t x) {
 }
 
 static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
-    #if 0
+    #if 1
     if (intnum != 0x10 && intnum != 0x1C && intnum != 0x08) {
         char buf[80];
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
@@ -940,6 +940,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
     static bool was_TF;
 
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
+        if (cpu->native_done) break;
         if ((cpu->flags.value & IF) && cpu->intr) {
             cpu->intr = false;
             int no = cpu->cb.pic_read_irq(cpu->cb.pic);

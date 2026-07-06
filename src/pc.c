@@ -999,6 +999,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 		cpu_install_bios_handlers(pc->cpu);
 	}
 	pc->vga_bios = conf->vga_bios;
+	pc->cpu->native_done = false;
 	pc->enable_serial = conf->enable_serial;
 #if !defined(_WIN32) && !defined(__wasm__)
 	if (pc->enable_serial)

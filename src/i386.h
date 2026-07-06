@@ -164,6 +164,7 @@ struct CPU {
 	uword excerr;
 
 	const char *bios;
+	bool native_done;
 
 #if PREFETCH_ENABLED
 /* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.

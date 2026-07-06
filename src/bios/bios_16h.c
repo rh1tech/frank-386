@@ -53,11 +53,30 @@ bool bios_16h_store_key(uint16_t ax)
     return true;
 }
 
+/* INT 16h AH=00h/01h are the legacy keyboard functions.  Enhanced
+ * keyboard keys are stored with AL=E0h for AH=10h/11h, but many old DOS
+ * programs only test AL==00h before using AH as the scan code.  Convert
+ * the enhanced marker to the legacy marker for AH=00h/01h only. */
+static uint16_t kbd_legacy_ax(uint16_t ax)
+{
+    return ((ax & 0x00ffu) == 0x00e0u) ? (ax & 0xff00u) : ax;
+}
+
 bool bios_16h(CPU* cpu)
 {
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
     case 0x00: /* read keystroke */
+        if (kbd_empty()) {// rеenter to the same call, so sometimes IRQ 1 will call INT 9h and update BDA area
+            /* Set IF=1 in the flags word already pushed on stack by intcall86,
+            * so that after any IRQ's IRET we still have interrupts enabled. */
+            writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack | 0x0200); /* IF bit */
+            ifl = 1; /* allow IRQs while waiting for keypress */
+            return false;
+        }
+        CPU_AX = kbd_legacy_ax(kbd_pop());
+        return true;
+
     case 0x10: /* enhanced read keystroke */
         if (kbd_empty()) {// rеenter to the same call, so sometimes IRQ 1 will call INT 9h and update BDA area
             /* Set IF=1 in the flags word already pushed on stack by intcall86,
@@ -70,6 +89,15 @@ bool bios_16h(CPU* cpu)
         return true;
 
     case 0x01: /* check keystroke */
+        cf = 0;  // ← явно сбросить CF (W/A)
+        if (kbd_empty()) {
+            zf = 1;
+            goto rt;
+        }
+        CPU_AX = kbd_legacy_ax(kbd_peek());
+        zf = 0;
+        goto rt;
+
     case 0x11: /* enhanced check keystroke */
         cf = 0;  // ← явно сбросить CF (W/A)
         if (kbd_empty()) {
