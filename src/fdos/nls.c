@@ -33,7 +33,7 @@ ULONG call_nls(UWORD bp,
     CPU_DX = cntry;
     CPU_BX = cp;
     CPU_AX = (0x14u << 8) | (subfct & 0x00ff);
-    bios_intcall(cpu, 0x2F);
+    bios_intcall(cpu, 0x2F, "NLS 2F");
     ULONG res =((ULONG)CPU_BX << 16) | CPU_AX;
     cpu_restore_regs(cpu, &regs);
     return res;

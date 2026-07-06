@@ -104,28 +104,32 @@ void reset_umb() {
 
 int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size)
 {
+    int res;
+    u16 save_ax = CPU_AX;
+    u16 save_bx = CPU_BX;
+    u16 save_dx = CPU_DX;
     CPU_DX = 0xffff;
     CPU_AX = 0x1000;
-
     cpu_far_call(cpu, FP_SEG(driverAddress), FP_OFF(driverAddress));
-
-    if (CPU_BL != 0xb0)
-        return 0;
-
-    if (CPU_DX == 0)
-        return 0;
-
+    if (CPU_BL != 0xb0 || CPU_DX == 0) {
+        res = 0;
+        goto ret;
+    }
     CPU_AX = 0x1000;
     /* DX оставляем равным largest size */
     cpu_far_call(cpu, FP_SEG(driverAddress), FP_OFF(driverAddress));
-
-    if (CPU_AX != 1)
-        return 0;
-
+    if (CPU_AX != 1) {
+        res = 0;
+        goto ret;
+    }
     *seg = CPU_BX;
     *size = CPU_DX;
-
-    return CPU_AX;
+    res = CPU_AX;
+ret:
+    CPU_AX = save_ax;
+    CPU_BX = save_bx;
+    CPU_DX = save_dx;
+    return res;
 }
 
 static inline void xms_move_to(register uint32_t destination, register uint32_t source, register uint32_t length) {
@@ -443,7 +447,8 @@ bool fdos_2fh(CPU* cpu) {
         .callback = xms_handler,
         .expected_cs = 0xF000,
         .expected_ip = 0xFEFF,
-        .done = false
+        .done = false,
+        .owner = "INT 2fH"
     };
     if (CPU_AX == 0x4300)
         CPU_AL = 0x80;

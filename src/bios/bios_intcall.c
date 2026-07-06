@@ -1,7 +1,13 @@
+#include <pico.h>
+#include <hardware/gpio.h>
 #include "286/cpu.h"
 #include "bios/bios.h"
 
+const char* last_int_call = "NONE";
+
 static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
+    gpio_put(PICO_DEFAULT_LED_PIN, 1);
+    last_int_call = params->owner;
     if (!params->done) {
         ifl = 0; /// no more IRQ till return to normal flow
         params->done = true;
@@ -15,14 +21,15 @@ static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
 extern struct PC* pc;
 void pc_step(struct PC* pc, size_t max_ops);
 
-void bios_intcall(CPU* cpu, uint8_t intnum) {
+void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     u16 cs = CPU_CS;
     u16 ip = CPU_IP;
     bios_callback_params_t params = {
         .callback = intcall_waiter,
         .expected_cs = 0xFFEF, // just default, may be changed
         .expected_ip = 0x000F, // by set_bios_callback reenter=true
-        .done = false
+        .done = false,
+        .owner = owner
     };
     set_bios_callback(cpu, &params, true);
     if (intnum != 0x1C) {
@@ -50,4 +57,5 @@ void bios_intcall(CPU* cpu, uint8_t intnum) {
     // restore initial CS:IP
     SET_CS (cs);
     SET_IP (ip);
+    gpio_put(PICO_DEFAULT_LED_PIN, 0);
 }

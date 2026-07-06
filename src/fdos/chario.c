@@ -190,13 +190,14 @@ int ndread(dos_far_ptr *pdev)
  */
 STATIC void fast_put_char(unsigned char chr)
 {
-  CPU_regs saved;
-  cpu_save_regs(cpu, &saved);
-  CPU_AH = 0x0e;
-  CPU_AL = chr;
-  CPU_BX = 0x0007;
-  bios_intcall(cpu, 0x10);
-  cpu_restore_regs(cpu, &saved);
+//  CPU_regs saved;
+//  cpu_save_regs(cpu, &saved);
+//  CPU_AH = 0x0e;
+//  CPU_AL = chr;
+//  CPU_BX = 0x0007;
+//  bios_intcall(cpu, 0x10, "PUT CHAR 10h");
+//  cpu_restore_regs(cpu, &saved);
+  bios_teletype(cpu, chr, 0);
 }
 
 void update_scr_pos(unsigned char c, unsigned char count)

@@ -28,7 +28,7 @@ bool bios_1Ah(CPU*); // Time/Date services
 bool bios_FFh(CPU*); // W/A BIOS callback
 bool set_bios_callback(CPU*, bios_callback_params_t*, bool reenter);
 bool drop_bios_callback(CPU*, bios_callback_params_t*);
-void bios_intcall(CPU*, uint8_t); // sync call
+void bios_intcall(CPU*, uint8_t, const char*); // sync call
 
 bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page);
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9

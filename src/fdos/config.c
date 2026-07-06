@@ -616,7 +616,7 @@ STATIC VOID Dosmem(BYTE * pLine)
 }
 
 static unsigned init_oem(void) {
-  bios_intcall(cpu, 0x12);
+  bios_intcall(cpu, 0x12, "OEM 12h");
   return CPU_AX;
 }
 
@@ -650,7 +650,7 @@ STATIC void umb_init(void)
 
     /* reset root */
     /* Note: since device drivers can change what is considered top of memory (e.g. move XBDA) we must requery */
-    ram_top = init_oem();
+    ram_top = pload16(0x413); /// it was init_oem();
     LoL->uppermem_root = ram_top * 64 - 1;
 
     /* create link mcb (below) */
@@ -964,13 +964,13 @@ STATIC void ClearScreen(unsigned char attr)
   rows = peekb(0x40, 0x84);
   if (rows == 0) rows = 24;
   CPU_DH = rows;
-  bios_intcall(cpu, 0x10);
+  bios_intcall(cpu, 0x10, "CLS");
 
   /* move cursor to pos 0,0: */
   CPU_AH = 0x02; /* set cursorpos */
   CPU_BH = 0;    /* displaypage: */
   CPU_DX = 0;  /* pos 0,0 */
-  bios_intcall(cpu, 0x10);
+  bios_intcall(cpu, 0x10, "CLS");
   MenuColor = attr;
 }
 
@@ -1113,7 +1113,7 @@ STATIC VOID sysScreenMode(BYTE * pLine)
   CPU_AH = nFunc; /* set videomode */
   CPU_AL = nMode;
   CPU_BL = 0;
-  bios_intcall(cpu, 0x10);
+  bios_intcall(cpu, 0x10, "MODE");
 }
 
 STATIC VOID sysVersion(BYTE * pLine)
@@ -1615,6 +1615,19 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   while (FP_OFF(next_dhp) != 0xffff)
   {
     struct dhdr *p = (struct dhdr *) ARM_PTR(dhp);
+
+    UBYTE *img = (UBYTE *) ARM_PTR(dhp);
+
+    /* One-shot check of the loaded x86 device header before init_device()
+       and before x86_execrh() can execute dh_strategy.  Keep it to one
+       line: header signature, header fields, and first bytes at strategy. */
+    CfgDbgPrintf(("DEVHDR %04x:%04x sig=%02x%02x%02x%02x attr=%04x strat=%04x intr=%04x op=%02x%02x%02x%02x%02x\n",
+                  FP_SEG(dhp), FP_OFF(dhp),
+                  img[0], img[1], img[2], img[3],
+                  p->dh_attr, p->x86.dh_strategy, p->x86.dh_interrupt,
+                  img[p->x86.dh_strategy + 0], img[p->x86.dh_strategy + 1],
+                  img[p->x86.dh_strategy + 2], img[p->x86.dh_strategy + 3],
+                  img[p->x86.dh_strategy + 4]));    
     /* /// TODO:
      native external drivers need a separate load path, e.g. DEVICENATIVE.
      ATTR_NATIVE cannot be trusted in disk-loaded DOS driver headers. */
@@ -1636,10 +1649,6 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 
     dhp = next_dhp;
   }
-
-  /* might have been the UMB driver or DOS=UMB */
-  if (UmbState == 2)
-    umb_init();
 
   return result;
 }
@@ -2052,26 +2061,33 @@ VOID DoConfig(int nPass)
 #define GetBiosTime() pload32(0x46c)
 UWORD GetBiosKey(int timeout)
 {
-  iregs r;
+  ULONG res;
+  CPU_regs saved;
   ULONG startTime = GetBiosTime();
+  cpu_save_regs(cpu, &saved);
   if (timeout >= 0)
   {
     do
     {
       /* optionally HLT here - timer will IRQ even if no keypress */
       CPU_AX = 0x0100;             /* are there keys available ? */
-      bios_intcall(cpu, 0x16);
+      bios_intcall(cpu, 0x16, "GetBiosKey");
       if (!zf) {
         CPU_AX = 0x0000;
-        bios_intcall(cpu, 0x16);
-        return CPU_AX;
+        bios_intcall(cpu, 0x16, "GetBiosKey");
+        goto ok;
       }
     } while ((unsigned)(GetBiosTime() - startTime) < timeout * 18u);
-    return 0xffff;
+    res = 0xffff;
+    goto ret;
   }
   CPU_AX = 0x0000;
-  bios_intcall(cpu, 0x16);
-  return CPU_AX;
+  bios_intcall(cpu, 0x16, "GetBiosKey");
+ok:
+  res = CPU_AX;
+ret:
+  cpu_restore_regs(cpu, &saved);
+  return res;
 }
 
 STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)

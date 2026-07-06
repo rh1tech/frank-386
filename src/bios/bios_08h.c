@@ -43,7 +43,7 @@ bool bios_08h(CPU* cpu)
     out 20h, 20h
     iret    
     */
-    bios_intcall(cpu, 0x1C);
+    bios_intcall(cpu, 0x1C, "IRQ0/INT8/INT1C");
     cpu_portout8(0x20, 0x20);
 
     return true;

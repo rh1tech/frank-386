@@ -10,7 +10,8 @@ static bool bios_18h_waiter(CPU* cpu, bios_callback_params_t* any) {
 static bios_callback_params_t params = {
     .callback = bios_18h_waiter,
     .expected_cs = 0xFFE0,
-    .expected_ip = 0x00FF
+    .expected_ip = 0x00FF,
+    .owner = "INT 18H"
 };
 
 bool bios_18h(CPU* cpu) {

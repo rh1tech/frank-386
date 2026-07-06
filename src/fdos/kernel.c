@@ -19,7 +19,8 @@ static bool waiter(CPU* cpu, bios_callback_params_t* any) {
 static bios_callback_params_t params = {
     .callback = waiter,
     .expected_cs = 0xF000,
-    .expected_ip = 0xFEFF
+    .expected_ip = 0xFEFF,
+    .owner = "FAR CALL"
 };
 
 int	vsnprintf (char *__restrict, size_t, const char *__restrict, __gnuc_va_list)
@@ -236,20 +237,25 @@ KernelConfig InitKernelConfig = {
 
 ULONG lseek(int fd, long position)
 {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_BX = (UWORD)fd;
     CPU_CX = (UWORD)((ULONG)position >> 16);
     CPU_DX = (UWORD)((ULONG)position & 0xffff);
     CPU_AX = 0x4200;   /* origin = start of file */
-    bios_intcall(cpu, 0x21);
-    if (cf)
-        return (ULONG)-1;
-    return ((ULONG)CPU_DX << 16) | CPU_AX;
+    bios_intcall(cpu, 0x21, "LSEEK");
+    ULONG res = cf ? (ULONG)-1 : ((ULONG)CPU_DX << 16) | CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 void keycheck(void)
 {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_AH = 0x01;
-    bios_intcall(cpu, 0x16);
+    bios_intcall(cpu, 0x16, "KEYCHECK");
+    cpu_restore_regs(cpu, &saved);
 }
 
 static void ConIntr(request FAR *rq) {
@@ -263,10 +269,10 @@ static void ConIntr(request FAR *rq) {
         cpu_save_regs(cpu, &saved);
         while (1) {
             CPU_AH = 0x01;          /* INT 16h: check keystroke */
-            bios_intcall(cpu, 0x16);
+            bios_intcall(cpu, 0x16, "CON INTR");
             if (zf) break;          /* ZF=1: buffer empty */
             CPU_AH = 0x00;          /* INT 16h: read and discard */
-            bios_intcall(cpu, 0x16);
+            bios_intcall(cpu, 0x16, "CON INTR");
         }
         cpu_restore_regs(cpu, &saved);
         rq_done(rq);
@@ -276,7 +282,7 @@ static void ConIntr(request FAR *rq) {
         /* non-destructive peek: S_BUSY if no key, else set r_ndbyte */
         cpu_save_regs(cpu, &saved);
         CPU_AH = 0x01;              /* INT 16h AH=01h: check keystroke */
-        bios_intcall(cpu, 0x16);
+        bios_intcall(cpu, 0x16, "C_NDREAD");
         if (zf) {
             /* no key in buffer */
             rq->r_status = S_DONE | S_BUSY;
@@ -291,7 +297,7 @@ static void ConIntr(request FAR *rq) {
         /* input status: S_BUSY if no key waiting */
         cpu_save_regs(cpu, &saved);
         CPU_AH = 0x01;
-        bios_intcall(cpu, 0x16);
+        bios_intcall(cpu, 0x16, "C_ISTAT");
         rq->r_status = zf ? (S_DONE | S_BUSY) : S_DONE;
         cpu_restore_regs(cpu, &saved);
         break;
@@ -300,7 +306,7 @@ static void ConIntr(request FAR *rq) {
         /* blocking read: wait until a key is available */
         cpu_save_regs(cpu, &saved);
         CPU_AH = 0x00;              /* INT 16h AH=00h: read keystroke */
-        bios_intcall(cpu, 0x16);    /* returns false (re-enters) until key ready */
+        bios_intcall(cpu, 0x16, "C_INPUT");    /* returns false (re-enters) until key ready */
         if (rq->r_count > 0 && EFFECTIVE(rq->r_trans)) {
             BYTE FAR *p = ARM_PTR(rq->r_trans);
             *p = CPU_AL;
@@ -323,7 +329,7 @@ static void ConIntr(request FAR *rq) {
                 CPU_AH = 0x0E;
                 CPU_AL = *p++;
                 CPU_BX = 0x0007;    /* page 0, attribute 7 */
-                bios_intcall(cpu, 0x10);
+                bios_intcall(cpu, 0x10, "C_OUTVFY/C_OUTPUT");
             }
         }
         cpu_restore_regs(cpu, &saved);
@@ -1161,7 +1167,7 @@ static void set_DTA(dos_far_ptr p) {
     CPU_AH = 0x1A; // Set Current DTA
     SET_DS (FP_SEG(p));
     CPU_DX = p.offset;
-    bios_intcall(cpu, 0x21);
+    bios_intcall(cpu, 0x21, "DTA");
 }
 
 dos_far_ptr getvec(uint8_t intno) {
@@ -1319,45 +1325,65 @@ dos_far_ptr linear_to_far(const void *p)
 }
 
 int init_setdrive(int drive) {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_AH = 0x0e;
     CPU_DX = drive;
-    bios_intcall(cpu, 0x21);
-    return CPU_AL;          /* number of potentially valid drives */
+    bios_intcall(cpu, 0x21, "SET DRIVE");
+    int res = CPU_AL;          /* number of potentially valid drives */
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 int init_DosOpen(dos_far_ptr pathname, int flags) {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     SET_DS (FP_SEG(pathname));
     CPU_DX = FP_OFF(pathname);
     CPU_AL = flags & 0xff;
     CPU_AH = 0x3d;          /* DOS open */
-    bios_intcall(cpu, 0x21);
-    return cf ? -1 : CPU_AX;          /* file handle */
+    bios_intcall(cpu, 0x21, "I_OPEN");
+    int res = cf ? -1 : CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 int dup2(int oldfd, int newfd)
 {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_AH = 0x46;      /* Force duplicate file handle */
     CPU_BX = oldfd;
     CPU_CX = newfd;
-    bios_intcall(cpu, 0x21);
-    return cf ? -1 : CPU_AX;
+    bios_intcall(cpu, 0x21, "DUP2");
+    int res = cf ? -1 : CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 int read(int fd, dos_far_ptr dst, COUNT sz) {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_AH = 0x3F;
     CPU_BX = fd;
     CPU_CX = sz;
     CPU_DX = dst.offset;
     SET_DS ( dst.segment );
-    bios_intcall(cpu, 0x21);
-    return cf ? -1 : CPU_AX;
+    bios_intcall(cpu, 0x21, "READ");
+    int res = cf ? -1 : CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 int close(int fd) {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_AH = 0x3E;
     CPU_BX = fd;
-    bios_intcall(cpu, 0x21);
-    return cf ? -1 : CPU_AX;
+    bios_intcall(cpu, 0x21, "CLOSE");
+    int res = cf ? -1 : CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 /*

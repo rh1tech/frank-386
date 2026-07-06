@@ -12,8 +12,11 @@ static bool bios_00h_waiter(CPU* cpu, bios_callback_params_t* any) {
 static bios_callback_params_t params = {
     .callback = bios_00h_waiter,
     .expected_cs = 0xFFE0,
-    .expected_ip = 0x00FF
+    .expected_ip = 0x00FF,
+    .owner = "INT 00H"
 };
+
+extern const char* last_int_call;
 
 /**
  * INT 00 - CPU-generated - DIVIDE ERROR
@@ -27,6 +30,7 @@ Notes:	on an 8086/8088, the return address points to the following instruction
  */
 bool bios_00h(CPU* cpu) {
 	printf("\nDivide overflow at %04X:%04X\n", CPU_CS, CPU_IP);
+	printf("Last int_call %s\n", last_int_call);
     SET_CS ( 0xFFF0 ); // -> FFF74: INT FFh
     SET_IP ( 0x0074 );
     set_bios_callback(cpu, &params, false);

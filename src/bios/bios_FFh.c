@@ -12,6 +12,7 @@ while(1); // remove it
 
 static bios_callback_params_t root = {
     .callback = bios_no_callback,
+    .owner = "ROOT"
 };
 
 // assigned to 0xFFEFF address (FFE0: 00FF)

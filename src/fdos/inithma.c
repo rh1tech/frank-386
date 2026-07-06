@@ -130,15 +130,21 @@ int EnableHMA(VOID)
 
 dos_far_ptr DetectXMSDriver(void)
 {
+    u16 save_ax = CPU_AX;
     CPU_AX = 0x4300;
-    bios_intcall(cpu, 0x2F);
-    if (CPU_AL != 0x80)
+    // bios_intcall(cpu, 0x2F, "XMS 2F");
+    fdos_2fh(cpu);
+    if (CPU_AL != 0x80) {
+        CPU_AX = save_ax;
         return MK_FP(0, 0);
+    }
     UWORD save_es = CPU_ES;
     UWORD save_bx = CPU_BX;
     CPU_AX = 0x4310;
-    bios_intcall(cpu, 0x2F);
+//    bios_intcall(cpu, 0x2F, "XMS 2F");
+    fdos_2fh(cpu);
     dos_far_ptr entry = MK_FP(CPU_ES, CPU_BX);
+    CPU_AX = save_ax;
     CPU_BX = save_bx;
     SET_ES ( save_es );
     return entry;

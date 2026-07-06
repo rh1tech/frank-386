@@ -231,6 +231,7 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define FP_ES_DI (MK_FP(CPU_ES, CPU_DI))
 
 #define peekb(seg, ofs) (*((unsigned char far *)ARM_PTR(MK_FP(seg,ofs))))
+#define peekw(seg, ofs) (*((u16*)ARM_PTR(MK_FP(seg,ofs))))
 #define x86_para2far(seg) (MK_FP((seg), 0))
 #define para2far(seg) ((mcb*)ARM_PTR(MK_FP((seg), 0)))
 

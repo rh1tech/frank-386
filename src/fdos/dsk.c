@@ -416,7 +416,7 @@ STATIC int LBA_Transfer(CPU* cpu,
     LBA_address += count;
     totaltodo -= count;
 
-    ADD_OFF(buffer, count * bytes_sector);
+    buffer = ADD_OFF(buffer, count * bytes_sector);
   }
 
   return 0;

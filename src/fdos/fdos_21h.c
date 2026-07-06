@@ -659,20 +659,28 @@ exit_dispatch:
 }
 
 UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_AH = 0x3F;
     CPU_BX = fd;
     CPU_CX = count;
     SET_DS ( FP_SEG(buf) );
     CPU_DX = FP_OFF(buf);
-    bios_intcall(cpu, 0x21);
-    return cf ? (UCOUNT)-1 : CPU_AX;
+    bios_intcall(cpu, 0x21, "RES READ 21h");
+    int res = cf ? (UCOUNT)-1 : CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 int init_switchar(int ch) {
-  CPU_AX = 0x3701;
-  CPU_DL = (BYTE)ch;
-  bios_intcall(cpu, 0x21);
-  return CPU_AL == 0x00 ? 0 : -1;
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
+    CPU_AX = 0x3701;
+    CPU_DL = (BYTE)ch;
+    bios_intcall(cpu, 0x21, "INIT SWITCHER 21h");
+    int res = CPU_AL == 0x00 ? 0 : -1;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 

@@ -43,5 +43,5 @@
 void init_PSPSet(CPU* cpu, u16 psp) {
     CPU_AH = 0x50; // Set Current PSP
     CPU_BX = psp;
-    bios_intcall(cpu, 0x21);
+    bios_intcall(cpu, 0x21, "INIT PSP");
 }

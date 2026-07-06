@@ -46,6 +46,9 @@ STATIC int InitBcdToByte(int x)
 }
 
 void Init_clk_driver(CPU* cpu) {
+  CPU_regs saved;
+  cpu_save_regs(cpu, &saved);
+
   /* get BIOS time */
   CPU_AH = 2;
   bios_1Ah(cpu);
@@ -56,11 +59,11 @@ void Init_clk_driver(CPU* cpu) {
   CPU_CH = InitBcdToByte(CPU_CH);   /* hours   */
   CPU_DH = InitBcdToByte(CPU_DH);   /* seconds */
   CPU_DL = 0;
-  bios_intcall(cpu, 0x21);
+  bios_intcall(cpu, 0x21, "INIT CLK");
 
   /* get BIOS date */
   CPU_AH = 4;
-  bios_intcall(cpu, 0x1A);
+  bios_intcall(cpu, 0x1A, "INIT CLK");
 
   /* DosSetDate */
   CPU_AH = 0x2b;
@@ -70,5 +73,7 @@ void Init_clk_driver(CPU* cpu) {
   if ((CPU_CX >= 1900) && (CPU_CX < 1980)) CPU_CX += 100;
   CPU_DH = InitBcdToByte(CPU_DH);   /* month */
   CPU_DL = InitBcdToByte(CPU_DL);   /* day   */
-  bios_intcall(cpu, 0x21);
+  bios_intcall(cpu, 0x21, "INIT CLK");
+
+  cpu_restore_regs(cpu, &saved);
 }

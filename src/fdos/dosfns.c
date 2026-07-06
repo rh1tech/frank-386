@@ -11,8 +11,8 @@ int share_open_check(dos_far_ptr filename,  /* pointer to fully qualified filena
                      unsigned short pspseg, /* psp segment address of owner process */
                      int openmode,          /* 0=read-only, 1=write-only, 2=read-write */
                      int sharemode) {       /* SHARE_COMPAT, etc... */
-    UWORD save_ds = CPU_DS;
-    UWORD save_si = CPU_SI;
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
 
     SET_DS(FP_SEG(filename));
     CPU_SI = FP_OFF(filename);
@@ -21,20 +21,22 @@ int share_open_check(dos_far_ptr filename,  /* pointer to fully qualified filena
     CPU_DX = sharemode;
 
     CPU_AX = 0x10A0;
-    bios_intcall(cpu, 0x2F);
+    bios_intcall(cpu, 0x2F, "SHARE OPEN 2F");
 
-    CPU_SI = save_si;
-    SET_DS(save_ds);
-
-    return (int16_t)CPU_AX;
+    int res = (int16_t)CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
 }
 
 /* DOS calls this to record the fact that it has successfully
     closed a file, or the fact that the open for this file failed. */
 void share_close_file(int fileno) {  /* file_table entry number */
+    CPU_regs saved;
+    cpu_save_regs(cpu, &saved);
     CPU_BX = fileno;
     CPU_AX = 0x10A1;
-    bios_intcall(cpu, 0x2F);
+    bios_intcall(cpu, 0x2F, "SHARE CLOSE 2F");
+    cpu_restore_regs(cpu, &saved);
 }
 
 

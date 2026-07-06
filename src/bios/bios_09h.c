@@ -261,7 +261,8 @@ static bios_callback_params_t params = {
     .callback = bios_09h_phase2,
     .expected_cs = 0xFFE0,
     .expected_ip = 0x00FF,
-    .data = &ax
+    .data = &ax,
+    .owner = "INT 09H"
 };
 
 /* Phase 1: read scan code, save in scratch, redirect to INT 15h/4Fh stub.

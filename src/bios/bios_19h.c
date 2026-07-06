@@ -168,7 +168,8 @@ static bios_callback_params_t params = {
     .callback = bios_19h_waiter,
     .expected_cs = 0xFFEF,
     .expected_ip = 0x000F,
-    .done = false
+    .done = false,
+    .owner = "INT 19H"
 };
 
 extern struct PC* pc;
