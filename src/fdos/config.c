@@ -1567,6 +1567,17 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 
   /* Get the device driver name                                   */
   GetStringArg(pLine, szBuf);
+  
+  if (strcasecmp(szBuf, "HIMEM.SYS") == 0) { // W/A to skip well known XMS manager
+    printf("Skip guest XMS manager: %s\n", szBuf);
+    return DE_DEVICE;
+  }
+#ifndef I386_MODE
+  if (strcasecmp(szBuf, "EMM386.EXE") == 0) { // W/A to skip well known EMM386
+    printf("Skip guest EMM386 manager: %s\n", szBuf);
+    return DE_DEVICE;
+  }
+#endif
 
   /* The driver is loaded at the top of allocated memory.         */
   /* The device driver is paragraph aligned.                      */
