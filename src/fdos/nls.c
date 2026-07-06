@@ -178,6 +178,9 @@ STATIC int nlsGetData(struct nlsPackage FAR * nls, int subfct,
   return DE_INVLDFUNC;
 }
 
+BYTE DosYesNo(UWORD ch) {
+    return (BYTE)muxYesNo(ch);
+}
 /*
  *	Called for all subfunctions other than 0x20-0x23,& 0xA0-0xA2
  *	of DOS-65
@@ -280,4 +283,23 @@ STATIC COUNT DosLoadPackage(UWORD cp, UWORD cntry)
 COUNT DosSetCountry(UWORD cntry)
 {
   return DosLoadPackage(NLS_DEFAULT, cntry);
+}
+
+        /* getTableX return the pointer to the X'th table; X==subfct */
+        /* subfct 2: normal upcase table; 4: filename upcase table */
+#ifdef NLS_REORDER_POINTERS
+#define getTable2(nls)	((nls)->nlsPointers[0].pointer)
+#define getTable4(nls)	((nls)->nlsPointers[1].pointer)
+#define getTable7(nls)	((nls)->nlsPointers[4].pointer)
+#else
+#define getTable2(nls)	getTable(2, (nls))
+#define getTable4(nls)	getTable(4, (nls))
+#define getTable7(nls)	getTable(7, (nls))
+#define NEED_GET_TABLE
+#endif
+
+dos_far_ptr DosGetDBCS(void)
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+	return linear_to_far(getTable7(nlsInfo->actPkg));
 }

@@ -119,7 +119,7 @@ int get_sft_idx(UCOUNT hndl);
 struct cds FAR *get_cds_unvalidated(unsigned dsk);
 /*struct cds*/ dos_far_ptr get_cds(unsigned drive);
 struct cds FAR *get_cds1(unsigned dsk);
-COUNT DosTruename(const char FAR * src, char FAR * dest);
+COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest);
 
 /* dosidle.asm */
 VOID ASMCFUNC DosIdle_int(void);
@@ -280,7 +280,7 @@ COUNT DosSetCountry(UWORD cntry);
 #endif
 COUNT DosGetCodepage(UWORD * actCP, UWORD * sysCP);
 COUNT DosSetCodepage(UWORD actCP, UWORD sysCP);
-VOID FAR *DosGetDBCS(void);
+dos_far_ptr DosGetDBCS(void);
 UWORD ASMCFUNC syscall_MUX14(iregs FAR *);
 
 /* prf.c */

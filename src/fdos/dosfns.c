@@ -895,3 +895,23 @@ COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2)
 
   return DosRenameTrue(PriPathName, SecPathName, D_ALL);
 }
+
+COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
+{
+  /*
+   * RBIL/upstream FreeDOS semantics: on error, the caller's output
+   * buffer must be left unchanged.  Build the canonical name in the
+   * kernel scratch buffer first, then copy it to ES:DI only on success.
+   *
+   * AH=60h passes DS:SI -> source and ES:DI -> destination.
+   * This port's truename() already accepts a guest far source pointer
+   * and writes to a native kernel buffer.
+   */
+  COUNT rc = truename(src, PriPathName, CDS_MODE_ALLOW_WILDCARDS);
+  if (rc >= SUCCESS) {
+    strcpy((char *)ARM_PTR(dest), PriPathName);
+    set_fcbname();
+  }
+  return rc;
+}
+

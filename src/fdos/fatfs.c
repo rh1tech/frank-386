@@ -229,23 +229,61 @@ COUNT dos_close(COUNT fd)
 }
 
 /*
-    dos_extend(fnp, emptywrite) - grow a file by allocating one more
-    cluster past its current end (write path).
+    dos_extend(fnp, emptywrite) - make sure the FAT chain reaches at
+    least up to fnp->f_offset before a write starts (fnp->f_offset was
+    already positioned by the preceding lseek/DTA logic; dir_size may
+    still be smaller, e.g. after a seek past EOF, or on the very first
+    write to a freshly created empty file).
 
-    /// TODO: stub for this iteration. Needs find_fat_free() (not
-    /// migrated, same as extend()'s comment above) to allocate a
-    /// cluster. Always reports the disk as full - rwblock() (below)
-    /// only calls this for XFR_WRITE, which nothing in this codebase
-    /// invokes yet (DosWrite()/AH=40h are not migrated), so this is
-    /// unreachable for now, not silently wrong.
+    CAUTION (2026-07 fix): this used to be a stub that unconditionally
+    returned DE_HNDLDSKFULL, on the theory that AH=40h/DosWrite() never
+    called it. That stopped being true once case 0x40 was wired up in
+    fdos_21h.c: since DE_HNDLDSKFULL != SUCCESS, rwblock() took the "no
+    more space" branch on *every* write to a regular file and returned
+    0 without transferring any data - CF=0 (success) with AX=0 bytes
+    written, i.e. a silent no-op write, not a visible error. Restored
+    the real body below (map_cluster() does the actual allocation via
+    extend(), which is also fixed in this same patch).
 
-    Migrated from fatfs.c (signature only; body replaced as above).
+    Migrated from fatfs.c verbatim (WRITEZEROS branch omitted: it is
+    not defined in this port, same as upstream default).
 */
 STATIC COUNT dos_extend(f_node_ptr fnp, BOOL emptywrite)
 {
-  UNREFERENCED_PARAMETER(fnp);
-  UNREFERENCED_PARAMETER(emptywrite);
-  return DE_HNDLDSKFULL;
+  if (fnp->f_offset <= fnp->f_dir.dir_size)
+    return SUCCESS;
+
+  {
+    BOOL special = 0;
+
+    if (emptywrite
+        && ((fnp->f_offset &
+             (((ULONG)fnp->f_dpb->dpb_secsize
+               << fnp->f_dpb->dpb_shftcnt) - 1)
+            )
+            == 0)
+        ) {
+      special = 1;
+      -- fnp->f_offset;
+    }
+    if (map_cluster(fnp, XFR_WRITE) != SUCCESS) {
+      if (special) ++ fnp->f_offset;
+      if (fnp->f_cluster != FREE) {
+        /* write size if couldn't satisfy full request,
+           but at least one cluster is allocated. */
+        fnp->f_dir.dir_size =
+          (((ULONG)fnp->f_cluster_offset + 1)
+          * (ULONG)fnp->f_dpb->dpb_secsize)
+          <<
+          fnp->f_dpb->dpb_shftcnt;
+        merge_file_changes(fnp, FALSE);
+      }
+      return DE_HNDLDSKFULL;
+    }
+    if (special) ++ fnp->f_offset;
+
+    return SUCCESS;
+  }
 }
 
 
@@ -273,22 +311,76 @@ STATIC void fnode_to_sft(f_node_ptr fnp)
 #endif
 }
 
+STATIC VOID wipe_out_clusters(struct dpb FAR * dpbp, CLUSTER st);
 /*
     shrink_file(fnp) - release every cluster past fnp's current file
-    position, for a write that truncates a file mid-stream.
+    position, for a write that truncates a file mid-stream (the
+    "AH=40h, CX=0000h" truncate-at-current-offset idiom).
 
-    /// TODO: stub for this iteration. Needs to walk and free the FAT
-    /// chain past the new end of file - not migrated, same reasoning
-    /// as dos_extend() above (only reachable from a XFR_WRITE caller,
-    /// none of which exist yet in this codebase).
+    CAUTION (2026-07 fix): this used to be a stub that printed a
+    PANIC message and spun in "for(;;);" forever. It was unreachable
+    while dos_extend() unconditionally failed first (see the fix
+    above) - once dos_extend() actually succeeds, any CX=0000h write
+    reaches this function, so leaving it as an infinite loop would
+    have turned the previous silent no-op bug into a hard hang the
+    moment the first bug was fixed. Restored the real body below.
 
-    Migrated from fatfs.c (signature only; body replaced as above).
+    Migrated from fatfs.c verbatim.
 */
 STATIC int shrink_file(f_node_ptr fnp)
 {
-  UNREFERENCED_PARAMETER(fnp);
-  printf("PANIC: shrink_file() called but not implemented\n");
-  for (;;) ;
+  ULONG lastoffset = fnp->f_offset;     /* has to be saved */
+  CLUSTER last, next, st;
+  struct dpb FAR *dpbp = fnp->f_dpb;
+  int ret = DE_ACCESS;
+
+  if (fnp->f_offset)
+    fnp->f_offset--;            /* last existing cluster */
+  else if (fnp->f_cluster == FREE)
+    /* zero offset, 0-byte file: nothing to do ! */
+    goto done_success;
+
+  if (map_cluster(fnp, XFR_READ) != SUCCESS)    /* error, don't truncate */
+    goto done;
+
+  st = fnp->f_cluster;
+
+  next = next_cluster(dpbp, st); /* return nr. of 1st cluster after new end */
+
+  if (next <= 1) /* 1/error or 0/FREE chain points into the void */
+    goto done;
+
+  /* Loop from start until either a FREE entry is         */
+  /* encountered (due to a damaged file system) or the    */
+  /* last cluster is encountered.                         */
+  /* zap the FAT pointed to                       */
+
+  if (fnp->f_dir.dir_size == 0) /* file shrinks to size 0 */
+  {
+    fnp->f_cluster = FREE;
+    setdstart(dpbp, &fnp->f_dir, FREE); /* file no longer has start cluster */
+    last = FREE;
+  }
+  else
+  {
+    if (next == LONG_LAST_CLUSTER) /* nothing to do, file already ends here */
+      goto done_success;
+    last = LONG_LAST_CLUSTER; /* make file end */
+  }
+  if (link_fat(dpbp, st, last) != SUCCESS)
+    goto done; /* do not wipe remainder of chain if FAT is broken */
+
+  wipe_out_clusters(dpbp, next); /* free clusters after the end */
+  /* flush buffers, make sure disk is updated */
+  if (!flush_buffers(fnp->f_dpb->dpb_unit))
+    goto done;
+
+done_success:
+  ret = SUCCESS;
+
+done:
+  fnp->f_offset = lastoffset;   /* has to be restored */
+  return ret;
 }
 
 /*
@@ -1130,25 +1222,62 @@ void setdstart(struct dpb *dpbp, struct dirent *dentry, CLUSTER value)
 #endif
 }
 
-
+STATIC CLUSTER find_fat_free(f_node_ptr fnp);
 /*
-    extend(fnp) - extend a directory or file by exactly one cluster,
-    allocating a free one from the FAT and chaining it in.
+    extend(fnp) - extend a directory or file by exactly one cluster.
+    Only map_cluster() calls this in a loop (for files); dos_mkdir()/
+    extend_dir() call it once each (for directories).
 
-    /// TODO: stub for this iteration. The original calls
-    /// find_fat_free(fnp) to locate a free cluster - not migrated yet,
-    /// since nothing exercising the write path (map_cluster(fnp,
-    /// XFR_WRITE), i.e. writing past the current end of a file) is
-    /// migrated yet either. Always reports the disk as full, which is
-    /// what map_cluster() does with a real extend() that can't find a
-    /// free cluster - this just means writes that would grow a file
-    /// fail for now instead of allocating, while reads (XFR_READ)
-    /// never call this at all (see map_cluster() below).
+    CAUTION (2026-07 fix): this used to be a stub returning
+    LONG_LAST_CLUSTER unconditionally, i.e. "disk full" every time.
+    That silently broke every caller above it that was otherwise
+    already fully migrated and working (map_cluster() -> any write
+    that needs to grow a file; extend_dir()/dos_mkdir() -> MKDIR).
+    find_fat_free(), link_fat(), next_cluster() and setdstart(), which
+    this function is built on, are all already real (verbatim)
+    migrations - only the glue between them was missing.
+
+    Migrated from fatfs.c verbatim (put_string() -> printf(), same
+    convention already used by clusterMessage() in fattab.c: this is a
+    "run chkdsk" diagnostic for a corrupt FAT chain, not guest-visible
+    output, and put_string() itself is not implemented in this port).
 */
 STATIC CLUSTER extend(f_node_ptr fnp)
 {
-  UNREFERENCED_PARAMETER(fnp);
-  return LONG_LAST_CLUSTER;
+  CLUSTER free_fat;
+
+  /* get an empty cluster, so that we use it to extend the file.  */
+  free_fat = find_fat_free(fnp);
+
+  /* No empty clusters, disk is FULL! Translate into a useful     */
+  /* error message.                                               */
+  if (free_fat == LONG_LAST_CLUSTER)
+    return free_fat;
+
+  /* if 1a or 1b works but 2 fails, we get a pointer into an wrong FAT entry */
+  /* our new fattab.c checks should be able to trap the bad pointers for now */
+  if (link_fat(fnp->f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* 2 */ /* free->last */
+      return LONG_LAST_CLUSTER; /* do not try 1a/1b if 2 did not work out */
+  /* if 2 works but 1a/1b fails, we only get a harmless lost cluster here */
+
+  /* Now that we have found a free FAT entry, mark it as the last entry of */
+  /* the chain and save (note: BUFFERS cause nondeterministic write order) */
+  if (fnp->f_cluster == FREE) /* if the file leaves the empty state */
+    setdstart(fnp->f_dpb, &fnp->f_dir, free_fat); /* 1a */
+  else
+  {
+    /* let previously last chain element chain to newly allocated cluster! */
+    if (next_cluster(fnp->f_dpb, fnp->f_cluster) != LONG_LAST_CLUSTER)
+    {
+      /* we tried to "grow a file in the middle", f_node or FAT messed up? */
+      printf("FAT chain size bad!\n");
+      return LONG_LAST_CLUSTER;
+    }
+    if (link_fat(fnp->f_dpb, fnp->f_cluster, free_fat) != SUCCESS) /* 1b */ /* last->used */
+      return LONG_LAST_CLUSTER; /* should never happen */
+  }
+
+  return free_fat;
 }
 
 /* Description.

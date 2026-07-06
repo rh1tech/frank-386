@@ -210,6 +210,10 @@ bool fdos_21h(CPU* _cpu) {
     internal_data->Int21AX = CPU_AX;
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
+      case 0x02:
+        CPU_AL = CPU_DL;
+        write_char_stdout(CPU_AL);
+        break;
       /* Display String                                               */
       case 0x09:
         {
@@ -229,6 +233,16 @@ bool fdos_21h(CPU* _cpu) {
 
       case 0x1A: // set DTA
         internal_data->dta = FP_DS_DX;
+        break;
+
+        /* Set Interrupt Vector                                         */
+      case 0x25:
+      {
+        /* AL = interrupt number, DS:DX = new handler. */
+        pstore16((uint32_t)CPU_AL * 4u, CPU_DX);
+        pstore16((uint32_t)CPU_AL * 4u + 2u, CPU_DS);
+        cf = 0;
+      }
         break;
 
         /* Get Date                                                     */
@@ -402,6 +416,26 @@ bool fdos_21h(CPU* _cpu) {
       }
         break;
 
+      case 0x40: // DOS 2+ - WRITE - WRITE TO FILE OR DEVICE
+      {
+        /* BX = file handle, CX = byte count, DS:DX = buffer.
+           Migrated from inthndlr.c's "case 0x40" (DosWrite(lr.BX,
+           lr.CX, FP_DS_DX)), same long_check convention as case 0x3f:
+           CF=0/AX=bytes-written on success, CF=1/AX=-rc on error. */
+        long result = DosWrite(CPU_BX, CPU_CX, FP_DS_DX);
+        if (result < SUCCESS)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-result);
+        }
+        else
+        {
+          cf = 0;
+          CPU_AX = (UWORD)result;
+        }
+      }
+        break;
+
       /* Get/Set File Attributes                                      */
       case 0x43:
         switch (CPU_AL)
@@ -504,6 +538,76 @@ bool fdos_21h(CPU* _cpu) {
       case 0x62: // DOS 3.0+ - GET CURRENT PSP ADDRESS
         CPU_BX = internal_data->cu_psp;
         break;
+
+      case 0x60: /* DOS 3+ - TRUENAME - canonicalize filename/path */
+        rc = DosTruename(MK_FP(CPU_DS, CPU_SI), FP_ES_DI);
+        CPU_AX = rc;
+        goto short_check;
+
+        /* Extended country information / NLS functions                */
+      case 0x65:
+        switch (CPU_AL)
+        {
+          case 0x20:             /* upcase single character */
+            CPU_DL = DosUpChar(CPU_DL);
+            cf = 0;
+            break;
+          case 0x21:             /* upcase memory area */
+            DosUpMem(ARM_PTR(FP_DS_DX), CPU_CX);
+            cf = 0;
+            break;
+          case 0x22:             /* upcase ASCIZ */
+            DosUpString((char FAR *)ARM_PTR(FP_DS_DX));
+            cf = 0;
+            break;
+          case 0xA0:             /* upcase single filename character */
+            CPU_DL = DosUpFChar(CPU_DL);
+            cf = 0;
+            break;
+          case 0xA1:             /* upcase filename memory area */
+            DosUpFMem(ARM_PTR(FP_DS_DX), CPU_CX);
+            cf = 0;
+            break;
+          case 0xA2:             /* upcase filename ASCIZ */
+            DosUpFString((char FAR *)ARM_PTR(FP_DS_DX));
+            cf = 0;
+            break;
+          case 0x23:             /* check Yes/No response */
+            CPU_AX = DosYesNo(CPU_DL);
+            cf = 0;
+            break;
+          default:
+            rc = DosGetData(CPU_AL, CPU_BX, CPU_DX, CPU_CX, ARM_PTR(FP_ES_DI));
+            goto short_check;
+        }
+        break;
+
+        /* Dos Seek                                                     */
+      case 0x42: // DOS 2+ - LSEEK - MOVE FILE POINTER
+      {
+        ULONG result;
+
+        /* BX = file handle, CX:DX = signed 32-bit offset, AL = origin:
+           0 = start, 1 = current position, 2 = end of file.
+
+           Upstream FreeDOS does the AL range check in the INT 21h
+           dispatcher before calling DosSeek(); keep that behaviour here
+           instead of relying only on SftSeek2(), so invalid modes report
+           DE_INVLDFUNC through the normal INT 21h error path. */
+        if (CPU_AL > 2)
+          goto error_invalid;
+
+        result = DosSeek(CPU_BX,
+                         (LONG)(((UDWORD)CPU_CX << 16) | CPU_DX),
+                         CPU_AL,
+                         &rc);
+        if (rc == SUCCESS) {
+          CPU_DX = (UWORD)(result >> 16);
+          CPU_AX = (UWORD)result;
+        }
+        goto short_check;
+      }
+
 
         /* Terminate process (old-style, CP/M-compatible; same as
            INT 20h - see fdos_20h() - and equivalent to AH=4Ch with
@@ -626,8 +730,39 @@ bool fdos_21h(CPU* _cpu) {
             cf = 1;
         }
         break;
+      /* UNDOCUMENTED: Double byte and korean tables                  */
+    case 0x63:
+      {
+#if 0
+        /* not really supported, but will pass.                 */
+        lr.AL = 0x00;           /*jpp: according to interrupt list */
+        /*Bart: fails for PQDI and WATCOM utilities:
+           use the above again */
+#endif
+        switch (CPU_AL)
+        {
+          case 0: {
+            dos_far_ptr p = DosGetDBCS();
+            SET_DS ( FP_SEG(p) );
+            CPU_SI = FP_OFF(p) + 2;
+            break;
+          }
+          case 1: /* set Korean Hangul input method to DL 0/1 */
+            CPU_AL = 0xff;       /* flag error (AL would be 0 if okay) */
+            break;
+          case 2: /* get Korean Hangul input method setting to DL */
+            CPU_AL = 0xff;       /* flag error, do not set DL */
+            break;
+          default:      /* is this the proper way to handle invalid AL? */
+            rc = -1;
+            goto error_exit;
+        }
+        break;
+      }
+      case 0xDD: // Novell NetWare - WORKSTATION - SET NetWare ERROR MODE
+        goto error_invalid;
 
-        default:
+      default:
         no_handler(_cpu);
     }
     goto exit_dispatch;
