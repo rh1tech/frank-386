@@ -1462,10 +1462,16 @@ err:printf("%s has invalid format\n", filename);
                 min(subf_data->length, sizeof(struct CountrySpecificInfo));
         CharMapFn = nlsCountryInfoHardcoded.C.CharMapFn;
       }
+      if (hdr[i].id == 35)
+      {
+        memcpy(&nlsPackageHardcoded->yeschar, subf_data->buffer, 2);
+        memcpy(&nlsPackageHardcoded->nochar, subf_data->buffer + 2, 2);
+        continue;
+      }
       if (hdr[i].id == 1)
         ptable = (BYTE FAR *)&nlsPackageHardcoded->nlsExt.size;
       else
-        ptable = nlsPackageHardcoded->nlsPointers[table[subf_tbl_ndx].idx].pointer;
+        ptable = (BYTE FAR *)ARM_PTR(nlsPackageHardcoded->nlsPointers[table[subf_tbl_ndx].idx].pointer);
       if (hdr[i].id == 7)
       {
         if (subf_data->length == 0)
@@ -1484,19 +1490,13 @@ err:printf("%s has invalid format\n", filename);
         continue;
       }
 
-      /* for 0-7 we store COUNTRY.SYS data directly in buffer, but yes/no characters we store in nls package directly */
-      if (hdr[i].id == 35)
-      {
-        memcpy(&nlsPackageHardcoded->yeschar, subf_data->buffer, 2);
-        memcpy(&nlsPackageHardcoded->nochar, subf_data->buffer + 2, 2);
-      } else {
-          memcpy(ptable + 2, subf_data->buffer,
-                  /* skip length ^*/  subf_data->length);
-          if (hdr[i].id == 1) {
-              /* fixup user callable address in case we overwrote it */
-              ((struct CountrySpecificInfo *)ptable)->CharMapFn = CharMapFn;
-          }
-      }
+      /* for 0-7 we store COUNTRY.SYS data directly in the NLS table. */
+      memcpy(ptable + 2, subf_data->buffer,
+              /* skip length ^*/  subf_data->length);
+      if (hdr[i].id == 1) {
+          /* fixup user callable address in case we overwrote it */
+          ((struct CountrySpecificInfo *)ptable)->CharMapFn = CharMapFn;
+       }
     }
     rc = TRUE;
     goto ret;

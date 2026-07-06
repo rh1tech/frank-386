@@ -65,30 +65,39 @@ STATIC int muxBufGo(int subfct, int bp, UWORD cp, UWORD cntry,
  *	Also resolves the default values (-1) into the currently
  *	active codepage/country code.
  */
+static inline struct nlsPackage *nls_pkg_ptr(dos_far_ptr p) {
+  return far_is_null(p) ? NULL : (struct nlsPackage *)ARM_PTR(p);
+}
+
 STATIC struct nlsPackage* searchPackage(UWORD cp, UWORD cntry)
 {
+  dos_far_ptr x86_nls;
   struct nlsPackage FAR *nls;
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
   log(("searchPackage(%u, %u) nlsInfo: %p\n", cp, cntry, nlsInfo));
 
-  if (nlsInfo->actPkg == NULL || nlsInfo->chain == NULL) {
-    log(("ERR: nlsInfo not proper initiased\n"));
+  if (far_is_null(nlsInfo->actPkg) || far_is_null(nlsInfo->chain)) {
+    log(("ERR: nlsInfo not properly initialised\n"));
     return NULL;
   }
 
+  nls = nls_pkg_ptr(nlsInfo->actPkg);
   if (cp == NLS_DEFAULT) {
-    cp = nlsInfo->actPkg->cp;
+    cp = nls->cp;
     log(("cp: %u\n", cp));
   }
   if (cntry == NLS_DEFAULT) {
-    cntry = nlsInfo->actPkg->cntry;
+    cntry = ((struct nlsPackage *)ARM_PTR(nlsInfo->actPkg))->cntry;
     log(("cntry: %u\n", cntry));
   }
 
-  for (nls = nlsInfo->chain; nls != NULL; nls = nls->nxt) {
+  for (x86_nls = nlsInfo->chain; !far_is_null(x86_nls); x86_nls = nls->nxt) {
+    nls = nls_pkg_ptr(x86_nls);
     if (nls->cp == cp && nls->cntry == cntry)
         break;
   }
+  if (far_is_null(x86_nls))
+    nls = NULL;  
   log(("nls: %p\n", nls));
   return nls;
 }
@@ -138,42 +147,31 @@ STATIC COUNT cpyBuf(VOID FAR * dst, UWORD dstlen, VOID FAR * src,
 STATIC int nlsGetData(struct nlsPackage FAR * nls, int subfct,
                       UBYTE FAR * buf, unsigned bufsize)
 {
-  VOID FAR *poi;
+  struct nlsPointer FAR *poi;
+  VOID FAR *data;
 
   log(("NLS: nlsGetData(): subfct=%x, bufsize=%u, cp=%u, cntry=%u\n",
        subfct, bufsize, nls->cp, nls->cntry));
 
-  /* Theoretically tables 1 and, if NLS_REORDER_POINTERS is enabled,
-     2 and 4 could be hard-coded, because their
-     data is located at predictable (calculatable) locations.
-     However, 1 and subfct NLS_DOS_38 are to handle the same
-     data and the "locateSubfct()" call has to be implemented anyway,
-     in order to handle all subfunctions.
-     Also, NLS is often NOT used in any case, so this code is more
-     size than speed optimized. */
   if ((poi = locateSubfct(nls, subfct)) != NULL)
   {
+    data = ARM_PTR(poi->pointer);
     log(("NLS: nlsGetData(): subfunction found\n"));
     switch (subfct)
     {
       case 1:                  /* Extended Country Information */
-        return cpyBuf(buf, bufsize, poi,
-                      ((struct nlsExtCntryInfo FAR *)poi)->size + 3);
+        return cpyBuf(buf, bufsize, data,
+                      ((struct nlsExtCntryInfo FAR *)data)->size + 3);
       case NLS_DOS_38:         /* Normal Country Information */
-        return cpyBuf(buf, bufsize, &(((struct nlsExtCntryInfo FAR *)poi)->dateFmt), 24);       /* standard cinfo has no more 34 _used_ bytes */
+        return cpyBuf(buf, bufsize, &(((struct nlsExtCntryInfo FAR *)data)->dateFmt), 24);       /* standard cinfo has no more 34 _used_ bytes */
         /* don't copy 34, copy only 0x18 instead, 
            see comment at DosGetCountryInformation                      TE */
       default:
-        /* All other subfunctions just return the found nlsPoinerInf
-           structure */
+        /* All other subfunctions return the guest-visible nlsPointer. */
         return cpyBuf(buf, bufsize, poi, sizeof(struct nlsPointer));
     }
   }
 
-  /* The requested subfunction could not been located within the
-     NLS pkg --> error. Because the data corresponds to the subfunction
-     number passed to the API, the failure is the same as that a wrong
-     API function has been called. */
   log(("NLS: nlsGetData(): Subfunction not found\n"));
   return DE_INVLDFUNC;
 }
@@ -264,7 +262,7 @@ STATIC COUNT nlsLoadPackage(struct nlsPackage FAR * nls)
 {
 
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-  nlsInfo->actPkg = nls;
+  nlsInfo->actPkg = linear_to_far(nls);
   return SUCCESS;
 }
 STATIC COUNT DosLoadPackage(UWORD cp, UWORD cntry)
@@ -288,9 +286,9 @@ COUNT DosSetCountry(UWORD cntry)
         /* getTableX return the pointer to the X'th table; X==subfct */
         /* subfct 2: normal upcase table; 4: filename upcase table */
 #ifdef NLS_REORDER_POINTERS
-#define getTable2(nls)	((nls)->nlsPointers[0].pointer)
-#define getTable4(nls)	((nls)->nlsPointers[1].pointer)
-#define getTable7(nls)	((nls)->nlsPointers[4].pointer)
+#define getTable2(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[0].pointer)
+#define getTable4(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[1].pointer)
+#define getTable7(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[4].pointer)
 #else
 #define getTable2(nls)	getTable(2, (nls))
 #define getTable4(nls)	getTable(4, (nls))
@@ -301,5 +299,5 @@ COUNT DosSetCountry(UWORD cntry)
 dos_far_ptr DosGetDBCS(void)
 {
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-	return linear_to_far(getTable7(nlsInfo->actPkg));
+	return getTable7(nlsInfo->actPkg);
 }

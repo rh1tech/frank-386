@@ -362,7 +362,7 @@ bool fdos_21h(CPU* _cpu) {
             {
               if (cntry == (UWORD) - 1) {
                 struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-                cntry = nlsInfo->actPkg->cntry;
+                cntry = ((struct nlsPackage *)ARM_PTR(nlsInfo->actPkg))->cntry;
               }
               CPU_AX = CPU_BX = cntry;
             }

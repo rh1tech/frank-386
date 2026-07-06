@@ -34,11 +34,14 @@
 #define x86_DATA                MK_FP(DOS_PSP, 0x13A0) // _DATA one byte in chario.c + 3 (adjust to 32-bit)
 #define x86_nlsInfo             MK_FP(DOS_PSP, 0x13A4) // _DATA struct nlsInfoBlock
 #define x86_nlsPackageHardcoded MK_FP(DOS_PSP, 0x13A4 + sizeof(struct nlsInfoBlock)) // struct nlsPackage
-#define x86_nlsEntries          MK_FP(DOS_PSP, 0x13A4 + sizeof(struct nlsInfoBlock) + sizeof(struct nlsPackage)) // UWORD
-#define x86_nlsCount            MK_FP(DOS_PSP, 0x13A4 + sizeof(struct nlsInfoBlock) + sizeof(struct nlsPackage) + sizeof(UWORD)) // UWORD
-#define x86_subf_hdr            MK_FP(DOS_PSP, 0x13A4 + sizeof(struct nlsInfoBlock) + sizeof(struct nlsPackage) + sizeof(UWORD) + sizeof(UWORD)) // struct subf_hdr * 9
-#define x86_subf_data           MK_FP(DOS_PSP, 0x13A4 + sizeof(struct nlsInfoBlock) + sizeof(struct nlsPackage) + sizeof(UWORD) + sizeof(UWORD) + sizeof(struct subf_hdr) * 9) // struct subf_data
-#define x86_subf_data_buffer    MK_FP(DOS_PSP, 0x13A4 + sizeof(struct nlsInfoBlock) + sizeof(struct nlsPackage) + sizeof(UWORD) + sizeof(UWORD) + sizeof(struct subf_hdr) * 9 + offsetof(struct subf_data, buffer)) // internal in pref
+/* hardcoded NLS tables: upcase(130)+fupcase(130)+fname(24)+collate(258)+dbcs(10) */
+#define X86_NLS_HC_TABLE_BYTES  (130u + 130u + 24u + 258u + 10u)
+#define x86_nlsScratch          MK_FP(DOS_PSP, 0x13A4 + sizeof(struct nlsInfoBlock) + sizeof(struct nlsPackage) + X86_NLS_HC_TABLE_BYTES)
+#define x86_nlsEntries          ADD_OFF(x86_nlsScratch, 0) // UWORD
+#define x86_nlsCount            ADD_OFF(x86_nlsScratch, sizeof(UWORD)) // UWORD
+#define x86_subf_hdr            ADD_OFF(x86_nlsScratch, sizeof(UWORD) + sizeof(UWORD)) // struct subf_hdr * 9
+#define x86_subf_data           ADD_OFF(x86_nlsScratch, sizeof(UWORD) + sizeof(UWORD) + sizeof(struct subf_hdr) * 9) // struct subf_data
+#define x86_subf_data_buffer    ADD_OFF(x86_subf_data, offsetof(struct subf_data, buffer)) // internal in pref
 
 #define x86_BSS           MK_FP(DOS_PSP, 0x19F4) // _BSS -> DiskTransferBuffer[MAX_SEC_SIZE=512]
 #define x86_SZ_LINE       MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE) // _BSS + MAX_SEC_SIZE = 0x1BF4

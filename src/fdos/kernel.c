@@ -165,7 +165,7 @@ static void init_nls_hardcoded(void)
 
     memset(pkg, 0, sizeof(*pkg));
 
-    pkg->nxt = NULL;
+    pkg->nxt = MK_FP(0, 0);
     pkg->cntry = 1;
     pkg->cp = 437;
     pkg->flags = NLS_FLAG_HARDCODED;
@@ -175,17 +175,17 @@ static void init_nls_hardcoded(void)
 
     struct nlsPointer *ptrs = pkg->nlsPointers;
     ptrs[0].subfct = 2;
-    ptrs[0].pointer = ARM_PTR(nls_hc_ptr(off_table2));
+    ptrs[0].pointer = nls_hc_ptr(off_table2);
     ptrs[1].subfct = 4;
-    ptrs[1].pointer = ARM_PTR(nls_hc_ptr(off_table4));
+    ptrs[1].pointer = nls_hc_ptr(off_table4);
     ptrs[2].subfct = 5;
-    ptrs[2].pointer = ARM_PTR(nls_hc_ptr(off_table5));
+    ptrs[2].pointer = nls_hc_ptr(off_table5);
     ptrs[3].subfct = 6;
-    ptrs[3].pointer = ARM_PTR(nls_hc_ptr(off_table6));
+    ptrs[3].pointer = nls_hc_ptr(off_table6);
     ptrs[4].subfct = 7;
-    ptrs[4].pointer = ARM_PTR(nls_hc_ptr(off_table7));
+    ptrs[4].pointer = nls_hc_ptr(off_table7);
     ptrs[5].subfct = 1;
-    ptrs[5].pointer = &pkg->nlsExt;
+    ptrs[5].pointer = nls_hc_ptr(offsetof(struct nlsPackage, nlsExt));
 
     pkg->nlsExt.subfct = 1;
     pkg->nlsExt.size = 0x001c;
@@ -210,11 +210,11 @@ static void init_nls_hardcoded(void)
     memcpy(ARM_PTR(nls_hc_ptr(off_table7)), nls_dbcs_hardcoded_init, sizeof(nls_dbcs_hardcoded_init));
 
     memset(info, 0, sizeof(*info));
-    info->fname = NULL;
+    info->fname = MK_FP(0, 0);
     info->sysCodePage = 437;
     info->flags = NLS_CODE_REORDER_POINTERS;
-    info->actPkg = pkg;
-    info->chain = pkg;
+    info->actPkg = x86_nlsPackageHardcoded;
+    info->chain = x86_nlsPackageHardcoded;
 }
 
 KernelConfig InitKernelConfig = {

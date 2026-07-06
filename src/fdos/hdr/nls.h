@@ -418,7 +418,7 @@ struct nlsExtCntryInfo {
 struct nlsPointer {             /* Information of DOS-65-0X is addressed
                                    by a pointer */
   UBYTE subfct;                 /* number of the subfunction */
-  VOID FAR *pointer;            /* the pointer to be returned when the subfunction
+  dos_far_ptr pointer;          /* guest far pointer to be returned when the subfunction
                                    of DOS-65 is called (Note: won't work for
                                    subfunctions 0, 1, 0x20, 0x21, 0x22, 0x23,
                                    0xA0, 0xA1,& 0xA2 */
@@ -426,7 +426,8 @@ struct nlsPointer {             /* Information of DOS-65-0X is addressed
 
 struct nlsPackage {             /* the contents of one chain item of the
                                    list of NLS packages */
-  struct nlsPackage FAR *nxt;   /* next item in chain */
+  dos_far_ptr/*struct nlsPackage*/
+              nxt;              /* guest far pointer to next item in chain */
   UWORD cntry, cp;              /* country ID / codepage of this NLS pkg */
   UWORD flags;                  /* direct access and other flags */
   /* Note: Depending on the flags above all remaining
@@ -437,7 +438,8 @@ struct nlsPackage {             /* the contents of one chain item of the
   UWORD yeschar;                /* yes / no character DOS-65-23 */
   UWORD nochar;
   UWORD numSubfct;              /* number of supported sub-functions */
-  struct nlsPointer nlsPointers[5];     /* may grow dynamically */
+/// TODO: ensure  struct nlsPointer nlsPointers[5];     /* may grow dynamically */
+  struct nlsPointer nlsPointers[6];     /* 2,4,5,6,7 plus subfct 1 */
   struct nlsExtCntryInfo nlsExt;
 };
 
@@ -477,12 +479,14 @@ struct nlsFnamTerm {
 
 struct nlsInfoBlock {           /* This block contains all information
                                    shared by the kernel and the external NLSFUNC program */
-  char FAR *fname;              /* filename from COUNTRY=;
+  dos_far_ptr fname;            /* filename from COUNTRY=;
                                    maybe tweaked by NLSFUNC */
   UWORD sysCodePage;            /* system code page */
   UWORD flags;                  /* implementation flags */
-  struct nlsPackage *actPkg;    /* current NLS package */
-  struct nlsPackage *chain;     /* first item of info chain --
+  dos_far_ptr/*struct nlsPackage*/
+              actPkg;           /* current NLS package */
+  dos_far_ptr/*struct nlsPackage*/
+              chain;            /* first item of info chain --  
                                    hardcoded U.S.A./CP437 */
 };
 
