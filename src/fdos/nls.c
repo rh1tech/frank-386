@@ -41,15 +41,18 @@ ULONG call_nls(UWORD bp,
 }
 /*== DS:SI _always_ points to global NLS info structure <-> no
  * subfct can use these registers for anything different. ==ska*/
-STATIC long muxGo(int subfct, UWORD bp, UWORD cp, UWORD cntry, UWORD bufsize,
-		  void FAR *buf)
+STATIC int muxGo(int subfct, UWORD bp, UWORD cp, UWORD cntry, UWORD bufsize, void FAR *buf)
 {
-  long ret;
   log(("NLS: muxGo(): subfct=%x, cntry=%u, cp=%u, ES:DI=%p\n",
        subfct, cntry, cp, buf));
-  ret = call_nls(bp, buf, subfct, cp, cntry, bufsize);
-  log(("NLS: muxGo(): return value = %lx\n", ret));
-  return ret;
+  ULONG ret = call_nls(bp, buf, subfct, cp, cntry, bufsize);
+  int16_t r16 = (int16_t)(ret & 0xFFFF);
+  if (r16 < 0) {
+    log(("NLS: muxGo(): return value = %d\n", r16));
+    return r16;
+  }
+  log(("NLS: muxGo(): return value = %p\n", ret));
+  return (int)ret;
 }
 
 STATIC int muxBufGo(int subfct, int bp, UWORD cp, UWORD cntry,
@@ -57,8 +60,7 @@ STATIC int muxBufGo(int subfct, int bp, UWORD cp, UWORD cntry,
 {
   log(("NLS: muxBufGo(): subfct=%x, BP=%u, cp=%u, cntry=%u, len=%u, buf=%p\n",
        subfct, bp, cp, cntry, bufsize, buf));
-
-  return (int)muxGo(subfct, bp, cp, cntry, bufsize, buf);
+  return muxGo(subfct, bp, cp, cntry, bufsize, buf);
 }
 
 /*
@@ -118,6 +120,16 @@ STATIC VOID FAR *locateSubfct(struct nlsPackage FAR * nls, int subfct)
     for (cnt = nls->numSubfct, p = &nls->nlsPointers[0]; cnt--; ++p)
       if (p->subfct == (UBYTE) subfct)
         return p;
+
+  log(("NLS: locateSubfct(): not found subfct=%x nls=%p\n", subfct, nls));
+  if (nls) {
+    int i;
+    log(("NLS: locateSubfct(): pkg cp=%u cntry=%u numSubfct=%u\n",
+         nls->cp, nls->cntry, nls->numSubfct));
+    for (i = 0, p = &nls->nlsPointers[0]; i < nls->numSubfct; i++, p++)
+      log(("NLS: locateSubfct(): ptr[%d] subfct=%u ptr=%04x:%04x\n",
+           i, p->subfct, FP_SEG(p->pointer), FP_OFF(p->pointer)));
+  }
 
   return NULL;
 }
@@ -359,10 +371,14 @@ bool fdos_nls_2fh(CPU *cpu)
       return true;
 
     case NLSFUNC_GETDATA:
+      log(("NLS 2F/1402: BP=%04x BX(cp)=%04x DX(cntry)=%04x CX(size)=%04x ES:DI=%04x:%04x\n",
+           CPU_BP, cp, cntry, bufsize, CPU_ES, CPU_DI));
       pkgp = searchPackage(cp, cntry);
+      log(("NLS 2F/1402: pkgp=%04x:%04x\n", FP_SEG(pkgp), FP_OFF(pkgp)));
       rc = !far_is_null(pkgp)
            ? nlsGetData((struct nlsPackage *)ARM_PTR(pkgp), CPU_BP, buf, bufsize)
            : DE_FILENOTFND;
+      log(("NLS 2F/1402: rc=%d AX=%04x\n", rc, (UWORD)rc));
       CPU_AX = (UWORD)rc;
       return true;
 

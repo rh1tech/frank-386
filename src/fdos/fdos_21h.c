@@ -587,11 +587,23 @@ bool fdos_21h(CPU* _cpu) {
             break;
           case 0x23:             /* check Yes/No response */
             CPU_AX = DosYesNo(CPU_DL);
+            CfgDbgPrintf(("INT21/65%02x YESNO in DL=%02x -> AX=%04x\n",
+                          CPU_AL, CPU_DL, CPU_AX));            
             cf = 0;
             break;
-          default:
+          default: {
+            UBYTE subfct = CPU_AL;
+            UWORD in_bx = CPU_BX;
+            UWORD in_dx = CPU_DX;
+            UWORD in_cx = CPU_CX;
+            UWORD in_es = CPU_ES;
+            UWORD in_di = CPU_DI;
             rc = DosGetData(CPU_AL, CPU_BX, CPU_DX, CPU_CX, ARM_PTR(FP_ES_DI));
+            CfgDbgPrintf(("INT21/65%02x GetData bx=%04x dx=%04x cx=%04x es:di=%04x:%04x -> rc=%d ax=%04x cf=%d\n",
+                          subfct, in_bx, in_dx, in_cx, in_es, in_di,
+                          rc, CPU_AX, cf));
             goto short_check;
+          }
         }
         break;
 
