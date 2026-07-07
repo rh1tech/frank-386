@@ -258,6 +258,7 @@ set(EMU_CORE_SOURCES
     src/fdos/inithma.c
     src/fdos/dsk.c
     src/fdos/dosfns.c
+    src/fdos/lfnapi.c
     src/fdos/fatfs.c
     src/fdos/fattab.c
     src/fdos/fatdir.c
@@ -364,6 +365,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     QUIET=1
     # FreeDOS FAT32 support
     WITHFAT32=1
+    WITHLFNAPI=1
 
     # Board configuration
     BOARD_${BOARD}

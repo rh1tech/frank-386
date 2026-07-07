@@ -201,6 +201,206 @@ UBYTE DosSelectDrv(UBYTE drv)
   return LoL->lastdrive;
 }
 
+#ifdef WITHFAT32
+static COUNT int21_fat32(void)
+{
+  COUNT rc;
+
+  switch (CPU_AL)
+  {
+    /* Get extended drive parameter block */
+    case 0x02:
+    {
+      struct dpb FAR *dpb;
+      struct xdpbdata FAR *xddp;
+
+      if (CPU_CX < sizeof(struct xdpbdata))
+        return DE_INVLDBUF;
+
+      dpb = GetDriveDPB(CPU_DL, &rc);
+      if (rc != SUCCESS)
+        return rc;
+
+      flush_buffers(dpb->dpb_unit);
+      dpb->dpb_flags = M_CHANGED;
+
+      if (media_check(dpb) < 0)
+        return DE_INVLDDRV;
+
+      xddp = (struct xdpbdata FAR *)ARM_PTR(FP_ES_DI);
+      memcpy(&xddp->xdd_dpb, dpb, sizeof(struct dpb));
+      xddp->xdd_dpbsize = sizeof(struct dpb);
+
+      if (!ISFAT32(dpb) && dpb->dpb_xsize != dpb->dpb_size)
+      {
+        xddp->xdd_dpb.dpb_nfreeclst_un.dpb_nfreeclst_st.dpb_nfreeclst_hi =
+          (dpb->dpb_nfreeclst == 0xFFFF ? 0xFFFF : 0);
+        dpb16to32(&xddp->xdd_dpb);
+        xddp->xdd_dpb.dpb_xfatsize = dpb->dpb_fatsize;
+        xddp->xdd_dpb.dpb_xcluster =
+          (dpb->dpb_cluster == 0xFFFF ? 0xFFFFFFFFuL : dpb->dpb_cluster);
+      }
+      break;
+    }
+
+    /* Get extended free drive space */
+    case 0x03:
+    {
+      struct xfreespace FAR *xfsp = (struct xfreespace FAR *)ARM_PTR(FP_ES_DI);
+
+      if (CPU_CX < sizeof(struct xfreespace))
+        return DE_INVLDBUF;
+
+      rc = DosGetExtFree((BYTE FAR *)ARM_PTR(FP_DS_DX), xfsp);
+      if (rc != SUCCESS)
+        return rc;
+      break;
+    }
+
+    /* Set DPB to use for formatting */
+    case 0x04:
+    {
+      struct xdpbforformat FAR *xdffp = (struct xdpbforformat FAR *)ARM_PTR(FP_ES_DI);
+      struct dpb FAR *dpb;
+
+      if (CPU_CX < sizeof(struct xdpbforformat))
+        return DE_INVLDBUF;
+
+      dpb = GetDriveDPB(CPU_DL, &rc);
+      if (rc != SUCCESS)
+        return rc;
+
+      xdffp->xdff_datasize = sizeof(struct xdpbforformat);
+      xdffp->xdff_version.actual = 0;
+
+      switch ((UWORD)xdffp->xdff_function)
+      {
+        case 0x00:
+        {
+          ULONG nfreeclst = xdffp->xdff_f.setdpbcounts.nfreeclst;
+          ULONG cluster = xdffp->xdff_f.setdpbcounts.cluster;
+          if (ISFAT32(dpb))
+          {
+            if ((dpb->dpb_xfsinfosec == 0xffff && (nfreeclst != 0 || cluster != 0))
+                || nfreeclst == 1 || nfreeclst > dpb->dpb_xsize
+                || cluster == 1 || cluster > dpb->dpb_xsize)
+              return DE_INVLDPARM;
+            dpb->dpb_xnfreeclst = nfreeclst;
+            dpb->dpb_xcluster = cluster;
+            write_fsinfo(dpb);
+          }
+          else
+          {
+            if ((unsigned)nfreeclst == 1 || (unsigned)nfreeclst > dpb->dpb_size ||
+                (unsigned)cluster == 1 || (unsigned)cluster > dpb->dpb_size)
+              return DE_INVLDPARM;
+            dpb->dpb_nfreeclst = (UWORD)nfreeclst;
+            dpb->dpb_cluster = (UWORD)cluster;
+          }
+          break;
+        }
+
+        case 0x01:
+        {
+          ddt *pddt = getddt(CPU_DL);
+          memcpy(&pddt->ddt_bpb, ARM_PTR(xdffp->xdff_f.rebuilddpb.bpbp), sizeof(bpb));
+        }
+        /* fall through */
+        case 0x02:
+rebuild_dpb:
+          flush_buffers(dpb->dpb_unit);
+          dpb->dpb_flags = M_CHANGED;
+          if (media_check(dpb) < 0)
+            return DE_INVLDDRV;
+          break;
+
+        case 0x03:
+        case 0x04:
+        {
+          ULONG value;
+          if (!ISFAT32(dpb))
+            return DE_INVLDPARM;
+
+          value = xdffp->xdff_f.setget.new;
+          if ((UWORD)xdffp->xdff_function == 0x03)
+          {
+            if (value != 0xFFFFFFFFUL && (value & ~(0xf | 0x80)))
+              return DE_INVLDPARM;
+            xdffp->xdff_f.setget.old = dpb->dpb_xflags;
+          }
+          else
+          {
+            if (value != 0xFFFFFFFFUL && (value < 2 || value > dpb->dpb_xsize))
+              return DE_INVLDPARM;
+            xdffp->xdff_f.setget.old = dpb->dpb_xrootclst;
+          }
+
+          if (value != 0xFFFFFFFFUL)
+          {
+            bpb FAR *bpbp;
+            struct buffer FAR *bp = getblock(1, dpb->dpb_unit);
+            bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT);
+            bp->b_flag |= BFR_VALID | BFR_DIRTY;
+            bpbp = (bpb FAR *)&bp->b_buffer[BT_BPB];
+            if ((UWORD)xdffp->xdff_function == 0x03)
+              bpbp->bpb_xflags = (UWORD)value;
+            else
+              bpbp->bpb_xrootclst = value;
+          }
+          goto rebuild_dpb;
+        }
+
+        default:
+          return DE_INVLDFUNC;
+      }
+      break;
+    }
+
+    /* Extended absolute disk read/write */
+    case 0x05:
+    {
+      BYTE FAR *SectorBlock = (BYTE FAR *)ARM_PTR(MK_FP(CPU_DS, CPU_BX));
+      ULONG blkno;
+      UWORD nblks;
+      dos_far_ptr bufp;
+      UBYTE mode;
+
+      if (CPU_CX != 0xffff || (CPU_SI & ~0x6001))
+        return DE_INVLDPARM;
+
+      if (CPU_DL > LoL->lastdrive || CPU_DL == 0)
+        return -0x207;
+
+      blkno =  (ULONG)SectorBlock[0]
+             | ((ULONG)SectorBlock[1] << 8)
+             | ((ULONG)SectorBlock[2] << 16)
+             | ((ULONG)SectorBlock[3] << 24);
+      nblks =  (UWORD)SectorBlock[4]
+             | ((UWORD)SectorBlock[5] << 8);
+      bufp = MK_FP((UWORD)(SectorBlock[8] | ((UWORD)SectorBlock[9] << 8)),
+                   (UWORD)(SectorBlock[6] | ((UWORD)SectorBlock[7] << 8)));
+        
+      mode = ((CPU_SI & 1) == 0) ? DSKREADINT25 : DSKWRITEINT26;
+
+      CPU_AX = dskxfer(CPU_DL - 1, blkno, bufp, nblks, mode);
+
+      if (mode == DSKWRITEINT26 && CPU_AX == 0)
+        setinvld(CPU_DL - 1);
+
+      if (CPU_AX > 0)
+        return -0x20c;
+      break;
+    }
+
+    default:
+      return DE_INVLDFUNC;
+  }
+
+  return SUCCESS;
+}
+#endif
+
+
 /*
 DOS 1+ - main DOS handler
 */
@@ -229,6 +429,11 @@ bool fdos_21h(CPU* _cpu) {
 
       case 0x0E: // set drive
         CPU_AL = DosSelectDrv(CPU_DL);
+        break;
+
+        /* Get default drive                                           */
+      case 0x19:
+        CPU_AL = internal_data->default_drive;
         break;
 
       case 0x1A: // set DTA
@@ -784,6 +989,112 @@ bool fdos_21h(CPU* _cpu) {
         }
         break;
       }
+        /* Windows95 / EDR-DOS long filename API.
+           Ported from original kernel/inthndlr.c case 0x71.
+
+           Most LFN subfunctions in the original kernel fall through to
+           unsupp: AL=00, CF=1.  AX therefore becomes 7100h.
+
+           AL=42h and AL=A6h are special: original validates the DOS file
+           handle and, for shared/network SFT entries, gives the redirector
+           INT 2Fh/AH=11h a chance to handle the request.  Local filesystem
+           support is still reported as unsupported. */
+       case 0x71:
+        switch (CPU_AL)
+        {
+#ifdef WITHLFNAPI
+          case 0x0d:
+          case 0x39:
+          case 0x3a:
+          case 0x3b:
+          case 0x41:
+          case 0x43:
+          case 0x47:
+          case 0x4e:
+          case 0x4f:
+          case 0xa0:
+          case 0xa1:
+          case 0xa2:
+          case 0xa8:
+          case 0xaa:
+            goto lfn_unsupp;
+
+          case 0x56:
+          case 0x60:
+            switch (CPU_CL)
+            {
+              case 0x00:
+              case 0x01:
+              case 0x02:
+                goto lfn_unsupp;
+              default:
+                goto lfn_unsupp;
+            }
+
+          case 0xa9:
+          case 0x6c:
+            goto lfn_unsupp;
+
+          case 0xa7:
+            switch (CPU_BL)
+            {
+              case 0x00:
+              case 0x01:
+                goto lfn_unsupp;
+              default:
+                goto lfn_unsupp;
+            }
+#endif
+          default:
+            goto lfn_unsupp;
+        }
+        break;
+
+#ifdef WITHLFNAPI
+        /* Win95 beta LFN - find close */
+      case 0x72:
+        goto lfn_unsupp;
+#endif
+
+#ifdef WITHFAT32
+        /* DOS 7.0+ FAT32 extended functions */
+      case 0x73:
+        cf = 0;
+        internal_data->CritErrCode = SUCCESS;
+        rc = int21_fat32();
+        goto short_check;
+#endif
+
+#ifdef WITHLFNAPI
+        /* FreeDOS LFN helper API functions */
+      case 0x74:
+        switch (CPU_AL)
+        {
+          case 0x01:
+            rc = lfn_allocate_inode();
+            break;
+          case 0x02:
+            rc = lfn_free_inode(CPU_BX);
+            break;
+          case 0x03:
+            rc = lfn_setup_inode(CPU_BX, MK_ULONG(CPU_CX, CPU_DX), MK_ULONG(CPU_SI, CPU_DI));
+            break;
+          case 0x04:
+            rc = lfn_create_entries(CPU_BX, (lfn_inode_ptr)ARM_PTR(FP_DS_DX));
+            break;
+          case 0x05:
+            rc = lfn_dir_read(CPU_BX, (lfn_inode_ptr)ARM_PTR(FP_DS_DX));
+            break;
+          case 0x06:
+            rc = lfn_dir_write(CPU_BX);
+            break;
+          default:
+            goto error_invalid;
+        }
+        CPU_AX = rc;
+        cf = 0;
+        goto short_check;
+#endif
       case 0xDD: // Novell NetWare - WORKSTATION - SET NetWare ERROR MODE
         goto error_invalid;
 
@@ -796,6 +1107,11 @@ short_check:
     if (rc < SUCCESS)
         goto error_exit;
     cf = 0;
+    goto exit_dispatch;
+
+lfn_unsupp:
+    CPU_AL = 0x00;
+    cf = 1;
     goto exit_dispatch;
 
 error_invalid:

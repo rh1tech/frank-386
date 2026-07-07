@@ -119,6 +119,7 @@ int get_sft_idx(UCOUNT hndl);
 struct cds FAR *get_cds_unvalidated(unsigned dsk);
 /*struct cds*/ dos_far_ptr get_cds(unsigned drive);
 struct cds FAR *get_cds1(unsigned dsk);
+struct dpb FAR *GetDriveDPB(UBYTE drive, COUNT *rc);
 COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest);
 
 /* dosidle.asm */
@@ -171,6 +172,7 @@ COUNT dos_write(COUNT fd, const VOID FAR * buffer, UCOUNT count);
 CLUSTER dos_free(struct dpb FAR * dpbp);
 BOOL dir_exists(char * path);
 VOID dpb16to32(struct dpb FAR *dpbp);
+COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp);
 
 f_node_ptr split_path(const char *, f_node_ptr fnp);
 
@@ -250,15 +252,12 @@ VOID mcb_print(mcb FAR * mcbp);
 
 /* lfnapi.c */
 COUNT lfn_allocate_inode(VOID);
-COUNT lfn_free_inode(COUNT handle);
-
-COUNT lfn_setup_inode(COUNT handle, ULONG dirstart, ULONG diroff);
-
-COUNT lfn_create_entries(COUNT handle, lfn_inode_ptr lip);
+COUNT lfn_free_inode(UWORD inode);
+COUNT lfn_setup_inode(UWORD inode, ULONG dir_cluster, ULONG dir_offset);
+COUNT lfn_create_entries(UWORD inode, lfn_inode_ptr out);
+COUNT lfn_dir_read(UWORD inode, lfn_inode_ptr out);
+COUNT lfn_dir_write(UWORD inode);
 COUNT lfn_remove_entries(COUNT handle);
-
-COUNT lfn_dir_read(COUNT handle, lfn_inode_ptr lip);
-COUNT lfn_dir_write(COUNT handle);
 
 /* nls.c */
 BYTE DosYesNo(UWORD ch);

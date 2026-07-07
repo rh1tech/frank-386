@@ -26,6 +26,7 @@
 #include "hdr/tail.h"
 #include "hdr/process.h"
 #include "hdr/version.h"
+#include "hdr/xstructs.h"
 #include "proto.h"
 #include "globals.h"
 #include "hdr/debug.h"

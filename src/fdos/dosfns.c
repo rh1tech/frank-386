@@ -915,3 +915,117 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
   return rc;
 }
 
+#ifdef WITHFAT32
+/* same convention as get_cds1(): drive is 0 for default, 1=A, 2=B, ... */
+struct dpb FAR *GetDriveDPB(UBYTE drive, COUNT *rc)
+{
+  struct cds FAR *cdsp = get_cds1(drive);
+
+  if (cdsp == NULL || far_is_null(cdsp->cdsDpb) || (cdsp->cdsFlags & CDSNETWDRV))
+  {
+    *rc = DE_INVLDDRV;
+    return NULL;
+  }
+
+  *rc = SUCCESS;
+  return (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
+}
+
+#define IS_SLASH(ch) ((ch) == '\\' || (ch) == '/')
+COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
+{
+  struct dpb FAR *dpbp;
+  struct cds FAR *cdsp;
+  dos_far_ptr cdsp_x86;
+
+  memset(xfsp, 0, sizeof(struct xfreespace));
+  xfsp->xfs_datasize = sizeof(struct xfreespace);
+
+  cdsp = NULL;
+  if (!*DriveString || (*DriveString == '.') || (IS_SLASH(DriveString[0]) && !IS_SLASH(DriveString[1])))
+  {
+    cdsp_x86 = get_cds(internal_data->default_drive);
+    if (!far_is_null(cdsp_x86))
+      cdsp = (struct cds FAR *)ARM_PTR(cdsp_x86);
+  }
+  else if (DriveString[1] == ':')
+  {
+    cdsp_x86 = get_cds(DosUpFChar(*DriveString) - 'A');
+    if (!far_is_null(cdsp_x86))
+      cdsp = (struct cds FAR *)ARM_PTR(cdsp_x86);
+  }
+
+  if (cdsp == NULL)
+    return DE_INVLDDRV;
+
+  if (cdsp->cdsFlags & CDSNETWDRV)
+  {
+    return DE_INVLDDRV;
+    #if 0
+    if (remote_getfree_11a3(cdsp, rg) != SUCCESS)
+    {
+      if (remote_getfree(cdsp, rg) != SUCCESS)
+        return DE_INVLDDRV;
+
+      xfsp->xfs_clussize = rg[0];
+      xfsp->xfs_totalclusters = rg[1];
+      xfsp->xfs_secsize = rg[2];
+      xfsp->xfs_freeclusters = rg[3];
+    }
+    else
+    {
+      UDWORD total, avail;
+      UDWORD bps, spc;
+
+      bps = rg[4];
+      spc = 1;
+      total = (((UDWORD)rg[0] << 16UL) | rg[1]);
+      avail = (((UDWORD)rg[2] << 16UL) | rg[3]);
+
+      while (total > 0x00ffffffUL && spc < 128) {
+        spc *= 2;
+        avail /= 2;
+        total /= 2;
+      }
+      while (total > 0x00ffffffUL && bps < 32768UL) {
+        bps *= 2;
+        avail /= 2;
+        total /= 2;
+      }
+
+      xfsp->xfs_secsize = bps;
+      xfsp->xfs_clussize = spc;
+      xfsp->xfs_totalclusters = total;
+      xfsp->xfs_freeclusters = avail;
+    }
+    #endif
+  }
+  else
+  {
+    if (far_is_null(cdsp->cdsDpb))
+      return DE_INVLDDRV;
+    dpbp = (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
+    if (media_check(dpbp) < 0)
+      return DE_INVLDDRV;
+
+    xfsp->xfs_secsize = dpbp->dpb_secsize;
+    xfsp->xfs_totalclusters = (ISFAT32(dpbp) ? dpbp->dpb_xsize : dpbp->dpb_size) - 1;
+/// TODO:    xfsp->xfs_freeclusters = dos_free(dpbp); replacemnt:
+    xfsp->xfs_freeclusters = ISFAT32(dpbp)
+                            ? dpbp->dpb_xnfreeclst
+                            : (dpbp->dpb_nfreeclst == 0xFFFF
+                               ? 0 : dpbp->dpb_nfreeclst);
+    xfsp->xfs_clussize = dpbp->dpb_clsmask + 1;
+  }
+
+  xfsp->xfs_totalunits = xfsp->xfs_totalclusters;
+  xfsp->xfs_freeunits = xfsp->xfs_freeclusters;
+  xfsp->xfs_totalsectors = xfsp->xfs_totalclusters * xfsp->xfs_clussize;
+  xfsp->xfs_freesectors = xfsp->xfs_freeclusters * xfsp->xfs_clussize;
+  xfsp->xfs_datasize = sizeof(struct xfreespace);
+
+  return SUCCESS;
+}
+#undef IS_SLASH
+#endif
+
