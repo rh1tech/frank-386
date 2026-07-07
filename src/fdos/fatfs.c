@@ -828,7 +828,7 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
   if (sftp == (sft *) - 1)
     return DE_INVLDHNDL;
 
-  internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), sftp);
+  internal_data->lpCurSft = linear_to_far(sftp);
 /*
    remote sub sft_count.
    /// TODO:

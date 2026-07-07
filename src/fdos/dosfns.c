@@ -252,13 +252,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     if ((flags & (O_TRUNC | O_CREAT)) == O_CREAT)
       attrib |= 0x100;
 
-    /// TODO: FP_SEG(LoL->sfthead) assumes sftp lives in the same
-    /// segment as the first (built-in) SFT block - true right now
-    /// since the second block (PreConfig2(), not implemented/called
-    /// yet) doesn't exist, but would need fixing (recovering sftp's
-    /// real segment some other way) once it does. Moot for now: this
-    /// whole branch is unreachable (see the function-level comment).
-    internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), sftp);
+    internal_data->lpCurSft = linear_to_far(sftp);
     cmd = REM_CREATE;
     if (!(flags & O_LEGACY))
     {
@@ -446,7 +440,7 @@ STATIC COUNT SftSeek2(int sft_idx, LONG new_pos, unsigned mode, UDWORD *p_result
   if (mode > SEEK_END)
     return DE_INVLDFUNC;
 
-  internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), s);
+  internal_data->lpCurSft = linear_to_far(s);
 
   /* Do special return for character devices      */
   if (s->sft_flags & SFT_FDEVICE)
@@ -538,7 +532,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
     dos_far_ptr save_dta;
 
     save_dta = internal_data->dta;
-    internal_data->lpCurSft = x86_FAR_PTR(FP_SEG(LoL->sfthead), s);
+    internal_data->lpCurSft = linear_to_far(s);
     internal_data->current_filepos = s->sft_posit;     /* needed for MSCDEX * /
     internal_data->dta = bp;
     XferCount = remote_rw(mode == XFR_READ ? REM_READ : REM_WRITE, s, n);

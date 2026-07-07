@@ -1032,7 +1032,7 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
     if ((FP_SEG(LoL->CDSp) != 0) && (LoL->nblkdev < LoL->lastdrive))
     {
       struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp);
-      CDSp[LoL->nblkdev].cdsDpb = x86_dpb;
+      CDSp[LoL->nblkdev].cdsDpb = ADD_OFF(x86_dpb, Index * sizeof(struct dpb));
       CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
     }
     /*
