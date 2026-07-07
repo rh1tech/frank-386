@@ -450,6 +450,31 @@ bool fdos_2fh(CPU* cpu) {
         .done = false,
         .owner = "INT 2fH"
     };
+
+    if (CPU_AX == 0xAE00) {
+        /*
+        * INT 2F/AX=AE00h - DOS 3.3+ internal
+        * INSTALLABLE COMMAND - installation check.
+        *
+        * Return AL=FFh to report that the installable-command interface is
+        * present.  The actual CONFIG.SYS INSTALL/INSTALLHIGH queue/execution
+        * is already handled in config.c by CmdInstall()/CmdInstallHigh() and
+        * DoInstall(); this function is only the multiplex installation probe.
+        */
+        CPU_AL = 0xFF;
+    }
+    else
+    if (CPU_AX == 0xAE01) {
+        /*
+         * INT 2F/AX=AE01h - DOS 3.3+ internal
+         * INSTALLABLE COMMAND - execute pending INSTALL=/INSTALLHIGH=
+         * commands collected while parsing CONFIG.SYS.
+         */
+        DoInstall();
+        CPU_AL = 0x00;
+        cf = 0;
+    }
+    else
     if (CPU_AH == 0x14)
         return fdos_nls_2fh(cpu);
     else

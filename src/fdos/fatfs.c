@@ -666,7 +666,7 @@ void dos_merge_file_changes(int fd)
 
     Migrated from fatfs.c verbatim.
 */
-STATIC int find_fname(const char *path, int attr, f_node_ptr fnp)
+int find_fname(const char *path, int attr, f_node_ptr fnp)
 {
   /* check for leading backslash and open the directory given that */
   /* contains the file given by path.                              */
@@ -1861,7 +1861,7 @@ STATIC VOID wipe_out(f_node_ptr fnp)
   /* it would be annoying if mass-deletes could not use BUFFERS...  */
 }
 
-STATIC COUNT delete_dir_entry(f_node_ptr fnp)
+COUNT delete_dir_entry(f_node_ptr fnp)
 {
   COUNT rc;
 

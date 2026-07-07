@@ -96,7 +96,7 @@ COUNT DosClose(COUNT hndl);
 COUNT DosCloseSft(int sft_idx, BOOL commitonly);
 #define DosCommit(hndl) DosCloseSft(get_sft_idx(hndl), TRUE)
 UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc);
-COUNT DosGetCuDir(UBYTE drive, dos_far_ptr * s);
+COUNT DosGetCuDir(UBYTE drive, dos_far_ptr s);
 COUNT DosChangeDir(dos_far_ptr s);
 COUNT DosFindFirst(UCOUNT attr, BYTE FAR * name);
 COUNT DosFindNext(void);

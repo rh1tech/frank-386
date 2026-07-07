@@ -100,12 +100,13 @@ void BIOS_drive_reset(CPU* cpu, unsigned drive);
 void blockio(CPU* cpu, request FAR *rq);
 int ASMPASCAL init_switchar(int chr);
 dos_far_ptr getvec(uint8_t intno);
-BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
-                 dos_far_ptr * r_top);
+BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode, dos_far_ptr * r_top);
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
 int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size);
 ULONG ASMPASCAL lseek(int fd, long position);
 dos_far_ptr DetectXMSDriver(void);
+int find_fname(const char *path, int attr, f_node_ptr fnp);
+COUNT delete_dir_entry(f_node_ptr fnp);
 
 inline static void rq_done(request FAR *rq) {
     rq->r_status = S_DONE;

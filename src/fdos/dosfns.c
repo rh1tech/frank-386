@@ -1029,3 +1029,115 @@ COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
 #undef IS_SLASH
 #endif
 
+/* FIX (analysis patch): declared in proto.h, called by INT 21h AH=47h
+   (GET CURRENT DIRECTORY - see fdos_21h.c), but never implemented in
+   this port. drive: 0 = default drive, 1 = A:, 2 = B:, ...
+   dst: destination buffer as a guest dos_far_ptr (ES:DI / DS:SI as
+   passed by the caller - see MK_FP(CPU_DS, CPU_SI) at the call site). */
+COUNT DosGetCuDir(UBYTE drive, dos_far_ptr dst)
+{
+  struct cds FAR *cdsp = get_cds1(drive);
+  const BYTE *src;
+  if (cdsp == NULL)
+    return DE_INVLDDRV;
+  src = cdsp->cdsCurrentPath + cdsp->cdsBackslashOffset + 1;
+  strcpy((char *)ARM_PTR(dst), (const char *)src);
+  return SUCCESS;
+}
+
+/* FIX (analysis patch): declared in proto.h, called by INT 21h AH=3Bh
+   (CHDIR - see fdos_21h.c), but never implemented in this port.
+   Migrated from upstream dosfns.c; network-redirector branch dropped in
+   the same style already used above for DosMkRmdir/DosRenameTrue in
+   this file (no network_redirector() in this port). */
+COUNT DosChangeDir(dos_far_ptr s)
+{
+  COUNT result;
+
+  result = truename(s, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  if (result < SUCCESS)
+    return DE_PATHNOTFND;
+
+  set_fcbname();
+
+  if (EFFECTIVE(internal_data->current_ldt) &&
+      (strlen(PriPathName) >= MAX_CDSPATH))
+    return DE_PATHNOTFND;
+
+  /// TODO:
+  ///  if (result & IS_NETWORK)
+  ///    return network_redirector(REM_CHDIR);
+
+  result = dos_cd(PriPathName);
+  if (result < SUCCESS)
+    return result;
+
+  /* Copy the path to the current directory structure. Some redirectors
+     do not write back to the CDS - not applicable here (no redirector),
+     kept for parity with upstream. */
+  if (EFFECTIVE(internal_data->current_ldt))
+  {
+    struct cds *cdsp = (struct cds *)ARM_PTR(internal_data->current_ldt);
+    fstrcpy(cdsp->cdsCurrentPath, PriPathName);
+    if (PriPathName[7] == 0)
+      cdsp->cdsCurrentPath[8] = 0; /* Need two Zeros at the end */
+  }
+  return SUCCESS;
+}
+
+/* FIX (analysis patch): declared in proto.h, called by INT 21h AH=41h
+   (see fdos_21h.c), but never implemented in this port. Migrated from
+   upstream dosfns.c; network/share branches dropped in the same style
+   already used above for DosMkRmdir/DosRenameTrue in this file, since
+   network_redirector()/share_is_file_open() are not ported (single-user,
+   no SHARE.EXE / redirector support). */
+COUNT DosDelete(dos_far_ptr path, int attrib)
+{
+  COUNT result;
+
+  result = truename(path, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  if (result < SUCCESS)
+    return result;
+
+  set_fcbname();
+
+  /// TODO:
+  ///  if (result & IS_NETWORK)
+  ///    return network_redirector(REM_DELETE);
+
+  if (result & IS_DEVICE)
+    return DE_FILENOTFND;
+
+  ///  if (IsShareInstalled(TRUE) && share_is_file_open(PriPathName))
+  ///    return DE_ACCESS;
+
+  return dos_delete(PriPathName, attrib);
+}
+
+/* FIX (analysis patch): dos_delete() was declared in proto.h and called
+   from DosDelete() (see dosfns.c), but never implemented anywhere in this
+   port - INT 21h AH=41h (DELETE FILE) had no working backend at all.
+   Migrated as-is from upstream fatfs.c; depends only on find_fname() and
+   delete_dir_entry(), both already present above in this file. */
+COUNT dos_delete(BYTE * path, int attrib)
+{
+  REG f_node_ptr fnp = &fnode[0];
+
+  /* Check that we don't have a duplicate name, so if we  */
+  /* find one, it's an error.                             */
+  int ret = find_fname(path, attrib, fnp);
+  if (ret == SUCCESS)
+  {
+    /* Do not delete directories or r/o files       */
+    /* lfn entries and volume labels are only found */
+    /* by find_fname() if attrib is set to a        */
+    /* special value                                */
+    if (fnp->f_dir.dir_attrib & (D_RDONLY | D_DIR))
+      return DE_ACCESS;
+
+    return delete_dir_entry(fnp);
+  }
+  else
+    /* No such file, return the error               */
+    return ret;
+}

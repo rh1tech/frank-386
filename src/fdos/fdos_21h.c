@@ -400,7 +400,6 @@ rebuild_dpb:
 }
 #endif
 
-
 /*
 DOS 1+ - main DOS handler
 */
@@ -653,6 +652,38 @@ bool fdos_21h(CPU* _cpu) {
         }
       }
         break;
+ 
+      /* Make directory                                                */
+      /* Remove directory                                               */
+      /* FIX (analysis patch): classic top-level entry points were missing;
+         DosMkRmdir() already exists and is used by the AH=43h/AL=FF path -
+         see inthndlr.c "case 0x39: case 0x3a: rc = DosMkRmdir(FP_DS_DX, lr.AH);" */
+      case 0x39:
+      case 0x3a:
+        rc = DosMkRmdir(FP_DS_DX, CPU_AH);
+        goto short_check;
+
+      /* Rename file (classic entry point) */
+      /* FIX (analysis patch): DosRename() already exists (used by the
+         AH=43h/AL=FF/CL=56h path); wire the standard AH=56h entry point too -
+         see inthndlr.c "case 0x56: rc = DosRename(FP_DS_DX, FP_ES_DI);" */
+      case 0x56:
+        rc = DosRename(FP_DS_DX, FP_ES_DI);
+        goto short_check;
+
+      /* Change directory                                             */
+      /* FIX (analysis patch): DosChangeDir() was declared but never
+         implemented in this port at all - AH=3Bh had no backend. */
+      case 0x3b:
+        rc = DosChangeDir(FP_DS_DX);
+        goto short_check;
+
+      /* Delete file                                                  */
+      /* FIX (analysis patch): DosDelete() was declared but never
+         implemented in this port at all - AH=41h had no backend. */
+      case 0x41:
+        rc = DosDelete(FP_DS_DX, D_ALL);
+        goto short_check;
 
       /* Get/Set File Attributes                                      */
       case 0x43:
@@ -706,6 +737,41 @@ bool fdos_21h(CPU* _cpu) {
         cf = 0;
         break;
 
+      case 0x45: /* DOS 2+ - DUP - DUPLICATE FILE HANDLE */
+      {
+        unsigned old_hndl = CPU_BX;
+        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+        UBYTE *filetab = (UBYTE *)ARM_PTR(p->ps_filetab);
+        unsigned new_hndl;
+
+        if (old_hndl >= p->ps_maxfiles || filetab[old_hndl] == 0xff)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-DE_INVLDHNDL);
+          break;
+        }
+
+        for (new_hndl = 0; new_hndl < p->ps_maxfiles; new_hndl++)
+        {
+          if (filetab[new_hndl] == 0xff)
+            break;
+        }
+
+        if (new_hndl >= p->ps_maxfiles)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-DE_TOOMANY);
+          break;
+        }
+
+        filetab[new_hndl] = filetab[old_hndl];
+        idx_to_sft(filetab[new_hndl])->sft_count++;
+
+        CPU_AX = (UWORD)new_hndl;
+        cf = 0;
+      }
+        break;
+
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       // BX = existing handle (old), CX = handle to redirect (new)
       {
@@ -739,6 +805,10 @@ bool fdos_21h(CPU* _cpu) {
         cf = 0;
       }
         break;
+
+      case 0x47: /* DOS 2+ - CWD - GET CURRENT DIRECTORY */
+        rc = DosGetCuDir(CPU_DL, MK_FP(CPU_DS, CPU_SI));
+        goto short_check;
 
         /* Set PSP                                                      */
       case 0x50:
