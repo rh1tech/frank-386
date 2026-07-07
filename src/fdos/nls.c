@@ -66,20 +66,24 @@ STATIC int muxBufGo(int subfct, int bp, UWORD cp, UWORD cntry,
  *	Also resolves the default values (-1) into the currently
  *	active codepage/country code.
  */
+
+static inline dos_far_ptr nls_null_ptr(void) {
+  return MK_FP(0, 0);
+}
 static inline struct nlsPackage *nls_pkg_ptr(dos_far_ptr p) {
   return far_is_null(p) ? NULL : (struct nlsPackage *)ARM_PTR(p);
 }
 
-STATIC struct nlsPackage* searchPackage(UWORD cp, UWORD cntry)
+STATIC dos_far_ptr/*struct nlsPackage*/ searchPackage(UWORD cp, UWORD cntry)
 {
-  dos_far_ptr x86_nls;
+  dos_far_ptr p;
   struct nlsPackage FAR *nls;
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
   log(("searchPackage(%u, %u) nlsInfo: %p\n", cp, cntry, nlsInfo));
 
   if (far_is_null(nlsInfo->actPkg) || far_is_null(nlsInfo->chain)) {
     log(("ERR: nlsInfo not properly initialised\n"));
-    return NULL;
+    return MK_FP(0, 0);
   }
 
   nls = nls_pkg_ptr(nlsInfo->actPkg);
@@ -88,19 +92,18 @@ STATIC struct nlsPackage* searchPackage(UWORD cp, UWORD cntry)
     log(("cp: %u\n", cp));
   }
   if (cntry == NLS_DEFAULT) {
-    cntry = ((struct nlsPackage *)ARM_PTR(nlsInfo->actPkg))->cntry;
+    cntry = nls->cntry;
     log(("cntry: %u\n", cntry));
   }
 
-  for (x86_nls = nlsInfo->chain; !far_is_null(x86_nls); x86_nls = nls->nxt) {
-    nls = nls_pkg_ptr(x86_nls);
+  for (p = nlsInfo->chain; !far_is_null(p); )
+  {
+    struct nlsPackage FAR *nls = (struct nlsPackage FAR *)ARM_PTR(p);
     if (nls->cp == cp && nls->cntry == cntry)
-        break;
-  }
-  if (far_is_null(x86_nls))
-    nls = NULL;  
-  log(("nls: %p\n", nls));
-  return nls;
+      return p;
+    p = nls->nxt;
+  }  
+  return MK_FP(0, 0);
 }
 
 /* For various robustnesses reasons and to simplify the implementation
@@ -188,10 +191,9 @@ BYTE DosYesNo(UWORD ch) {
  *	loaded, MUX-14 is invoked; otherwise the pkg's NLS_Fct_buf
  *	function is invoked.
  */
-COUNT DosGetData(int subfct, UWORD cp, UWORD cntry, UWORD bufsize,
-                 VOID FAR * buf)
+COUNT DosGetData(int subfct, UWORD cp, UWORD cntry, UWORD bufsize, VOID FAR * buf)
 {
-  struct nlsPackage FAR *nls;   /* NLS package to use to return the info from */
+  dos_far_ptr nls;              /* NLS package to use to return the info from */
 
   log(("NLS: GetData(): subfct=%x, cp=%u, cntry=%u, bufsize=%u\n", subfct, cp, cntry, bufsize));
 
@@ -205,14 +207,15 @@ COUNT DosGetData(int subfct, UWORD cp, UWORD cntry, UWORD bufsize,
   }
 
   /* nls := NLS package of cntry/codepage */
-  if ((nls = searchPackage(cp, cntry)) != NULL)
+  if (!far_is_null(nls = searchPackage(cp, cntry)))
   {
+    struct nlsPackage FAR *pkg = (struct nlsPackage FAR *)ARM_PTR(nls);
     /* matching NLS package found */
-    if (nls->flags & NLS_FLAG_DIRECT_GETDATA)
+    if (pkg->flags & NLS_FLAG_DIRECT_GETDATA)
       /* Direct access to the data */
-      return nlsGetData(nls, subfct, buf, bufsize);
-    cp = nls->cp;
-    cntry = nls->cntry;
+      return nlsGetData(pkg, subfct, buf, bufsize);
+    cp = pkg->cp;
+    cntry = pkg->cntry;
   }
 
   /* If the NLS pkg is not loaded into memory or the direct-access
@@ -259,19 +262,18 @@ STATIC COUNT muxLoadPkg(int subfct, UWORD cp, UWORD cntry)
   return (int)muxGo(subfct, 0, cp, cntry, 0, 0);
 }
 
-STATIC COUNT nlsLoadPackage(struct nlsPackage FAR * nls)
+STATIC COUNT nlsLoadPackage(dos_far_ptr nls)
 {
-
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-  nlsInfo->actPkg = linear_to_far(nls);
+  nlsInfo->actPkg = nls;
   return SUCCESS;
 }
 STATIC COUNT DosLoadPackage(UWORD cp, UWORD cntry)
 {
-  struct nlsPackage FAR *nls;   /* NLS package to use to return the info from */
+  dos_far_ptr nls;              /* NLS package to use to return the info from */
 
   /* nls := NLS package of cntry/codepage */
-  if ((nls = searchPackage(cp, cntry)) != NULL)
+  if (!far_is_null(nls = searchPackage(cp, cntry)))
     /* OK the NLS pkg is loaded --> activate it */
     return nlsLoadPackage(nls);
 
@@ -328,7 +330,7 @@ bool fdos_nls_2fh(CPU *cpu)
   UWORD bufsize = CPU_CX;
   VOID FAR *buf = far_is_null(FP_ES_DI) ? NULL : ARM_PTR(FP_ES_DI);
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-  struct nlsPackage *pkg = NULL;
+  dos_far_ptr pkgp = MK_FP(0, 0);
 
   switch (subfct)
   {
@@ -348,23 +350,27 @@ bool fdos_nls_2fh(CPU *cpu)
        * No external COUNTRY.SYS loader lives here.  We can only activate a
        * package that is already present in the in-memory NLS chain.
        */
-      pkg = searchPackage(cp, cntry);
-      if (pkg != NULL)
-        rc = nlsLoadPackage(pkg);
+      pkgp = searchPackage(cp, cntry);
+      if (!far_is_null(pkgp))
+        rc = nlsLoadPackage(pkgp);
       else
         rc = DE_FILENOTFND;
       CPU_AX = (UWORD)rc;
       return true;
 
     case NLSFUNC_GETDATA:
-      pkg = searchPackage(cp, cntry);
-      rc = (pkg != NULL) ? nlsGetData(pkg, CPU_BP, buf, bufsize) : DE_FILENOTFND;
+      pkgp = searchPackage(cp, cntry);
+      rc = !far_is_null(pkgp)
+           ? nlsGetData((struct nlsPackage *)ARM_PTR(pkgp), CPU_BP, buf, bufsize)
+           : DE_FILENOTFND;
       CPU_AX = (UWORD)rc;
       return true;
 
     case NLSFUNC_DOS38:
-      pkg = searchPackage(cp, cntry);
-      rc = (pkg != NULL) ? nlsGetData(pkg, NLS_DOS_38, buf, bufsize) : DE_FILENOTFND;
+      pkgp = searchPackage(cp, cntry);
+      rc = !far_is_null(pkgp)
+           ? nlsGetData((struct nlsPackage *)ARM_PTR(pkgp), NLS_DOS_38, buf, bufsize)
+           : DE_FILENOTFND;
       CPU_AX = (UWORD)rc;
       return true;
 
@@ -373,17 +379,19 @@ bool fdos_nls_2fh(CPU *cpu)
        * DR-DOS compatible alias: same register contract as GETDATA in this
        * port.  Keep it handled so callers do not fall into no_handler().
        */
-      pkg = searchPackage(cp, cntry);
-      rc = (pkg != NULL) ? nlsGetData(pkg, CPU_BP, buf, bufsize) : DE_FILENOTFND;
+      pkgp = searchPackage(cp, cntry);
+      rc = !far_is_null(pkgp)
+           ? nlsGetData((struct nlsPackage *)ARM_PTR(pkgp), CPU_BP, buf, bufsize)
+           : DE_FILENOTFND;
       CPU_AX = (UWORD)rc;
       return true;
 
-    case NLSFUNC_YESNO:
+    case NLSFUNC_YESNO: {
       /*
        * CX carries the character in muxYesNo().  Return 1 for yes,
        * 0 for no, DE_INVLDFUNC for neither.
        */
-      pkg = (struct nlsPackage *)ARM_PTR(nlsInfo->actPkg);
+      struct nlsPackage *pkg = (struct nlsPackage *)ARM_PTR(nlsInfo->actPkg);
       if (toupper((unsigned char)bufsize) == toupper((unsigned char)pkg->yeschar))
         CPU_AX = 1;
       else if (toupper((unsigned char)bufsize) == toupper((unsigned char)pkg->nochar))
@@ -391,7 +399,7 @@ bool fdos_nls_2fh(CPU *cpu)
       else
         CPU_AX = (UWORD)DE_INVLDFUNC;
       return true;
-
+    }
     case NLSFUNC_UPMEM:
     case NLSFUNC_FILE_UPMEM:
       /*
