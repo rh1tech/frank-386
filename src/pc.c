@@ -1488,6 +1488,8 @@ void bios_post(PC *pc) {
 	point2iret(0x21);
 	point2iret(0x29);
 	point2iret(0x2f);
+// MS MOUSE
+	point2iret(0x33);
 // IRQ14 - HARD DISK CONTROLLER OPERATION COMPLETE (AT and later)
 	point2iret(0x76);
 

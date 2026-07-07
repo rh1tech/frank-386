@@ -346,6 +346,7 @@ static inline void cmos_write(CPU* cpu, uint8_t reg, uint8_t val)
 inline static void print_line2(const char* s, int row, int col) {
 	u16 c;
 	u32 base = 0xB8000 + row * 160;
+	col <<= 1;
     while ((c = *s) && col < 160) {
         pstore16(base + col, 0x0F00 | c);
 		++s; ++col; ++col;

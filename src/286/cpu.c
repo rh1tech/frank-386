@@ -91,22 +91,47 @@ handler_t handlers[256];
 #include <stdio.h>
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
 void cpu_err_msg(CPU* cpu, const char* msg) {
+    char buf[80];
+    uint32_t ip = ((uint32_t)CPU_CS << 4) + CPU_IP;
+    uint32_t sp = ((uint32_t)CPU_SS << 4) + CPU_SP;
+    uint16_t fw = cpu_getflags(cpu);
     print_line(msg, 1);
-    char buf[10];
-    snprintf(buf, 10, "AX: %04xh ", CPU_AX); print_line(buf, 2);
-    snprintf(buf, 10, "BX: %04xh ", CPU_BX); print_line(buf, 3);
-    snprintf(buf, 10, "CX: %04xh ", CPU_CX); print_line(buf, 4);
-    snprintf(buf, 10, "DX: %04xh ", CPU_DX); print_line(buf, 5);
-    snprintf(buf, 10, "SI: %04xh ", CPU_SI); print_line(buf, 6);
-    snprintf(buf, 10, "DI: %04xh ", CPU_DI); print_line(buf, 7);
-    snprintf(buf, 10, "BP: %04xh ", CPU_BP); print_line(buf, 8);
-    snprintf(buf, 10, "DS: %04xh ", CPU_DS); print_line(buf, 9);
-    snprintf(buf, 10, "SS: %04xh ", CPU_SS); print_line(buf, 10);
-    snprintf(buf, 10, "FS: %04xh ", CPU_FS); print_line(buf, 11);
-    snprintf(buf, 10, "GS: %04xh ", CPU_GS); print_line(buf, 12);
-    snprintf(buf, 10, "ES: %04xh ", CPU_ES); print_line(buf, 13);
-    snprintf(buf, 10, "CS: %04xh ", CPU_CS); print_line(buf, 14);
-    snprintf(buf, 10, "IP: %04xh ", CPU_IP); print_line(buf, 15);
+
+    snprintf(buf, sizeof(buf), "AX=%04X BX=%04X CX=%04X DX=%04X ",
+             CPU_AX, CPU_BX, CPU_CX, CPU_DX); print_line(buf, 2);
+    snprintf(buf, sizeof(buf), "SI=%04X DI=%04X BP=%04X SP=%04X ",
+             CPU_SI, CPU_DI, CPU_BP, CPU_SP); print_line(buf, 3);
+    snprintf(buf, sizeof(buf), "CS:IP=%04X:%04X  SS:SP=%04X:%04X ",
+             CPU_CS, CPU_IP, CPU_SS, CPU_SP); print_line(buf, 4);
+    snprintf(buf, sizeof(buf), "DS=%04X ES=%04X FS=%04X GS=%04X ",
+             CPU_DS, CPU_ES, CPU_FS, CPU_GS); print_line(buf, 5);
+
+    snprintf(buf, sizeof(buf), "FLAGS=%04X %c%c%c%c%c%c%c%c%c ",
+             fw,
+             (fw & 0x0800) ? 'O' : '-',
+             (fw & 0x0400) ? 'D' : '-',
+             (fw & 0x0200) ? 'I' : '-',
+             (fw & 0x0100) ? 'T' : '-',
+             (fw & 0x0080) ? 'S' : '-',
+             (fw & 0x0040) ? 'Z' : '-',
+             (fw & 0x0010) ? 'A' : '-',
+             (fw & 0x0004) ? 'P' : '-',
+             (fw & 0x0001) ? 'C' : '-');
+    print_line(buf, 6);
+
+    snprintf(buf, sizeof(buf), "OP=%02X %02X %02X %02X %02X %02X ",
+             read86(ip + 0), read86(ip + 1), read86(ip + 2),
+             read86(ip + 3), read86(ip + 4), read86(ip + 5));
+    print_line(buf, 7);
+
+    snprintf(buf, sizeof(buf), "STACK=%04X %04X %04X %04X ",
+             readw86(sp + 0), readw86(sp + 2),
+             readw86(sp + 4), readw86(sp + 6));
+    print_line(buf, 8);
+
+    snprintf(buf, sizeof(buf), "RET? IP=%04X CS=%04X FL=%04X ",
+             readw86(sp + 0), readw86(sp + 2), readw86(sp + 4));
+    print_line(buf, 9);
 }
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "ERROR: no handler defined");
@@ -931,7 +956,7 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
 
 /// TODO: inline
 bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
-    ///print_line2("BIOS", 0, 8);
+    print_line2("BIOS", 0, 8);
     return handlers[intnum](cpu);
 }
 
