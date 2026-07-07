@@ -121,10 +121,12 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     if (EFFECTIVE(buf) >= 0xa0000 && numblocks == 1 && LoL->bufloc != LOC_CONV)
     {
       IoReqHdrD.r_trans = LoL->deblock_buf;
-      if (mode == DSKWRITE)
+      if (mode == DSKWRITE || mode == DSKWRITEINT26)
         fmemcpy(LoL->deblock_buf, buf, dpbp->dpb_secsize);
+
       execrh(linear_to_far( &IoReqHdrD ), dpbp->dpb_device);
-      if (mode == DSKREAD)
+
+      if (mode == DSKREAD || mode == DSKREADINT25)
         fmemcpy(buf, LoL->deblock_buf, dpbp->dpb_secsize);
     }
     else
@@ -199,6 +201,39 @@ STATIC struct buffer *bufptr(UWORD off)
 #define b_next(bp) bufptr((bp)->b_next)
 #define b_prev(bp) bufptr((bp)->b_prev)
 
+#if DEBUG
+STATIC void check_buffer_ring(const char *where)
+{
+  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+  UWORD seg = FP_SEG(LoL->firstbuf);
+  UWORD first = FP_OFF(LoL->firstbuf);
+
+  for (unsigned i = 0; i < LoL->nbuffers; i++)
+  {
+    UWORD cur = buf_seg_off(bp);
+    struct buffer *next = b_next(bp);
+    struct buffer *prev = b_prev(bp);
+
+    if (next->b_prev != cur || prev->b_next != cur)
+    {
+      printf("PANIC: buffer ring broken at %s i=%u seg=%04X first=%04X "
+             "cur=%04X next=%04X next.prev=%04X prev=%04X prev.next=%04X "
+             "flags=%02X unit=%u bblk=%lu\n",
+             where, i, seg, first,
+             cur, bp->b_next, next->b_prev, bp->b_prev, prev->b_next,
+             bp->b_flag, bp->b_unit, (unsigned long)bp->b_blkno);
+      while (1);
+    }
+
+    bp = next;
+  }
+
+  if (buf_seg_off(bp) != first)
+    printf("PANIC: buffer ring does not close at %s first=%04X got=%04X nbuffers=%u\n",
+           where, first, buf_seg_off(bp), LoL->nbuffers);
+}
+#endif
+
 STATIC void move_buffer(struct buffer *bp, UWORD firstbp)
 {
   UWORD bp_off = buf_seg_off(bp);
@@ -225,6 +260,9 @@ STATIC void move_buffer(struct buffer *bp, UWORD firstbp)
          "bp.next=%04X bp.prev=%04X\n",
          bp_off, firstbp, bp->b_next, bp->b_prev);
 */
+#if DEBUG
+  check_buffer_ring("move_buffer");
+#endif
 }
 
 /*
@@ -246,6 +284,9 @@ STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
   UWORD uncacheBuf = 0;
   UWORD firstbp = FP_OFF(LoL->firstbuf);
 
+#if DEBUG
+  check_buffer_ring("searchblock-entry");
+#endif
   bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
   do
   {

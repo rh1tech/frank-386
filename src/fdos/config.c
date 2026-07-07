@@ -2292,8 +2292,8 @@ VOID PostConfig(VOID)
     LoL->lastdrive = LoL->nblkdev;
 
   CfgDbgPrintf(("starting FAR allocations at %x\n", base_seg));
-
-  config_init_buffers(Config.cfgBuffers);
+  /// TODO: may be move buffers ring to HMA
+///  config_init_buffers(Config.cfgBuffers);
 
   /*
    * PreConfig2() appended the second 3-entry SFT block after the

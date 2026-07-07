@@ -172,7 +172,8 @@ COUNT dos_write(COUNT fd, const VOID FAR * buffer, UCOUNT count);
 CLUSTER dos_free(struct dpb FAR * dpbp);
 BOOL dir_exists(char * path);
 VOID dpb16to32(struct dpb FAR *dpbp);
-COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp);
+struct xfreespace;
+COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace* xfsp);
 
 f_node_ptr split_path(const char *, f_node_ptr fnp);
 
