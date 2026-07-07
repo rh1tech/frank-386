@@ -450,6 +450,9 @@ bool fdos_2fh(CPU* cpu) {
         .done = false,
         .owner = "INT 2fH"
     };
+    if (CPU_AH == 0x14)
+        return fdos_nls_2fh(cpu);
+    else
     if (CPU_AX == 0x4300)
         CPU_AL = 0x80;
     else 

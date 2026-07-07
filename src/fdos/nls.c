@@ -1,3 +1,4 @@
+#include <ctype.h>
 #include "hdrs.h"
 #include "bios/bios.h"
 
@@ -300,4 +301,121 @@ dos_far_ptr DosGetDBCS(void)
 {
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
 	return getTable7(nlsInfo->actPkg);
+}
+
+/*
+ * INT 2Fh / AH=14h - FreeDOS NLS MUX root handler.
+ *
+ * call_nls() enters here with:
+ *   AL = NLSFUNC_* subfunction
+ *   BP = DOS-65 subfunction / package-load selector
+ *   BX = codepage
+ *   DX = country
+ *   CX = buffer size or character
+ *   DS:SI = nlsInfoBlock
+ *   ES:DI = caller buffer, when applicable
+ *
+ * Return convention used by nls.c:
+ *   AX = DOS error/status, SUCCESS == 0
+ *   BX may carry an extra word for install-check.
+ */
+bool fdos_nls_2fh(CPU *cpu)
+{
+  COUNT rc = SUCCESS;
+  UWORD subfct = CPU_AL;
+  UWORD cp = CPU_BX;
+  UWORD cntry = CPU_DX;
+  UWORD bufsize = CPU_CX;
+  VOID FAR *buf = far_is_null(FP_ES_DI) ? NULL : ARM_PTR(FP_ES_DI);
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+  struct nlsPackage *pkg = NULL;
+
+  switch (subfct)
+  {
+    case NLSFUNC_INSTALL_CHECK:
+      /*
+       * muxLoadPkg() expects AX=14FFh and BX=NLS_FREEDOS_NLSFUNC_ID.
+       * This is the kernel's built-in MUX-14 root, not an external TSR,
+       * but it is sufficient for internal NLS routing.
+       */
+      CPU_AX = 0x14ff;
+      CPU_BX = NLS_FREEDOS_NLSFUNC_ID;
+      return true;
+
+    case NLSFUNC_LOAD_PKG:
+    case NLSFUNC_LOAD_PKG2:
+      /*
+       * No external COUNTRY.SYS loader lives here.  We can only activate a
+       * package that is already present in the in-memory NLS chain.
+       */
+      pkg = searchPackage(cp, cntry);
+      if (pkg != NULL)
+        rc = nlsLoadPackage(pkg);
+      else
+        rc = DE_FILENOTFND;
+      CPU_AX = (UWORD)rc;
+      return true;
+
+    case NLSFUNC_GETDATA:
+      pkg = searchPackage(cp, cntry);
+      rc = (pkg != NULL) ? nlsGetData(pkg, CPU_BP, buf, bufsize) : DE_FILENOTFND;
+      CPU_AX = (UWORD)rc;
+      return true;
+
+    case NLSFUNC_DOS38:
+      pkg = searchPackage(cp, cntry);
+      rc = (pkg != NULL) ? nlsGetData(pkg, NLS_DOS_38, buf, bufsize) : DE_FILENOTFND;
+      CPU_AX = (UWORD)rc;
+      return true;
+
+    case NLSFUNC_DRDOS_GETDATA:
+      /*
+       * DR-DOS compatible alias: same register contract as GETDATA in this
+       * port.  Keep it handled so callers do not fall into no_handler().
+       */
+      pkg = searchPackage(cp, cntry);
+      rc = (pkg != NULL) ? nlsGetData(pkg, CPU_BP, buf, bufsize) : DE_FILENOTFND;
+      CPU_AX = (UWORD)rc;
+      return true;
+
+    case NLSFUNC_YESNO:
+      /*
+       * CX carries the character in muxYesNo().  Return 1 for yes,
+       * 0 for no, DE_INVLDFUNC for neither.
+       */
+      pkg = (struct nlsPackage *)ARM_PTR(nlsInfo->actPkg);
+      if (toupper((unsigned char)bufsize) == toupper((unsigned char)pkg->yeschar))
+        CPU_AX = 1;
+      else if (toupper((unsigned char)bufsize) == toupper((unsigned char)pkg->nochar))
+        CPU_AX = 0;
+      else
+        CPU_AX = (UWORD)DE_INVLDFUNC;
+      return true;
+
+    case NLSFUNC_UPMEM:
+    case NLSFUNC_FILE_UPMEM:
+      /*
+       * Minimal safe built-in service: CP437 hardcoded tables currently map
+       * ASCII correctly, and non-ASCII remains byte-preserving unless the
+       * direct table path is used elsewhere.
+       */
+      if (buf == NULL)
+        rc = DE_INVLDDATA;
+      else
+      {
+        UBYTE *p = (UBYTE *)buf;
+        while (bufsize--)
+        {
+          if (*p >= 'a' && *p <= 'z')
+            *p -= 'a' - 'A';
+          p++;
+        }
+      }
+      CPU_AX = (UWORD)rc;
+      return true;
+
+    default:
+      CPU_AX = (UWORD)DE_INVLDFUNC;
+      return true;
+  }
 }

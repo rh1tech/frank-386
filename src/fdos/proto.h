@@ -270,8 +270,8 @@ VOID DosUpString(char FAR * str);
 VOID DosUpFMem(VOID FAR * str, unsigned len);
 unsigned char DosUpFChar(unsigned char ch);
 VOID DosUpFString(char FAR * str);
-COUNT DosGetData(int subfct, UWORD cp, UWORD cntry, UWORD bufsize,
-                 VOID FAR * buf);
+COUNT DosGetData(int subfct, UWORD cp, UWORD cntry, UWORD bufsize, VOID FAR * buf);
+bool fdos_nls_2fh(CPU *cpu);
 #ifndef DosGetCountryInformation
 COUNT DosGetCountryInformation(UWORD cntry, VOID FAR * buf);
 #endif
