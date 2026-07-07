@@ -7,7 +7,8 @@
 #define muxYesNo(ch)		muxBufGo(NLSFUNC_YESNO,0, NLS_DEFAULT, NLS_DEFAULT, (ch), 0)
 #define muxUpMem(s,b,bs)	muxBufGo((s),0, NLS_DEFAULT,NLS_DEFAULT, (bs), (b))
 
-#define log(x) printf x
+#define log(x)
+/// printf x
 
 ULONG call_nls(UWORD bp,
                UWORD FAR *buf,

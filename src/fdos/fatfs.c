@@ -692,22 +692,23 @@ int find_fname(const char *path, int attr, f_node_ptr fnp)
 /* see DosOpenSft(), dosfns.c for an explanation of the flags bits      */
 /* directory opens are allowed here; these are not allowed by DosOpenSft*/
 
+STATIC VOID wipe_out(f_node_ptr fnp);
+STATIC int alloc_find_free(f_node_ptr fnp, char *path);
+STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, char *name);
+
 /*
-    Migrated from fatfs.c verbatim, except for the O_TRUNC and
-    DE_FILENOTFND-with-O_CREAT branches:
-      - O_TRUNC needs wipe_out() (release the existing file's FAT
-        chain and truncate to zero) - not migrated yet.
-      - O_CREAT (the file doesn't exist) needs alloc_find_free()
-        (allocate a free directory slot/cluster for a brand-new file)
-        and init_direntry()/dir_write() to write it out - none of
-        which are migrated yet either.
-    Both report a clear, deliberate "not implemented" error
-    (DE_ACCESS - there is no specific "not implemented" DOS error
-    code) instead of silently doing nothing or corrupting state, so
-    they fail loudly rather than pretending to succeed. The O_OPEN
-    (open existing file) path - this iteration's actual goal - is
-    migrated in full, including the shared tail (merge_file_changes()/
-    fnode_to_sft()) that runs after any of the three branches.
+Migrated from fatfs.c verbatim.
+
+    FIX (analysis patch): the O_TRUNC and O_CREAT branches below used to
+    be deliberate "not implemented yet" stubs returning DE_ACCESS - i.e.
+    no DOS program could ever create a new file or truncate an existing
+    one (redirection ">", COPY CON, compilers/installers writing output,
+    etc. all failed). All the pieces they need - wipe_out(),
+    alloc_find_free(), init_direntry(), dir_write() - are already fully
+    implemented elsewhere in this file (alloc_find_free() is already
+    exercised today by dos_rename()'s "create new entry in other
+    directory" path), so this is a straight restore of the upstream
+    logic, not new design.
 */
 int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
 {
@@ -727,11 +728,11 @@ int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
       if ((dir_attrib & (D_RDONLY | D_DIR | D_VOLID))
           || (dir_attrib & ~D_ARCHIVE & ~attrib))
         return DE_ACCESS;
-
-      /// TODO: wipe_out(fnp) (release the existing file's FAT chain
-      /// and truncate it to zero) is not implemented yet.
-      printf("dos_open: O_TRUNC not implemented yet\n");
-      return DE_ACCESS;
+      /* Release the existing files FAT and set the   */
+      /* length to zero, effectively truncating the   */
+      /* file to zero.                                */
+      wipe_out(fnp);
+      status = S_REPLACED;
     }
     else if (flags & O_OPEN)
     {
@@ -754,10 +755,10 @@ int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
   }
   else if (status == DE_FILENOTFND && (flags & O_CREAT))
   {
-    /// TODO: alloc_find_free(fnp, path) (allocate a free directory
-    /// slot/cluster for a brand-new file) is not implemented yet.
-    printf("dos_open: O_CREAT (new file) not implemented yet\n");
-    return DE_ACCESS;
+    int ret = alloc_find_free(fnp, path);
+    if (ret != SUCCESS)
+      return ret;
+    status = S_CREATED;
   }
   else
   {
@@ -777,11 +778,9 @@ int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
   fnp->f_flags |= SFT_FCLEAN;
   if (status != S_OPENED)
   {
-    /// TODO: init_direntry()/dir_write() are not implemented yet -
-    /// unreachable for now, since both branches that set status to
-    /// anything other than S_OPENED return early above instead.
-    printf("PANIC: dos_open reached the O_CREAT/O_TRUNC tail unexpectedly\n");
-    for (;;) ;
+    init_direntry(&fnp->f_dir, attrib, FREE, fnp->f_dmp->dm_name_pat);
+    if (!dir_write(fnp))
+      return DE_ACCESS;
   }
 
   merge_file_changes(fnp, status == S_OPENED); /* /// Added - Ron Cemer */
@@ -1695,8 +1694,7 @@ STATIC CLUSTER find_fat_free(f_node_ptr fnp)
 }
 
 /* initialize directory entry (creation/access stamps 0 as per MS-DOS 7.10) */
-STATIC void init_direntry(struct dirent *dentry, unsigned attrib,
-                          CLUSTER cluster, char *name)
+STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, char *name)
 {
   memset(dentry, 0, sizeof(struct dirent));
   memcpy(dentry->dir_name, name, FNAME_SIZE + FEXT_SIZE);
@@ -1882,6 +1880,34 @@ COUNT delete_dir_entry(f_node_ptr fnp)
 
   /* SUCCESSful completion, return it             */
   return SUCCESS;
+}
+
+/* FIX (analysis patch): dos_delete() was declared in proto.h and called
+   from DosDelete() (see dosfns.c), but never implemented anywhere in this
+   port - INT 21h AH=41h (DELETE FILE) had no working backend at all.
+   Migrated as-is from upstream fatfs.c; depends only on find_fname() and
+   delete_dir_entry(), both already present above in this file. */
+COUNT dos_delete(BYTE * path, int attrib)
+{
+  REG f_node_ptr fnp = &fnode[0];
+
+  /* Check that we don't have a duplicate name, so if we  */
+  /* find one, it's an error.                             */
+  int ret = find_fname(path, attrib, fnp);
+  if (ret == SUCCESS)
+  {
+    /* Do not delete directories or r/o files       */
+    /* lfn entries and volume labels are only found */
+    /* by find_fname() if attrib is set to a        */
+    /* special value                                */
+    if (fnp->f_dir.dir_attrib & (D_RDONLY | D_DIR))
+      return DE_ACCESS;
+
+    return delete_dir_entry(fnp);
+  }
+  else
+    /* No such file, return the error               */
+    return ret;
 }
 
 COUNT dos_rmdir(BYTE * path)

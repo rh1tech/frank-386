@@ -201,6 +201,107 @@ UBYTE DosSelectDrv(UBYTE drv)
   return LoL->lastdrive;
 }
 
+static int fcb_parse_sep(int c)
+{
+  return c == ' ' || c == '\t' || c == ',' || c == ';' || c == '=';
+}
+
+static int fcb_parse_term(int c)
+{
+  return c == 0 || c == '\r' || c == '\n' || fcb_parse_sep(c);
+}
+
+static UBYTE DosParseFilenameIntoFcb(UBYTE mode, dos_far_ptr srcp, dos_far_ptr fcbp)
+{
+  const BYTE *src = (const BYTE *)ARM_PTR(srcp);
+  fcb *dst = (fcb *)ARM_PTR(fcbp);
+  UBYTE result = 0;
+  int i;
+
+  if (mode & 0x01)
+  {
+    while (fcb_parse_sep(*src))
+      src++;
+  }
+
+  if (src[0] && src[1] == ':')
+  {
+    UBYTE drive = DosUpFChar(src[0]);
+
+    if (drive < 'A' || drive > 'Z')
+      return 0xff;
+
+    drive = drive - 'A' + 1;
+    if (get_cds1(drive) == NULL)
+      return 0xff;
+
+    dst->fcb_drive = drive;
+    src += 2;
+  }
+  else if (!(mode & 0x02))
+  {
+    dst->fcb_drive = 0;
+  }
+
+  if (!(mode & 0x04))
+    memset(dst->fcb_fname, ' ', FNAME_SIZE);
+  if (!(mode & 0x08))
+    memset(dst->fcb_fext, ' ', FEXT_SIZE);
+
+  if (!fcb_parse_term(*src) && *src != '.')
+  {
+    for (i = 0; i < FNAME_SIZE && !fcb_parse_term(*src) && *src != '.'; )
+    {
+      BYTE c = *src++;
+      if (c == '*')
+      {
+        result = 1;
+        while (i < FNAME_SIZE)
+          dst->fcb_fname[i++] = '?';
+        while (!fcb_parse_term(*src) && *src != '.')
+          src++;
+        break;
+      }
+      if (c == '?')
+        result = 1;
+      dst->fcb_fname[i++] = DosUpFChar(c);
+    }
+
+    while (!fcb_parse_term(*src) && *src != '.')
+      src++;
+  }
+
+  if (*src == '.')
+  {
+    src++;
+    if (!(mode & 0x08))
+      memset(dst->fcb_fext, ' ', FEXT_SIZE);
+
+    for (i = 0; i < FEXT_SIZE && !fcb_parse_term(*src) && *src != '.'; )
+    {
+      BYTE c = *src++;
+      if (c == '*')
+      {
+        result = 1;
+        while (i < FEXT_SIZE)
+          dst->fcb_fext[i++] = '?';
+        while (!fcb_parse_term(*src) && *src != '.')
+          src++;
+        break;
+      }
+      if (c == '?')
+        result = 1;
+      dst->fcb_fext[i++] = DosUpFChar(c);
+    }
+
+    while (!fcb_parse_term(*src) && *src != '.')
+      src++;
+  }
+
+  CPU_SI = FP_OFF(srcp) + (UWORD)(src - (const BYTE *)ARM_PTR(srcp));
+  return result;
+}
+
 #ifdef WITHFAT32
 static COUNT int21_fat32(void)
 {
@@ -410,8 +511,8 @@ bool fdos_21h(CPU* _cpu) {
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
       case 0x02:
-        CPU_AL = CPU_DL;
         write_char_stdout(CPU_AL);
+        CPU_AL = (CPU_DL == HT) ? ' ' : CPU_DL;
         break;
       /* Display String                                               */
       case 0x09:
@@ -437,6 +538,11 @@ bool fdos_21h(CPU* _cpu) {
 
       case 0x1A: // set DTA
         internal_data->dta = FP_DS_DX;
+        break;
+
+      case 0x29: /* DOS 1+ - PARSE FILENAME INTO FCB */
+        CPU_AL = DosParseFilenameIntoFcb(CPU_AL, MK_FP(CPU_DS, CPU_SI),
+                                         MK_FP(CPU_ES, CPU_DI));
         break;
 
         /* Set Interrupt Vector                                         */
@@ -574,6 +680,28 @@ bool fdos_21h(CPU* _cpu) {
           goto short_check;
         }
 #endif
+      /* Create file                                                  */
+      /* FIX (analysis patch): AH=3Ch had no dispatcher entry at all -
+         and until dos_open()'s O_CREAT/O_TRUNC branches were implemented
+         (see fatfs.c), wiring it wouldn't have helped anyway. Now that
+         both exist, this mirrors inthndlr.c's "case 0x3c" exactly,
+         same long_check convention as case 0x3d below. */
+      case 0x3c:
+      {
+        long result = DosOpen(FP_DS_DX, O_LEGACY | O_RDWR | O_CREAT | O_TRUNC, CPU_CL);
+        if (result < SUCCESS)
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-result);
+        }
+        else
+        {
+          cf = 0;
+          CPU_AX = (UWORD)result;
+        }
+      }
+        break;
+
       case 0x3d: // DOS 2+ - OPEN - OPEN EXISTING FILE
       {
         /* DS:DX = ASCIIZ pathname, AL = access mode.

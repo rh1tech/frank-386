@@ -1113,31 +1113,3 @@ COUNT DosDelete(dos_far_ptr path, int attrib)
 
   return dos_delete(PriPathName, attrib);
 }
-
-/* FIX (analysis patch): dos_delete() was declared in proto.h and called
-   from DosDelete() (see dosfns.c), but never implemented anywhere in this
-   port - INT 21h AH=41h (DELETE FILE) had no working backend at all.
-   Migrated as-is from upstream fatfs.c; depends only on find_fname() and
-   delete_dir_entry(), both already present above in this file. */
-COUNT dos_delete(BYTE * path, int attrib)
-{
-  REG f_node_ptr fnp = &fnode[0];
-
-  /* Check that we don't have a duplicate name, so if we  */
-  /* find one, it's an error.                             */
-  int ret = find_fname(path, attrib, fnp);
-  if (ret == SUCCESS)
-  {
-    /* Do not delete directories or r/o files       */
-    /* lfn entries and volume labels are only found */
-    /* by find_fname() if attrib is set to a        */
-    /* special value                                */
-    if (fnp->f_dir.dir_attrib & (D_RDONLY | D_DIR))
-      return DE_ACCESS;
-
-    return delete_dir_entry(fnp);
-  }
-  else
-    /* No such file, return the error               */
-    return ret;
-}
