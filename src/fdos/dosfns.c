@@ -112,10 +112,10 @@ STATIC sft *get_free_sft(COUNT *sft_idx)
     data-buffer argument for C_OPEN (no data transferred); that becomes
     a plain NULL native pointer here.
 */
-STATIC int DeviceOpenSft(struct dhdr *dhp, sft *sftp)
+STATIC int DeviceOpenSft(dos_far_ptr /*struct dhdr*/ x86_dhp, sft *sftp)
 {
   int i;
-
+  struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
   sftp->sft_shroff = -1;      /* /// Added for SHARE - Ron Cemer */
   sftp->sft_count += 1;
   sftp->sft_flags =
@@ -128,7 +128,7 @@ STATIC int DeviceOpenSft(struct dhdr *dhp, sft *sftp)
   /* and uppercase */
   DosUpFMem(sftp->sft_name, FNAME_SIZE + FEXT_SIZE);
 
-  sftp->sft_dev = x86_FAR_PTR(DOS_PSP, dhp);
+  sftp->sft_dev = x86_dhp;
   sftp->sft_date = dos_getdate();
   sftp->sft_time = dos_gettime();
   sftp->sft_attrib = D_DEVICE;
@@ -209,7 +209,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 {
   COUNT sft_idx;
   sft *sftp;
-  struct dhdr *dhp;
+  dos_far_ptr dhp;
   long result;
 
   result = truename(fname, PriPathName, CDS_MODE_CHECK_DEV_PATH);
@@ -232,16 +232,17 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   sftp->sft_attrib = attrib = attrib | D_ARCHIVE;
 
   /* check for a (local) device */
-  if ((result & IS_DEVICE) && !(result & IS_NETWORK) &&
-      (dhp = IsDevice((const char *)ARM_PTR(fname))) != NULL)
-  {
-    int rc = DeviceOpenSft(dhp, sftp);
-    /* check the status code returned by the
-     * driver when we tried to open it
-     */
-    if (rc < SUCCESS)
-      return rc;
-    return sft_idx;
+  if ((result & IS_DEVICE) && !(result & IS_NETWORK)) {
+      dhp = IsDevice((const char *)ARM_PTR(fname));
+      if (EFFECTIVE(dhp) != 0) {
+        int rc = DeviceOpenSft(dhp, sftp);
+        /* check the status code returned by the
+        * driver when we tried to open it
+        */
+        if (rc < SUCCESS)
+          return rc;
+        return sft_idx;
+      }
   }
 
   if (result & IS_NETWORK)
@@ -340,25 +341,23 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 int idx_to_sft_(int SftIndex)
 {
   sfttbl *sp;
+  dos_far_ptr x86_sp;
 
   internal_data->lpCurSft = MK_FP(0xffff, 0xffff);
   if (SftIndex < 0)
     return -1;
 
   /* Get the SFT block that contains the SFT      */
-  for (sp = (sfttbl *)ARM_PTR(LoL->sfthead); !far_is_end(LoL->sfthead);
-       sp = (sfttbl *)ARM_PTR(LoL->sfthead))
+  for (x86_sp = LoL->sfthead; !far_is_end(x86_sp); x86_sp = sp->sftt_next)
   {
+    sp = (sfttbl *)ARM_PTR(x86_sp);
     if (SftIndex < sp->sftt_count)
     {
       /* finally, point to the right entry            */
-      internal_data->lpCurSft = MK_FP(FP_SEG(LoL->sfthead),
-                             FP_OFF(LoL->sfthead) + offsetof(sfttbl, sftt_table)
-                               + SftIndex * sizeof(sft));
+      internal_data->lpCurSft = linear_to_far(&sp->sftt_table[SftIndex]);
       return SftIndex;
     }
     SftIndex -= sp->sftt_count;
-    LoL->sfthead = sp->sftt_next;
   }
 
   /* If not found, return an error                */
@@ -654,10 +653,9 @@ const char *get_root(const char *fname)
     is a dos_far_ptr in this codebase (see device.h), not a directly
     dereferenceable pointer like the original's "struct dhdr FAR *".
 */
-struct dhdr *IsDevice(const char *fname)
+dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
 {
   dos_far_ptr x86_dhp;
-  struct dhdr *dhp;
   const char *froot = get_root(fname);
   int i;
 
@@ -686,14 +684,14 @@ struct dhdr *IsDevice(const char *fname)
        ((*froot=='.') && ((*(froot+1)=='\0') || (*(froot+2)=='\0' && *(froot+1)=='.')))
      )
   {
-    return NULL;
+    return MK_FP(0, 0);
   }
 
   /* cycle through all device headers checking for match */
-  for (x86_dhp = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev); !far_is_end(x86_dhp);
-       x86_dhp = dhp->dh_next)
+  struct dhdr* dhp;
+  for (x86_dhp = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev); !far_is_end(x86_dhp); x86_dhp = dhp->dh_next)
   {
-    dhp = (struct dhdr *)ARM_PTR(x86_dhp);
+    dhp = (struct dhdr*)ARM_PTR(x86_dhp);
 
     if (!(dhp->dh_attr & ATTR_CHAR))  /* if this is block device, skip */
       continue;
@@ -719,10 +717,10 @@ struct dhdr *IsDevice(const char *fname)
 
     /* if found a match then return device header */
     if (i == FNAME_SIZE)
-      return dhp;
+      return x86_dhp;
   }
 
-  return NULL;
+  return MK_FP(0, 0);
 }
 
 /*

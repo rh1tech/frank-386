@@ -816,9 +816,17 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
 
   SET_CS(seg);
   SET_IP(off);
-
+uint32_t wait_loops = 0;
   while (!params.done) {
     pc_step(pc, 4096); /// ???
+    if ((++wait_loops & 0x3ff) == 0) {
+      uint8_t op = getmem8(CPU_CS, CPU_IP);
+      printf("cpu_far_call wait target=%04x:%04x ret=%04x:%04x "
+             "now=%04x:%04x op=%02x SS:SP=%04x:%04x\n",
+             seg, off,
+             params.expected_cs, params.expected_ip,
+             CPU_CS, CPU_IP, op, CPU_SS, CPU_SP);
+    }    
     /*
     if (CPU_CS == params.expected_cs && CPU_IP == params.expected_ip) {
         printf("cpu_far_call reached return %04x:%04x SP=%04x\n",
@@ -904,6 +912,16 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
 
   printf("x86_execrh: dh_strategy @ %04x:%04x stack: %04x:%04x\n", hdr_seg, dhp->x86.dh_strategy, CPU_SS, CPU_SP);
   printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n", CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
+  printf("x86_execrh: hdr next=%04x:%04x attr=%04x strat=%04x intr=%04x "
+         "rq len=%02x unit=%02x cmd=%02x status=%04x "
+         "strat-op=%02x %02x %02x %02x %02x\n",
+         FP_SEG(dhp->dh_next), FP_OFF(dhp->dh_next),
+         dhp->dh_attr, dhp->x86.dh_strategy, dhp->x86.dh_interrupt,
+         getmem8(FP_SEG(x86_rq), FP_OFF(x86_rq) + 0),
+         getmem8(FP_SEG(x86_rq), FP_OFF(x86_rq) + 1),
+         getmem8(FP_SEG(x86_rq), FP_OFF(x86_rq) + 2),
+         getmem16(FP_SEG(x86_rq), FP_OFF(x86_rq) + 3),
+         getmem8(hdr_seg, dhp->x86.dh_strategy + 0), getmem8(hdr_seg, dhp->x86.dh_strategy + 1), getmem8(hdr_seg, dhp->x86.dh_strategy + 2), getmem8(hdr_seg, dhp->x86.dh_strategy + 3), getmem8(hdr_seg, dhp->x86.dh_strategy + 4));
 
   /* push si; push di */
   CPU_SP -= 2;
@@ -1611,7 +1629,6 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
 COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 {
   COUNT i;
-  struct dhdr *dhp;
   const char *froot;
   COUNT result;
   unsigned state;
@@ -1671,8 +1688,8 @@ COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
   TNDBG("TN05 drive result=%u default=%u src='%s'",
         result, internal_data->default_drive, src);
 
-  dhp = IsDevice(src);
-  TNDBG("TN06 IsDevice=%p src='%s'", dhp, src);
+  dos_far_ptr x86_dhp = IsDevice(src);
+  TNDBG("TN06 IsDevice=%p src='%s'", EFFECTIVE(x86_dhp), src);
 
   x86_cdsEntry = get_cds(result);
   cdsEntry = far_is_null(x86_cdsEntry) ? NULL : (struct cds *)ARM_PTR(x86_cdsEntry);
@@ -1683,7 +1700,7 @@ COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 
   if (cdsEntry == NULL)
   {
-    if (dhp && (mode & CDS_MODE_CHECK_DEV_PATH) && (result >= LoL->lastdrive))
+    if (EFFECTIVE(x86_dhp) && (mode & CDS_MODE_CHECK_DEV_PATH) && (result >= LoL->lastdrive))
     {
       const char *s = src + 2;
       char c = *s;
@@ -1753,11 +1770,10 @@ invalid_path:
   if (TempCDS.cdsFlags & CDSNETWDRV)
     result |= IS_NETWORK;
 
-  if (dhp)
+  if (EFFECTIVE(x86_dhp))
     result |= IS_DEVICE;
 
-  TNDBG("TN13 before QRemote mode=%04X result=%04X src='%s'",
-        mode, result, src);
+  TNDBG("TN13 before QRemote mode=%04X result=%04X src='%s'",  mode, result, src);
 
   memset(dest, 0, 12);
 /* /// TODO:

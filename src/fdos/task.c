@@ -743,8 +743,8 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   memcpy(&TempExeBlock, ep, sizeof(exec_blk));
 
   x86_lp = linear_to_far((const BYTE *) lp);
-
-  if (IsDevice(lp) ||           /* don't try to "execute" e.g. C:\NUL */
+  dos_far_ptr x86_dhp = IsDevice(lp);
+  if (EFFECTIVE(x86_dhp) ||           /* don't try to "execute" e.g. C:\NUL */
       (openresult = DosOpenSft(x86_lp, O_LEGACY | O_OPEN | O_RDONLY, 0)) < SUCCESS)
     return DE_FILENOTFND;
   fd = (COUNT) (openresult & 0xffff);

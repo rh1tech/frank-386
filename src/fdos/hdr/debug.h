@@ -88,8 +88,7 @@ VOID panic(BYTE * s);
 #ifdef DEBUGCFG
 #define CfgDbgPrintf(x) DebugPrintf(x)
 #else
-#define CfgDbgPrintf(x)
-/// printf x
+#define CfgDbgPrintf(x) printf x
 #endif
 
 /* display info on various DOS functions (dosfns.c) */
