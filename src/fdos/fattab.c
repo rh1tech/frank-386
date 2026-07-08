@@ -86,7 +86,7 @@ STATIC struct buffer *getFATblock(struct dpb *dpbp, CLUSTER clussec)
   {
     bp->b_flag &= ~(BFR_DATA | BFR_DIR);
     bp->b_flag |= BFR_FAT | BFR_VALID;
-    bp->b_dpbp = x86_FAR_PTR(FP_SEG(LoL->DPBp), dpbp);
+    bp->b_dpbp = linear_to_far(dpbp);
     bp->b_copies = dpbp->dpb_fats;
     bp->b_offset = dpbp->dpb_fatsize; /* 0 for FAT32 but blockio.c knows that */
 #ifdef WITHFAT32

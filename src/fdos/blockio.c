@@ -190,79 +190,25 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     native pointer. b_next()/b_prev() are then just bufptr() applied to
     the stored b_next/b_prev field.
 */
-STATIC UWORD buf_seg_off(struct buffer *bp)
+#define bufptr(_bp, off) ((struct buffer *)ARM_PTR(MK_FP(FP_SEG(_bp), off)))
+#define b_next_fp(_bp, bp) MK_FP(FP_SEG(_bp), (bp)->b_next)
+#define b_prev_fp(_bp, bp) MK_FP(FP_SEG(_bp), (bp)->b_prev)
+#define b_next(_bp, bp) bufptr(_bp, (bp)->b_next)
+#define b_prev(_bp, bp) bufptr(_bp, (bp)->b_prev)
+
+STATIC void move_buffer(dos_far_ptr/*struct buffer*/ _bp, UWORD firstbp)
 {
-  return x86_FAR_PTR(FP_SEG(LoL->firstbuf), bp).offset;
-}
-STATIC struct buffer *bufptr(UWORD off)
-{
-  return (struct buffer *)ARM_PTR(MK_FP(FP_SEG(LoL->firstbuf), off));
-}
-#define b_next(bp) bufptr((bp)->b_next)
-#define b_prev(bp) bufptr((bp)->b_prev)
-
-#if DEBUG
-STATIC void check_buffer_ring(const char *where)
-{
-  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
-  UWORD seg = FP_SEG(LoL->firstbuf);
-  UWORD first = FP_OFF(LoL->firstbuf);
-
-  for (unsigned i = 0; i < LoL->nbuffers; i++)
-  {
-    UWORD cur = buf_seg_off(bp);
-    struct buffer *next = b_next(bp);
-    struct buffer *prev = b_prev(bp);
-
-    if (next->b_prev != cur || prev->b_next != cur)
-    {
-      printf("PANIC: buffer ring broken at %s i=%u seg=%04X first=%04X "
-             "cur=%04X next=%04X next.prev=%04X prev=%04X prev.next=%04X "
-             "flags=%02X unit=%u bblk=%lu\n",
-             where, i, seg, first,
-             cur, bp->b_next, next->b_prev, bp->b_prev, prev->b_next,
-             bp->b_flag, bp->b_unit, (unsigned long)bp->b_blkno);
-      while (1);
-    }
-
-    bp = next;
-  }
-
-  if (buf_seg_off(bp) != first)
-    printf("PANIC: buffer ring does not close at %s first=%04X got=%04X nbuffers=%u\n",
-           where, first, buf_seg_off(bp), LoL->nbuffers);
-}
-#endif
-
-STATIC void move_buffer(struct buffer *bp, UWORD firstbp)
-{
-  UWORD bp_off = buf_seg_off(bp);
-/*
-  printf("move_buffer enter bp=%04X first=%04X "
-         "bp.next=%04X bp.prev=%04X "
-         "next.prev=%04X prev.next=%04X first.prev=%04X\n",
-         bp_off, firstbp,
-         bp->b_next, bp->b_prev,
-         b_next(bp)->b_prev, b_prev(bp)->b_next,
-         bufptr(firstbp)->b_prev);
-*/
+  UWORD bp_off = FP_OFF(_bp);
+  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
   /* connect bp->b_prev and bp->b_next */
-  b_next(bp)->b_prev = bp->b_prev;
-  b_prev(bp)->b_next = bp->b_next;
+  b_next(_bp, bp)->b_prev = bp->b_prev;
+  b_prev(_bp, bp)->b_next = bp->b_next;
 
   /* insert bp between firstbp and firstbp->b_prev */
-  bp->b_prev = bufptr(firstbp)->b_prev;
+  bp->b_prev = bufptr(_bp, firstbp)->b_prev;
   bp->b_next = firstbp;
-  b_next(bp)->b_prev = bp_off;
-  b_prev(bp)->b_next = bp_off;
-/*
-  printf("move_buffer leave bp=%04X first=%04X "
-         "bp.next=%04X bp.prev=%04X\n",
-         bp_off, firstbp, bp->b_next, bp->b_prev);
-*/
-#if DEBUG
-  check_buffer_ring("move_buffer");
-#endif
+  b_next(_bp, bp)->b_prev = bp_off;
+  b_prev(_bp, bp)->b_next = bp_off;
 }
 
 /*
@@ -275,45 +221,41 @@ STATIC void move_buffer(struct buffer *bp, UWORD firstbp)
 
     Migrated from blockio.c.
 */
-STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
+STATIC dos_far_ptr/*struct buffer*/ searchblock(ULONG blkno, COUNT dsk)
 {
   unsigned guard = 0;
   int fat_count = 0;
-  struct buffer *bp;
   UWORD lastNonFat = 0;
   UWORD uncacheBuf = 0;
   UWORD firstbp = FP_OFF(LoL->firstbuf);
 
-#if DEBUG
-  check_buffer_ring("searchblock-entry");
-#endif
-  bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+  dos_far_ptr _bp = LoL->firstbuf;
+  struct buffer* bp = (struct buffer *)ARM_PTR(_bp);
   do
   {
-    if ((bp->b_blkno == blkno) &&
-        (bp->b_flag & BFR_VALID) && (bp->b_unit == dsk))
+    if ((bp->b_blkno == blkno) && (bp->b_flag & BFR_VALID) && (bp->b_unit == dsk))
     {
       /* found it -- rearrange LRU links      */
       bp->b_flag &= ~BFR_UNCACHE;  /* reset uncache attribute */
-      if (buf_seg_off(bp) != firstbp)
+      if (FP_OFF(_bp) != firstbp)
       {
-        UWORD bp_off = buf_seg_off(bp);
+        UWORD bp_off = FP_OFF(_bp);
         LoL->firstbuf = MK_FP(FP_SEG(LoL->firstbuf), bp_off);
-        move_buffer(bp, firstbp);
+        move_buffer(_bp, firstbp);
       }
-      return bp;
+      return _bp;
     }
 
     if (bp->b_flag & BFR_UNCACHE)
-      uncacheBuf = buf_seg_off(bp);
+      uncacheBuf = FP_OFF(_bp);
 
     if (bp->b_flag & BFR_FAT)
       fat_count++;
     else
-      lastNonFat = buf_seg_off(bp);
+      lastNonFat = FP_OFF(_bp);
 
     {
-      UWORD cur = buf_seg_off(bp);
+      UWORD cur = FP_OFF(_bp);
       UWORD next = bp->b_next;
 
       if (next == 0xffff || guard >= LoL->nbuffers)
@@ -326,8 +268,9 @@ STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
       guard++;
     }
 
-    bp = b_next(bp);
-  } while (buf_seg_off(bp) != firstbp);
+    _bp = b_next_fp(_bp, bp);
+    bp = (struct buffer *)ARM_PTR(_bp);
+  } while (FP_OFF(_bp) != firstbp);
 
   /*
      now take either the last buffer in chain (not used recently)
@@ -336,26 +279,27 @@ STATIC struct buffer *searchblock(ULONG blkno, COUNT dsk)
 
   if (uncacheBuf)
   {
-    bp = bufptr(uncacheBuf);
+    _bp = MK_FP(FP_SEG(_bp), uncacheBuf);
   }
   else if ((bp->b_flag & BFR_FAT) && fat_count < 3 && lastNonFat)
   {
-    bp = bufptr(lastNonFat);
+    _bp = MK_FP(FP_SEG(_bp), lastNonFat);
   }
   else
   {
-    bp = b_prev(bufptr(firstbp));
+    _bp = MK_FP(FP_SEG(_bp), firstbp);
   }
+  bp = (struct buffer *)ARM_PTR(_bp);
 
   bp->b_flag |= BFR_UNCACHE;  /* set uncache attribute */
 
-  if (buf_seg_off(bp) != firstbp)          /* move to front */
+  if (FP_OFF(_bp) != firstbp)          /* move to front */
   {
-    UWORD bp_off = buf_seg_off(bp);
-    move_buffer(bp, firstbp);
-    LoL->firstbuf = MK_FP(FP_SEG(LoL->firstbuf), bp_off);
+    UWORD bp_off = FP_OFF(_bp);
+    move_buffer(_bp, firstbp);
+    LoL->firstbuf = MK_FP(FP_SEG(_bp), bp_off);
   }
-  return bp;
+  return _bp;
 }
 
 /*      Write one disk buffer                                           */
@@ -399,7 +343,8 @@ STATIC BOOL flush1(struct buffer *bp)
 */
 struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 {
-  struct buffer *bp = searchblock(blkno, dsk);
+  dos_far_ptr _bp = searchblock(blkno, dsk);
+  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
 
   if (!(bp->b_flag & BFR_UNCACHE))
   {
@@ -431,71 +376,70 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 }
 
 /*      Mark all buffers for a disk as not valid                        */
-VOID setinvld(REG COUNT dsk)
-{
-  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+VOID setinvld(REG COUNT dsk) {
+  dos_far_ptr _bp = LoL->firstbuf;
+  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
   UWORD firstbp = FP_OFF(LoL->firstbuf);
-
   do
   {
     if (bp->b_unit == dsk)
       bp->b_flag = 0;
-    bp = b_next(bp);
+    _bp = b_next_fp(_bp, bp);
+    bp = (struct buffer*)ARM_PTR(_bp);
   }
-  while (buf_seg_off(bp) != firstbp);
+  while (FP_OFF(_bp) != firstbp);
 }
 
-
 /*      Check if there is at least one dirty buffer                     */
-BOOL dirty_buffers(REG COUNT dsk)
-{
-  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+BOOL dirty_buffers(REG COUNT dsk) {
+  dos_far_ptr _bp = LoL->firstbuf;
+  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
   UWORD firstbp = FP_OFF(LoL->firstbuf);
-
   do
   {
     if (bp->b_unit == dsk &&
         (bp->b_flag & (BFR_VALID | BFR_DIRTY)) == (BFR_VALID | BFR_DIRTY))
       return TRUE;
-    bp = b_next(bp);
+    _bp = b_next_fp(_bp, bp);
+    bp = (struct buffer*)ARM_PTR(_bp);
   }
-  while (buf_seg_off(bp) != firstbp);
+  while (FP_OFF(_bp) != firstbp);
   return FALSE;
 }
 
 /*      Write all disk buffers for one drive                            */
-BOOL flush_buffers(REG COUNT dsk)
-{
-  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+BOOL flush_buffers(REG COUNT dsk) {
+  dos_far_ptr _bp = LoL->firstbuf;
+  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
   UWORD firstbp = FP_OFF(LoL->firstbuf);
   REG BOOL ok = TRUE;
-
   do
   {
     if (bp->b_unit == dsk)
       if (!flush1(bp))
         ok = FALSE;
-    bp = b_next(bp);
+    _bp = b_next_fp(_bp, bp);
+    bp = (struct buffer*)ARM_PTR(_bp);
   }
-  while (buf_seg_off(bp) != firstbp);
+  while (FP_OFF(_bp) != firstbp);
   return ok;
 }
 
 /*      Write all disk buffers                                          */
-BOOL flush(void)
-{
-  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+BOOL flush(void) {
+  dos_far_ptr _bp = LoL->firstbuf;
+  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
   UWORD firstbp = FP_OFF(LoL->firstbuf);
   REG BOOL ok = TRUE;
-
   do
   {
     if (!flush1(bp))
       ok = FALSE;
     bp->b_flag &= ~BFR_VALID;
-    bp = b_next(bp);
+    _bp = b_next_fp(_bp, bp);
+    bp = (struct buffer*)ARM_PTR(_bp);
   }
-  while (buf_seg_off(bp) != firstbp);
+  while (FP_OFF(_bp) != firstbp);
 
   /// TODO: network_redirector(REM_FLUSHALL) - no network redirector
   /// in this codebase yet.
@@ -514,7 +458,8 @@ BOOL flush(void)
 */
 BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mode)
 {
-  struct buffer *bp = (struct buffer *)ARM_PTR(LoL->firstbuf);
+  dos_far_ptr _bp = LoL->firstbuf;
+  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
   UWORD firstbp = FP_OFF(LoL->firstbuf);
   /* Search through buffers to see if the required block  */
   /* is already in a buffer                               */
@@ -525,8 +470,9 @@ BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mo
       else
         bp->b_flag = 0;
     }
-    bp = b_next(bp);
+    _bp = b_next_fp(_bp, bp);
+    bp = (struct buffer*)ARM_PTR(_bp);
   }
-  while (buf_seg_off(bp) != firstbp);
+  while (FP_OFF(_bp) != firstbp);
   return FALSE;
 }

@@ -98,7 +98,7 @@ STATIC int merge_file_changes(f_node_ptr fnp, int collect)
   if (!IsShareInstalled(FALSE))
     return SUCCESS;
 
-  fnp_dpb_far = x86_FAR_PTR(FP_SEG(LoL->DPBp), fnp->f_dpb);
+  fnp_dpb_far = linear_to_far(fnp->f_dpb);
 
   i = 0;
   for (x86_sp = LoL->sfthead; !far_is_end(x86_sp); )
@@ -302,7 +302,7 @@ STATIC void fnode_to_sft(f_node_ptr fnp)
 
   sftp->sft_diridx = fnp->f_diridx;
   sftp->sft_dirsector = fnp->f_dirsector;
-  sftp->sft_dcb = x86_FAR_PTR(FP_SEG(LoL->DPBp), fnp->f_dpb);
+  sftp->sft_dcb = linear_to_far(fnp->f_dpb);
   sftp->sft_posit = fnp->f_offset;
   sftp->sft_cuclust = fnp->f_cluster;
   sftp->sft_relclust = (UWORD)fnp->f_cluster_offset;
