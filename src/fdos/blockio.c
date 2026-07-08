@@ -193,6 +193,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
 #define b_prev_fp(_bp, bp) MK_FP(FP_SEG(_bp), (bp)->b_prev)
 #define b_next(_bp, bp) bufptr(_bp, (bp)->b_next)
 #define b_prev(_bp, bp) bufptr(_bp, (bp)->b_prev)
+#define b_buffer_fp(_bp) MK_FP(FP_SEG(_bp), FP_OFF(_bp) + offsetof(struct buffer, b_buffer))
 
 STATIC void move_buffer(dos_far_ptr/*struct buffer*/ _bp, UWORD firstbp)
 {
@@ -302,10 +303,10 @@ STATIC dos_far_ptr/*struct buffer*/ searchblock(ULONG blkno, COUNT dsk)
 }
 
 /*      Write one disk buffer                                           */
-STATIC BOOL flush1(struct buffer *bp)
+STATIC BOOL flush1(dos_far_ptr/*struct buffer*/ _bp)
 {
   BOOL ok = TRUE;
-
+  struct buffer *bp = (struct buffer *)ARM_PTR(_bp);
   if ((bp->b_flag & (BFR_VALID | BFR_DIRTY)) == (BFR_VALID | BFR_DIRTY))
   {
     ULONG b_offset = 0;
@@ -322,7 +323,7 @@ STATIC BOOL flush1(struct buffer *bp)
     }
     while (b_copies--)
     {
-      if (dskxfer(bp->b_unit, blkno, linear_to_far(bp->b_buffer), 1, DSKWRITE))
+      if (dskxfer(bp->b_unit, blkno, b_buffer_fp(_bp), 1, DSKWRITE))
         ok = FALSE;
       blkno += b_offset;
     }
@@ -353,13 +354,13 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
   /* The block we need is not in a buffer, we must make a buffer  */
   /* available, and fill it with the desired block                */
 
-  if (!flush1(bp))
+  if (!flush1(_bp))
     return NULL;
 /*
   printf("getblk fill blk=%lu dsk=%d bp=%p buf=%p next=%04X prev=%04X\n",
          (unsigned long)blkno, dsk, bp, bp->b_buffer, bp->b_next, bp->b_prev);
 */
-  if (!overwrite && dskxfer(dsk, blkno, linear_to_far(bp->b_buffer), 1, DSKREAD))
+  if (!overwrite && dskxfer(dsk, blkno, b_buffer_fp(_bp), 1, DSKREAD))
   {
     return NULL;
   }
@@ -412,7 +413,7 @@ BOOL flush_buffers(REG COUNT dsk) {
   do
   {
     if (bp->b_unit == dsk)
-      if (!flush1(bp))
+      if (!flush1(_bp))
         ok = FALSE;
     _bp = b_next_fp(_bp, bp);
     bp = (struct buffer*)ARM_PTR(_bp);
@@ -429,7 +430,7 @@ BOOL flush(void) {
   REG BOOL ok = TRUE;
   do
   {
-    if (!flush1(bp))
+    if (!flush1(_bp))
       ok = FALSE;
     bp->b_flag &= ~BFR_VALID;
     _bp = b_next_fp(_bp, bp);
@@ -462,7 +463,7 @@ BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mo
   do {
     if (blknolow <= bp->b_blkno && bp->b_blkno <= blknohigh && (bp->b_flag & BFR_VALID) && (bp->b_unit == dsk)) {
       if (mode == XFR_READ)
-        flush1(bp);
+        flush1(_bp);
       else
         bp->b_flag = 0;
     }
