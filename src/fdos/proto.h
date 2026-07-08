@@ -72,7 +72,7 @@ void write_char_stdout(int c);
 void update_scr_pos(unsigned char c, unsigned char count);
 long cooked_write(dos_far_ptr/*struct dhdr*/ *pdev, size_t n, char *bp);
 
-sft FAR *get_sft(UCOUNT);
+dos_far_ptr /*sft*/ get_sft(UCOUNT);
 
 /* dosfns.c */
 const char FAR *get_root(const char FAR *);
@@ -114,7 +114,7 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname);
 BOOL IsShareInstalled(BOOL recheck);
 COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock);
 int idx_to_sft_(int SftIndex);
-sft FAR *idx_to_sft(int SftIndex);
+dos_far_ptr /*sft*/ idx_to_sft(int SftIndex);
 int get_sft_idx(UCOUNT hndl);
 struct cds FAR *get_cds_unvalidated(unsigned dsk);
 /*struct cds*/ dos_far_ptr get_cds(unsigned drive);
@@ -149,7 +149,7 @@ void ConvertName83ToNameSZ(BYTE FAR * destSZ, BYTE FAR * srcFCBName);
 const char *ConvertNameSZToName83(char *destFCBName, const char *srcSZ);
 
 /* fatfs.c */
-struct dpb FAR *get_dpb(COUNT dsk);
+dos_far_ptr/*struct dpb*/ get_dpb(COUNT dsk);
 ULONG clus2phys(CLUSTER cl_no, struct dpb FAR * dpbp);
 int dos_open(char * path, unsigned flag, unsigned attrib, int fd);
 BOOL fcbmatch(const char *fcbname1, const char *fcbname2);

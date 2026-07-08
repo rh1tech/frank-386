@@ -516,7 +516,7 @@ bool fdos_21h(CPU* _cpu) {
         CPU_AL = read_char_stdin(TRUE);
         write_char_stdout(CPU_AL);
         break;
-        
+
       case 0x02:
         write_char_stdout(CPU_AL);
         CPU_AL = (CPU_DL == HT) ? ' ' : CPU_DL;
@@ -587,7 +587,7 @@ bool fdos_21h(CPU* _cpu) {
       /* Flush Buffer, Read Keyboard                                  */
       case 0x0c:
       {
-        dos_far_ptr dev = sft_to_dev(get_sft(STDIN));
+        dos_far_ptr dev = sft_to_dev((sft*) ARM_PTR ( get_sft(STDIN) ) );
         if (FP_SEG(dev) || FP_OFF(dev))
           con_flush(&dev);
         switch (CPU_AL)
@@ -991,7 +991,7 @@ bool fdos_21h(CPU* _cpu) {
         }
 
         filetab[new_hndl] = filetab[old_hndl];
-        idx_to_sft(filetab[new_hndl])->sft_count++;
+        ((sft*) ARM_PTR (idx_to_sft(filetab[new_hndl]) ))->sft_count++;
 
         CPU_AX = (UWORD)new_hndl;
         cf = 0;
@@ -1026,7 +1026,7 @@ bool fdos_21h(CPU* _cpu) {
 
           /* copy SFT index and bump ref count */
           filetab[new_hndl] = filetab[old_hndl];
-          idx_to_sft(filetab[new_hndl])->sft_count++;
+          ((sft*) ARM_PTR (idx_to_sft(filetab[new_hndl]) ))->sft_count++;
         }
         cf = 0;
       }
@@ -1222,6 +1222,22 @@ bool fdos_21h(CPU* _cpu) {
             cf = 0;
         }
         break;
+      /* Get/Set File Date and Time                                   */
+      case 0x57:
+        switch (CPU_AL)
+        {
+          case 0x00:
+            rc = DosGetFtime((COUNT)CPU_BX, (ddate*)&CPU_DX, (dtime*)&CPU_CX);
+            break;
+
+          case 0x01:
+            rc = DosSetFtime((COUNT)CPU_BX, (ddate)CPU_DX, (dtime)CPU_CX);
+            break;
+
+          default:
+            rc = DE_INVLDFUNC;
+        }
+        goto short_check;
 
         /* Get/Set memory allocation strategy, get/set UMB link state   */
       case 0x58:

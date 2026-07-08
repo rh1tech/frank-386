@@ -383,13 +383,12 @@ int get_sft_idx(unsigned hndl)
 
 /*
     get_sft(hndl) - translate a DOS file handle into a pointer to its
-    SFT entry. Returns (sft *)-1 if hndl is not a currently open
+    SFT entry. Returns -1 if hndl is not a currently open
     handle for the current process.
 
     Migrated from dosfns.c.
 */
-sft *get_sft(UCOUNT hndl)
-{
+dos_far_ptr /*sft*/ get_sft(UCOUNT hndl) {
   /* Get the SFT block that contains the SFT      */
   return idx_to_sft(get_sft_idx(hndl));
 }
@@ -433,17 +432,17 @@ BOOL IsShareInstalled(BOOL recheck)
 */
 STATIC COUNT SftSeek2(int sft_idx, LONG new_pos, unsigned mode, UDWORD *p_result)
 {
-  sft *s = idx_to_sft(sft_idx);
+  dos_far_ptr _s = idx_to_sft(sft_idx);
 
-  if (s == (sft *) - 1)
+  if (far_is_end(_s))
     return DE_INVLDHNDL;
 
   /* Test for invalid mode                        */
   if (mode > SEEK_END)
     return DE_INVLDFUNC;
 
-  internal_data->lpCurSft = linear_to_far(s);
-
+  internal_data->lpCurSft = _s;
+  sft* s = (sft*) ARM_PTR(_s);
   /* Do special return for character devices      */
   if (s->sft_flags & SFT_FDEVICE)
   {
@@ -507,12 +506,12 @@ ULONG DosSeek(unsigned hndl, LONG new_pos, COUNT mode, int *rc)
 long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
 {
   /* Get the SFT block that contains the SFT      */
-  sft *s = idx_to_sft(sft_idx);
-
-  if (s == (sft *) - 1)
+  dos_far_ptr _s = idx_to_sft(sft_idx);
+  if (far_is_end(_s))
   {
     return DE_INVLDHNDL;
   }
+  sft* s = (sft*)ARM_PTR(_s);
   /* If for read and write-only or for write and read-only then exit */
   if((mode == XFR_READ && (s->sft_mode & O_WRONLY)) ||
      (mode == XFR_WRITE && (s->sft_mode & O_ACCMODE) == O_RDONLY))
@@ -1231,4 +1230,33 @@ COUNT DosFindNext(void)
   rc = dos_findnext();
 
   return pop_dmp(rc, dta_far);
+}
+
+COUNT DosGetFtime(COUNT hndl, ddate * dp, dtime * tp)
+{
+  dos_far_ptr _s = get_sft(hndl);
+  if ( far_is_end (_s) )
+    return DE_INVLDHNDL;
+  sft* s = (sft*) ARM_PTR (_s);
+  *dp = s->sft_date;
+  *tp = s->sft_time;
+  return SUCCESS;
+}
+
+COUNT DosSetFtimeSft(int sft_idx, ddate dp, dtime tp)
+{
+  dos_far_ptr _s = get_sft(sft_idx);
+  if ( far_is_end (_s) )
+    return DE_INVLDHNDL;
+  sft* s = (sft*) ARM_PTR (_s);
+
+  /* If SFT entry refers to a device, do nothing */
+  if (s->sft_flags & SFT_FDEVICE)
+    return SUCCESS;
+
+  s->sft_flags |= SFT_FDATE;
+  s->sft_date = dp;
+  s->sft_time = tp;
+
+  return SUCCESS;
 }

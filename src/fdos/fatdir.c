@@ -63,9 +63,11 @@ VOID dir_init_fnode(f_node_ptr fnp, CLUSTER dirstart)
 
   /* root directory */
 #ifdef WITHFAT32
-  if (dirstart == 0)
-    if (ISFAT32(fnp->f_dpb))
-      dirstart = fnp->f_dpb->dpb_xrootclst;
+  if (dirstart == 0) {
+    struct dpb* dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
+    if (ISFAT32(dpb))
+      dirstart = dpb->dpb_xrootclst;
+  }
 #endif
   fnp->f_cluster = fnp->f_dmp->dm_dircluster = dirstart;
 }
@@ -102,7 +104,7 @@ STATIC void swap_deleted(char *name)
 COUNT dir_read(REG f_node_ptr fnp)
 {
   struct buffer *bp;
-  REG UWORD secsize = fnp->f_dpb->dpb_secsize;
+  REG UWORD secsize = ((struct dpb*)ARM_PTR(fnp->f_dpb))->dpb_secsize;
   unsigned sector;
   unsigned entry = fnp->f_dmp->dm_entry;
 
@@ -115,13 +117,13 @@ COUNT dir_read(REG f_node_ptr fnp)
   /* dirent portion of the fnode, set the SFT_FCLEAN bit and leave,*/
   /* but only for root directories                                */
 
+  struct dpb* dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
   if (fnp->f_dmp->dm_dircluster == 0)
   {
-    if (entry >= fnp->f_dpb->dpb_dirents)
+    if (entry >= dpb->dpb_dirents)
       return DE_SEEK;
 
-    fnp->f_dirsector = entry / (secsize / DIRENT_SIZE) +
-      fnp->f_dpb->dpb_dirstrt;
+    fnp->f_dirsector = entry / (secsize / DIRENT_SIZE) + dpb->dpb_dirstrt;
   }
   else
   {
@@ -135,13 +137,13 @@ COUNT dir_read(REG f_node_ptr fnp)
 
     /* Compute the block within the cluster and the */
     /* offset within the block.                     */
-    sector = (UBYTE)(fnp->f_offset / secsize) & fnp->f_dpb->dpb_clsmask;
+    sector = (UBYTE)(fnp->f_offset / secsize) & dpb->dpb_clsmask;
 
-    fnp->f_dirsector = clus2phys(fnp->f_cluster, fnp->f_dpb) + sector;
+    fnp->f_dirsector = clus2phys(fnp->f_cluster, dpb) + sector;
     /* Get the block we need from cache             */
   }
 
-  bp = getblock(fnp->f_dirsector, fnp->f_dpb->dpb_unit);
+  bp = getblock(fnp->f_dirsector, dpb->dpb_unit);
 
   /* Now that we have the block for our entry, get the    */
   /* directory entry.                                     */
@@ -247,7 +249,7 @@ f_node_ptr dir_open(register const char *dirname, BOOL split, f_node_ptr fnp)
     {
       /* make certain we've moved off */
       /* root                         */
-      dir_init_fnode(fnp, getdstart(fnp->f_dpb, &fnp->f_dir));
+      dir_init_fnode(fnp, getdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir));
       fnp->f_dmp->dm_entry = 0;
     }
   }
@@ -277,7 +279,7 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
   /* Update the entry if it was modified by a write or create...  */
   if (!update || (fnp->f_flags & (SFT_FCLEAN|SFT_FDATE)) != SFT_FCLEAN)
   {
-    bp = getblock(fnp->f_dirsector, fnp->f_dpb->dpb_unit);
+    bp = getblock(fnp->f_dirsector, ((struct dpb*)ARM_PTR(fnp->f_dpb))->dpb_unit);
 
     /* Now that we have a block, transfer the directory      */
     /* entry into the block.                                */
@@ -297,7 +299,7 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
       fputword(&vp[DIR_DATE], fnp->f_dir.dir_date);
       fputword(&vp[DIR_START], fnp->f_dir.dir_start);
 #ifdef WITHFAT32
-      if (ISFAT32(fnp->f_dpb))
+      if (ISFAT32((struct dpb*)ARM_PTR(fnp->f_dpb)))
         fputword(&vp[DIR_START_HIGH], fnp->f_dir.dir_start_high);
 #endif
       fputlong(&vp[DIR_SIZE], fnp->f_dir.dir_size);
@@ -313,7 +315,7 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
     bp->b_flag |= BFR_DIR | BFR_DIRTY | BFR_VALID;
   }
   /* Clear buffers after directory write or DOS close                     */
-  return flush_buffers(fnp->f_dpb->dpb_unit);
+  return flush_buffers(((struct dpb*)ARM_PTR(fnp->f_dpb))->dpb_unit);
 }
 
 /*
@@ -411,7 +413,7 @@ COUNT dos_findnext(void)
   fnp = &fnode[0];
   dmp = &sda_tmp_dmD;
   fnp->f_dpb = get_dpb(dmp->dm_drive);
-  if (media_check(fnp->f_dpb) < 0)
+  if (media_check((struct dpb*)ARM_PTR(fnp->f_dpb)) < 0)
     return DE_NFILES;
 
   dir_init_fnode(fnp, dmp->dm_dircluster);

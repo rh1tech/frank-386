@@ -1054,8 +1054,7 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
 
 /* If cmdLine is NULL, this is an internal driver */
 
-BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
-                 dos_far_ptr * r_top)
+BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode, dos_far_ptr* r_top)
 {
   struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
   const char *cmdstr = cmdLine ? cmdLine : "\n";
@@ -1064,6 +1063,8 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
   dos_far_ptr x86_rq;
   request* rq;
   char name[8];
+
+  printf("init_device %s, r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
 
   /* rq, and (for C_INIT) a guest-RAM copy of the command line, both
      live on the *guest* stack. The command-line copy matters because
@@ -1148,6 +1149,7 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
     /*   last INIT call which will then be passed as the end address   */
     /*   for the next INIT call.                                       */
     *r_top = rq->r_endaddr;
+  printf("init_device(%s), r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
   }
 
   if (!(dhp->dh_attr & ATTR_CHAR) && (rq->r_nunits != 0))
@@ -1422,21 +1424,21 @@ int close(int fd) {
     plays it safe with a save/restore around the walk so LoL->sfthead
     is never observably changed by callers.
 */
-sft *idx_to_sft(int SftIndex)
+dos_far_ptr /*sft*/ idx_to_sft(int SftIndex)
 {
   dos_far_ptr saved_head = LoL->sfthead;
-  sft *result;
+  dos_far_ptr result;
 
   SftIndex = idx_to_sft_(SftIndex);
   LoL->sfthead = saved_head;
 
   /* if not opened, the SFT is useless            */
   if (SftIndex == -1)
-    return (sft *)-1;
+    return MK_FP(-1,-1);
 
-  result = (sft *)ARM_PTR(internal_data->lpCurSft);
-  if (result->sft_count == 0)
-    return (sft *)-1;
+  result = internal_data->lpCurSft;
+  if (((sft*)ARM_PTR(result))->sft_count == 0)
+    return MK_FP(-1,-1);
   return result;
 }
 

@@ -95,15 +95,14 @@ int DosDevIOctl(lregs * r)
     case 0x0c:
     case 0x10:
     {
-      sft FAR *s;
-      unsigned flags;
-
+      dos_far_ptr _s = get_sft(CPU_BX);
       /* Test that the handle is valid and                    */
       /* get the SFT block that contains the SFT              */
-      if ((s = get_sft(CPU_BX)) == (sft FAR *) - 1)
+      if ( far_is_end (_s) )
         return DE_INVLDHNDL;
 
-      flags = s->sft_flags;
+      sft* s = (sft*) ARM_PTR (_s);
+      unsigned flags = s->sft_flags;
 
       switch (CPU_AL)
       {
@@ -161,7 +160,6 @@ int DosDevIOctl(lregs * r)
 
     default: /* block IOCTL: 4, 5, 8, 9, d, e, f, 11 */
     {
-      struct dpb FAR *dpbp;
       unsigned attr;
 /*
    This line previously returned the deviceheader at CPU_bl. But,
@@ -174,9 +172,10 @@ int DosDevIOctl(lregs * r)
 /* JT Fixed it */
 
       /* NDN feeds the actual ASCII drive letter to this function */
-      dpbp = get_dpb((CPU_BL & 0x1f) == 0 ? internal_data->default_drive : (CPU_BL & 0x1f) - 1);
-      if (dpbp)
+      dos_far_ptr _dpbp = get_dpb((CPU_BL & 0x1f) == 0 ? internal_data->default_drive : (CPU_BL & 0x1f) - 1);
+      if (! far_is_null(_dpbp))
       {
+        struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp);
         CharReqHdr.r_unit = dpbp->dpb_subunit;
         x86_dev = dpbp->dpb_device;
         dev = (struct dhdr*)ARM_PTR(x86_dev);
@@ -193,16 +192,17 @@ int DosDevIOctl(lregs * r)
 
       switch (CPU_AL)
       {
-	case 0x08:
-	{
-	  struct cds FAR *cdsp = get_cds1(CPU_BL & 0x1f);
-	  if (cdsp == NULL)
-	    return DE_INVLDDRV;
-	  if (cdsp->cdsFlags & CDSNETWDRV)
-	    return DE_INVLDFUNC;
-	  CPU_AX = (dpbp->dpb_flags == M_DONT_KNOW);
-	  return SUCCESS;
-	}
+        case 0x08:
+        {
+          struct cds FAR *cdsp = get_cds1(CPU_BL & 0x1f);
+          if (cdsp == NULL)
+            return DE_INVLDDRV;
+          if (cdsp->cdsFlags & CDSNETWDRV)
+            return DE_INVLDFUNC;
+          struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp);
+          CPU_AX = (dpbp->dpb_flags == M_DONT_KNOW);
+          return SUCCESS;
+        }
         case 0x09:
         {
           /* note from get_dpb()                            */

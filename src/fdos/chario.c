@@ -162,7 +162,8 @@ dos_far_ptr sft_to_dev(sft *s)
 
 int StdinBusy(void)
 {
-  sft *s = get_sft(STDIN);
+  dos_far_ptr _s = get_sft(STDIN);
+  sft* s = (sft*) ARM_PTR ( _s );
   dos_far_ptr dev = sft_to_dev(s);
 
   if (FP_SEG(dev) || FP_OFF(dev))
@@ -279,7 +280,7 @@ void write_char(int c, int sft_idx)
 void write_char_stdout(int c)
 {
   unsigned char count = 1;
-  unsigned flags = get_sft(STDOUT)->sft_flags;
+  unsigned flags = ((sft*)ARM_PTR(get_sft(STDOUT)))->sft_flags;
 
   /* ah=2, ah=9 should expand tabs even for raw devices and disk files */
   if ((flags & (SFT_FDEVICE|SFT_FBINARY)) != SFT_FDEVICE)
@@ -445,7 +446,7 @@ STATIC int raw_get_char(dos_far_ptr *pdev, BOOL check_break)
 
 unsigned char read_char(int sft_in, int sft_out, BOOL check_break)
 {
-  sft *s = idx_to_sft(sft_in);
+  sft* s = (sft*) ARM_PTR( idx_to_sft(sft_in) );
   dos_far_ptr dev = sft_to_dev(s);
   return read_char_sft_dev(sft_in, sft_out, &dev, check_break);
 }

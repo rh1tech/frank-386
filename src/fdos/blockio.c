@@ -59,14 +59,12 @@ _Static_assert(sizeof(request) == 30, "request no longer fits in internal_data->
 
 UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mode)
 {
-  struct dpb *dpbp = get_dpb(dsk);
-  struct dhdr *dpb_device;
-
-  if (dpbp == NULL)
-  {
+  dos_far_ptr _dpbp = get_dpb(dsk);
+  if (far_is_null(_dpbp)) {
     return 0x0201;              /* illegal command */
   }
-  dpb_device = (struct dhdr *)ARM_PTR(dpbp->dpb_device);
+  struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp); 
+  struct dhdr* dpb_device = (struct dhdr *)ARM_PTR(dpbp->dpb_device);
 
   if (dpbp->dpb_secsize != 512)
   {
@@ -118,7 +116,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
      * Then transfer block through deblock_buf (DiskTransferBuffer doesn't work!)
      * (But this won't work for multi-block HMA transfers... are there any?)
      */
-    if (EFFECTIVE(buf) >= 0xa0000 && numblocks == 1 && LoL->bufloc != LOC_CONV)
+    if (FP_SEG(buf) >= 0xa000 && numblocks == 1 && LoL->bufloc != LOC_CONV)
     {
       IoReqHdrD.r_trans = LoL->deblock_buf;
       if (mode == DSKWRITE || mode == DSKWRITEINT26)
@@ -358,12 +356,9 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
   if (!flush1(bp))
     return NULL;
 /*
-  printf("getblk fill blk=%lu dsk=%d bp_off=%04X buf_off=%04X "
-         "next=%04X prev=%04X\n",
-         (unsigned long)blkno, dsk, buf_seg_off(bp),
-         buf_seg_off((struct buffer *)bp->b_buffer),
-         bp->b_next, bp->b_prev);
-*/  
+  printf("getblk fill blk=%lu dsk=%d bp=%p buf=%p next=%04X prev=%04X\n",
+         (unsigned long)blkno, dsk, bp, bp->b_buffer, bp->b_next, bp->b_prev);
+*/
   if (!overwrite && dskxfer(dsk, blkno, linear_to_far(bp->b_buffer), 1, DSKREAD))
   {
     return NULL;

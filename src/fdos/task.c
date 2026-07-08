@@ -55,12 +55,10 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 
 ULONG SftGetFsize(int sft_idx)
 {
-  sft *s = idx_to_sft(sft_idx);
-
-  if (s == (sft *) - 1)
+  dos_far_ptr s = idx_to_sft(sft_idx);
+  if (far_is_end(s))
     return DE_INVLDHNDL;
-
-  return s->sft_size;
+  return ((sft*)ARM_PTR(s))->sft_size;
 }
 
 /* dsk: 0 = current default drive, 1 = A:, 2 = B:, ... (FCB drive-byte
@@ -198,7 +196,7 @@ STATIC void child_psp(seg para, seg cur_psp, int psize)
     if (q_filetab[i] != 0xff)
     {
       p->ps_files[i] = q_filetab[i];
-      idx_to_sft(p->ps_files[i])->sft_count++;
+      ((sft*)ARM_PTR(idx_to_sft(p->ps_files[i])))->sft_count++;
     }
   }
 
