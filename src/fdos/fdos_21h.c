@@ -510,10 +510,98 @@ bool fdos_21h(CPU* _cpu) {
     internal_data->Int21AX = CPU_AX;
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
+      /* Read Keyboard With Echo                                      */
+      case 0x01:
+      DOS_01:
+        CPU_AL = read_char_stdin(TRUE);
+        write_char_stdout(CPU_AL);
+        break;
+        
       case 0x02:
         write_char_stdout(CPU_AL);
         CPU_AL = (CPU_DL == HT) ? ' ' : CPU_DL;
         break;
+
+      /* Auxiliary Input                                              */
+      case 0x03:
+      {
+        int sft_idx = get_sft_idx(STDAUX);
+        CPU_AL = read_char(sft_idx, sft_idx, TRUE);
+      }
+        break;
+
+      /* Auxiliary Output                                             */
+      case 0x04:
+        write_char(CPU_DL, get_sft_idx(STDAUX));
+        break;
+
+      /* Print Character                                              */
+      case 0x05:
+        write_char(CPU_DL, get_sft_idx(STDPRN));
+        break;
+
+      /* Direct Console I/O                                           */
+      case 0x06:
+      DOS_06:
+        if (CPU_DL != 0xff)
+        {
+          CPU_AL = CPU_DL;
+          write_char_stdout(CPU_AL);
+          break;
+        }
+        CPU_AL = 0x00;
+        zf = 1;
+        if (StdinBusy())
+        {
+          DosIdle_int();
+          break;
+        }
+        zf = 0;
+        /* fall through */
+
+      /* Direct Console Input                                         */
+      case 0x07:
+      DOS_07:
+        CPU_AL = read_char_stdin(FALSE);
+        break;
+
+      /* Read Keyboard Without Echo                                   */
+      case 0x08:
+      DOS_08:
+        CPU_AL = read_char_stdin(TRUE);
+        break;
+
+      /* Buffered Keyboard Input                                      */
+      case 0x0a:
+      DOS_0A:
+        read_line(get_sft_idx(STDIN), get_sft_idx(STDOUT), (keyboard *)ARM_PTR(FP_DS_DX));
+        break;
+
+      /* Check Stdin Status                                           */
+      case 0x0b:
+        CPU_AL = 0xFF;
+        if (StdinBusy())
+          CPU_AL = 0x00;
+        break;
+
+      /* Flush Buffer, Read Keyboard                                  */
+      case 0x0c:
+      {
+        dos_far_ptr dev = sft_to_dev(get_sft(STDIN));
+        if (FP_SEG(dev) || FP_OFF(dev))
+          con_flush(&dev);
+        switch (CPU_AL)
+        {
+          case 0x01: goto DOS_01;
+          case 0x06: goto DOS_06;
+          case 0x07: goto DOS_07;
+          case 0x08: goto DOS_08;
+          case 0x0a: goto DOS_0A;
+        }
+        CPU_AL = 0x00;
+      }
+        break;
+
       /* Display String                                               */
       case 0x09:
         {
