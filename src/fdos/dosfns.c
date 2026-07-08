@@ -1021,7 +1021,7 @@ COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
 #undef IS_SLASH
 #endif
 
-/* FIX (analysis patch): declared in proto.h, called by INT 21h AH=47h
+/* declared in proto.h, called by INT 21h AH=47h
    (GET CURRENT DIRECTORY - see fdos_21h.c), but never implemented in
    this port. drive: 0 = default drive, 1 = A:, 2 = B:, ...
    dst: destination buffer as a guest dos_far_ptr (ES:DI / DS:SI as
@@ -1037,7 +1037,7 @@ COUNT DosGetCuDir(UBYTE drive, dos_far_ptr dst)
   return SUCCESS;
 }
 
-/* FIX (analysis patch): declared in proto.h, called by INT 21h AH=3Bh
+/* declared in proto.h, called by INT 21h AH=3Bh
    (CHDIR - see fdos_21h.c), but never implemented in this port.
    Migrated from upstream dosfns.c; network-redirector branch dropped in
    the same style already used above for DosMkRmdir/DosRenameTrue in
@@ -1052,8 +1052,7 @@ COUNT DosChangeDir(dos_far_ptr s)
 
   set_fcbname();
 
-  if (EFFECTIVE(internal_data->current_ldt) &&
-      (strlen(PriPathName) >= MAX_CDSPATH))
+  if ((FP_OFF(internal_data->current_ldt) != 0xFFFF) && (strlen(PriPathName) >= MAX_CDSPATH))
     return DE_PATHNOTFND;
 
   /// TODO:
@@ -1067,7 +1066,7 @@ COUNT DosChangeDir(dos_far_ptr s)
   /* Copy the path to the current directory structure. Some redirectors
      do not write back to the CDS - not applicable here (no redirector),
      kept for parity with upstream. */
-  if (EFFECTIVE(internal_data->current_ldt))
+  if (FP_OFF(internal_data->current_ldt) != 0xFFFF)
   {
     struct cds *cdsp = (struct cds *)ARM_PTR(internal_data->current_ldt);
     fstrcpy(cdsp->cdsCurrentPath, PriPathName);
@@ -1077,7 +1076,7 @@ COUNT DosChangeDir(dos_far_ptr s)
   return SUCCESS;
 }
 
-/* FIX (analysis patch): declared in proto.h, called by INT 21h AH=41h
+/* declared in proto.h, called by INT 21h AH=41h
    (see fdos_21h.c), but never implemented in this port. Migrated from
    upstream dosfns.c; network/share branches dropped in the same style
    already used above for DosMkRmdir/DosRenameTrue in this file, since
@@ -1104,4 +1103,130 @@ COUNT DosDelete(dos_far_ptr path, int attrib)
   ///    return DE_ACCESS;
 
   return dos_delete(PriPathName, attrib);
+}
+
+/* DosFindFirst()/DosFindNext() (INT 21h AH=4Eh/
+   4Fh) were declared in proto.h but never implemented in this port -
+   without them DIR, wildcard COPY, and any directory enumeration had
+   no working backend at all. Migrated from upstream dosfns.c, with
+   two adaptations for this port (documented inline below):
+     1. the original passes the caller's DTA around as a bare near/far
+        dmatch* (since real DOS keeps results directly in the DTA
+        buffer) - here internal_data->dta is a dos_far_ptr, so pop_dmp
+        takes it as such and ARM_PTR-converts it once, writing fields
+        directly instead of calling fmemcpy() (which needs a guest
+        dos_far_ptr *source* too - see kernel.c; sda_tmp_dmD is native
+        memory, not a guest address, so fmemcpy would be the wrong
+        tool here regardless).
+     2. get_root() in this port already returns a plain native char*
+        (see dosfns.c), not a near/far pointer requiring FP_OFF() to
+        extract - original's "FP_OFF(get_root(...))" is simplified
+        accordingly.
+   network_redirector branch dropped, same as DosMkRmdir/DosChangeDir
+   above (no redirector in this port). */
+/* DosFindFirst()/DosFindNext() (INT 21h AH=4Eh/
+   4Fh) were declared in proto.h but never implemented in this port -
+   without them DIR, wildcard COPY, and any directory enumeration had
+   no working backend at all. Migrated from upstream dosfns.c, with
+   two adaptations for this port (documented inline below):
+     1. the original passes the caller's DTA around as a bare near/far
+        dmatch* (since real DOS keeps results directly in the DTA
+        buffer) - here internal_data->dta is a dos_far_ptr, so pop_dmp
+        takes it as such and ARM_PTR-converts it once, writing fields
+        directly instead of calling fmemcpy() (which needs a guest
+        dos_far_ptr *source* too - see kernel.c; sda_tmp_dmD is native
+        memory reached through internal_data, not something we'd want
+        to reconstruct a far pointer for just to hand to fmemcpy).
+     2. DosFindFirst() takes dos_far_ptr name directly (like
+        DosChangeDir/DosOpenSft do) instead of the stale BYTE FAR*
+        prototype that was here before - a native pointer can't be
+        turned back into a guest far pointer relative to an arbitrary
+        segment (e.g. the caller's DS), only relative to a segment its
+        address is actually known to be reachable from; DOS_PSP (the
+        kernel's own reserved segment, see mcb.h) is that segment for
+        internal_data's fields, which is why it - not the caller's DS
+        or the DTA's segment - is used below for sda_tmp_dmD.
+   get_root() in this port already returns a plain native char*, not
+   a near/far pointer requiring FP_OFF() to extract - original's
+   "FP_OFF(get_root(...))" is simplified accordingly. network_redirector
+   branch dropped, same as DosMkRmdir/DosChangeDir above (no redirector
+   in this port). */
+STATIC int pop_dmp(int rc, dos_far_ptr dta_far)
+{
+  internal_data->dta = dta_far;
+  if (rc == SUCCESS)
+  {
+    dmatch *dmp = (dmatch *)ARM_PTR(dta_far);
+    memcpy(dmp, &sda_tmp_dmD, 21);
+    dmp->dm_attr_fnd = (BYTE) SearchDirD.dir_attrib;
+    dmp->dm_time = SearchDirD.dir_time;
+    dmp->dm_date = SearchDirD.dir_date;
+    dmp->dm_size = (LONG) SearchDirD.dir_size;
+    ConvertName83ToNameSZ((BYTE FAR *)dmp->dm_name, (BYTE FAR *)SearchDirD.dir_name);
+  }
+  return rc;
+}
+
+COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
+{
+  int rc;
+  dos_far_ptr dta_far = internal_data->dta;
+
+  rc = truename(name, PriPathName,
+                CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
+  if (rc < SUCCESS)
+    return rc;
+
+  set_fcbname();
+
+  SAttrD = (BYTE) attr;
+
+  internal_data->dta = x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD);
+  memset(&sda_tmp_dmD, 0, sizeof(dmatch));
+  memset(&SearchDirD, 0, sizeof(struct dirent));
+
+  /// TODO:
+  ///  if (rc & IS_NETWORK)
+  ///    return network_redirector_fp(REM_FINDFIRST, current_ldt);
+
+  if (rc & IS_DEVICE)
+  {
+    const char *p;
+    COUNT i;
+
+    /* make sure the next search fails */
+    sda_tmp_dmD.dm_entry = 0xffff;
+    /* Found a matching device. Hence there cannot be wildcards. */
+    SearchDirD.dir_attrib = D_DEVICE;
+    SearchDirD.dir_time = dos_gettime();
+    SearchDirD.dir_date = dos_getdate();
+    p = get_root(PriPathName);
+    memset(SearchDirD.dir_name, ' ', FNAME_SIZE + FEXT_SIZE);
+    for (i = 0; i < FNAME_SIZE && *p && *p != '.'; i++)
+      SearchDirD.dir_name[i] = *p++;
+    rc = SUCCESS;
+  }
+  else
+    rc = dos_findfirst(attr, PriPathName);
+
+  return pop_dmp(rc, dta_far);
+}
+
+COUNT DosFindNext(void)
+{
+  COUNT rc;
+  dos_far_ptr dta_far = internal_data->dta;
+
+  memcpy(&sda_tmp_dmD, ARM_PTR(dta_far), 21);
+
+  /* findnext will always fail on a volume id search or device name */
+  if ((sda_tmp_dmD.dm_attr_srch & ~(D_RDONLY | D_ARCHIVE | D_DEVICE)) == D_VOLID
+      || sda_tmp_dmD.dm_entry == 0xffff)
+    return DE_NFILES;
+
+  memset(&SearchDirD, 0, sizeof(struct dirent));
+  internal_data->dta = x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD);
+  rc = dos_findnext();
+
+  return pop_dmp(rc, dta_far);
 }

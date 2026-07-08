@@ -93,3 +93,6 @@ _Static_assert(sizeof(dmatch) == 43, "sizeof(dmatch) changed - re-check every fm
 */
 #define sda_tmp_dmD (*(dmatch *)&internal_data->sda_tmp_dm)
 #define sda_tmp_dm_renD (*(dmatch *)&internal_data->sda_tmp_dm_ren)
+
+#define SearchDirD (*(struct dirent *)&internal_data->SearchDir)
+#define SAttrD (internal_data->SAttr)

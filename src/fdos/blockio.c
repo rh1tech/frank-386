@@ -287,7 +287,8 @@ STATIC dos_far_ptr/*struct buffer*/ searchblock(ULONG blkno, COUNT dsk)
   }
   else
   {
-    _bp = MK_FP(FP_SEG(_bp), firstbp);
+    struct buffer *first = bufptr(_bp, firstbp);
+    _bp = MK_FP(FP_SEG(_bp), first->b_prev);
   }
   bp = (struct buffer *)ARM_PTR(_bp);
 

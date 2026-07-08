@@ -195,7 +195,7 @@ UBYTE DosSelectDrv(UBYTE drv)
 {
   internal_data->current_ldt = get_cds(drv);
 
-  if (EFFECTIVE(internal_data->current_ldt))
+  if (FP_OFF(internal_data->current_ldt) != 0xFFFF)
     internal_data->default_drive = drv;
   
   return LoL->lastdrive;
@@ -681,7 +681,7 @@ bool fdos_21h(CPU* _cpu) {
         }
 #endif
       /* Create file                                                  */
-      /* FIX (analysis patch): AH=3Ch had no dispatcher entry at all -
+      /* AH=3Ch had no dispatcher entry at all -
          and until dos_open()'s O_CREAT/O_TRUNC branches were implemented
          (see fatfs.c), wiring it wouldn't have helped anyway. Now that
          both exist, this mirrors inthndlr.c's "case 0x3c" exactly,
@@ -783,7 +783,7 @@ bool fdos_21h(CPU* _cpu) {
  
       /* Make directory                                                */
       /* Remove directory                                               */
-      /* FIX (analysis patch): classic top-level entry points were missing;
+      /* classic top-level entry points were missing;
          DosMkRmdir() already exists and is used by the AH=43h/AL=FF path -
          see inthndlr.c "case 0x39: case 0x3a: rc = DosMkRmdir(FP_DS_DX, lr.AH);" */
       case 0x39:
@@ -792,7 +792,7 @@ bool fdos_21h(CPU* _cpu) {
         goto short_check;
 
       /* Rename file (classic entry point) */
-      /* FIX (analysis patch): DosRename() already exists (used by the
+      /* DosRename() already exists (used by the
          AH=43h/AL=FF/CL=56h path); wire the standard AH=56h entry point too -
          see inthndlr.c "case 0x56: rc = DosRename(FP_DS_DX, FP_ES_DI);" */
       case 0x56:
@@ -800,19 +800,29 @@ bool fdos_21h(CPU* _cpu) {
         goto short_check;
 
       /* Change directory                                             */
-      /* FIX (analysis patch): DosChangeDir() was declared but never
+      /* DosChangeDir() was declared but never
          implemented in this port at all - AH=3Bh had no backend. */
       case 0x3b:
         rc = DosChangeDir(FP_DS_DX);
         goto short_check;
 
       /* Delete file                                                  */
-      /* FIX (analysis patch): DosDelete() was declared but never
+      /* DosDelete() was declared but never
          implemented in this port at all - AH=41h had no backend. */
       case 0x41:
         rc = DosDelete(FP_DS_DX, D_ALL);
         goto short_check;
 
+      /* Find first matching file                                     */
+      case 0x4e:
+        rc = DosFindFirst(CPU_CX, FP_DS_DX);
+        goto short_check;
+
+      /* Find next matching file                                      */
+      case 0x4f:
+        rc = DosFindNext();
+        goto short_check;
+        
       /* Get/Set File Attributes                                      */
       case 0x43:
         switch (CPU_AL)

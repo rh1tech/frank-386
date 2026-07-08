@@ -699,7 +699,7 @@ STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluste
 /*
 Migrated from fatfs.c verbatim.
 
-    FIX (analysis patch): the O_TRUNC and O_CREAT branches below used to
+    the O_TRUNC and O_CREAT branches below used to
     be deliberate "not implemented yet" stubs returning DE_ACCESS - i.e.
     no DOS program could ever create a new file or truncate an existing
     one (redirection ">", COPY CON, compilers/installers writing output,
@@ -1882,7 +1882,7 @@ COUNT delete_dir_entry(f_node_ptr fnp)
   return SUCCESS;
 }
 
-/* FIX (analysis patch): dos_delete() was declared in proto.h and called
+/* dos_delete() was declared in proto.h and called
    from DosDelete() (see dosfns.c), but never implemented anywhere in this
    port - INT 21h AH=41h (DELETE FILE) had no working backend at all.
    Migrated as-is from upstream fatfs.c; depends only on find_fname() and
@@ -1965,4 +1965,15 @@ COUNT dos_rmdir(BYTE * path)
     return DE_PATHNOTFND;
 
   return delete_dir_entry(fnp);
+}
+
+/* declared in proto.h, needed by dos_findnext()
+   (wildcard 8.3 name matching), but never implemented in this port.
+   Migrated verbatim from upstream fatfs.c. */
+BOOL fcmp_wild(const char * s1, const char * s2, unsigned n)
+{
+  for ( ; n--; ++s1, ++s2)
+    if (*s1 != '?' && *s1 != *s2)
+      return FALSE;
+  return TRUE;
 }

@@ -98,7 +98,7 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly);
 UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc);
 COUNT DosGetCuDir(UBYTE drive, dos_far_ptr s);
 COUNT DosChangeDir(dos_far_ptr s);
-COUNT DosFindFirst(UCOUNT attr, BYTE FAR * name);
+COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name);
 COUNT DosFindNext(void);
 COUNT DosGetFtime(COUNT hndl, ddate * dp, dtime * tp);
 COUNT DosSetFtimeSft(int sft_idx, ddate dp, dtime tp);
