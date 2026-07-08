@@ -388,23 +388,7 @@ done:
     for a regular (non-device) file: transfer "count" bytes between
     "buffer" and the file at fd's current position, advancing it.
 
-    Migrated from fatfs.c. Differences from the original:
-      - buffer is a dos_far_ptr on entry (it comes straight from the
-        guest program via DS:DX, like truename()'s src - see "support
-        both pointer kinds" in fnode.h's notes), converted to a native
-        pointer once up front via ARM_PTR(), the same reasoning as
-        truename()'s migration note: there is no adjust_far()-equivalent
-        normalization step needed here either, since ARM_PTR()/
-        EFFECTIVE() compute a plain linear address with no 16-bit
-        wraparound to guard against. The original's repeated
-        "buffer = adjust_far(buffer + xfr_cnt)" becomes plain native
-        pointer arithmetic ("buffer += xfr_cnt").
-      - fmemcpy() calls become plain memcpy(): bp->b_buffer is native,
-        and buffer is now native too (per the point above), so there
-        is no far pointer left to translate.
-      - dskxfer() already takes a native BYTE* (see its definition
-        above), so the "complete sectors" fast path passes buffer to
-        it directly, same as the original passed its (far) buffer.
+    Migrated from fatfs.c.
 */
 long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
 {
@@ -417,9 +401,10 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
   unsigned secsize;
   unsigned to_xfer = count;
   ULONG currentblock;
+
   BYTE *buffer = (BYTE *)ARM_PTR(x86_buffer);
 
-  if (mode==XFR_WRITE)
+  if (mode == XFR_WRITE)
   {
     fnp->f_dir.dir_attrib |= D_ARCHIVE;
     /* mark file as modified and set date not valid any more */

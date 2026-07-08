@@ -71,7 +71,7 @@ STATIC void set_fcbname(void)
     is preserved since LoL->current_sft_idx already exists in this
     codebase (see lol.h); nothing else in this iteration reads it yet.
 */
-STATIC sft *get_free_sft(COUNT *sft_idx)
+STATIC dos_far_ptr/*sft*/ get_free_sft(COUNT *sft_idx)
 {
   COUNT sys_idx = 0;
   dos_far_ptr x86_sp = LoL->sfthead;
@@ -91,14 +91,14 @@ STATIC sft *get_free_sft(COUNT *sft_idx)
         /* MS NET uses this on open/creat TE */
         internal_data->current_sft_idx = sys_idx;
 
-        return sfti;
+        return MK_FP( FP_SEG(x86_sp), FP_OFF(x86_sp) + ((uintptr_t)sfti - (uintptr_t)sp) ) ;
       }
     }
 
     x86_sp = sp->sftt_next;
   }
   /* If not found, return an error                */
-  return (sft *)-1;
+  return MK_FP(-1, -1);
 }
 
 
@@ -207,21 +207,18 @@ bits for flags (bits 11-8 are internal FreeDOS bits only)
 */
 long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 {
-  COUNT sft_idx;
-  sft *sftp;
-  dos_far_ptr dhp;
-  long result;
-
-  result = truename(fname, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  long result = truename(fname, PriPathName, CDS_MODE_CHECK_DEV_PATH);
   if (result < SUCCESS)
     return result;
 
   set_fcbname();
 
   /* now get a free system file table entry       */
-  if ((sftp = get_free_sft(&sft_idx)) == (sft *) - 1)
+  COUNT sft_idx;
+  dos_far_ptr lpCurSft = get_free_sft(&sft_idx);
+  if (far_is_end(lpCurSft))
     return DE_TOOMANY;
-
+  sft* sftp = (sft*)ARM_PTR(lpCurSft);
   memset(sftp, 0, sizeof(sft));
 
   sftp->sft_psp = internal_data->cu_psp;
@@ -232,6 +229,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   sftp->sft_attrib = attrib = attrib | D_ARCHIVE;
 
   /* check for a (local) device */
+  dos_far_ptr dhp;
   if ((result & IS_DEVICE) && !(result & IS_NETWORK)) {
       dhp = IsDevice((const char *)ARM_PTR(fname));
       if (EFFECTIVE(dhp) != 0) {
@@ -239,20 +237,24 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
         /* check the status code returned by the
         * driver when we tried to open it
         */
-        if (rc < SUCCESS)
+        if (rc < SUCCESS) {
           return rc;
+        }
         return sft_idx;
       }
   }
 
   if (result & IS_NETWORK)
   {
+    return DE_PATHNOTFND;
+    /// TODO:
+  #if 0
     int status;
     unsigned cmd;
     if ((flags & (O_TRUNC | O_CREAT)) == O_CREAT)
       attrib |= 0x100;
 
-    internal_data->lpCurSft = linear_to_far(sftp);
+    internal_data->lpCurSft = lpCurSft;
     cmd = REM_CREATE;
     if (!(flags & O_LEGACY))
     {
@@ -266,15 +268,15 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
       cmd = REM_OPEN;
       attrib = (BYTE)flags;
     }
-    /// TODO:
-///    status = (int)network_redirector_mx(cmd, sftp, (void *)(intptr_t)attrib);
-///    if (status >= SUCCESS)
+    status = (int)network_redirector_mx(cmd, sftp, (void *)(intptr_t)attrib);
+    if (status >= SUCCESS)
     {
       if (sftp->sft_count == 0)
         sftp->sft_count++;
       return sft_idx | ((long)status << 16);
     }
     return status;
+    #endif
   }
 
   /* First test the flags to see if the user has passed a valid   */
