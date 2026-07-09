@@ -15,6 +15,26 @@ static bios_callback_params_t root = {
     .owner = "ROOT"
 };
 
+#if PDB_DEBUG
+static void dpb_watch_ff_checkpoint(CPU* cpu, const char *where,
+                                    bios_callback_params_t *node)
+{
+    static char tags[16][80];
+    static unsigned tag_idx;
+    int snprintf(char *s, size_t n, const char *fmt, ...);
+    char *tag = tags[tag_idx++ & 15];
+    snprintf(tag, sizeof(tags[0]),
+             "FF-%s CS:IP=%04x:%04x AX=%04x cb=%s done=%u",
+             where, CPU_CS, CPU_IP, CPU_AX,
+             node ? node->owner : "?",
+             node ? node->done : 0);
+    dpb_watch_check_chain(tag);
+}
+#else
+#define dpb_watch_native_checkpoint(...)
+#define dpb_watch_ff_checkpoint(...)
+#endif
+
 // assigned to 0xFFEFF address (FFE0: 00FF)
 // used as callback, no direct vector is used for this in IVT
 // in case such address in CS:IP, it means: it was restored from x86 stack,
@@ -23,13 +43,19 @@ bool bios_FFh(CPU* cpu) { // W/A BIOS callback
     u16 cs = CPU_CS;
     u16 ip = CPU_IP;
     bios_callback_params_t* node = &root;
+    dpb_watch_ff_checkpoint(cpu, "entry", node);
     while(node->chain) {
         node = node->chain;
+        dpb_watch_ff_checkpoint(cpu, "scan", node);
         if (cs == node->expected_cs && ip == node->expected_ip) {
-            return node->callback(cpu, node);
+            dpb_watch_ff_checkpoint(cpu, "before-callback", node);
+            bool rc = node->callback(cpu, node);
+            dpb_watch_ff_checkpoint(cpu, "after-callback", node);
+            return rc;
         }
     }
     printf("no callback found, let try default\n");
+    dpb_watch_ff_checkpoint(cpu, "before-no-callback", &root);
     return bios_no_callback(cpu, &root);
 }
 

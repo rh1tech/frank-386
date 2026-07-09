@@ -119,7 +119,7 @@ int get_sft_idx(UCOUNT hndl);
 struct cds FAR *get_cds_unvalidated(unsigned dsk);
 /*struct cds*/ dos_far_ptr get_cds(unsigned drive);
 struct cds FAR *get_cds1(unsigned dsk);
-struct dpb FAR *GetDriveDPB(UBYTE drive, COUNT *rc);
+dos_far_ptr /*struct dpb*/ GetDriveDPB(UBYTE drive, COUNT *rc);
 COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest);
 
 /* dosidle.asm */
@@ -181,7 +181,8 @@ int dos_cd(char * PathName);
 
 COUNT dos_getfattr(BYTE * name);
 COUNT dos_setfattr(BYTE * name, UWORD attrp);
-COUNT media_check(REG struct dpb FAR * dpbp);
+COUNT media_check(dos_far_ptr /*struct dpb*/ dpbp);
+COUNT media_check_tagged(dos_far_ptr /*struct dpb*/ dpbp, const char *source);
 f_node_ptr xlt_fd(COUNT fd);
 COUNT xlt_fnp(f_node_ptr fnp);
 struct dhdr FAR * select_unit(COUNT drive);

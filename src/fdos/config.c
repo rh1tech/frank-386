@@ -1220,6 +1220,7 @@ STATIC VOID CmdSet(BYTE *pLine)
       oldsize = 0;
     }
     BYTE* master_env = ((BYTE*)ARM_PTR(x86_master_env));
+    dpb_watch_check_chain("prep_shell-after-env");
     if (size < master_env + 128 - (envp - oldsize) - 1 - 2)
     {                     /* must end with two consequtive zeros */
       deletevar(pp);      /* now that there's enough space, actually delete */
@@ -1599,9 +1600,11 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 
   if ((result = DosExec(EXEC_OVERLAY, &eb, (BYTE FAR *) PriPathName)) != SUCCESS)
   {
+    dpb_watch_check_chain("LoadDevice err");
     CfgFailure(pLine);
     return result;
   }
+  dpb_watch_check_chain("LoadDevice");
 
   strcpy(szBuf, pLine);
   /* uppercase the device driver command */
@@ -2169,10 +2172,15 @@ VOID PreConfig2(VOID)
   base_seg = LoL->first_mcb = FP_SEG(x86_first_mcb);
 
   /*
-   * ram_top is in Kbytes; MCB size is in paragraphs.
-   * The MCB itself occupies first_mcb:0000, so usable size is -1.
+    * ram_top is in Kbytes; MCB size is in paragraphs.
+    * DynAlloc() owns DYN_BUFFER_SEG..DYN_BUFFER_SEG+64K outside the
+    * MCB chain, so the low-memory arena must stop before it.
+    * The MCB itself occupies first_mcb:0000, so usable size is -1.
    */
-  mcb_init(base_seg, ram_top * 64 - LoL->first_mcb - 1, MCB_LAST);
+  UWORD mcb_top_seg = ram_top * 64;
+  if (mcb_top_seg > DYN_BUFFER_SEG)
+    mcb_top_seg = DYN_BUFFER_SEG;
+  mcb_init(base_seg, mcb_top_seg - LoL->first_mcb - 1, MCB_LAST);
 
   /*
    * Built-in firstsftt has 5 SFT entries. Original PreConfig2 appends

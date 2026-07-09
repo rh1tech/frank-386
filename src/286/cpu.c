@@ -954,10 +954,27 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
     }
 }
 
+#if PDB_DEBUG
+static void dpb_watch_native_checkpoint(CPU* cpu, const char *where, uint8_t intnum)
+{
+    static char tags[16][48];
+    static unsigned tag_idx;
+
+    char *tag = tags[tag_idx++ & 15];
+    snprintf(tag, 48, "NATIVE-%s INT=%02x AX=%04x", where, intnum, CPU_AX);
+    dpb_watch_check_chain(tag);
+}
+#else
+#define dpb_watch_native_checkpoint(...)
+#endif
+
 /// TODO: inline
 bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
     print_line2("BIOS", 0, 8);
-    return handlers[intnum](cpu);
+    dpb_watch_native_checkpoint(cpu, "entry", intnum);
+    bool res = handlers[intnum](cpu);
+    dpb_watch_native_checkpoint(cpu, "exit", intnum);
+    return res;
 }
 
 static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {

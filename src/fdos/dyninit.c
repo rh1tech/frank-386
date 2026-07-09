@@ -44,7 +44,7 @@
 dos_far_ptr DynAlloc(char *what, unsigned num, unsigned size)
 {
   unsigned total = num * size;
-  static dos_far_ptr Dyn = MK_FP(0x9000, 0); // 64k from 0x9000:0000 to 0x1A00:0000
+  static dos_far_ptr Dyn = MK_FP(DYN_BUFFER_SEG, 0); // 64k from 0x9000:0000 to 0xA000:0000
   struct DynS far *Dynp = (struct DynS far *)ARM_PTR(Dyn);
 
 #ifndef DEBUG

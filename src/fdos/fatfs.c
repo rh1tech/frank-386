@@ -41,6 +41,8 @@
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
+static const char *media_check_source = "?";
+
 /*
     fnode[] - internal scratch file nodes used while servicing a single
     DOS API call (open/read/write/seek/close/etc). See the comment on
@@ -955,8 +957,9 @@ dos_far_ptr/*struct dpb*/ get_dpb(COUNT dsk)
   return cdsp->cdsDpb;
 }
 
-STATIC int rqblockio(unsigned char command, struct dpb FAR * dpbp)
+STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
 {
+  struct dpb *dpbp = (struct dpb *)ARM_PTR(_dpbp);
  retry:
   MediaReqHdrD.r_length = sizeof(request);
   MediaReqHdrD.r_unit = dpbp->dpb_subunit;
@@ -966,7 +969,12 @@ STATIC int rqblockio(unsigned char command, struct dpb FAR * dpbp)
 
   if (command == C_BLDBPB) /* help USBASPI.SYS & DI1000DD.SYS (TE) */
     MediaReqHdrD.r_bpfat = DiskTransferBuffer;
+
+  drv_watch_set_dpb_context(_dpbp, command, dpbp->dpb_unit, dpbp->dpb_subunit, media_check_source);
+
+  dpb_watch_check("rqblockio-before-execrh", _dpbp);
   execrh(linear_to_far( &MediaReqHdrD ), dpbp->dpb_device);
+  dpb_watch_check("rqblockio-after-execrh", _dpbp);
   if ((MediaReqHdrD.r_status & S_ERROR) || !(MediaReqHdrD.r_status & S_DONE))
   {
     FOREVER
@@ -1087,52 +1095,66 @@ ckok:;
     may have been swapped since the last access, and if so, rebuild
     the DPB's BPB-derived fields from the new media.
 */
-COUNT media_check(struct dpb *dpbp)
+COUNT media_check_tagged(dos_far_ptr /*struct dpb*/ _dpbp, const char *source)
 {
-  int ret;
-  if (dpbp == NULL)
+  media_check_source = source;
+  if (far_is_null(_dpbp))
     return DE_INVLDDRV;
+  dpb_watch_check("media_check-entry", _dpbp);
 
   /* First test if anyone has changed the removable media         */
-  ret = rqblockio(C_MEDIACHK, dpbp);
+  int ret = rqblockio(C_MEDIACHK, _dpbp);
+  dpb_watch_check("media_check-after-C_MEDIACHK", _dpbp);
   if (ret < SUCCESS)
     return ret;
 
+  dpb_watch_check("media_check-before-switch", _dpbp);
+  struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp);
   switch (MediaReqHdrD.r_mcretcode | dpbp->dpb_flags)
   {
     case M_NOT_CHANGED:
       /* It was definitely not changed, so ignore it          */
+      dpb_watch_check("media_check-case-not-changed", _dpbp);
       return SUCCESS;
 
       /* If it is forced or the media may have changed,       */
       /* rebuild the bpb                                      */
     case M_DONT_KNOW:
+      dpb_watch_check("media_check-case-dont-know", _dpbp);
       /* IBM PCDOS technical reference says to call BLDBPB if */
       /* there are no used buffers                            */
-      if (dirty_buffers(dpbp->dpb_unit))
+      if (dirty_buffers(dpbp->dpb_unit)) {
+        dpb_watch_check("media_check-after-dirty_buffers", _dpbp);
         return SUCCESS;
-
+      }
+      dpb_watch_check("media_check-after-dirty_buffers2", _dpbp);
       /* If it definitely changed, don't know (falls through) */
       /* or has been changed, rebuild the bpb.                */
     /* case M_CHANGED: */
     default:
+      dpb_watch_check("media_check-case-default-before-setinvld", _dpbp);
       setinvld(dpbp->dpb_unit);
-      ret = rqblockio(C_BLDBPB, dpbp);
+      dpb_watch_check("media_check-after-setinvld", _dpbp);
+      ret = rqblockio(C_BLDBPB, _dpbp);
+      dpb_watch_check("media_check-after-C_BLDBPB", _dpbp);
       if (ret < SUCCESS)
         return ret;
 #ifdef WITHFAT32
       /* extend dpb only for internal or FAT32 devices */
       bpb_to_dpb((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr), dpbp,
-                 ((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr))->bpb_nfsect == 0 ||
-                 !is_guest_ptr(dpbp)
+                 ((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr))->bpb_nfsect == 0
       );
 #else
       bpb_to_dpb((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr), dpbp);
 #endif
+      dpb_watch_check("media_check-after-bpb_to_dpb", _dpbp);
       return SUCCESS;
   }
 }
-
+COUNT media_check(dos_far_ptr /*struct dpb*/ _dpbp)
+{
+  return media_check_tagged(_dpbp, "media_check");
+}
 /*    clus2phys(cl_no, dpbp) - convert a cluster number into the absolute
     sector number of its first sector.
 

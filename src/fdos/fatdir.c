@@ -413,7 +413,7 @@ COUNT dos_findnext(void)
   fnp = &fnode[0];
   dmp = &sda_tmp_dmD;
   fnp->f_dpb = get_dpb(dmp->dm_drive);
-  if (media_check((struct dpb*)ARM_PTR(fnp->f_dpb)) < 0)
+  if (media_check_tagged(fnp->f_dpb, "dos_findnext/fnp->f_dpb") < 0)
     return DE_NFILES;
 
   dir_init_fnode(fnp, dmp->dm_dircluster);

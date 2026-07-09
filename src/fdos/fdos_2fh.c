@@ -110,12 +110,14 @@ int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size)
     u16 save_dx = CPU_DX;
     CPU_DX = 0xffff;
     CPU_AX = 0x1000;
+    dpb_watch_check_chain("UMB_get_largest 1");
     cpu_far_call(cpu, FP_SEG(driverAddress), FP_OFF(driverAddress));
     if (CPU_BL != 0xb0 || CPU_DX == 0) {
         res = 0;
         goto ret;
     }
     CPU_AX = 0x1000;
+    dpb_watch_check_chain("UMB_get_largest 2");
     /* DX оставляем равным largest size */
     cpu_far_call(cpu, FP_SEG(driverAddress), FP_OFF(driverAddress));
     if (CPU_AX != 1) {
@@ -126,6 +128,7 @@ int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size)
     *size = CPU_DX;
     res = CPU_AX;
 ret:
+    dpb_watch_check_chain("UMB_get_largest 3");
     CPU_AX = save_ax;
     CPU_BX = save_bx;
     CPU_DX = save_dx;
@@ -133,6 +136,7 @@ ret:
 }
 
 static inline void xms_move_to(register uint32_t destination, register uint32_t source, register uint32_t length) {
+    dpb_watch_check_chain("xms_move_to 1");
     if (((destination | source) & 1u) == 0) {
         uint16_t *dest_ptr = (uint16_t *)xms_ptr(destination);
         while (length >= 2) {
@@ -163,9 +167,11 @@ static inline void xms_move_to(register uint32_t destination, register uint32_t 
     }
     if (length)
         *xms_ptr(destination) = read86(source);
+    dpb_watch_check_chain("xms_move_to 2");
 }
  
 static inline void xms_move_from(register uint32_t source, register uint32_t destination, register uint32_t length) {
+    dpb_watch_check_chain("xms_move_from 1");
     if (((source | destination) & 1u) == 0) {
         const uint16_t *source_ptr = (const uint16_t *)xms_ptr(source);
         while (length >= 2) {
@@ -196,15 +202,20 @@ static inline void xms_move_from(register uint32_t source, register uint32_t des
     }
     if (length)
         write86(destination, *xms_ptr(source));
+    dpb_watch_check_chain("xms_move_from 2");
 }
 
 static inline void xms_move_mem_to_mem(uint32_t destination, uint32_t source, uint32_t length) {
+    dpb_watch_check_chain("xms_move_mem_to_mem 1");
     memmove(X86_RAM_BASE + destination, X86_RAM_BASE + source, length);
+    dpb_watch_check_chain("xms_move_mem_to_mem 2");
 }
 
 static inline void xms_move_xms_to_xms(uint32_t destination, uint32_t source, uint32_t length) {
+    dpb_watch_check_chain("xms_move_xms_to_xms 1");
     memmove(xms_ptr(destination), xms_ptr(source), length);
- }
+    dpb_watch_check_chain("xms_move_xms_to_xms 2");
+}
 
 const umb_t *get_largest_free_umb_block(uint16_t *psz) {
     const umb_t *best = NULL;
@@ -340,6 +351,15 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 *move_data_ptr++ = readw86(struct_offset++);
                 struct_offset++;
             }
+            
+            printf("XMS MOVE: len=%lu sh=%04x so=%08lx dh=%04x do=%08lx phys_dst=%05lx\n",
+                move_data.length,
+                move_data.source_handle,
+                (unsigned long)move_data.source_offset,
+                move_data.destination_handle,
+                (unsigned long)move_data.destination_offset,
+                (unsigned long)to_physical_offset(move_data.destination_offset));
+
             if (!move_data.source_handle && !move_data.destination_handle) {
                 move_data.source_offset = to_physical_offset(move_data.source_offset);
                 move_data.destination_offset = to_physical_offset(move_data.destination_offset);

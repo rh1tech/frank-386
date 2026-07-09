@@ -843,6 +843,276 @@ uint32_t wait_loops = 0;
   SET_IP(save_ip);
 }
 
+#if PDB_DEBUG
+typedef struct drv_watch_s {
+  dos_far_ptr dhp;
+  dos_far_ptr next;
+  UWORD attr, strat, intr;
+  UBYTE first16[16];
+  UWORD init_cmd;
+  UWORD init_status;
+  dos_far_ptr init_endaddr;
+  char name[9];
+  const char *tag;
+} drv_watch_t;
+
+#define DRV_WATCH_MAX 64
+static drv_watch_t drv_watch[DRV_WATCH_MAX];
+static unsigned drv_watch_count;
+static dos_far_ptr drv_watch_last_dpb = MK_FP(0, 0);
+static UBYTE drv_watch_last_cmd = 0xff;
+static UBYTE drv_watch_last_unit = 0xff;
+static UBYTE drv_watch_last_subunit = 0xff;
+static const char *drv_watch_last_source = "?";
+
+typedef struct dpb_watch_s {
+  dos_far_ptr dpb;
+  UBYTE bytes[64];
+  const char *tag;
+} dpb_watch_t;
+
+#define DPB_WATCH_MAX 32
+static dpb_watch_t dpb_watch[DPB_WATCH_MAX];
+static unsigned dpb_watch_count;
+
+static void dpb_watch_capture(const char *tag, dos_far_ptr _dpb)
+{
+  if (far_is_null(_dpb) || far_is_end(_dpb))
+    return;
+  if (dpb_watch_count >= DPB_WATCH_MAX)
+    return;
+
+  dpb_watch_t *w = &dpb_watch[dpb_watch_count++];
+  w->dpb = _dpb;
+  w->tag = tag;
+  memcpy(w->bytes, ARM_PTR(_dpb), sizeof(w->bytes));
+}
+
+static void dpb_watch_capture_chain(const char *tag)
+{
+  dos_far_ptr _dpb = LoL->DPBp;
+  unsigned guard = 0;
+
+  while (!far_is_null(_dpb) && !far_is_end(_dpb) && guard++ < LoL->nblkdev + 4) {
+    struct dpb *dpb = (struct dpb *)ARM_PTR(_dpb);
+    dpb_watch_capture(tag, _dpb);
+    _dpb = dpb->dpb_next;
+  }
+}
+
+void dpb_watch_check(const char *tag, dos_far_ptr _dpb)
+{
+  for (unsigned i = 0; i < dpb_watch_count; i++) {
+    if (FP_SEG(dpb_watch[i].dpb) != FP_SEG(_dpb) ||
+        FP_OFF(dpb_watch[i].dpb) != FP_OFF(_dpb))
+      continue;
+
+    const UBYTE *now = (const UBYTE *)ARM_PTR(_dpb);
+    if (memcmp(now, dpb_watch[i].bytes, sizeof(dpb_watch[i].bytes)) == 0) {
+ //     memcpy(dpb_watch[i].bytes, now, sizeof(dpb_watch[i].bytes));
+      dpb_watch[i].tag = tag;
+      return;
+    }
+
+    printf("DPBWATCH PANIC[%s]: dpb=%04x:%04x saved_tag=%s\n",
+           tag, FP_SEG(_dpb), FP_OFF(_dpb), dpb_watch[i].tag);
+    printf("DPBWATCH saved: %02x %02x %02x %02x %02x %02x %02x %02x "
+           "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+           dpb_watch[i].bytes[0], dpb_watch[i].bytes[1], dpb_watch[i].bytes[2], dpb_watch[i].bytes[3],
+           dpb_watch[i].bytes[4], dpb_watch[i].bytes[5], dpb_watch[i].bytes[6], dpb_watch[i].bytes[7],
+           dpb_watch[i].bytes[8], dpb_watch[i].bytes[9], dpb_watch[i].bytes[10], dpb_watch[i].bytes[11],
+           dpb_watch[i].bytes[12], dpb_watch[i].bytes[13], dpb_watch[i].bytes[14], dpb_watch[i].bytes[15]);
+    printf("DPBWATCH now:   %02x %02x %02x %02x %02x %02x %02x %02x "
+           "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+           now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7],
+           now[8], now[9], now[10], now[11], now[12], now[13], now[14], now[15]);
+    for (;;) ;
+  }
+}
+void dpb_watch_check_chain(const char *tag)
+{
+  for (unsigned i = 0; i < dpb_watch_count; i++)
+    dpb_watch_check(tag, dpb_watch[i].dpb);
+}
+void drv_watch_set_dpb_context(dos_far_ptr/*struct dpb*/ _dpb, UBYTE cmd, UBYTE unit, UBYTE subunit, const char *source)
+{
+  dpb_watch_check("drv_watch_set_dpb_context", _dpb);
+  drv_watch_last_dpb = _dpb;
+  drv_watch_last_cmd = cmd;
+  drv_watch_last_unit = unit;
+  drv_watch_last_subunit = subunit;
+  drv_watch_last_source = source;
+}
+
+static int in_e000_block(dos_far_ptr p)
+{
+  return FP_SEG(p) >= 0xE000 && FP_SEG(p) < 0xF000;
+}
+
+static void drv_watch_capture(const char *tag, dos_far_ptr dhp,
+                              request *rq)
+{
+  if (drv_watch_count >= DRV_WATCH_MAX)
+    return;
+
+  struct dhdr *d = (struct dhdr *)ARM_PTR(dhp);
+  if (d->dh_attr & ATTR_NATIVE)
+    return;
+  drv_watch_t *w = &drv_watch[drv_watch_count++];
+
+  w->dhp = dhp;
+  w->next = d->dh_next;
+  w->attr = d->dh_attr;
+  w->strat = d->x86.dh_strategy;
+  w->intr = d->x86.dh_interrupt;
+  memcpy(w->first16, d, 16);
+  memcpy(w->name, d->dh_name, 8);
+  w->name[8] = 0;
+  w->tag = tag;
+  w->init_cmd = 0xff;
+  w->init_status = 0xffff;
+  w->init_endaddr = MK_FP(0, 0);
+
+  if (rq) {
+    w->init_cmd = rq->r_command;
+    w->init_status = rq->r_status;
+    w->init_endaddr = rq->r_endaddr;
+  }
+}
+
+static const drv_watch_t *drv_watch_find(dos_far_ptr dhp)
+{
+  for (unsigned i = 0; i < drv_watch_count; i++) {
+    if (FP_SEG(drv_watch[i].dhp) == FP_SEG(dhp))
+      return &drv_watch[i];
+  }
+  return NULL;
+}
+
+static int drv_watch_same_umb_macroblock(dos_far_ptr a, dos_far_ptr b)
+{
+  return (FP_SEG(a) & 0xF000) == (FP_SEG(b) & 0xF000);
+}
+
+static void drv_watch_print_one(const drv_watch_t *w)
+{
+  if (!w)
+    return;
+
+  printf("DRVWATCH: tag=%s dhp=%04x:%04x name='%.8s' next=%04x:%04x attr=%04x strat=%04x intr=%04x init_cmd=%02x init_status=%04x end=%04x:%04x "
+         "first16=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x\n",
+         w->tag,
+         FP_SEG(w->dhp), FP_OFF(w->dhp), w->name,
+         FP_SEG(w->next), FP_OFF(w->next),
+         w->attr, w->strat, w->intr,
+         w->init_cmd, w->init_status,
+         FP_SEG(w->init_endaddr), FP_OFF(w->init_endaddr),
+         w->first16[0], w->first16[1], w->first16[2], w->first16[3],
+         w->first16[4], w->first16[5], w->first16[6], w->first16[7],
+         w->first16[8], w->first16[9], w->first16[10], w->first16[11],
+         w->first16[12], w->first16[13], w->first16[14], w->first16[15]);
+}
+
+static void drv_watch_print_all(dos_far_ptr dhp)
+{
+  unsigned found = 0;
+
+  printf("DRVWATCH ALL: requested=%04x:%04x count=%u\n",
+         FP_SEG(dhp), FP_OFF(dhp), drv_watch_count);
+
+  for (unsigned i = 0; i < drv_watch_count; i++) {
+    if (!drv_watch_same_umb_macroblock(drv_watch[i].dhp, dhp))
+      continue;
+    found = 1;
+    drv_watch_print_one(&drv_watch[i]);
+  }
+
+   if (!found)
+  {
+    printf("DRVWATCH ALL: no saved records for macroblock %04x\n", FP_SEG(dhp) & 0xF000);
+    for (unsigned i = 0; i < drv_watch_count; i++)
+      drv_watch_print_one(&drv_watch[i]);
+  }
+}
+
+static int drv_watch_dhdr_looks_text(const struct dhdr *d)
+{
+  const unsigned char *p = (const unsigned char *)d;
+  unsigned printable = 0;
+
+  for (unsigned i = 0; i < 16; i++) {
+    if ((p[i] >= 0x20 && p[i] <= 0x7e) || p[i] == 0)
+      printable++;
+  }
+
+  return printable >= 14;
+}
+
+static void drv_watch_print_current(dos_far_ptr dhp, const struct dhdr *d)
+{
+  const unsigned char *p = (const unsigned char *)d;
+
+  printf("DRVWATCH CURRENT: dhp=%04x:%04x "
+         "next=%04x:%04x attr=%04x strat=%04x intr=%04x "
+         "bytes=%02x %02x %02x %02x %02x %02x %02x %02x "
+         "%02x %02x %02x %02x %02x %02x %02x %02x "
+         "ascii='%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c'\n",
+         FP_SEG(dhp), FP_OFF(dhp),
+         FP_SEG(d->dh_next), FP_OFF(d->dh_next),
+         d->dh_attr, d->x86.dh_strategy, d->x86.dh_interrupt,
+         p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7],
+         p[8], p[9], p[10], p[11], p[12], p[13], p[14], p[15],
+         (p[0] >= 0x20 && p[0] <= 0x7e) ? p[0] : '.',
+         (p[1] >= 0x20 && p[1] <= 0x7e) ? p[1] : '.',
+         (p[2] >= 0x20 && p[2] <= 0x7e) ? p[2] : '.',
+         (p[3] >= 0x20 && p[3] <= 0x7e) ? p[3] : '.',
+         (p[4] >= 0x20 && p[4] <= 0x7e) ? p[4] : '.',
+         (p[5] >= 0x20 && p[5] <= 0x7e) ? p[5] : '.',
+         (p[6] >= 0x20 && p[6] <= 0x7e) ? p[6] : '.',
+         (p[7] >= 0x20 && p[7] <= 0x7e) ? p[7] : '.',
+         (p[8] >= 0x20 && p[8] <= 0x7e) ? p[8] : '.',
+         (p[9] >= 0x20 && p[9] <= 0x7e) ? p[9] : '.',
+         (p[10] >= 0x20 && p[10] <= 0x7e) ? p[10] : '.',
+         (p[11] >= 0x20 && p[11] <= 0x7e) ? p[11] : '.',
+         (p[12] >= 0x20 && p[12] <= 0x7e) ? p[12] : '.',
+         (p[13] >= 0x20 && p[13] <= 0x7e) ? p[13] : '.',
+         (p[14] >= 0x20 && p[14] <= 0x7e) ? p[14] : '.',
+         (p[15] >= 0x20 && p[15] <= 0x7e) ? p[15] : '.');
+}
+
+static void drv_watch_print_dpb_context(void)
+{
+  printf("DRVWATCH DPBCTX: source=%s dpb=%04x:%04x cmd=%02x unit=%u sub=%u\n",
+         drv_watch_last_source, FP_SEG(drv_watch_last_dpb), FP_OFF(drv_watch_last_dpb),
+         drv_watch_last_cmd, drv_watch_last_unit, drv_watch_last_subunit);
+
+  if (!far_is_null(drv_watch_last_dpb) && !far_is_end(drv_watch_last_dpb)) {
+    struct dpb *dpb = (struct dpb *)ARM_PTR(drv_watch_last_dpb);
+    printf("DRVWATCH DPBCTX: dpb_next=%04x:%04x dpb_unit=%u dpb_subunit=%u dpb_device=%04x:%04x flags=%04x mdb=%02x\n",
+           FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next),
+           dpb->dpb_unit, dpb->dpb_subunit,
+           FP_SEG(dpb->dpb_device), FP_OFF(dpb->dpb_device),
+           dpb->dpb_flags, dpb->dpb_mdb);
+  }
+}
+
+static void drv_watch_panic_if_bad(dos_far_ptr dhp, const struct dhdr *d)
+{
+  if (!in_e000_block(dhp))
+    return;
+
+  if (!drv_watch_dhdr_looks_text(d))
+    return;
+
+  printf("\nDRVWATCH PANIC: suspicious device header before x86_execrh\n");
+  drv_watch_print_dpb_context();
+  drv_watch_print_current(dhp, d);
+  drv_watch_print_all(dhp);
+
+  for (;;) ;
+}
+#endif
+
 /*
    x86_execrh() - drive the standard MS-DOS/FreeDOS device driver
    protocol for a loaded (real x86 machine code) driver:
@@ -858,6 +1128,7 @@ uint32_t wait_loops = 0;
    byte-for-byte compatible with real, unmodified .SYS driver files).
 */
 static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far_ptr x86_dhp) {
+  drv_watch_panic_if_bad(x86_dhp, dhp);
   bool ifl_old = ifl;
 //  ifl = 1;
 //  df = 0;
@@ -1139,7 +1410,9 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
     /*   the used.  It is recommended that all the device drivers in   */
     /*   the file return the same address                              */
     if (FP_OFF(dhp->dh_next) == 0xffff) {
+        drv_watch_capture("before-KernelAllocPara", x86_dhp, rq);
         KernelAllocPara(FP_SEG(rq->r_endaddr) + (FP_OFF(rq->r_endaddr) + 15)/16 - FP_SEG(x86_dhp), 'D', name, mode);
+        drv_watch_capture("after-KernelAllocPara", x86_dhp, rq);
     }
 
     /* Another fix for multisegmented device drivers:                  */
@@ -1154,8 +1427,10 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
 
   if (!(dhp->dh_attr & ATTR_CHAR) && (rq->r_nunits != 0))
   {
+    drv_watch_capture("after-C_INIT-before-update_dcb", x86_dhp, rq);
     dhp->dh_name[0] = rq->r_nunits;
     update_dcb(x86_dhp);
+    drv_watch_capture("after-update_dcb", x86_dhp, rq);
   }
 
   if (dhp->dh_attr & ATTR_CONIN)
@@ -1555,14 +1830,10 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
 #define DirChar(c)  (((unsigned char)(c)) >= ' ' && \
                      !strchr(_DirChars, (c)))
 
-/* /// TODO: SFTMAX (128, the number of file handles) is what the
-   original actually uses here too (see newstuff.c) - a path-length
-   limit reusing an unrelated constant looks like a historical typo
-   in the original, but per this project's porting policy, bugs in
-   the original are preserved rather than silently "fixed". */
 #define addChar(c) \
 { \
-  if (p >= dest + SFTMAX) return PATH_ERROR(); /* path too long */	\
+  /*if (p >= dest + SFTMAX) return PATH_ERROR(); */	\
+  if (p >= dest + PATHLEN - 1) return PATH_ERROR(); /* path too long */	\
   *p++ = c; \
 }
 
@@ -1627,6 +1898,62 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
 
 #define TNPTR(p)  ((unsigned)((const char *)(p) - srcbuf))
 #define TNDPTR(p) ((unsigned)((const char *)(p) - dest))
+
+static int dpb_chain_contains(dos_far_ptr needle)
+{
+  dos_far_ptr p = LoL->DPBp;
+  unsigned guard = 0;
+
+  while (!far_is_null(p) && !far_is_end(p) && guard++ < LoL->nblkdev + 4)
+  {
+    if (FP_SEG(p) == FP_SEG(needle) && FP_OFF(p) == FP_OFF(needle))
+      return 1;
+    struct dpb *dpb = (struct dpb *)ARM_PTR(p);
+    p = dpb->dpb_next;
+  }
+  return 0;
+}
+
+static void panic_bad_cds_dpb(const char *tag, dos_far_ptr x86_cds,
+                              struct cds *cds, const struct cds *tmp)
+{
+  if (far_is_null(tmp->cdsDpb) || dpb_chain_contains(tmp->cdsDpb))
+    return;
+
+  printf("BAD CDS DPB[%s]: cds=%04x:%04x flags=%04x path='%s' "
+         "tmp_dpb=%04x:%04x root_dpb=%04x:%04x nblk=%u lastdrv=%u\n",
+         tag,
+         FP_SEG(x86_cds), FP_OFF(x86_cds),
+         tmp->cdsFlags, tmp->cdsCurrentPath,
+         FP_SEG(tmp->cdsDpb), FP_OFF(tmp->cdsDpb),
+         FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp),
+         LoL->nblkdev, LoL->lastdrive);
+
+  if (cds)
+    printf("BAD CDS DPB[%s]: real_cds flags=%04x path='%s' cdsDpb=%04x:%04x\n",
+           tag, cds->cdsFlags, cds->cdsCurrentPath,
+           FP_SEG(cds->cdsDpb), FP_OFF(cds->cdsDpb));
+
+  {
+    dos_far_ptr p = LoL->DPBp;
+    unsigned guard = 0;
+    while (!far_is_null(p) && !far_is_end(p) && guard++ < LoL->nblkdev + 4)
+    {
+      struct dpb *dpb = (struct dpb *)ARM_PTR(p);
+      printf("BAD CDS DPB[%s]: chain dpb=%04x:%04x next=%04x:%04x "
+             "unit=%u sub=%u dev=%04x:%04x flags=%04x\n",
+             tag,
+             FP_SEG(p), FP_OFF(p),
+             FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next),
+             dpb->dpb_unit, dpb->dpb_subunit,
+             FP_SEG(dpb->dpb_device), FP_OFF(dpb->dpb_device),
+             dpb->dpb_flags);
+      p = dpb->dpb_next;
+    }
+  }
+
+  for (;;) ;
+}
 
 COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 {
@@ -1762,6 +2089,7 @@ invalid_path:
   }
 
   memcpy(&TempCDS, cdsEntry, sizeof(TempCDS));
+  panic_bad_cds_dpb("after-memcpy", x86_cdsEntry, cdsEntry, &TempCDS);
   TNDBG("TN12 CDS path='%s' flags=%04X dpb=%04X:%04X backslash=%u join=%u",
         TempCDS.cdsCurrentPath, TempCDS.cdsFlags,
         FP_SEG(TempCDS.cdsDpb), FP_OFF(TempCDS.cdsDpb),
@@ -1853,21 +2181,13 @@ invalid_path:
 
     if ((TempCDS.cdsFlags & CDSNETWDRV) == 0)
     {
-      struct dpb *native_dpb = (struct dpb *)ARM_PTR(TempCDS.cdsDpb);
-
-      TNDBG("TN24 before media_check dpb=%04X:%04X native=%p cp='%s'",
-            FP_SEG(TempCDS.cdsDpb), FP_OFF(TempCDS.cdsDpb),
-            native_dpb, cp);
-
-      int mc = media_check(native_dpb);
-
+      int mc = media_check_tagged(TempCDS.cdsDpb, "truename/TempCDS.cdsDpb");
       TNDBG("TN25 after media_check rc=%d", mc);
 
       if (mc < 0) {
         TNDBG("TN26 media_check failed -> DE_PATHNOTFND");
         return DE_PATHNOTFND;
       }
-
       TNDBG("TN27 before dos_cd cp='%s'", cp);
 
       if (dos_cd((char *)cp) != SUCCESS) {
@@ -1889,20 +2209,17 @@ invalid_path:
       TNDBG("TN31 before strcpy dest <- cp='%s'", cp);
 
       strcpy(dest, (char *)cp);
-
       TNDBG("TN32 after strcpy dest='%s'", dest);
 
       if (TempCDS.cdsFlags & CDSSUBST)
       {
         TNDBG("TN33 CDSSUBST dest='%s'", dest);
-
         if (dest[1] == ':')
         {
           unsigned ii = drLetterToNr(dest[0]);
 
           TNDBG("TN34 subst real drive ii=%u lastdrive=%u",
                 ii, LoL->lastdrive);
-
           if (ii < LoL->lastdrive)
             result = (result & 0xffe0) | ii;
         }
@@ -1920,13 +2237,11 @@ invalid_path:
       TNDBG("TN36 skip physical cp='%s'", cp);
 
       strcpy(p, (char *)cp);
-
       TNDBG("TN37 after skip physical strcpy dest='%s'", dest);
     }
 
     if (p[0] == '\0')
       p[1] = p[0];
-
     p[0] = '\\';
 
     TNDBG("TN38 after force slash p=%u root=%u dest='%s'",
@@ -1936,10 +2251,8 @@ invalid_path:
       p += strlen(p);
     else
       src++;
-
     if (p[-1] == '\\')
       p--;
-
     TNDBG("TN39 before append src_ofs=%u src='%s' p=%u root_char='%c' dest='%s'",
           TNPTR(src), src, TNDPTR(p), *rootPos, dest);
   }
@@ -1955,16 +2268,11 @@ invalid_path:
       TNDBG("TN41 wildcard before end -> DE_PATHNOTFND");
       return DE_PATHNOTFND;
     }
-
     if (p[-1] != *rootPos)
       addChar(*rootPos);
-
     while (*src == '/' || *src == '\\')
       src++;
-
-    TNDBG("TN42 after sep skip src_ofs=%u src='%s' p=%u",
-          TNPTR(src), src, TNDPTR(p));
-
+    TNDBG("TN42 after sep skip src_ofs=%u src='%s' p=%u", TNPTR(src), src, TNDPTR(p));
     if (*src == '.')
     {
       int dots = 1;
@@ -1998,7 +2306,6 @@ invalid_path:
 
           TNDBG("TN46 dotdot after strip p=%u", TNDPTR(p));
         }
-
         continue;
       }
 
@@ -2029,10 +2336,8 @@ invalid_path:
           --i;
           addChar(c);
         }
-
         TNDBG("TN50 wildcard star expanded p=%u i=%d", TNDPTR(p), i);
       }
-
       if (c == '.')
       {
         if (state & PNE_DOT) {
@@ -2077,14 +2382,12 @@ invalid_path:
     TNDBG("TN56 dest only drive, add slash");
     addChar('\\');
   }
-
   *p = '\0';
 
   TNDBG("TN57 before DosUpFString root=%u dest='%s'",
         TNDPTR(rootPos), dest);
 
   DosUpFString(rootPos);
-
   TNDBG("TN58 after DosUpFString dest='%s'", dest);
 
   if (dest[2] != '/' && (!(mode & CDS_MODE_SKIP_PHYSICAL)) && LoL->njoined)
@@ -2101,7 +2404,6 @@ invalid_path:
 
       TNDBG("TN60 JOIN i=%u j=%u flags=%04X path='%s'",
             i, (unsigned)j, cdsp->cdsFlags, cdsp->cdsCurrentPath);
-
       if ((cdsp->cdsFlags & CDSJOINED) &&
           (dest[j] == '\\' || dest[j] == '\0') &&
           memcmp(dest, cdsp->cdsCurrentPath, j) == 0)
@@ -2120,7 +2422,7 @@ invalid_path:
         }
 
         result = (result & 0xffe0) | i;
-        internal_data->current_ldt = x86_FAR_PTR(FP_SEG(LoL->CDSp), cdsp);
+        internal_data->current_ldt = MK_FP(FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp) + i * sizeof(struct cds));
         result &= ~IS_NETWORK;
 
         if (cdsp->cdsFlags & CDSNETWDRV)
@@ -2139,7 +2441,6 @@ invalid_path:
       dest[2] != '/')
   {
     TNDBG("TN63 before dir_exists dest='%s'", dest);
-
     int de = dir_exists(dest);
 
     TNDBG("TN64 after dir_exists rc=%d", de);
@@ -2340,6 +2641,11 @@ STATIC void init_kernel(CPU* cpu)
 
     /* no resident DOS in guest RAM, so top is just below video RAM */
     lpTop = MK_FP((ram_top << 6) - 1, 0);
+    /* DynAlloc() owns DYN_BUFFER_SEG..DYN_BUFFER_SEG+64K outside the
+     * MCB chain.  The pre-MCB top-down KernelAlloc() arena must not
+     * allocate from that reserved guest range either. */
+    if (FP_SEG(lpTop) >= DYN_BUFFER_SEG)
+      lpTop = MK_FP(DYN_BUFFER_SEG, 0);
 
     /* Initialize IO subsystem                                      */
     InitIO();
@@ -2388,6 +2694,17 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     /* and process CONFIG.SYS one last time for device drivers */
     DoConfig(2);
 
+    {
+      dos_far_ptr _dpb = LoL->DPBp;
+      unsigned guard = 0;
+
+      while (!far_is_end(_dpb) && !far_is_null(_dpb) && guard++ < LoL->nblkdev + 4) {
+        struct dpb *dpb = (struct dpb *)ARM_PTR(_dpb);
+        drv_watch_capture("after-DoConfig2-dpb-device", dpb->dpb_device, NULL);
+        _dpb = dpb->dpb_next;
+      }
+    }
+
     /* Close all (device) files */
     for (i = 0; i < 20; i++)
       close(i);
@@ -2401,11 +2718,13 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     configDone();
 
     InitializeAllBPBs();
+    dpb_watch_capture_chain("after-InitializeAllBPBs-check");
 }
 
 STATIC void prep_shell(CPU* cpu)
 {
   CommandTail Cmd;
+  dpb_watch_check_chain("prep_shell-entry");
   char* master_env  = ((char *)ARM_PTR(x86_master_env));
   if (master_env[0] == '\0')   /* some shells panic on empty master env. */
     memcpy(master_env, "PATH=.\0\0\0\0", sizeof("PATH=.\0\0\0\0"));
@@ -2453,9 +2772,11 @@ STATIC void prep_shell(CPU* cpu)
     }
   }
   /* go execute process 0 (the shell) */
+  dpb_watch_check_chain("prep_shell-before-P_0");
   cpu_set_a20(cpu, 1);
   SET_DS ( DOS_PSP );
   P_0(cpu, &Config);
+  dpb_watch_check_chain("prep_shell-after-P_0");
   __unreachable();
 }
 
@@ -2539,7 +2860,9 @@ void kernel(CPU* _cpu) {
     printf("KERNEL: Boot drive = %c\n", 'A' + LoL->BootDrive - 1);
 #endif
 
+    dpb_watch_check_chain("kernel-before-DoInstall");
     DoInstall();
+    dpb_watch_check_chain("kernel-after-DoInstall");
 
     prep_shell(_cpu);
 

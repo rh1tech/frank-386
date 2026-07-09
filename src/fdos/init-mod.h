@@ -124,3 +124,15 @@ static inline bool far_is_null(dos_far_ptr p) {
 static inline bool far_is_end(dos_far_ptr p) {
     return FP_SEG(p) == 0xffff && FP_OFF(p) == 0xffff;
 }
+#if PDB_DEBUG
+void drv_watch_set_dpb_context(dos_far_ptr/*struct dpb*/ _dpb, UBYTE cmd, UBYTE unit, UBYTE subunit, const char *source);
+void dpb_watch_check_chain(const char *tag);
+void dpb_watch_check(const char *tag, dos_far_ptr _dpb);
+#else
+#define drv_watch_set_dpb_context(...)
+#define dpb_watch_check_chain(tag)
+#define dpb_watch_check(...)
+#define drv_watch_panic_if_bad(...)
+#define drv_watch_capture(...)
+#define dpb_watch_capture_chain(tag)
+#endif

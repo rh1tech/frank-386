@@ -2,6 +2,17 @@
 #include "bios/bios.h"
 #include "fdos.h"
 
+int snprintf(char *s, size_t n, const char *fmt, ...);
+static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
+{
+    static char tags[16][40];
+    static unsigned tag_idx;
+
+    char *tag = tags[tag_idx++ & 15];
+    snprintf(tag, 40, "INT21-%s AH=%02x AL=%02x", where, CPU_AH, CPU_AL);
+    dpb_watch_check_chain(tag);
+}
+
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined ");
 while(1); // remove it
@@ -312,20 +323,20 @@ static COUNT int21_fat32(void)
     /* Get extended drive parameter block */
     case 0x02:
     {
-      struct dpb FAR *dpb;
       struct xdpbdata FAR *xddp;
 
       if (CPU_CX < sizeof(struct xdpbdata))
         return DE_INVLDBUF;
 
-      dpb = GetDriveDPB(CPU_DL, &rc);
+      dos_far_ptr _dpb = GetDriveDPB(CPU_DL, &rc);
       if (rc != SUCCESS)
         return rc;
 
+      struct dpb* dpb = (struct dpb*)ARM_PTR(_dpb);
       flush_buffers(dpb->dpb_unit);
       dpb->dpb_flags = M_CHANGED;
 
-      if (media_check(dpb) < 0)
+      if (media_check_tagged(_dpb, "INT21/7302/GetDriveDPB") < 0)
         return DE_INVLDDRV;
 
       xddp = (struct xdpbdata FAR *)ARM_PTR(FP_ES_DI);
@@ -361,19 +372,19 @@ static COUNT int21_fat32(void)
     /* Set DPB to use for formatting */
     case 0x04:
     {
-      struct xdpbforformat FAR *xdffp = (struct xdpbforformat FAR *)ARM_PTR(FP_ES_DI);
-      struct dpb FAR *dpb;
 
       if (CPU_CX < sizeof(struct xdpbforformat))
         return DE_INVLDBUF;
 
-      dpb = GetDriveDPB(CPU_DL, &rc);
+      dos_far_ptr _dpb = GetDriveDPB(CPU_DL, &rc);
       if (rc != SUCCESS)
         return rc;
 
+      struct xdpbforformat FAR *xdffp = (struct xdpbforformat FAR *)ARM_PTR(FP_ES_DI);
       xdffp->xdff_datasize = sizeof(struct xdpbforformat);
       xdffp->xdff_version.actual = 0;
 
+      struct dpb* dpb = (struct dpb*)ARM_PTR(_dpb);
       switch ((UWORD)xdffp->xdff_function)
       {
         case 0x00:
@@ -411,7 +422,7 @@ static COUNT int21_fat32(void)
 rebuild_dpb:
           flush_buffers(dpb->dpb_unit);
           dpb->dpb_flags = M_CHANGED;
-          if (media_check(dpb) < 0)
+          if (media_check_tagged(_dpb, "INT21/7304/GetDriveDPB") < 0)
             return DE_INVLDDRV;
           break;
 
@@ -508,6 +519,7 @@ bool fdos_21h(CPU* _cpu) {
     COUNT rc;
     cpu = _cpu;
     internal_data->Int21AX = CPU_AX;
+    dpb_watch_int21_checkpoint(cpu, "entry");
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     switch (CPU_AH) {
       /* Read Keyboard With Echo                                      */
@@ -1165,6 +1177,7 @@ bool fdos_21h(CPU* _cpu) {
           BYTE *lp = (BYTE *) ARM_PTR(FP_DS_DX);
 
           rc = DosExec(CPU_AL, ep, lp);
+          dpb_watch_check_chain("0x4b");
           if (rc < SUCCESS)
           {
             CPU_AX = (UWORD) (-rc);
@@ -1444,9 +1457,11 @@ error_carry:
     cf = 1;
 
 exit_dispatch:
+    dpb_watch_int21_checkpoint(cpu, "exit");
     flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
                    | (cpu_getflags(cpu) & 0x0041); // set them back from CPU
     writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
+    dpb_watch_int21_checkpoint(cpu, "after-flags-write");
     return true;
 }
 

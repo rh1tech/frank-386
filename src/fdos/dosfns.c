@@ -208,18 +208,24 @@ bits for flags (bits 11-8 are internal FreeDOS bits only)
 long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 {
   long result = truename(fname, PriPathName, CDS_MODE_CHECK_DEV_PATH);
-  if (result < SUCCESS)
+  dpb_watch_check_chain("DosOpenSft 1");
+  if (result < SUCCESS) {
+    dpb_watch_check_chain("DosOpenSft 1err");
     return result;
+  }
 
   set_fcbname();
+  dpb_watch_check_chain("DosOpenSft 2");
 
   /* now get a free system file table entry       */
   COUNT sft_idx;
   dos_far_ptr lpCurSft = get_free_sft(&sft_idx);
+  dpb_watch_check_chain("DosOpenSft 3");
   if (far_is_end(lpCurSft))
     return DE_TOOMANY;
   sft* sftp = (sft*)ARM_PTR(lpCurSft);
   memset(sftp, 0, sizeof(sft));
+  dpb_watch_check_chain("DosOpenSft 4");
 
   sftp->sft_psp = internal_data->cu_psp;
   sftp->sft_mode = flags & 0xf0ff;
@@ -228,12 +234,15 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   sftp->sft_shroff = -1;        /* /// Added for SHARE - Ron Cemer */
   sftp->sft_attrib = attrib = attrib | D_ARCHIVE;
 
+  dpb_watch_check_chain("DosOpenSft 5");
   /* check for a (local) device */
   dos_far_ptr dhp;
   if ((result & IS_DEVICE) && !(result & IS_NETWORK)) {
       dhp = IsDevice((const char *)ARM_PTR(fname));
+      dpb_watch_check_chain("DosOpenSft 6");
       if (EFFECTIVE(dhp) != 0) {
         int rc = DeviceOpenSft(dhp, sftp);
+        dpb_watch_check_chain("DosOpenSft 7");
         /* check the status code returned by the
         * driver when we tried to open it
         */
@@ -244,6 +253,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
       }
   }
 
+  dpb_watch_check_chain("DosOpenSft 8");
   if (result & IS_NETWORK)
   {
     return DE_PATHNOTFND;
@@ -307,6 +317,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   sftp->sft_count++;
   sftp->sft_flags = PriPathName[0] - 'A';
   result = dos_open(PriPathName, flags, attrib, sft_idx);
+  dpb_watch_check_chain("DosOpenSft 10");
   if (result < 0)
   {
 /* /// Added for SHARE *** CURLY BRACES ADDED ALSO!!! ***.  - Ron Cemer */
@@ -321,6 +332,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     sftp->sft_count--;
     return result;
   }
+  dpb_watch_check_chain("DosOpenSft 11");
   return sft_idx | ((long)result << 16);
 }
 
@@ -759,6 +771,7 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
   hndl = (unsigned)result;
 
   result = DosOpenSft(fname, mode, attrib);
+  dpb_watch_check_chain("DosOpen");
   if (result < SUCCESS)
     return result;
 
@@ -772,6 +785,7 @@ COUNT DosGetFattr(dos_far_ptr name)
   COUNT result;
 
   result = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  dpb_watch_check_chain("DosGetFattr");
   if (result < SUCCESS)
     return result;
   
@@ -806,6 +820,7 @@ COUNT DosSetFattr(dos_far_ptr name, UWORD attrp)
   COUNT result;
 
   result = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  dpb_watch_check_chain("DosSetFattr");
   if (result < SUCCESS)
     return result;
 
@@ -836,6 +851,7 @@ COUNT DosMkRmdir(const dos_far_ptr dir, int action)
   COUNT result;
 
   result = truename(dir, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  dpb_watch_check_chain("DosMkRmdir");
   if (result < SUCCESS)
     return result;
 
@@ -871,6 +887,7 @@ COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2)
   COUNT result;
 
   result = truename(path2, SecPathName, CDS_MODE_CHECK_DEV_PATH);
+  dpb_watch_check_chain("DosRename 1");
   if (result < SUCCESS)
     return result;
 
@@ -878,6 +895,7 @@ COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2)
     return DE_FILENOTFND;
 
   result = truename(path1, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  dpb_watch_check_chain("DosRename 2");
   if (result < SUCCESS)
     return result;
 
@@ -901,6 +919,7 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
    * and writes to a native kernel buffer.
    */
   COUNT rc = truename(src, PriPathName, CDS_MODE_ALLOW_WILDCARDS);
+  dpb_watch_check_chain("DosTruename");
   if (rc >= SUCCESS) {
     strcpy((char *)ARM_PTR(dest), PriPathName);
     set_fcbname();
@@ -910,18 +929,18 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
 
 #ifdef WITHFAT32
 /* same convention as get_cds1(): drive is 0 for default, 1=A, 2=B, ... */
-struct dpb FAR *GetDriveDPB(UBYTE drive, COUNT *rc)
+dos_far_ptr /*struct dpb*/ GetDriveDPB(UBYTE drive, COUNT *rc)
 {
   struct cds FAR *cdsp = get_cds1(drive);
 
   if (cdsp == NULL || far_is_null(cdsp->cdsDpb) || (cdsp->cdsFlags & CDSNETWDRV))
   {
     *rc = DE_INVLDDRV;
-    return NULL;
+    return MK_FP(0, 0);
   }
 
   *rc = SUCCESS;
-  return (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
+  return cdsp->cdsDpb;
 }
 
 #define IS_SLASH(ch) ((ch) == '\\' || (ch) == '/')
@@ -997,10 +1016,10 @@ COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
   {
     if (far_is_null(cdsp->cdsDpb))
       return DE_INVLDDRV;
-    dpbp = (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
-    if (media_check(dpbp) < 0)
+    if (media_check_tagged(cdsp->cdsDpb, "DosGetExtFree/cdsDpb") < 0)
       return DE_INVLDDRV;
 
+    dpbp = (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
     xfsp->xfs_secsize = dpbp->dpb_secsize;
     xfsp->xfs_totalclusters = (ISFAT32(dpbp) ? dpbp->dpb_xsize : dpbp->dpb_size) - 1;
 /// TODO:    xfsp->xfs_freeclusters = dos_free(dpbp); replacemnt:
@@ -1048,6 +1067,7 @@ COUNT DosChangeDir(dos_far_ptr s)
   COUNT result;
 
   result = truename(s, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  dpb_watch_check_chain("DosChangeDir");
   if (result < SUCCESS)
     return DE_PATHNOTFND;
 
@@ -1088,6 +1108,7 @@ COUNT DosDelete(dos_far_ptr path, int attrib)
   COUNT result;
 
   result = truename(path, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  dpb_watch_check_chain("DosDelete");
   if (result < SUCCESS)
     return result;
 
@@ -1173,8 +1194,8 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
   int rc;
   dos_far_ptr dta_far = internal_data->dta;
 
-  rc = truename(name, PriPathName,
-                CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
+  rc = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
+  dpb_watch_check_chain("DosFindFirst");
   if (rc < SUCCESS)
     return rc;
 

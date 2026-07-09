@@ -104,7 +104,8 @@ STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
   pSrc = exp->exec.env_seg ?
     (BYTE *) ARM_PTR(MK_FP(exp->exec.env_seg, 0)) :
     (ppsp->ps_environ ? (BYTE *) ARM_PTR(MK_FP(ppsp->ps_environ, 0)) : NULL);
-
+  
+  ///printf("ChildEnv\n");
   nEnvSize = 1;
   if (pSrc)
   {                              /* if no environment is available, one
@@ -144,10 +145,13 @@ STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
   pDest += sizeof(UWORD);
 
   /* copy the fully-qualified program name */
-  if ((RetCode = truename(linear_to_far((const BYTE *) pathname), PriPathName,
-                          CDS_MODE_SKIP_PHYSICAL)) < SUCCESS)
+  if ((RetCode = truename(linear_to_far((const BYTE *) pathname), PriPathName, CDS_MODE_SKIP_PHYSICAL)) < SUCCESS) {
+    dpb_watch_check_chain("ChildEnv 1");
     return RetCode;
+  }
+  dpb_watch_check_chain("ChildEnv 2");
   strcpy(pDest, PriPathName);
+  dpb_watch_check_chain("ChildEnv 3");
 
   return SUCCESS;
 }
@@ -743,8 +747,11 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   x86_lp = linear_to_far((const BYTE *) lp);
   dos_far_ptr x86_dhp = IsDevice(lp);
   if (EFFECTIVE(x86_dhp) ||           /* don't try to "execute" e.g. C:\NUL */
-      (openresult = DosOpenSft(x86_lp, O_LEGACY | O_OPEN | O_RDONLY, 0)) < SUCCESS)
+      (openresult = DosOpenSft(x86_lp, O_LEGACY | O_OPEN | O_RDONLY, 0)) < SUCCESS) {
+    dpb_watch_check_chain("DosExec err");
     return DE_FILENOTFND;
+  }
+  dpb_watch_check_chain("DosExec");
   fd = (COUNT) (openresult & 0xffff);
 
   rc = (int) DosRWSft(fd, sizeof(exe_header), linear_to_far((BYTE *) &ExeHeader),
@@ -776,7 +783,9 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
    indirection here: DosExec() is an ordinary C function. */
 COUNT res_DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 {
-  return DosExec(mode, ep, lp);
+  COUNT res = DosExec(mode, ep, lp);
+  dpb_watch_check_chain("res_DosExec");
+  return res;
 }
 
 /* start process 0 (the shell) */
