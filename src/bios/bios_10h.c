@@ -171,14 +171,9 @@
 #define BIOS10_BDA_VIDEO_DISPLAY_DATA  0x489
 
 /*
- * BDA 40:87 bit 0:
- *   0 = direct cursor scan-line setting
- *   1 = emulate old 8-scan-line cursor values on taller VGA character cells
- *
  * Bit 7 is BIOS-private here: it records that AH=12h/BL=30h explicitly
  * selected a text scan-line mode, so the next mode set should apply it.
  */
-#define BIOS10_VMO_CURSOR_EMULATION    0x01
 #define BIOS10_VMO_SCANLINE_SELECTED   0x80
 
 /*
@@ -195,6 +190,53 @@
 #define BIOS10_VDD_SCANLINE_400        0x10
 #define BIOS10_VDD_SCANLINE_200        0x80
 #define BIOS10_VMO_GRAYSCALE_SUMMING   0x02
+
+/*
+ * Convert the logical cursor shape stored in BDA to the physical shape
+ * required by the current character-cell height, then program the CRTC.
+ *
+ * The BDA value itself remains unchanged, so INT 10h/AH=03h returns the
+ * same shape that was set by software.
+ */
+static void bios_10h_program_cursor_shape(CPU* cpu, uint16_t shape)
+{
+    uint8_t start = shape >> 8;
+    uint8_t end = shape;
+
+    /*
+     * Match SeaBIOS get_cursor_shape().
+     * BDA video_ctl bit 0:
+     *   0 = emulate old 8-scan-line cursor values
+     *   1 = use supplied scan lines directly
+     */
+    if ((read86(BIOS10_BDA_VIDEO_CTL) & 0x01) == 0) {
+        uint8_t emu_start = start & 0x3F;
+        uint8_t emu_end = end & 0x1F;
+        uint16_t height = readw86(0x485);
+
+        if (height > 8 && emu_end < 8 && emu_start < 0x20) {
+            if (emu_end != (uint8_t)(emu_start + 1))
+                emu_start =
+                    ((uint16_t)(emu_start + 1) * height / 8) - 1;
+            else
+                emu_start =
+                    ((uint16_t)(emu_end + 1) * height / 8) - 2;
+
+            emu_end = ((uint16_t)(emu_end + 1) * height / 8) - 1;
+            start = emu_start;
+            end = emu_end;
+        }
+    }
+
+    uint16_t crtc = readw86(0x463);
+    if (crtc == 0)
+        crtc = 0x3D4;
+
+    cpu_portout8(crtc, 0x0A);
+    cpu_portout8(crtc + 1, start);
+    cpu_portout8(crtc, 0x0B);
+    cpu_portout8(crtc + 1, end);
+}
 
 /*
  * Forward declaration: mode-set scan-line selection needs to load the
@@ -632,21 +674,17 @@ static void bios_10h_apply_selected_text_scanlines(CPU* cpu)
 
     uint8_t height = bios_10h_selected_scanline_char_height();
     uint32_t src;
-    uint16_t cursor_shape;
 
     switch (height) {
     case 8:
         src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
-        cursor_shape = 0x0607;
         break;
     case 14:
         src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
-        cursor_shape = 0x0B0C;
         break;
     case 16:
     default:
         src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
-        cursor_shape = 0x0E0F;
         break;
     }
 
@@ -654,7 +692,6 @@ static void bios_10h_apply_selected_text_scanlines(CPU* cpu)
 
     write86(0x484, 24);
     writew86(0x485, height);
-    writew86(0x460, cursor_shape);
 
     uint16_t crtc = readw86(0x463);
     if (crtc == 0)
@@ -665,11 +702,6 @@ static void bios_10h_apply_selected_text_scanlines(CPU* cpu)
     reg09 = (reg09 & 0xE0) | ((height - 1) & 0x1F);
     cpu_portout8(crtc, 0x09);
     cpu_portout8(crtc + 1, reg09);
-
-    cpu_portout8(crtc, 0x0A);
-    cpu_portout8(crtc + 1, cursor_shape >> 8);
-    cpu_portout8(crtc, 0x0B);
-    cpu_portout8(crtc + 1, cursor_shape & 0xFF);
 }
 
 /*
@@ -713,20 +745,18 @@ static bool bios_10h_00h(CPU* cpu)
     for (uint8_t page = 0; page < 8; page++)
         writew86(0x450 + page * 2, 0x0000);
 
-    if (m->char_height <= 8)
+    if (m->text)
         writew86(0x460, 0x0607);
-    else if (m->char_height <= 14)
-        writew86(0x460, 0x0B0C);
-     else
-        writew86(0x460, 0x0E0F);
 
     /* SeaBIOS vga_set_mode: update video_ctl, video_switches, modeset_ctl */
     write86(0x465, no_clear ? 0xE0 : 0x60);             /* video_ctl: bit7=no_clear (SeaBIOS) */
     write86(0x488, 0xF9);                               /* video_switches */
     write86(BIOS10_BDA_VIDEO_DISPLAY_DATA,
             read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) | BIOS10_VDD_VGA_ACTIVE);
-    if (m->text)
+    if (m->text) {
         bios_10h_apply_selected_text_scanlines(cpu);
+        bios_10h_program_cursor_shape(cpu, readw86(0x460));
+    }
 
     if (!no_clear) {
         if (m->text) {
@@ -763,57 +793,9 @@ CRTC: reg 0Ah = start scan / cursor disable, reg 0Bh = end scan
 */
 static bool bios_10h_01h(CPU* cpu)
 {
-    uint8_t ch_raw = CPU_CH;
-    uint8_t cl_raw = CPU_CL & 0x1F;
-    bool    hidden = (ch_raw & 0x20) != 0; /* bit 5 = cursor disable */
-
-    /* Save raw CH:CL in BDA 0x460 (SeaBIOS: SET_BDA(cursor_type, CX) — raw) */
-    writew86(0x460, ((uint16_t)ch_raw << 8) | CPU_CL);
-
-    /*
-     * Cursor emulation selected by AH=12h/BL=34h.
-     *
-     * Old software often uses 8-scan-line cursor values such as 0607h.
-     * In VGA text modes with 14/16 scan-line cells, BIOS may remap those
-     * values to the active character height while AH=03h still returns the
-     * caller's original CH:CL saved above.
-     */
-    if (!hidden && (read86(BIOS10_BDA_VIDEO_MODE_OPTIONS) & BIOS10_VMO_CURSOR_EMULATION)) {
-        uint8_t height = readw86(0x485);
-
-        if (height > 8 && height <= BIOS10_FONT_MAX_HEIGHT) {
-            uint8_t start = ch_raw & 0x1F;
-            uint8_t end = cl_raw;
-
-            if (start < 8)
-                start = ((uint16_t)start * height + 4) / 8;
-            if (end < 8)
-                end = (((uint16_t)(end + 1) * height + 7) / 8) - 1;
-
-            if (start >= height)
-                start = height - 1;
-            if (end >= height)
-                end = height - 1;
-
-            ch_raw = (ch_raw & 0xE0) | start;
-            cl_raw = end;
-        }
-    }
-    
-    /* Program CRTC */
-    uint16_t crtc = readw86(0x463);
-    if (crtc == 0) crtc = 0x3D4;
-
-    /* CRTC reg 0Ah: bit5=CD (cursor disable), bits4:0=start scan line */
-    uint8_t reg0a = (ch_raw & 0x1F);
-    if (hidden) reg0a |= 0x20;
-    cpu_portout8(crtc,     0x0A);
-    cpu_portout8(crtc + 1, reg0a);
-
-    /* CRTC reg 0Bh: bits4:0=end scan line */
-    cpu_portout8(crtc,     0x0B);
-    cpu_portout8(crtc + 1, cl_raw);
-
+    /* SeaBIOS stores the caller's unmodified CX in BDA cursor_type. */
+    writew86(0x460, CPU_CX);
+    bios_10h_program_cursor_shape(cpu, CPU_CX);
     return true;
 }
 
@@ -2563,19 +2545,12 @@ VGA character-cell height.
 */
 static bool bios_10h_1234h(CPU* cpu)
 {
-    uint8_t opts = read86(BIOS10_BDA_VIDEO_MODE_OPTIONS);
-    switch (CPU_AL) {
-    case 0x00:
-        opts |= BIOS10_VMO_CURSOR_EMULATION;
-        break;
-    case 0x01:
-        opts &= ~BIOS10_VMO_CURSOR_EMULATION;
-        break;
-    default:
+    if (CPU_AL > 0x01) {
         cf = 1;
         return true;
     }
-    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, opts);
+    uint8_t video_ctl = read86(BIOS10_BDA_VIDEO_CTL);
+    write86(BIOS10_BDA_VIDEO_CTL, (video_ctl & ~0x01) | (CPU_AL & 0x01));
     CPU_AL = 0x12;
     cf = 0;
     return true;

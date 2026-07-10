@@ -362,7 +362,9 @@ UWORD DosGetRetCode(void);
 
 /* newstuff.c */
 int SetJFTSize(UWORD nHandles);
-long DosMkTmp(BYTE FAR * pathname, UWORD attr);
+/* port note: the caller's DS:DX buffer is mutated in place (the
+   generated name is appended), so it travels as a guest pointer. */
+long DosMkTmp(dos_far_ptr pathname, UWORD attr);
 COUNT truename(dos_far_ptr src, char * dest, COUNT t);
 
 /* network.c */

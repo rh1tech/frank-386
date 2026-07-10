@@ -1023,6 +1023,121 @@ UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc)
   return spc;
 }
 
+/* ------------------------------------------------------------------
+   Block C helpers.
+   SetJFTSize()/DosMkTmp() ported from the original kernel/newstuff.c
+   (the port keeps them here next to DosTruename(), which also came
+   from newstuff.c). DosLockUnlock() ported from kernel/dosfns.c.
+   ------------------------------------------------------------------ */
+
+/*
+    TE-TODO (inherited from the original): if called repeatedly by same
+    process, last allocation must be freed. if handle count < 20, copy
+    back to PSP.
+*/
+int SetJFTSize(UWORD nHandles)
+{
+  UWORD block, maxBlock, i;
+  psp *ppsp = (psp *) ARM_PTR (MK_FP(internal_data->cu_psp, 0));
+  dos_far_ptr newtab;
+
+  if (nHandles <= ppsp->ps_maxfiles)
+  {
+    ppsp->ps_maxfiles = nHandles;
+    return SUCCESS;
+  }
+
+  if ((DosMemAlloc((nHandles + 0xf) >> 4, internal_data->mem_access_mode,
+                   &block, &maxBlock)) < 0)
+    return DE_NOMEM;
+
+  ++block;
+  newtab = MK_FP(block, 0);
+
+  i = ppsp->ps_maxfiles;
+  /* copy existing part and fill up new part by "no open file" */
+  fmemcpy(newtab, ppsp->ps_filetab, i);
+  fmemset(MK_FP(block, i), 0xff, nHandles - i);
+
+  ppsp->ps_maxfiles = nHandles;
+  ppsp->ps_filetab = newtab;
+
+  return SUCCESS;
+}
+
+long DosMkTmp(dos_far_ptr pathname, UWORD attr)
+{
+  /* create filename from current date and time */
+  /* the guest's DS:DX buffer is mutated in place, as documented for
+     INT 21h AH=5Ah: the generated name is appended to the path */
+  char *base = (char *) ARM_PTR (pathname);
+  char *ptmp;
+  unsigned long randvar;
+  long rc;
+  int loop;
+
+  ptmp = base + strlen(base);
+  if (LoL->os_major == 5) { /* clone some bad habit of MS DOS 5.0 only */
+    if (ptmp == base || (ptmp[-1] != '\\' && ptmp[-1] != '/'))
+      *ptmp++ = '\\';
+  }
+  ptmp[8] = '\0';
+
+  randvar = ((unsigned long)dos_getdate() << 16) | dos_gettime();
+
+  loop = 0;
+  do {
+    unsigned long tmp = randvar++;
+    int i;
+    for(i = 7; i >= 0; tmp >>= 4, i--)
+      ptmp[i] = ((char)tmp & 0xf) + 'A';
+
+    /* DOS versions: > 5: characters A - P
+       < 5: hex digits */
+    if (LoL->os_major < 5)
+      for (i = 0; i < 8; i++)
+        ptmp[i] -= (ptmp[i] < 'A' + 10) ? '0' - 'A' : 10;
+
+    /* only create new file -- 2001/09/22 ska*/
+    rc = DosOpen(pathname, O_LEGACY | O_CREAT | O_RDWR, attr);
+  } while (rc == DE_FILEEXISTS && loop++ < 0xfff);
+
+  return rc;
+}
+
+COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock)
+{
+  sft *s;
+  dos_far_ptr _s;
+
+  /* Get the SFT block that contains the SFT      */
+  _s = get_sft(hndl);
+  if (far_is_end(_s))
+    return DE_INVLDHNDL;
+  s = (sft *) ARM_PTR (_s);
+
+  if (s->sft_flags & SFT_FSHARED)
+    /* original: remote_lock_unlock(s, pos, len, unlock). The network
+       redirector is permanently stubbed on this platform, and without
+       it no SFT can carry SFT_FSHARED in the first place. */
+    return DE_INVLDFUNC;
+
+  /* Invalid function unless SHARE is installed or remote. */
+  if (!IsShareInstalled(FALSE))
+    return DE_INVLDFUNC;
+
+  /* Lock violation if this SFT entry does not support locking. */
+  if (s->sft_shroff < 0)
+    return DE_LOCK;
+
+  /* Let SHARE do the work. */
+  /* original: share_lock_unlock(cu_psp, s->sft_shroff, pos, len,
+     unlock). The SHARE module is not ported; IsShareInstalled() always
+     returns FALSE in this port, so this point is unreachable - kept
+     for structural fidelity with the original. */
+  return DE_INVLDFUNC;
+}
+
 #ifdef WITHFAT32
 /* same convention as get_cds1(): drive is 0 for default, 1=A, 2=B, ... */
 dos_far_ptr /*struct dpb*/ GetDriveDPB(UBYTE drive, COUNT *rc)

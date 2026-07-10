@@ -1438,6 +1438,85 @@ bool fdos_21h(CPU* _cpu) {
         goto short_check;
 #endif
       /* ------------------------------------------------------------------
+         Block C (ported from kernel/inthndlr.c): file extensions.
+         Long results follow the original's long_check convention: on
+         failure rc = (COUNT)lrc -> error_exit (which also latches
+         CritErrCode), on success CF=0 and AX = low word.
+         ------------------------------------------------------------------ */
+
+      /* Create Temporary File                                        */
+      case 0x5a:
+      {
+        long lrc = DosMkTmp(FP_DS_DX, CPU_CX);
+        if (lrc < SUCCESS)
+        {
+          rc = (COUNT)lrc;
+          goto error_exit;
+        }
+        cf = 0;
+        CPU_AX = (UWORD)lrc;
+        break;
+      }
+
+      /* Create New File (fails with DE_FILEEXISTS if it exists)      */
+      case 0x5b:
+      {
+        long lrc = DosOpen(FP_DS_DX, O_LEGACY | O_RDWR | O_CREAT, CPU_CX);
+        if (lrc < SUCCESS)
+        {
+          rc = (COUNT)lrc;
+          goto error_exit;
+        }
+        cf = 0;
+        CPU_AX = (UWORD)lrc;
+        break;
+      }
+
+      /* Lock/unlock file access (added for SHARE - Ron Cemer)        */
+      case 0x5c:
+        rc = DosLockUnlock(CPU_BX,
+                           ((LONG)CPU_CX << 16) | CPU_DX,
+                           ((LONG)CPU_SI << 16) | CPU_DI,
+                           CPU_AL != 0);
+        if (rc != SUCCESS)
+          goto error_exit;
+        cf = 0;
+        break;
+
+      /* Set Max file handle count                                    */
+      case 0x67:
+        rc = SetJFTSize(CPU_BX);
+        goto short_check;
+
+      /* Flush file buffer -- COMMIT FILE                             */
+      case 0x68:
+      case 0x6a:
+        rc = DosCommit(CPU_BX);
+        goto short_check;
+
+      /* Extended Open/Create                                         */
+      case 0x6c:
+      {
+        long lrc;
+        /* high nibble must be <= 1, low nibble must be <= 2 */
+        if ((CPU_DL & 0xef) > 0x2)
+          goto error_invalid;
+        lrc = DosOpen(MK_FP(CPU_DS, CPU_SI),
+                      (CPU_BX & 0x70ff) | ((CPU_DL & 3) << 8) |
+                      ((CPU_DL & 0x10) << 6), CPU_CL);
+        if (lrc < SUCCESS)
+        {
+          rc = (COUNT)lrc;
+          goto error_exit;
+        }
+        /* action taken */
+        CPU_CX = (UWORD)(lrc >> 16);
+        cf = 0;
+        CPU_AX = (UWORD)lrc;
+        break;
+      }
+
+      /* ------------------------------------------------------------------
          Block B (ported from kernel/inthndlr.c): disk / DPB information.
          ------------------------------------------------------------------ */
 
