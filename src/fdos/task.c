@@ -329,8 +329,10 @@ static void restore_ctx(CPU * cpu, struct saved_cpu_ctx *s)
 
 /* Called synchronously from INT 20h and INT 21h AH=00h/4Ch (see
    fdos_21h.c/fdos_20h() below). exit_type: 0=normal, 1=Ctrl-Break,
-   2=critical error abort, 3=TSR (INT 21h AH=31h - not wired up in
-   this pass, so exit_type is currently always 0). */
+   2=critical error abort, 3=TSR (INT 21h AH=31h: the resident block
+   was already resized by DosMemChange() in the 31h handler;
+   exec_run_child() below keeps the process's memory and open
+   handles). */
 void request_terminate(UBYTE exit_code, UBYTE exit_type)
 {
   term_exit_code = exit_code;
@@ -376,14 +378,15 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
 
   SET_SS(FP_SEG(stack));  CPU_SP = FP_OFF(stack);
   SET_CS(FP_SEG(entry));  SET_IP(FP_OFF(entry));
-  SET_DS(dses);            SET_ES(dses);
+  SET_DS(dses);           SET_ES(dses);
   CPU_AX = CPU_BX = ax_bx;
-  CPU_CX = 0xff;
+  CPU_CX = 0x00ff;
+  CPU_DX = dses;
   CPU_SI = FP_OFF(entry);
   CPU_DI = FP_OFF(stack);
   CPU_BP = 0x091e;               /* matches upstream: some programs
                                      expect 0x09 in BP's high byte */
-  ifl = 1; /* IF=1, everything else clear (including CF - the child starts "successful") */
+  cpu_setflags(cpu, 0x0200, 0xffff);
 
   terminate_flag = false;
   cpu->native_done = false;
@@ -396,20 +399,33 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   cpu->native_done = false;
   terminate_flag = saved_terminate_flag;
 
-  /* --- child terminated: free its resources (return_user()'s
-     equivalent, minus upstream's real-hardware vector-restore dance -
-     see the function-level comment above for why it isn't needed
-     here) --- */
-  if (term_exit_type != 3)       /* not a TSR (not wired up yet, always
-                                     false for now, kept for parity
-                                     with upstream/future INT21 31h) */
+  /* --- child terminated: return_user()'s equivalent --- */
   {
     psp *p = (psp *) ARM_PTR(MK_FP(child_psp_seg, 0));
-    int i;
 
-    for (i = 0; i < p->ps_maxfiles; i++)
-      DosClose(i);
-    FreeProcessMem(child_psp_seg);
+    /* When process returns - restore the isv (upstream return_user()
+       does this unconditionally, BEFORE the TSR check: the parent's
+       INT 22h/23h/24h handlers, saved into the child PSP at load time
+       by new_psp(), come back even for a TSR. Programs routinely hook
+       INT 23h/24h and exit without unhooking; skipping this restore
+       leaves the vectors dangling into freed (or, for a TSR, private)
+       memory. */
+    setvec(0x22, p->ps_isv22);
+    setvec(0x23, p->ps_isv23);
+    setvec(0x24, p->ps_isv24);
+
+    /* And free all process memory if not a TSR return (INT 21h
+       AH=31h, term_exit_type 3): a TSR keeps its (already resized)
+       memory block, its environment and its open file handles, per
+       upstream return_user(). */
+    if (term_exit_type != 3)
+    {
+      int i;
+
+      for (i = 0; i < p->ps_maxfiles; i++)
+        DosClose(i);
+      FreeProcessMem(child_psp_seg);
+    }
   }
 
   internal_data->cu_psp = saved_cu_psp;
@@ -563,7 +579,8 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
   {
     UWORD fcbcode;
     psp *p;
-
+    // termination vector (not used by the kernel, but may be used by gues process)
+    setvec(0x22, MK_FP(CPU_CS, CPU_IP));
     child_psp(mem, internal_data->cu_psp, mem + asize);
     fcbcode = patchPSP(mem - 1, env, exp, namep);
 
@@ -728,6 +745,8 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
   {
     UWORD fcbcode;
 
+    setvec(0x22, MK_FP(CPU_CS, CPU_IP));
+    // termination vector (not used by the kernel, but may be used by gues process)
     child_psp(mem, internal_data->cu_psp, mem + asize);
     fcbcode = patchPSP(mem - 1, env, exp, namep);
     exp->exec.stack = MK_FP(ExeHeader.exInitSS + start_seg, ExeHeader.exInitSP);

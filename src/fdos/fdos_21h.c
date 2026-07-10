@@ -1441,6 +1441,26 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         goto short_check;
 #endif
       /* ------------------------------------------------------------------
+         Block F (ported from kernel/inthndlr.c): terminate and stay
+         resident.
+         ------------------------------------------------------------------ */
+
+      /* Keep Program (Terminate and stay resident) */
+      case 0x31:
+        /* Resize the process's block to DX paragraphs (min 6, per the
+           original) BEFORE terminating; environment block and open
+           handles are kept - exec_run_child() skips DosClose()/
+           FreeProcessMem() for term type 3. Return code AH=03h is
+           what the parent's INT 21h AH=4Dh will report (original:
+           return_code = AL | 0x300). Errors from DosMemChange() are
+           deliberately ignored, exactly like the original. */
+        DosMemChange(internal_data->cu_psp,
+                     CPU_DX < 6 ? 6 : CPU_DX, NULL);
+        request_terminate(CPU_AL, 3);
+        cf = 0;
+        break;
+
+      /* ------------------------------------------------------------------
          Blocks D & E (ported from kernel/inthndlr.c): server/network
          (5Dh/5Eh/5Fh, redirector permanently stubbed - see
          network_redirector_mx() in kernel.c) and NLS codepage (66h).

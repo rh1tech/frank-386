@@ -1479,6 +1479,11 @@ dos_far_ptr getvec(uint8_t intno) {
     return *(dos_far_ptr*)&res;
 }
 
+void setvec(uint8_t intno, dos_far_ptr vec) {
+    pstore16(4ul * intno,     FP_OFF(vec));
+    pstore16(4ul * intno + 2, FP_SEG(vec));
+}
+
 STATIC void PSPInit(void)
 {
   psp far *p = (psp far *) ARM_PTR(x86_PSP);

@@ -101,6 +101,7 @@ void BIOS_drive_reset(CPU* cpu, unsigned drive);
 void blockio(CPU* cpu, request FAR *rq);
 int ASMPASCAL init_switchar(int chr);
 dos_far_ptr getvec(uint8_t intno);
+void setvec(uint8_t intno, dos_far_ptr vec);
 BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode, dos_far_ptr * r_top);
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
 int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size);
