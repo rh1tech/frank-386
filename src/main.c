@@ -433,6 +433,19 @@ static void platform_poll(void *opaque) {
     (void)opaque;
     poll_keyboard();
     // VGA update is handled by Core 1, don't call here to avoid contention
+    if (pc && pc->reset_request) {
+        pc->reset_request = 0;
+rst:
+        *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
+        watchdog_reboot(0, 0, 0);
+        while (true);
+    }
+    /* Same reachability problem as above: the settings-UI restart request
+       was also only checked in main()'s outer loop. */
+    if (settingsui_restart_requested()) {
+        settingsui_clear_restart();
+        goto rst;
+    }
 }
 
 //=============================================================================
