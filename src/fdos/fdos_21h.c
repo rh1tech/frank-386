@@ -1441,6 +1441,88 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         goto short_check;
 #endif
       /* ------------------------------------------------------------------
+         Block G (ported from kernel/inthndlr.c): the FCB layer
+         (fcbfns.c). AH=29h (parse) was already implemented separately.
+         ------------------------------------------------------------------ */
+
+      case 0x0f:
+        CPU_AL = FcbOpen(FP_DS_DX, O_FCB | O_LEGACY | O_OPEN | O_RDWR);
+        break;
+
+      case 0x10:
+        CPU_AL = FcbClose(FP_DS_DX);
+        break;
+
+      case 0x11:
+        CPU_AL = FcbFindFirstNext(FP_DS_DX, TRUE);
+        break;
+
+      case 0x12:
+        CPU_AL = FcbFindFirstNext(FP_DS_DX, FALSE);
+        break;
+
+      case 0x13:
+        CPU_AL = FcbDelete(FP_DS_DX);
+        break;
+
+      case 0x14:
+        /* FCB read */
+        CPU_AL = FcbReadWrite(FP_DS_DX, 1, XFR_READ);
+        break;
+
+      case 0x15:
+        /* FCB write */
+        CPU_AL = FcbReadWrite(FP_DS_DX, 1, XFR_WRITE);
+        break;
+
+      case 0x16:
+        CPU_AL = FcbOpen(FP_DS_DX, O_FCB | O_LEGACY | O_CREAT | O_TRUNC | O_RDWR);
+        break;
+
+      case 0x17:
+        CPU_AL = FcbRename(FP_DS_DX);
+        break;
+
+      /* Random read using FCB: fields not updated
+         (XFR_RANDOM should not be used here) */
+      case 0x21:
+        CPU_AL = FcbRandomIO(FP_DS_DX, XFR_READ);
+        break;
+
+      /* Random write using FCB */
+      case 0x22:
+        CPU_AL = FcbRandomIO(FP_DS_DX, XFR_WRITE);
+        break;
+
+      /* Get file size in records using FCB */
+      case 0x23:
+        CPU_AL = FcbGetFileSize(FP_DS_DX);
+        break;
+
+      /* Set random record field in FCB */
+      case 0x24:
+        FcbSetRandom(FP_DS_DX);
+        break;
+
+      /* Read random record(s) using FCB */
+      case 0x27:
+      {
+        UWORD nrec = CPU_CX;
+        CPU_AL = FcbRandomBlockIO(FP_DS_DX, &nrec, XFR_READ | XFR_FCB_RANDOM);
+        CPU_CX = nrec;
+        break;
+      }
+
+      /* Write random record(s) using FCB */
+      case 0x28:
+      {
+        UWORD nrec = CPU_CX;
+        CPU_AL = FcbRandomBlockIO(FP_DS_DX, &nrec, XFR_WRITE | XFR_FCB_RANDOM);
+        CPU_CX = nrec;
+        break;
+      }
+
+      /* ------------------------------------------------------------------
          Block F (ported from kernel/inthndlr.c): terminate and stay
          resident.
          ------------------------------------------------------------------ */

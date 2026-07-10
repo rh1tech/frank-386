@@ -213,23 +213,26 @@ VOID DosDisplayOutput(COUNT c);
    dos_far_ptr into guest memory (see fcbfns.c), not a native BYTE*. */
 dos_far_ptr FatGetDrvData(UBYTE drive, UBYTE * spc, UWORD * bps,
                    UWORD * nc);
-UWORD FcbParseFname(UBYTE *wTestMode, const BYTE FAR *lpFileName, fcb FAR * lpFcb);
-const BYTE FAR *ParseSkipWh(const BYTE FAR * lpFileName);
-BOOL TestCmnSeps(BYTE FAR * lpFileName);
-BOOL TestFieldSeps(BYTE FAR * lpFileName);
-const BYTE FAR *GetNameField(const BYTE FAR * lpFileName, BYTE FAR * lpDestField,
+/* FcbParseFname()/ParseSkipWh() are NOT ported: INT 21h AH=29h uses
+   the port's own DosParseFilenameIntoFcb() in fdos_21h.c. TestCmnSeps/
+   TestFieldSeps are macros inside fcbfns.c, as in the original.
+   port note: the caller's FCB and DTA are guest structures, so the
+   Fcb* entry points take guest far pointers (dos_far_ptr), matching
+   the DosOpen()/DosDelete() convention. GetNameField() operates on
+   native buffers (kernel-internal use only). */
+const BYTE *GetNameField(const BYTE * lpFileName, BYTE * lpDestField,
                        COUNT nFieldSize, BOOL * pbWildCard);
-UBYTE FcbReadWrite(xfcb FAR *, UCOUNT, int);
-UBYTE FcbGetFileSize(xfcb FAR * lpXfcb);
-void FcbSetRandom(xfcb FAR * lpXfcb);
-UBYTE FcbRandomBlockIO(xfcb FAR * lpXfcb, UWORD *nRecords, int mode);
-UBYTE FcbRandomIO(xfcb FAR * lpXfcb, int mode);
-UBYTE FcbOpen(xfcb FAR * lpXfcb, unsigned flags);
-UBYTE FcbDelete(xfcb FAR * lpXfcb);
-UBYTE FcbRename(xfcb FAR * lpXfcb);
-UBYTE FcbClose(xfcb FAR * lpXfcb);
+UBYTE FcbReadWrite(dos_far_ptr lpXfcb, UCOUNT recno, int mode);
+UBYTE FcbGetFileSize(dos_far_ptr lpXfcb);
+void FcbSetRandom(dos_far_ptr lpXfcb);
+UBYTE FcbRandomBlockIO(dos_far_ptr lpXfcb, UWORD *nRecords, int mode);
+UBYTE FcbRandomIO(dos_far_ptr lpXfcb, int mode);
+UBYTE FcbOpen(dos_far_ptr lpXfcb, unsigned flags);
+UBYTE FcbDelete(dos_far_ptr lpXfcb);
+UBYTE FcbRename(dos_far_ptr lpXfcb);
+UBYTE FcbClose(dos_far_ptr lpXfcb);
 void FcbCloseAll(void);
-UBYTE FcbFindFirstNext(xfcb FAR * lpXfcb, BOOL First);
+UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First);
 
 /* intr.asm */
 UWORD ASMPASCAL call_intr(WORD nr, iregs FAR * rp);

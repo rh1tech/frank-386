@@ -324,7 +324,12 @@ static void restore_ctx(CPU * cpu, struct saved_cpu_ctx *s)
   SET_DS(s->ds); SET_ES(s->es);
   CPU_AX = s->ax; CPU_BX = s->bx; CPU_CX = s->cx; CPU_DX = s->dx;
   CPU_SI = s->si; CPU_DI = s->di; CPU_BP = s->bp;
-  cpu_setflags(cpu, s->flags, 0xFFFF);
+  /* Restore FLAGS exactly. cpu_setflags() is (set_mask, clear_mask)
+     applied in that order in both cores, so (s->flags, 0xFFFF) would
+     zero everything: bits are set first, then the full clear wipes
+     them. Masked in practice only because the final IRET of the
+     parent's INT 21h re-pops the real flags - fix it anyway. */
+  cpu_setflags(cpu, s->flags, (uword)~s->flags);
 }
 
 /* Called synchronously from INT 20h and INT 21h AH=00h/4Ch (see
@@ -386,7 +391,14 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   CPU_DI = FP_OFF(stack);
   CPU_BP = 0x091e;               /* matches upstream: some programs
                                      expect 0x09 in BP's high byte */
-  cpu_setflags(cpu, 0x0200, 0xffff);
+  /* Child entry FLAGS := 0200h exactly (IF set, everything else clear,
+     matching upstream's irp->FLAGS = 0x200). NOTE the argument order in
+     both cores' set_flags() is SET first, then CLEAR - so a clear_mask
+     of 0xffff would wipe the IF bit we just set and start the child
+     with interrupts disabled (timer tick frozen and keyboard IRQ dead
+     outside of INT 21h calls, where fdos_21h's STI-at-entry re-enables
+     them). The clear mask must exclude the bits being set. */
+  cpu_setflags(cpu, 0x0200, (uword)~0x0200u);
 
   terminate_flag = false;
   cpu->native_done = false;
@@ -424,6 +436,9 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
 
       for (i = 0; i < p->ps_maxfiles; i++)
         DosClose(i);
+      FcbCloseAll();            /* upstream return_user() order:
+                                   handles, then FCB-opened files,
+                                   then the memory */
       FreeProcessMem(child_psp_seg);
     }
   }

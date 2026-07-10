@@ -337,5 +337,26 @@ struct dos_data {
     BYTE  absrdwrflg;              // 7BB
     UWORD high_words[12];          // 7BC..7D3
     UWORD unk7D4[3];
+
+    /* --- port-only appendix (beyond the documented real-DOS SDA) ---
+       Guest-resident scratch for fcbfns.c. The original kernel
+       redirects the DTA onto kernel-data dmatch instances: a DGROUP
+       static for the FindFirst/FindNext state and stack locals inside
+       FcbDelete()/FcbRename(). DGROUP is guest-visible memory on real
+       DOS, and internal_data->dta is a guest far pointer in this port,
+       so the scratch must live in guest memory - here, past the
+       documented SDA fields (no guest software depends on offsets
+       beyond 7D9h). Layout check: dos_data sits at DOS_PSP:0AEBh, the
+       next fixed object is the NLS info block at DOS_PSP:13A4h; these
+       three members add 43+43+16 bytes, well inside the slack.       */
+    dmatch fcb_dmatch;             /* FcbFindFirstNext persistent state
+                                      (original: static dmatch Dmatch) */
+    dmatch fcb_dmatch_tmp;         /* FcbDelete/FcbRename transient
+                                      (original: stack locals)         */
+    char   fcb_ren_name[2 + FNAME_SIZE + 1 + FEXT_SIZE + 2];
+                                   /* FcbRename 'A:NAME.EXT' rebuild
+                                      buffer (original: stack local;
+                                      needs a guest address here since
+                                      truename() takes a guest src)    */
 };
 #pragma pack(pop)
