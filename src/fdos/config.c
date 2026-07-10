@@ -869,13 +869,13 @@ STATIC VOID CfgBreak(BYTE *pLine)
 {
     pLine = skipwh(pLine);
     if (toupper(pLine[0]) == 'O' && toupper(pLine[1]) == 'N') {
-        break_ena = TRUE;
+        internal_data->break_ena = TRUE;
         return;
     }
     if (toupper(pLine[0]) == 'O' &&
         toupper(pLine[1]) == 'F' &&
         toupper(pLine[2]) == 'F') {
-        break_ena = FALSE;
+        internal_data->break_ena = FALSE;
         return;
     }
     CfgFailure(pLine);

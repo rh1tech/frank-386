@@ -1105,6 +1105,26 @@ long DosMkTmp(dos_far_ptr pathname, UWORD attr)
   return rc;
 }
 
+/* see RBIL D-2152 and D-215D06 before attempting
+   to change these two functions!
+   (ported from the original kernel/network.c; these are not network
+   I/O - they only book-keep the machine name in the SDA and the
+   NetBios number in the List of Lists, so they are ported for real
+   rather than stubbed)
+ */
+UWORD get_machine_name(dos_far_ptr netname)
+{
+  memcpy(ARM_PTR(netname), internal_data->net_name, 16);
+  return (LoL->NetBios);
+}
+
+VOID set_machine_name(dos_far_ptr netname, UWORD name_num)
+{
+  LoL->NetBios = name_num;
+  memcpy(internal_data->net_name, ARM_PTR(netname), 15);
+  internal_data->net_set_count++;
+}
+
 COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock)
 {
   sft *s;

@@ -294,6 +294,41 @@ STATIC COUNT DosLoadPackage(UWORD cp, UWORD cntry)
   return muxLoadPkg(NLSFUNC_LOAD_PKG, cp, cntry);
 }
 
+/*
+ *	Ported from the original kernel/nls.c for INT 21h AH=66h.
+ */
+STATIC COUNT DosSetPackage(UWORD cp, UWORD cntry)
+{
+  /* Right now, we do not have codepage change support in kernel, so push
+     it through the mux in any case. (original comment; the port's
+     muxLoadPkg()/mux dispatcher already handles NLSFUNC_LOAD_PKG2) */
+  return muxLoadPkg(NLSFUNC_LOAD_PKG2, cp, cntry);
+}
+
+/*
+ *	Called for DOS-66-01 get CP
+ */
+COUNT DosGetCodepage(UWORD * actCP, UWORD * sysCP)
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+  *sysCP = nlsInfo->sysCodePage;
+  *actCP = nls_pkg_ptr(nlsInfo->actPkg)->cp;
+  return SUCCESS;
+}
+
+/*
+ *	Called for DOS-66-02 set CP
+ *	Note: One cannot change the system CP. Why it is necessary
+ *	to specify it, is lost to me. (2000/02/13 ska)
+ */
+COUNT DosSetCodepage(UWORD actCP, UWORD sysCP)
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+  if (sysCP == NLS_DEFAULT || sysCP == nlsInfo->sysCodePage)
+    return DosSetPackage(actCP, NLS_DEFAULT);
+  return DE_INVLDDATA;
+}
+
 COUNT DosSetCountry(UWORD cntry)
 {
   return DosLoadPackage(NLS_DEFAULT, cntry);

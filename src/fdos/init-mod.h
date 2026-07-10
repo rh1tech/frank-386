@@ -69,7 +69,7 @@ extern dos_far_ptr lpTop;
 extern UWORD ram_top;
 extern char singleStep;
 extern char SkipAllConfig;
-extern BYTE DOSFAR ASM break_ena;  /* break enabled flag                   */
+/* break_ena lives in the SDA: use internal_data->break_ena (see kernel.c) */
 extern unsigned char DOSTEXTFAR ASM kbdType;
 extern const dos_far_ptr _nlsPackageHardcoded;
 

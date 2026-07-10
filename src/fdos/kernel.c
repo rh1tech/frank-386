@@ -82,7 +82,10 @@ struct dhdr* clk_dev;
 struct dhdr* blk_dev;
 struct lol* LoL;// = (struct lol*)ARM_PTR(x86_FIXED_DATA);
 struct dos_data* internal_data;// (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
-BYTE DOSFAR ASM break_ena = 1;  /* break enabled flag                   */
+/* break_ena: the original kernel's C global break_ena IS the SDA byte
+   at internal_data+17h (an asm label alias). The port briefly had two
+   diverging copies; the SDA field internal_data->break_ena is now the
+   single source of truth (guest programs peek that byte directly). */
 unsigned char DOSTEXTFAR ASM kbdType = 0x10; // 00 for 84key, 10h for 102key
 const dos_far_ptr _nlsPackageHardcoded = x86_nlsPackageHardcoded;
 

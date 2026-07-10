@@ -534,6 +534,9 @@ bool fdos_21h(CPU* _cpu) {
        prompt). The caller's own IF is untouched: it is restored from
        flags_on_stack by the final IRET, exactly as on real hardware. */
     ifl = 1;
+dispatch:                       /* re-entry point for AH=5Dh AL=00h
+                                   (remote server call), matching the
+                                   original inthndlr.c dispatch: label */
     switch (CPU_AH) {
       /* Read Keyboard With Echo                                      */
       case 0x01:
@@ -1438,6 +1441,166 @@ bool fdos_21h(CPU* _cpu) {
         goto short_check;
 #endif
       /* ------------------------------------------------------------------
+         Blocks D & E (ported from kernel/inthndlr.c): server/network
+         (5Dh/5Eh/5Fh, redirector permanently stubbed - see
+         network_redirector_mx() in kernel.c) and NLS codepage (66h).
+         ------------------------------------------------------------------ */
+
+      case 0x5d:
+        switch (CPU_AL)
+        {
+            /* Remote Server Call: DS:DX -> DOS parameter list holding
+               the register frame AX,BX,CX,DX,SI,DI,DS,ES (original:
+               fmemcpy(&lr, FP_DS_DX, sizeof(lregs)); goto dispatch).
+               Load DS/ES last - reading the frame uses the old DS.   */
+          case 0x00:
+          {
+            uint32_t frame = (CPU_DS << 4) + CPU_DX;
+            UWORD new_ds, new_es;
+            CPU_AX = readw86(frame + 0);
+            CPU_BX = readw86(frame + 2);
+            CPU_CX = readw86(frame + 4);
+            CPU_DX = readw86(frame + 6);
+            CPU_SI = readw86(frame + 8);
+            CPU_DI = readw86(frame + 10);
+            new_ds = readw86(frame + 12);
+            new_es = readw86(frame + 14);
+            SET_DS ( new_ds );
+            SET_ES ( new_es );
+            goto dispatch;
+          }
+
+            /* Get address of SDA: DS:SI -> internal_data (the
+               ErrorMode byte), CX = bytes to swap while InDOS,
+               DX = bytes to swap always. The original's asm labels:
+               _swap_always sits right before Int21AX (offset 1Ah),
+               _swap_indos marks the end of all kernel data ("we don't
+               know precisely what needs to be swapped, so set it
+               here") - the port's equivalent end is the end of
+               struct dos_data.                                       */
+          case 0x06:
+          {
+            char *sda_base = (char *)ARM_PTR(MK_FP(DOS_PSP, 0));
+            SET_DS ( DOS_PSP );
+            CPU_SI = (UWORD)((char *)&internal_data->ErrorMode - sda_base);
+            CPU_CX = (UWORD)((char *)(internal_data + 1) -
+                             (char *)&internal_data->ErrorMode);
+            CPU_DX = (UWORD)((char *)&internal_data->Int21AX -
+                             (char *)&internal_data->ErrorMode);
+            cf = 0;
+            break;
+          }
+
+          case 0x07:
+          case 0x08:
+          case 0x09:
+            rc = (int)network_redirector_mx(REM_PRINTREDIR,
+                     NULL, (void *)(intptr_t)internal_data->Int21AX);
+            cf = 0;
+            if (rc != SUCCESS)
+              goto error_exit;
+            break;
+
+            /* Set Extended Error: DS:DX -> lregs frame
+               (AX=0 BX=2 CX=4 DX=6 SI=8 DI=10 DS=12 ES=14)           */
+          case 0x0a:
+          {
+            uint32_t er = (CPU_DS << 4) + CPU_DX;
+            internal_data->CritErrCode   = readw86(er + 0);
+            internal_data->CritErrDev    = MK_FP(readw86(er + 14),
+                                                 readw86(er + 10));
+            internal_data->CritErrLocus  = read86(er + 5);   /* CH */
+            internal_data->CritErrClass  = read86(er + 3);   /* BH */
+            internal_data->CritErrAction = read86(er + 2);   /* BL */
+            cf = 0;
+            break;
+          }
+
+          default:
+            internal_data->CritErrCode = SUCCESS;
+            goto error_invalid;
+        }
+        break;
+
+      case 0x5e:
+        switch (CPU_AL)
+        {
+          case 0x00:
+            CPU_CX = get_machine_name(FP_DS_DX);
+            break;
+
+          case 0x01:
+            set_machine_name(FP_DS_DX, CPU_CX);
+            break;
+
+          default:
+            rc = (int)network_redirector_mx(REM_PRINTSET, NULL,
+                     (void *)(intptr_t)internal_data->Int21AX);
+            goto short_check;
+        }
+        break;
+
+      case 0x5f:
+        if (CPU_AL == 7 || CPU_AL == 8)
+        {
+          if (CPU_DL < LoL->lastdrive)
+          {
+            struct cds *cdsp =
+                (struct cds *)ARM_PTR(LoL->CDSp) + CPU_DL;
+            if (FP_OFF(cdsp->cdsDpb))   /* letter of physical drive?  */
+            {
+              cdsp->cdsFlags &= ~CDSPHYSDRV;
+              if (CPU_AL == 7)
+                cdsp->cdsFlags |= CDSPHYSDRV;
+              break;
+            }
+          }
+          rc = DE_INVLDDRV;
+          goto error_exit;
+        }
+        else
+        {
+          /* original: network_redirector_mx(REM_DOREDIRECT, &lr, ...)
+             manipulates the caller's register frame directly and
+             leaves via real_exit (AX = -rc, CF on failure, registers
+             otherwise untouched). With the permanent stub rc is always
+             DE_INVLDFUNC; the register-frame side effects don't exist. */
+          rc = (int)network_redirector_mx(REM_DOREDIRECT, NULL,
+                   (void *)(intptr_t)internal_data->Int21AX);
+          if (rc != SUCCESS)
+          {
+            internal_data->CritErrCode = -rc;   /* Maybe set */
+            cf = 1;
+          }
+          CPU_AX = -rc;
+          break;
+        }
+
+      /* Get/Set global code page                                     */
+      case 0x66:
+        switch (CPU_AL)
+        {
+          case 1:
+          {
+            UWORD act, sys;
+            rc = DosGetCodepage(&act, &sys);
+            CPU_BX = act;
+            CPU_DX = sys;
+            break;
+          }
+          case 2:
+            rc = DosSetCodepage(CPU_BX, CPU_DX);
+            break;
+
+          default:
+            goto error_invalid;
+        }
+        if (rc != SUCCESS)
+          goto error_exit;
+        cf = 0;
+        break;
+
+      /* ------------------------------------------------------------------
          Block C (ported from kernel/inthndlr.c): file extensions.
          Long results follow the original's long_check convention: on
          failure rc = (COUNT)lrc -> error_exit (which also latches
@@ -1664,18 +1827,20 @@ bool fdos_21h(CPU* _cpu) {
       case 0x33:
         switch (CPU_AL)
         {
-          /* Set Ctrl-C flag; returns DL = break_ena                  */
+          /* Set Ctrl-C flag; returns DL = break_ena. break_ena is the
+             SDA byte at internal_data+17h - the single source of truth
+             (guest programs peek it directly), see kernel.c.          */
           case 0x01:
-            break_ena = CPU_DL & 1;
+            internal_data->break_ena = CPU_DL & 1;
             /* fall through so DL only low bit (as in MS-DOS) */
           /* Get Ctrl-C flag                                          */
           case 0x00:
-            CPU_DL = break_ena;
+            CPU_DL = internal_data->break_ena;
             break;
           case 0x02:            /* get/set extended control break     */
           {
-            UBYTE tmp = break_ena;
-            break_ena = CPU_DL & 1;
+            UBYTE tmp = internal_data->break_ena;
+            internal_data->break_ena = CPU_DL & 1;
             CPU_DL = tmp;
             break;
           }

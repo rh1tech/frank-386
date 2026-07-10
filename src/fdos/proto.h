@@ -380,8 +380,15 @@ long ASMPASCAL network_redirector_mx(unsigned cmd, void far *s, void *arg);
 #define remote_printredir(dx,ax) (int)network_redirector_mx(REM_PRINTREDIR, MK_FP(0,dx),(void *)ax)
 #define QRemote_Fn(d,s) (int)network_redirector_mx(REM_FILENAME, d, (void *)&s)
 */
-UWORD get_machine_name(BYTE FAR * netname);
-VOID set_machine_name(BYTE FAR * netname, UWORD name_num);
+/* Live declaration for the always-fail redirector stub implemented in
+   kernel.c (no NIC on this platform, no redirector will ever load).
+   Signature matches kernel.c: the register-frame argument of the
+   original (an lregs*) has no equivalent here, callers pass NULL. */
+long network_redirector_mx(unsigned cmd, void *s, void *arg);
+/* port note: netname is the caller's DS:DX buffer, so it travels as a
+   guest pointer (see dosfns.c). */
+UWORD get_machine_name(dos_far_ptr netname);
+VOID set_machine_name(dos_far_ptr netname, UWORD name_num);
 
 /* procsupt.asm */
 VOID ASMCFUNC exec_user(iregs FAR * irp, int disable_a20);
