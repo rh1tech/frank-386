@@ -336,6 +336,7 @@ void request_terminate(UBYTE exit_code, UBYTE exit_type)
   term_exit_code = exit_code;
   term_exit_type = exit_type;
   terminate_flag = true;
+  cpu->native_done = true;
 }
 
 /* Returns AX-packed AL=last exit code, AH=exit type, matching INT 21h
@@ -373,8 +374,10 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   ifl = 1; /* IF=1, everything else clear (including CF - the child starts "successful") */
 
   terminate_flag = false;
+  cpu->native_done = false;
   while (!terminate_flag)
     pc_step(pc, 4096);
+  cpu->native_done = false;
   terminate_flag = saved_terminate_flag;
 
   /* --- child terminated: free its resources (return_user()'s

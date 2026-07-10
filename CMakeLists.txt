@@ -363,6 +363,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
 
     # no FreeDOS redundant messages
     QUIET=1
+    #PDB_DEBUG=1
     # FreeDOS FAT32 support
     WITHFAT32=1
     WITHLFNAPI=1

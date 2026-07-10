@@ -491,12 +491,12 @@ void blockio(CPU* cpu, request FAR *rq)
     area (Dyn), see DynAlloc("ddt", nUnits, sizeof(ddt)) call sites and
     the comment near _Dyn in dsk_init()/InitDsk(). Here the array is
     built incrementally (push_ddt()), but DynAlloc() itself allocates
-    sequentially from the same fixed segment (0x9000:0000), so the
+    sequentially from DYN_BUFFER before the first MCB exists, so the
     array is contiguous in exactly the same way, and entry 0 starts
     right after the struct DynS header.
 */
 ddt *getddt(int dev)
 {
-  dos_far_ptr base = MK_FP(0x9000, sizeof(struct DynS));
+  dos_far_ptr base = ADD_OFF(DYN_BUFFER, sizeof(struct DynS));
   return (ddt *)ARM_PTR(base) + dev;
 }

@@ -26,6 +26,7 @@
  019F4H 0240DH 00A1AH _BSS               BSS
 */
 #define x86_DTA           MK_FP(DOS_PSP, 0x0080) // Disk Transfer Area
+#define x86_MASTER_ENV    MK_FP(DOS_PSP + 8, 0)  // original: 0068:0000
 
 #define x86_IO_FIXED_DATA MK_FP(DOS_PSP, 0x07A8) // _IO_FIXED_DATA -> con_dev
 #define x86_FIXED_DATA    MK_FP(DOS_PSP, 0x08F0) // _FIXED_DATA -> LoL
@@ -46,7 +47,7 @@
 #define x86_BSS           MK_FP(DOS_PSP, 0x19F4) // _BSS -> DiskTransferBuffer[MAX_SEC_SIZE=512]
 #define x86_SZ_LINE       MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE) // _BSS + MAX_SEC_SIZE = 0x1BF4
 #define x86_DAP           MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256) // = 0x1CF4 /* 16 */
-#define x86_MASTER_ENV    MK_FP(DOS_PSP, 0x19F4 + MAX_SEC_SIZE + 256 + 16) // = 0x1D04 /* 128 */
+// end = 0x1D04 /* 128 */
 
 #include "hdr/nls.h"
 

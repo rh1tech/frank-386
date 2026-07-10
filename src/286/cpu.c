@@ -955,6 +955,7 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
 }
 
 #if PDB_DEBUG
+void dpb_watch_check_chain(const char *tag);
 static void dpb_watch_native_checkpoint(CPU* cpu, const char *where, uint8_t intnum)
 {
     static char tags[16][48];

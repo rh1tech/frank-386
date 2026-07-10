@@ -25,7 +25,13 @@
 #define RELEASE_UMB 0x11
 
 #define XMS_HANDLES 64
-#define XMS_BASE_PHYS 0x00100000ul
+/*
+ * EMB pool lives ABOVE the HMA. HMA is FFFF:0010..FFFF:FFFF, i.e. physical
+ * 0x100000..0x10FFEF, and is owned by the kernel (DOS=HIGH, buffers).
+ * Handing EMB storage out starting at 0x100000 lets any XMS client
+ * (e.g. FreeCOM swap) overwrite the kernel/buffers in HMA.
+ */
+#define XMS_EMB_BASE_PHYS 0x00110000ul
 
 #define to_physical_offset(offset) (((uint16_t)(((offset) >> 16) & 0xFFFF) << 4) + (uint16_t)((offset) & 0xFFFF))
 
@@ -34,8 +40,87 @@ static inline uint16_t xms_memory_kb(void) {
     return (uint16_t)cmos_read(cpu, 0x17) | ((uint16_t)cmos_read(cpu, 0x18) << 8);
 }
 
+/* Extended memory reported by CMOS starts at 1 MiB and includes the HMA;
+ * the EMB pool excludes the first 64 KiB (HMA). */
+static inline uint32_t emb_pool_size(void) {
+    uint16_t kb = xms_memory_kb();
+    return (kb > 64) ? ((uint32_t)(kb - 64) << 10) : 0;
+}
+
 static inline uint8_t *xms_ptr(uint32_t offset) {
-    return X86_RAM_BASE + XMS_BASE_PHYS + offset;
+    return X86_RAM_BASE + XMS_EMB_BASE_PHYS + offset;
+}
+
+typedef struct {
+    uint32_t base;   /* byte offset inside the EMB pool */
+    uint32_t size;   /* bytes */
+    uint8_t  used;
+    uint8_t  locks;
+} emb_handle_t;
+
+static emb_handle_t emb_handles[XMS_HANDLES + 1]; /* index 0 is never a valid handle */
+
+static int emb_free_handle_count(void) {
+    int n = 0;
+    for (int i = 1; i <= XMS_HANDLES; ++i)
+        if (!emb_handles[i].used) n++;
+    return n;
+}
+
+/* First-fit search for a gap of `size` bytes in the pool. Returns true and
+ * the base offset on success. size == 0 is legal per XMS spec. */
+static bool emb_find_gap(uint32_t size, uint32_t *out_base) {
+    const uint32_t pool = emb_pool_size();
+    if (size > pool)
+        return false;
+    uint32_t cand = 0;
+    bool moved = true;
+    while (moved) {
+        moved = false;
+        for (int i = 1; i <= XMS_HANDLES; ++i) {
+            const emb_handle_t *h = &emb_handles[i];
+            if (!h->used || h->size == 0)
+                continue;
+            if (cand < h->base + h->size && h->base < cand + (size ? size : 1)) {
+                cand = h->base + h->size;
+                moved = true;
+            }
+        }
+        if (cand + size > pool)
+            return false;
+    }
+    *out_base = cand;
+    return true;
+}
+
+static void emb_free_stats(uint32_t *largest, uint32_t *total) {
+    const uint32_t pool = emb_pool_size();
+    uint32_t used = 0;
+    uint32_t big = 0;
+    /* total free */
+    for (int i = 1; i <= XMS_HANDLES; ++i)
+        if (emb_handles[i].used)
+            used += emb_handles[i].size;
+    *total = (pool > used) ? pool - used : 0;
+    /* largest gap: walk gaps between sorted extents (O(n^2), n<=64) */
+    uint32_t cursor = 0;
+    for (;;) {
+        /* find the used extent with the smallest base >= cursor */
+        uint32_t next_base = pool, next_end = pool;
+        for (int i = 1; i <= XMS_HANDLES; ++i) {
+            const emb_handle_t *h = &emb_handles[i];
+            if (h->used && h->size && h->base + h->size > cursor && h->base < next_base) {
+                next_base = h->base;
+                next_end = h->base + h->size;
+            }
+        }
+        if (next_base > cursor && next_base - cursor > big)
+            big = next_base - cursor;
+        if (next_base == pool)
+            break;
+        cursor = (next_end > cursor) ? next_end : cursor + 1;
+    }
+    *largest = big;
 }
 
 /// TODO: remove it on debug finished
@@ -100,6 +185,13 @@ void reset_umb() {
     for (int i = 0; i < UMB_BLOCKS_COUNT; ++i) {
         umb_blocks[i].allocated_paragraphs = 0;
     }
+    umb_blocks_allocated = 0;
+    for (int i = 0; i <= XMS_HANDLES; ++i) {
+        emb_handles[i].used = 0;
+        emb_handles[i].locks = 0;
+        emb_handles[i].base = emb_handles[i].size = 0;
+    }
+    xms_handles = 0;
 }
 
 int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size)
@@ -316,32 +408,58 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             CPU_AX = cpu_get_a20(cpu); // Success
             break;
         case QUERY_EMB: { // 08h
-            uint16_t free_kb = xms_memory_kb();
-            CPU_AX = free_kb;
-            CPU_DX = free_kb; /* total free EMB */
+            uint32_t largest, total;
+            emb_free_stats(&largest, &total);
+            CPU_AX = (uint16_t)(largest >> 10); /* largest free block, KB */
+            CPU_DX = (uint16_t)(total >> 10);   /* total free EMB, KB */
+            CPU_BL = (largest == 0) ? 0xA0 : 0;
+            break;
+        }
+        case ALLOCATE_EMB: { // Allocate Extended Memory Block (Function 09h), DX = size in KB
+            int hnd = 0;
+            for (int i = 1; i <= XMS_HANDLES; ++i)
+                if (!emb_handles[i].used) { hnd = i; break; }
+            if (hnd == 0) {
+                CPU_AX = 0;
+                CPU_BL = 0xA1; /* out of handles */
+                break;
+            }
+            const uint32_t size = (uint32_t)CPU_DX << 10;
+            uint32_t base = 0;
+            if (!emb_find_gap(size, &base)) {
+                CPU_AX = 0;
+                CPU_BL = 0xA0; /* out of memory */
+                break;
+            }
+            emb_handles[hnd].used = 1;
+            emb_handles[hnd].locks = 0;
+            emb_handles[hnd].base = base;
+            emb_handles[hnd].size = size;
+            xms_handles++;
+            CPU_DX = (uint16_t)hnd;
+            CPU_AX = 1;
             CPU_BL = 0;
             break;
         }
-        case ALLOCATE_EMB: // Allocate Extended Memory Block (Function 09h):
-            if (xms_handles + 1 < XMS_HANDLES) {
-                CPU_DX = ++xms_handles;
-                CPU_AX = 1;
-                CPU_BL = 0;
+        case RELEASE_EMB: { // 0Ah, DX = handle
+            const uint16_t hnd = CPU_DX;
+            if (hnd == 0 || hnd > XMS_HANDLES || !emb_handles[hnd].used) {
+                CPU_AX = 0;
+                CPU_BL = 0xA2; /* invalid handle */
                 break;
             }
-            CPU_AX = 0;
-            CPU_BL = 0xA2;
-            break;
-        case RELEASE_EMB:
-            if (xms_handles) {
-                xms_handles--;
-                CPU_AX = 1;
-                CPU_BL = 0;
+            if (emb_handles[hnd].locks) {
+                CPU_AX = 0;
+                CPU_BL = 0xAB; /* block is locked */
                 break;
             }
-            CPU_AX = 0;
-            CPU_BL = 0xA2;
+            emb_handles[hnd].used = 0;
+            emb_handles[hnd].base = emb_handles[hnd].size = 0;
+            if (xms_handles) xms_handles--;
+            CPU_AX = 1;
+            CPU_BL = 0;
             break;
+        }
         case MOVE_EMB: {
             // Move Extended Memory Block (Function 0Bh)
             move_data_t move_data;
@@ -352,23 +470,57 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 struct_offset++;
             }
             
-            printf("XMS MOVE: len=%lu sh=%04x so=%08lx dh=%04x do=%08lx phys_dst=%05lx\n",
-                move_data.length,
+            /* Validate handles / offsets and rebase EMB offsets onto the
+             * per-handle base inside the pool. Real-mode (handle==0) sides
+             * are seg:off far pointers. */
+            uint8_t err = 0;
+            if (move_data.source_handle) {
+                const uint16_t h = move_data.source_handle;
+                if (h > XMS_HANDLES || !emb_handles[h].used)
+                    err = 0xA3; /* invalid source handle */
+                else if (move_data.source_offset + move_data.length > emb_handles[h].size ||
+                         move_data.source_offset + move_data.length < move_data.source_offset)
+                    err = 0xA4; /* invalid source offset */
+                else
+                    move_data.source_offset += emb_handles[h].base;
+            } else {
+                move_data.source_offset = to_physical_offset(move_data.source_offset);
+            }
+            if (!err && move_data.destination_handle) {
+                const uint16_t h = move_data.destination_handle;
+                if (h > XMS_HANDLES || !emb_handles[h].used)
+                    err = 0xA5; /* invalid destination handle */
+                else if (move_data.destination_offset + move_data.length > emb_handles[h].size ||
+                         move_data.destination_offset + move_data.length < move_data.destination_offset)
+                    err = 0xA6; /* invalid destination offset */
+                else
+                    move_data.destination_offset += emb_handles[h].base;
+            } else if (!err) {
+                move_data.destination_offset = to_physical_offset(move_data.destination_offset);
+            }
+            #if XMS_DEBUG
+            printf("XMS MOVE: len=%lu sh=%04x so=%08lx dh=%04x do=%08lx phys_dst=%06lx%s\n",
+                (unsigned long)move_data.length,
                 move_data.source_handle,
                 (unsigned long)move_data.source_offset,
                 move_data.destination_handle,
                 (unsigned long)move_data.destination_offset,
-                (unsigned long)to_physical_offset(move_data.destination_offset));
+                (unsigned long)(move_data.destination_handle
+                    ? XMS_EMB_BASE_PHYS + move_data.destination_offset
+                    : move_data.destination_offset),
+                err ? " REJECTED" : "");
+            #endif
+            if (err) {
+                CPU_AX = 0;
+                CPU_BL = err;
+                break;
+            }
 
             if (!move_data.source_handle && !move_data.destination_handle) {
-                move_data.source_offset = to_physical_offset(move_data.source_offset);
-                move_data.destination_offset = to_physical_offset(move_data.destination_offset);
                 xms_move_mem_to_mem(move_data.destination_offset, move_data.source_offset, move_data.length);
             } else if (!move_data.source_handle) {
-                move_data.source_offset = to_physical_offset(move_data.source_offset);
                 xms_move_to(move_data.destination_offset, move_data.source_offset, move_data.length);
             } else if (!move_data.destination_handle) {
-                move_data.destination_offset = to_physical_offset(move_data.destination_offset);
                 xms_move_from(move_data.source_offset, move_data.destination_offset, move_data.length);
             } else {
                 xms_move_xms_to_xms(move_data.destination_offset, move_data.source_offset, move_data.length);
@@ -443,6 +595,94 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             CPU_AX = 0x0000; // Failure
             CPU_DX = 0x0000;
             CPU_BL = 0xB2; // Error code
+            break;
+        }
+        case LOCK_EMB: { // 0Ch, DX = handle -> DX:BX = 32-bit physical address
+            const uint16_t hnd = CPU_DX;
+            if (hnd == 0 || hnd > XMS_HANDLES || !emb_handles[hnd].used) {
+                CPU_AX = 0;
+                CPU_BL = 0xA2;
+                break;
+            }
+            if (emb_handles[hnd].locks == 0xFF) {
+                CPU_AX = 0;
+                CPU_BL = 0xAC; /* lock count overflow */
+                break;
+            }
+            emb_handles[hnd].locks++;
+            const uint32_t phys = XMS_EMB_BASE_PHYS + emb_handles[hnd].base;
+            CPU_DX = (uint16_t)(phys >> 16);
+            CPU_BX = (uint16_t)(phys & 0xFFFF);
+            CPU_AX = 1;
+            break;
+        }
+        case UNLOCK_EMB: { // 0Dh, DX = handle
+            const uint16_t hnd = CPU_DX;
+            if (hnd == 0 || hnd > XMS_HANDLES || !emb_handles[hnd].used) {
+                CPU_AX = 0;
+                CPU_BL = 0xA2;
+                break;
+            }
+            if (emb_handles[hnd].locks == 0) {
+                CPU_AX = 0;
+                CPU_BL = 0xAA; /* block is not locked */
+                break;
+            }
+            emb_handles[hnd].locks--;
+            CPU_AX = 1;
+            CPU_BL = 0;
+            break;
+        }
+        case EMB_HANDLE_INFO: { // 0Eh, DX = handle -> BH=locks, BL=free handles, DX=size KB
+            const uint16_t hnd = CPU_DX;
+            if (hnd == 0 || hnd > XMS_HANDLES || !emb_handles[hnd].used) {
+                CPU_AX = 0;
+                CPU_BL = 0xA2;
+                break;
+            }
+            CPU_BH = emb_handles[hnd].locks;
+            CPU_BL = (uint8_t)emb_free_handle_count();
+            CPU_DX = (uint16_t)(emb_handles[hnd].size >> 10);
+            CPU_AX = 1;
+            break;
+        }
+        case REALLOCATE_EMB: { // 0Fh, BX = new size KB, DX = handle
+            const uint16_t hnd = CPU_DX;
+            if (hnd == 0 || hnd > XMS_HANDLES || !emb_handles[hnd].used) {
+                CPU_AX = 0;
+                CPU_BL = 0xA2;
+                break;
+            }
+            if (emb_handles[hnd].locks) {
+                CPU_AX = 0;
+                CPU_BL = 0xAB; /* block is locked */
+                break;
+            }
+            const uint32_t new_size = (uint32_t)CPU_BX << 10;
+            emb_handle_t *h = &emb_handles[hnd];
+            if (new_size <= h->size) {
+                h->size = new_size;
+                CPU_AX = 1;
+                CPU_BL = 0;
+                break;
+            }
+            /* try to grow in place: temporarily hide the handle and search */
+            const uint32_t old_base = h->base, old_size = h->size;
+            h->used = 0;
+            uint32_t base = 0;
+            bool ok = emb_find_gap(new_size, &base);
+            h->used = 1;
+            if (!ok) {
+                CPU_AX = 0;
+                CPU_BL = 0xA0; /* out of memory */
+                break;
+            }
+            if (base != old_base && old_size)
+                memmove(xms_ptr(base), xms_ptr(old_base), old_size);
+            h->base = base;
+            h->size = new_size;
+            CPU_AX = 1;
+            CPU_BL = 0;
             break;
         }
         default:

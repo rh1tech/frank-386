@@ -821,11 +821,13 @@ uint32_t wait_loops = 0;
     pc_step(pc, 4096); /// ???
     if ((++wait_loops & 0x3ff) == 0) {
       uint8_t op = getmem8(CPU_CS, CPU_IP);
+      /*
       printf("cpu_far_call wait target=%04x:%04x ret=%04x:%04x "
              "now=%04x:%04x op=%02x SS:SP=%04x:%04x\n",
              seg, off,
              params.expected_cs, params.expected_ip,
              CPU_CS, CPU_IP, op, CPU_SS, CPU_SP);
+      */
     }    
     /*
     if (CPU_CS == params.expected_cs && CPU_IP == params.expected_ip) {
@@ -1180,7 +1182,7 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   /* les bx,[rhp] */
   SET_ES ( FP_SEG(x86_rq) );
   CPU_BX = FP_OFF(x86_rq);
-
+  #if EXEC_DEBUG
   printf("x86_execrh: dh_strategy @ %04x:%04x stack: %04x:%04x\n", hdr_seg, dhp->x86.dh_strategy, CPU_SS, CPU_SP);
   printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n", CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
   printf("x86_execrh: hdr next=%04x:%04x attr=%04x strat=%04x intr=%04x "
@@ -1193,7 +1195,7 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
          getmem8(FP_SEG(x86_rq), FP_OFF(x86_rq) + 2),
          getmem16(FP_SEG(x86_rq), FP_OFF(x86_rq) + 3),
          getmem8(hdr_seg, dhp->x86.dh_strategy + 0), getmem8(hdr_seg, dhp->x86.dh_strategy + 1), getmem8(hdr_seg, dhp->x86.dh_strategy + 2), getmem8(hdr_seg, dhp->x86.dh_strategy + 3), getmem8(hdr_seg, dhp->x86.dh_strategy + 4));
-
+  #endif
   /* push si; push di */
   CPU_SP -= 2;
   writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_SI);
@@ -1209,7 +1211,9 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   CPU_SI = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
   CPU_SP += 2;
 
+  #if EXEC_DEBUG
   printf("x86_execrh: dh_interrupt @ %04x:%04x\n", hdr_seg, dhp->x86.dh_interrupt);
+  #endif
   cpu_far_call(cpu, hdr_seg, dhp->x86.dh_interrupt);
 
   /* sti; cld */
@@ -1223,7 +1227,9 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   CPU_SP += 2;
   CPU_BP = readw86(((uint32_t)CPU_SS << 4) + CPU_SP);
   CPU_SP += 2;
+  #if EXEC_DEBUG
   printf("x86_execrh: done\n");
+  #endif
 }
 
 WORD execrh(/*request*/ dos_far_ptr _rq, /*struct dhdr*/ dos_far_ptr _dhp) {
@@ -1335,7 +1341,7 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
   request* rq;
   char name[8];
 
-  printf("init_device %s, r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
+  //printf("init_device %s, r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
 
   /* rq, and (for C_INIT) a guest-RAM copy of the command line, both
      live on the *guest* stack. The command-line copy matters because
@@ -1422,7 +1428,7 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
     /*   last INIT call which will then be passed as the end address   */
     /*   for the next INIT call.                                       */
     *r_top = rq->r_endaddr;
-  printf("init_device(%s), r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
+    //printf("init_device(%s), r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
   }
 
   if (!(dhp->dh_attr & ATTR_CHAR) && (rq->r_nunits != 0))
@@ -2641,11 +2647,6 @@ STATIC void init_kernel(CPU* cpu)
 
     /* no resident DOS in guest RAM, so top is just below video RAM */
     lpTop = MK_FP((ram_top << 6) - 1, 0);
-    /* DynAlloc() owns DYN_BUFFER_SEG..DYN_BUFFER_SEG+64K outside the
-     * MCB chain.  The pre-MCB top-down KernelAlloc() arena must not
-     * allocate from that reserved guest range either. */
-    if (FP_SEG(lpTop) >= DYN_BUFFER_SEG)
-      lpTop = MK_FP(DYN_BUFFER_SEG, 0);
 
     /* Initialize IO subsystem                                      */
     InitIO();

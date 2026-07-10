@@ -16,6 +16,7 @@ static bios_callback_params_t root = {
 };
 
 #if PDB_DEBUG
+void dpb_watch_check_chain(const char *tag);
 static void dpb_watch_ff_checkpoint(CPU* cpu, const char *where,
                                     bios_callback_params_t *node)
 {

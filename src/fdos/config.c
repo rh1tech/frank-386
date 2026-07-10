@@ -115,14 +115,14 @@ struct instCmds {
 static int numInstallCmds;
 static struct instCmds InstallCommands[MAX_INSTALL_CMDS];
 
-STATIC void config_init_buffers(int wantedbuffers)
+STATIC void config_init_buffers_ex(int wantedbuffers, int allow_hma)
 {
   unsigned buffers = 0;
 
   /* fill HMA with buffers if BUFFERS count >=0 and DOS in HMA        */
   if (wantedbuffers < 0)
     wantedbuffers = -wantedbuffers;
-  else if (HMAState == HMA_DONE)
+  else if (allow_hma && HMAState == HMA_DONE)
     buffers = (0xfff0 - HMAFree) / sizeof(struct buffer);
 
   if (wantedbuffers < 6)         /* min 6 buffers                     */
@@ -141,7 +141,7 @@ STATIC void config_init_buffers(int wantedbuffers)
   dos_far_ptr x86_buffer;
   {
     size_t bytes = sizeof(struct buffer) * buffers;
-    x86_buffer = HMAalloc(bytes);
+    x86_buffer = allow_hma ? HMAalloc(bytes) : MK_FP(0, 0);
 
     if (!FP_SEG(x86_buffer) && !FP_OFF(x86_buffer))
     {
@@ -193,6 +193,11 @@ STATIC void config_init_buffers(int wantedbuffers)
            buffers, buffers * sizeof(struct buffer));
     }
   }
+}
+
+STATIC void config_init_buffers(int wantedbuffers)
+{
+  config_init_buffers_ex(wantedbuffers, 1);
 }
 
 /* Do first time initialization.  Store last so that we can reset it    */
@@ -2159,36 +2164,24 @@ STATIC VOID mumcb_init(UCOUNT seg, UWORD size)
  */
 VOID PreConfig2(VOID)
 {
-  /*
-   * Current fixed guest layout comment in this file says:
-   *   _BSS 019F4h..0240Dh, size 0A1Ah
-   * so DynLast() equivalent is DOS_PSP:240Eh.
-   */
-  dos_far_ptr x86_dyn_last = MK_FP(DOS_PSP, 0x240E);
+  dos_far_ptr x86_dyn_last = DynLast();
   dos_far_ptr x86_first_mcb = AlignParagraph(ADD_OFF(x86_dyn_last, 0x0F));
-  dos_far_ptr x86_sft2;
-  sfttbl *sp;
-
   base_seg = LoL->first_mcb = FP_SEG(x86_first_mcb);
 
   /*
     * ram_top is in Kbytes; MCB size is in paragraphs.
-    * DynAlloc() owns DYN_BUFFER_SEG..DYN_BUFFER_SEG+64K outside the
-    * MCB chain, so the low-memory arena must stop before it.
+    * DynAlloc() data is below first_mcb, as in the original kernel.
     * The MCB itself occupies first_mcb:0000, so usable size is -1.
    */
-  UWORD mcb_top_seg = ram_top * 64;
-  if (mcb_top_seg > DYN_BUFFER_SEG)
-    mcb_top_seg = DYN_BUFFER_SEG;
-  mcb_init(base_seg, mcb_top_seg - LoL->first_mcb - 1, MCB_LAST);
+  mcb_init(base_seg, ram_top * 64 - LoL->first_mcb - 1, MCB_LAST);
 
   /*
    * Built-in firstsftt has 5 SFT entries. Original PreConfig2 appends
    * a second 3-entry SFT block, giving the initial 8 entries expected
    * before PostConfig() allocates the final FILES= block.
    */
-  sp = (sfttbl *)ARM_PTR(LoL->sfthead);
-  x86_sft2 = KernelAlloc(sizeof(sftheader) + 3 * sizeof(sft), 'F', 0);
+  sfttbl *sp = (sfttbl *)ARM_PTR(LoL->sfthead);
+  dos_far_ptr x86_sft2 = KernelAlloc(sizeof(sftheader) + 3 * sizeof(sft), 'F', 0);
   sp->sftt_next = x86_sft2;
 
   sp = (sfttbl *)ARM_PTR(x86_sft2);
@@ -2300,8 +2293,11 @@ VOID PostConfig(VOID)
     LoL->lastdrive = LoL->nblkdev;
 
   CfgDbgPrintf(("starting FAR allocations at %x\n", base_seg));
-  /// TODO: may be move buffers ring to HMA
-///  config_init_buffers(Config.cfgBuffers);
+  /* Original FreeDOS reinitializes buffers here after first_mcb exists.
+   * The preliminary PreConfig() buffers are only temporary.  In this port,
+   * keep the final buffers in low MCB memory for now: HMA buffer placement
+   * is a separate path and conflicts with the current HMA model. */
+  config_init_buffers_ex(Config.cfgBuffers, 0);
 
   /*
    * PreConfig2() appended the second 3-entry SFT block after the
