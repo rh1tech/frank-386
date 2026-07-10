@@ -2697,6 +2697,10 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     DoConfig(0);
     DoConfig(1);
 
+#ifdef WITHLFNAPI
+    /* Persistent LFN helper fnodes belong to resident guest DOS data. */
+    lfnapi_init();
+#endif    
     /* initialize near data and MCBs */
     PreConfig2();
 

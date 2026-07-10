@@ -5227,16 +5227,17 @@ static void i386_reset(CPU* _cpu)
 	for (int i = 0; i < 8; i++) {
 		cpu->seg[i].sel = 0;
 		cpu->seg[i].base = 0;
-		cpu->seg[i].limit = 0;
+		cpu->seg[i].limit = 0xffff;
 		cpu->seg[i].flags = 0;
 	}
-	cpu->seg[2].flags = (1 << 22);
-	cpu->seg[1].flags = (1 << 22);
+//	cpu->seg[2].flags = (1 << 22);
+//	cpu->seg[1].flags = (1 << 22);
 
 	cpu->ip = 0xfff0;
 	cpu->next_ip = cpu->ip; PREFETCH_RESET
 	cpu->seg[SEG_CS].sel = 0xf000;
 	cpu->seg[SEG_CS].base = 0xf0000;
+	cpu->seg[SEG_CS].limit = 0xffff;
 
 	cpu->idt.base = 0;
 	cpu->idt.limit = 0x3ff;

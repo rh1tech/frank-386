@@ -1501,7 +1501,7 @@ STATIC int clear_dir(f_node_ptr fnp, CLUSTER cluster)
   return SUCCESS;
 }
 
-STATIC COUNT extend_dir(f_node_ptr fnp)
+COUNT extend_dir(f_node_ptr fnp)
 {
   int ret;
   CLUSTER cluster = extend(fnp);
