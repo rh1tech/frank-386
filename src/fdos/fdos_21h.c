@@ -521,6 +521,9 @@ bool fdos_21h(CPU* _cpu) {
     internal_data->Int21AX = CPU_AX;
     dpb_watch_int21_checkpoint(cpu, "entry");
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
+    /* STI: real DOS re-enables interrupts first thing in its INT 21h
+       entry stub (FreeDOS entry.asm does "sti" right after the stack switch) */
+    ifl = 1;
     switch (CPU_AH) {
       /* Read Keyboard With Echo                                      */
       case 0x01:
