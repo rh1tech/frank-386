@@ -173,6 +173,7 @@ CLUSTER dos_free(struct dpb FAR * dpbp);
 BOOL dir_exists(char * path);
 VOID dpb16to32(struct dpb FAR *dpbp);
 struct xfreespace;
+UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc);
 COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace* xfsp);
 
 f_node_ptr split_path(const char *, f_node_ptr fnp);
@@ -191,6 +192,11 @@ void dos_merge_file_changes(int fd);
 /* fattab.c */
 void read_fsinfo(struct dpb FAR * dpbp);
 void write_fsinfo(struct dpb FAR * dpbp);
+#ifdef WITHFAT32
+VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp, BOOL extended);
+#else
+VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp);
+#endif
 CLUSTER link_fat(struct dpb FAR * dpbp, CLUSTER Cluster1,
                  REG CLUSTER Cluster2);
 CLUSTER next_cluster(struct dpb FAR * dpbp, REG CLUSTER ClusterNum);
@@ -203,7 +209,9 @@ int DosCharInput(VOID);
 VOID DosDirectConsoleIO(iregs FAR * r);
 VOID DosCharOutput(COUNT c);
 VOID DosDisplayOutput(COUNT c);
-BYTE FAR *FatGetDrvData(UBYTE drive, UBYTE * spc, UWORD * bps,
+/* port note: hands a pointer back to the guest, so it returns a
+   dos_far_ptr into guest memory (see fcbfns.c), not a native BYTE*. */
+dos_far_ptr FatGetDrvData(UBYTE drive, UBYTE * spc, UWORD * bps,
                    UWORD * nc);
 UWORD FcbParseFname(UBYTE *wTestMode, const BYTE FAR *lpFileName, fcb FAR * lpFcb);
 const BYTE FAR *ParseSkipWh(const BYTE FAR * lpFileName);
@@ -344,6 +352,8 @@ UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth);
 
 /* task.c */
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
+void new_psp(seg para, seg cur_psp);        /* INT 21h AH=26h */
+void child_psp(seg para, seg cur_psp, int psize); /* INT 21h AH=55h */
 COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
 COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
 ULONG SftGetFsize(int sft_idx);

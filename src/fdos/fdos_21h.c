@@ -522,7 +522,17 @@ bool fdos_21h(CPU* _cpu) {
     dpb_watch_int21_checkpoint(cpu, "entry");
     uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     /* STI: real DOS re-enables interrupts first thing in its INT 21h
-       entry stub (FreeDOS entry.asm does "sti" right after the stack switch) */
+       entry stub (FreeDOS entry.asm does "sti" right after the stack
+       switch), because the INT dispatch itself cleared IF. This port
+       must do the same: while this native handler runs, any x86
+       stepping it triggers (bios_intcall() polling INT 16h from the
+       CON device, execrh()/cpu_far_call() into loaded drivers, and
+       exec_run_child() for AH=4Bh) inherits the live IF flag - and
+       with IF=0, IRQ1 is never delivered, bios_09h never runs, the
+       BDA keyboard buffer never fills, and every INT 16h AH=01h poll
+       reports "empty" forever (dead keyboard at the COMMAND.COM
+       prompt). The caller's own IF is untouched: it is restored from
+       flags_on_stack by the final IRET, exactly as on real hardware. */
     ifl = 1;
     switch (CPU_AH) {
       /* Read Keyboard With Echo                                      */
@@ -1427,8 +1437,256 @@ bool fdos_21h(CPU* _cpu) {
         cf = 0;
         goto short_check;
 #endif
+      /* ------------------------------------------------------------------
+         Block B (ported from kernel/inthndlr.c): disk / DPB information.
+         ------------------------------------------------------------------ */
+
+      /* Get Default Drive Data                                       */
+      case 0x1b:
+        CPU_DL = 0;
+        /* fall through */
+      /* Get Drive Data                                               */
+      case 0x1c:
+      {
+        UBYTE spc;
+        UWORD bps, nc;
+        dos_far_ptr p = FatGetDrvData(CPU_DL, &spc, &bps, &nc);
+        if (!far_is_null(p))
+        {
+          CPU_AL = spc;
+          CPU_CX = bps;
+          CPU_DX = nc;
+          SET_DS ( FP_SEG(p) );
+          CPU_BX = FP_OFF(p);
+        }
+        else
+          CPU_AL = 0xff;  /* return 0xff on invalid drive */
+        break;
+      }
+
+      /* Get default DPB                                              */
+      case 0x1f:
+      /* Get DPB                                                      */
+      case 0x32:
+      /* r->DL is NOT changed by MS 6.22 */
+      /* INT21/32 is documented to reread the DPB */
+      {
+        int drv = (CPU_DL == 0 || CPU_AH == 0x1f)
+                    ? internal_data->default_drive : CPU_DL - 1;
+        dos_far_ptr dpbp_x86 = get_dpb(drv);
+        struct dpb *dpbp;
+
+        if (far_is_null(dpbp_x86))
+        {
+          internal_data->CritErrCode = -DE_INVLDDRV;
+          CPU_AL = 0xFF;
+          break;
+        }
+        dpbp = (struct dpb *) ARM_PTR (dpbp_x86);
+        /* hazard: no error checking! */
+        flush_buffers(dpbp->dpb_unit);
+        dpbp->dpb_flags = M_CHANGED;  /* force flush and reread of drive BPB/DPB */
+
+#ifdef WITHFAT32
+        if (media_check(dpbp_x86) < 0 || ISFAT32(dpbp))
+#else
+        if (media_check(dpbp_x86) < 0)
+#endif
+        {
+          CPU_AL = 0xff;
+          internal_data->CritErrCode = -DE_INVLDDRV;
+          break;
+        }
+        SET_DS ( FP_SEG(dpbp_x86) );
+        CPU_BX = FP_OFF(dpbp_x86);
+        CPU_AL = 0;
+        break;
+      }
+
+      /* Dos Get Disk Free Space                                      */
+      case 0x36:
+      {
+        UWORD navc, bps, nc;
+        CPU_AX = DosGetFree(CPU_DL, &navc, &bps, &nc);
+        if (CPU_AX != 0xffff)
+        {
+          /* original copies its whole reg frame back, leaving the
+             outputs untouched on error; only assign on success */
+          CPU_BX = navc;
+          CPU_CX = bps;
+          CPU_DX = nc;
+        }
+        break;
+      }
+
+      /* DOS 2+ internal - TRANSLATE BIOS PARAMETER BLOCK TO DRIVE
+         PARAM BLOCK: DS:SI -> BPB, ES:BP -> DPB to fill              */
+      case 0x53:
+#ifdef WITHFAT32
+        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(CPU_DS, CPU_SI)),
+                   (struct dpb *) ARM_PTR (MK_FP(CPU_ES, CPU_BP)),
+                   (CPU_CX == 0x4558 && CPU_DX == 0x4152));
+#else
+        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(CPU_DS, CPU_SI)),
+                   (struct dpb *) ARM_PTR (MK_FP(CPU_ES, CPU_BP)));
+#endif
+        break;
+
+      /* Get/Set disk serial number: original wraps generic IOCTL
+         44h/0Dh with CX=0866h (get) / 0846h (set); the drive travels
+         in BL, which DosDevIOctl's 0Dh path reads directly.          */
+      case 0x69:
+      {
+        int drv = (CPU_BL == 0 ? internal_data->default_drive : CPU_BL - 1);
+        if (CPU_AL < 2)
+        {
+          if (far_is_null(get_cds(drv)))
+          {
+            rc = DE_INVLDDRV;
+            goto error_exit;
+          }
+          if (!far_is_null(get_dpb(drv)))
+          {
+            UWORD saveCX = CPU_CX;
+            CPU_CX = (CPU_AL == 0) ? 0x0866 : 0x0846;
+            CPU_AL = 0x0d;
+            rc = DosDevIOctl();
+            CPU_CX = saveCX;
+            goto short_check;
+          }
+        }
+        goto error_invalid;
+      }
+
+      /* ------------------------------------------------------------------
+         Block A (ported from kernel/inthndlr.c): trivial functions whose
+         state already exists in the port's SDA/LoL.
+         ------------------------------------------------------------------ */
+
+      /* Disk Reset: flush all dirty buffers                          */
+      case 0x0d:
+        flush();
+        break;
+
+      /* Create New PSP: parent template is the CALLER's CS, exactly
+         as in the original (new_psp(lr.DX, r->CS)). The caller's CS
+         sits on the INT frame: SS:SP -> IP, CS, FLAGS.               */
+      case 0x26:
+        new_psp(CPU_DX, readw86((CPU_SS << 4) + CPU_SP + 2));
+        break;
+
+      /* Set Verify Flag                                              */
+      case 0x2e:
+        internal_data->verify_ena = CPU_AL & 1;
+        break;
+
+      /* DosVars - get/set dos variables (original: int21_syscall).
+         Does not touch carry.                                        */
+      case 0x33:
+        switch (CPU_AL)
+        {
+          /* Set Ctrl-C flag; returns DL = break_ena                  */
+          case 0x01:
+            break_ena = CPU_DL & 1;
+            /* fall through so DL only low bit (as in MS-DOS) */
+          /* Get Ctrl-C flag                                          */
+          case 0x00:
+            CPU_DL = break_ena;
+            break;
+          case 0x02:            /* get/set extended control break     */
+          {
+            UBYTE tmp = break_ena;
+            break_ena = CPU_DL & 1;
+            CPU_DL = tmp;
+            break;
+          }
+          /* Get Boot Drive                                           */
+          case 0x05:
+            CPU_DL = LoL->BootDrive;
+            break;
+          /* Get (real) DOS-C version                                 */
+          case 0x06:
+            CPU_BL = LoL->os_major;
+            CPU_BH = LoL->os_minor;
+            CPU_DL = 0;                    /* revision, remaining 0   */
+            CPU_DH = LoL->version_flags;   /* bit3: ROM, bit4: HMA    */
+            break;
+          /* FreeDOS extension: CPU family. Both emulator cores are at
+             least 286-class; keep the conservative answer.           */
+          case 0xfa:
+            CPU_AL = 2;
+            break;
+          /* FreeDOS extension: set version returned by INT 21h/30h   */
+          case 0xfc:
+            LoL->os_setver_major = CPU_BL;
+            LoL->os_setver_minor = CPU_BH;
+            break;
+          /* FreeDOS extension: get release string pointer in DX:AX   */
+          case 0xff:
+            CPU_DX = DOS_PSP;
+            CPU_AX = (UWORD)((char *)LoL->os_release_str -
+                             (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
+            break;
+          default:              /* set AL=0xFF as error, NOT carry    */
+            CPU_AL = 0xff;
+            break;
+        }
+        break;
+
+      /* Get InDOS flag address                                       */
+      case 0x34:
+        SET_ES ( DOS_PSP );
+        CPU_BX = (UWORD)((char *)&internal_data->InDOS -
+                         (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
+        break;
+
+      /* Get Verify Flag                                              */
+      case 0x54:
+        CPU_AL = internal_data->verify_ena;
+        break;
+
+      /* UNDOCUMENTED: create child PSP at DX, memory top in SI       */
+      case 0x55:
+        child_psp(CPU_DX, internal_data->cu_psp, CPU_SI);
+        /* copy command line from the parent (required for some device
+           loaders) */
+        fmemcpy(MK_FP(CPU_DX, 0x80), MK_FP(internal_data->cu_psp, 0x80), 128);
+        internal_data->cu_psp = CPU_DX;
+        break;
+
+      /* Get Extended Error information                               */
+      case 0x59:
+        CPU_AX = internal_data->CritErrCode;
+        CPU_CH = internal_data->CritErrLocus;
+        CPU_BH = internal_data->CritErrClass;
+        CPU_BL = internal_data->CritErrAction;
+        CPU_DI = FP_OFF(internal_data->CritErrDev);
+        SET_ES ( FP_SEG(internal_data->CritErrDev) );
+        break;
+
+      /* DOS 5+ internal (set driver lookahead): original rejects it  */
+      case 0x64:
+        goto error_invalid;
+
       case 0xDD: // Novell NetWare - WORKSTATION - SET NetWare ERROR MODE
         goto error_invalid;
+
+      /* CP/M compatibility functions: genuine no-ops in the original
+         kernel (return AL=0, carry untouched). Kept OUT of default: so
+         they don't trip the unimplemented-function trap below.
+         NOTE (porting plan): the original kernel routes unknown AH here
+         too (default falls through to this group with AL=0). That final
+         switch-over is deliberately postponed to the LAST porting
+         iteration - until then default: stays a hard trap to surface
+         anything still missing. */
+      case 0x18:
+      case 0x1d:
+      case 0x1e:
+      case 0x20:
+      case 0x61:
+      case 0x6b:
+        CPU_AL = 0;
+        break;
 
       default:
         no_handler(_cpu);

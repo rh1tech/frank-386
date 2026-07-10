@@ -159,7 +159,7 @@ STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
 /* base PSP setup shared by every child: copy the parent PSP wholesale
    (matching upstream's new_psp()), then fix up the fields that must
    differ. */
-STATIC void new_psp(seg para, seg cur_psp)
+void new_psp(seg para, seg cur_psp)   /* exported: INT 21h AH=26h */
 {
   psp *p = (psp *) ARM_PTR(MK_FP(para, 0));
 
@@ -170,7 +170,7 @@ STATIC void new_psp(seg para, seg cur_psp)
   p->ps_isv24 = getvec(0x24);
 }
 
-STATIC void child_psp(seg para, seg cur_psp, int psize)
+void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h */
 {
   psp *p = (psp *) ARM_PTR(MK_FP(para, 0));
   psp *q = (psp *) ARM_PTR(MK_FP(cur_psp, 0));
@@ -336,6 +336,18 @@ void request_terminate(UBYTE exit_code, UBYTE exit_type)
   term_exit_code = exit_code;
   term_exit_type = exit_type;
   terminate_flag = true;
+  /* CRITICAL: stop the innermost pc_step() batch *immediately*, the
+     same way intcall_waiter()/cpu_far_call_waiter() do. Without this,
+     the CPU core IRETs back into the just-terminated program (to the
+     byte right after its INT 20h / INT 21h AH=00h/4Ch) and keeps
+     executing whatever garbage follows - for up to the remaining
+     ~4095 instructions of the current pc_step(pc, 4096) batch -
+     because exec_run_child() only checks terminate_flag *between*
+     batches. Programs place the terminate call at the very end of
+     their code, so those bytes are data/nothing, and execution
+     deterministically walks off into the weeds. Both CPU cores
+     (286/cpu.c i286_step() and i386.c) test native_done at the top of
+     every instruction iteration and break out at once. */
   cpu->native_done = true;
 }
 
@@ -377,6 +389,10 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   cpu->native_done = false;
   while (!terminate_flag)
     pc_step(pc, 4096);
+  /* request_terminate() set native_done to abort the batch; clear it,
+     or every subsequent pc_step() (the parent's own stepping, or an
+     outer exec_run_child() loop) would keep breaking out instantly
+     without executing a single instruction. */
   cpu->native_done = false;
   terminate_flag = saved_terminate_flag;
 

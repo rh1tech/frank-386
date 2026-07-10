@@ -258,6 +258,7 @@ set(EMU_CORE_SOURCES
     src/fdos/inithma.c
     src/fdos/dsk.c
     src/fdos/dosfns.c
+    src/fdos/fcbfns.c
     src/fdos/lfnapi.c
     src/fdos/fatfs.c
     src/fdos/fattab.c

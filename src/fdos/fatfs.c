@@ -1091,6 +1091,65 @@ ckok:;
 }
 
 /*
+    dos_free(dpbp) - free cluster count for the drive.
+    Ported verbatim from the original kernel (fatfs.c). Returns the
+    cached dpb_(x)nfreeclst when valid, otherwise walks the FAT via
+    is_free_cluster() (read-only path already migrated in fattab.c),
+    caches the result and, for FAT32, persists it through
+    write_fsinfo(). Needed by DosGetFree() (INT 21h AH=36h) and
+    FatGetDrvData() (AH=1Bh/1Ch).
+*/
+CLUSTER dos_free(struct dpb FAR * dpbp)
+{
+  /* There's an unwritten rule here. All fs       */
+  /* cluster start at 2 and run to max_cluster+2  */
+  REG CLUSTER i;
+  REG CLUSTER cnt;
+  CLUSTER max_cluster = dpbp->dpb_size;
+
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+  {
+    if (dpbp->dpb_xnfreeclst != XUNKNCLSTFREE)
+      return dpbp->dpb_xnfreeclst;
+    max_cluster = dpbp->dpb_xsize;
+  }
+  else
+#endif
+  if (dpbp->dpb_nfreeclst != UNKNCLSTFREE)
+    return dpbp->dpb_nfreeclst;
+
+  cnt = 0;
+  for (i = 2; i <= max_cluster; i++)
+  {
+    if (is_free_cluster(dpbp, i))
+    {
+      if (cnt == 0)
+      {
+        /* update first free cluster number */
+#ifdef WITHFAT32
+        if (ISFAT32(dpbp))
+          dpbp->dpb_xcluster = i;
+        else
+#endif
+          dpbp->dpb_cluster = (UWORD)i;
+      }
+      ++cnt;
+    }
+  }
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+  {
+    dpbp->dpb_xnfreeclst = cnt;
+    write_fsinfo(dpbp);
+    return cnt;
+  }
+#endif
+  dpbp->dpb_nfreeclst = (UWORD)cnt;
+  return cnt;
+}
+
+/*
     media_check(dpbp) - check whether removable media in drive dpbp
     may have been swapped since the last access, and if so, rebuild
     the DPB's BPB-derived fields from the new media.

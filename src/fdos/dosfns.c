@@ -927,6 +927,102 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
   return rc;
 }
 
+/*
+    DosGetFree() - INT 21h AH=36h / AH=1Bh/1Ch backend.
+    Ported from the original kernel (dosfns.c). Port adaptations:
+      - cds/dpb far pointers follow the DosGetExtFree() idiom below
+        (dos_far_ptr for the guest pointer, ARM_PTR() to dereference);
+      - current_ldt lives in the SDA (internal_data->current_ldt) and
+        stores the GUEST pointer, as the rest of the port expects;
+      - CDSNETWDRV: network redirector is stubbed out on this platform
+        (no NIC on the RP2350 target) - a network drive simply reports
+        "invalid drive" (0xffff), which is also what the original does
+        when remote_getfree() fails.
+    navc==NULL means: called from FatGetDrvData, fcbfns.c */
+UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc)
+{
+  struct dpb FAR *dpbp;
+  struct cds FAR *cdsp;
+  dos_far_ptr cdsp_x86, dpbp_x86;
+  UWORD spc;
+
+  /* first check for valid drive          */
+  spc = (UWORD)-1;
+  cdsp_x86 = get_cds(drive == 0 ? internal_data->default_drive : drive - 1);
+  if (far_is_null(cdsp_x86))
+    return spc;
+  cdsp = (struct cds FAR *)ARM_PTR(cdsp_x86);
+
+  internal_data->current_ldt = cdsp_x86;
+  if (cdsp->cdsFlags & CDSNETWDRV)
+  {
+    /* network redirector permanently stubbed on this platform */
+    return spc;
+  }
+
+  dpbp_x86 = cdsp->cdsDpb;
+  if (far_is_null(dpbp_x86))
+    return spc;
+  dpbp = (struct dpb FAR *)ARM_PTR(dpbp_x86);
+
+  if (navc == NULL)
+  {
+    /* hazard: no error checking! */
+    flush_buffers(dpbp->dpb_unit);
+    dpbp->dpb_flags = M_CHANGED;
+  }
+
+  if (media_check(dpbp_x86) < 0)
+    return spc;
+  /* get the data available from dpb      */
+  spc = (dpbp->dpb_clsmask + 1);
+  *bps = dpbp->dpb_secsize;
+
+  /* now tell fs to give us free cluster count */
+#ifdef WITHFAT32
+  if (ISFAT32(dpbp))
+  {
+    ULONG cluster_size, ntotal, nfree = 0;
+
+    /* we shift ntotal until it is equal to or below 0xfff6 */
+    cluster_size = (ULONG) dpbp->dpb_secsize << dpbp->dpb_shftcnt;
+    ntotal = dpbp->dpb_xsize - 1;
+    if (navc != NULL)
+      nfree = dos_free(dpbp);
+    while (ntotal > FAT_MAGIC16 && cluster_size < 0x8000)
+    {
+      cluster_size <<= 1;
+      spc <<= 1;
+      ntotal >>= 1;
+      nfree >>= 1;
+    }
+    /* get the data available from dpb      */
+    *nc = ntotal > FAT_MAGIC16 ? FAT_MAGIC16 : (UCOUNT) ntotal;
+
+    /* now tell fs to give us free cluster count */
+    if (navc != NULL)
+      *navc = nfree > FAT_MAGIC16 ? FAT_MAGIC16 : (UCOUNT) nfree;
+    return spc;
+  }
+#endif
+  /* a passed navc of NULL means: skip free; see FatGetDrvData
+     fcbfns.c */
+  if (navc != NULL)
+    *navc = (UWORD) dos_free(dpbp);
+  *nc = dpbp->dpb_size - 1;
+  if (spc > 64)
+  {
+    /* fake for 64k clusters do confuse some DOS programs, but let
+       others work without overflowing */
+    spc >>= 1;
+    if (navc != NULL)
+      *navc = ((unsigned)*navc < FAT_MAGIC16 / 2) ?
+        ((unsigned)*navc << 1) : FAT_MAGIC16;
+    *nc = ((unsigned)*nc < FAT_MAGIC16 / 2) ? ((unsigned)*nc << 1) : FAT_MAGIC16;
+  }
+  return spc;
+}
+
 #ifdef WITHFAT32
 /* same convention as get_cds1(): drive is 0 for default, 1=A, 2=B, ... */
 dos_far_ptr /*struct dpb*/ GetDriveDPB(UBYTE drive, COUNT *rc)
