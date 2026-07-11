@@ -47,7 +47,12 @@ struct fcom_guest {
   char redirect_command[FCOM_LINE_MAX + 1];
   char redirect_in[128];
   char redirect_out[128];
+  char pipe_left[FCOM_LINE_MAX + 1];
+  char pipe_right[FCOM_LINE_MAX + 1];
+  char pipe_temp[128];
+  UBYTE pipe_depth;
   UBYTE batch_active;
+  UBYTE echo_enabled;
 };
 #pragma pack(pop)
 
@@ -264,6 +269,19 @@ static void clear_screen(CPU *cpu, UWORD command_psp)
 {
   CPU_AX = 0x0003;
   fcom_intcall(cpu, command_psp, 0x10, "FCOM CLS");
+}
+
+
+static void pause_command(CPU *cpu, UWORD command_psp,
+                          struct fcom_guest *g)
+{
+  dos_puts(cpu, command_psp, g,
+           "Press any key to continue . . .");
+
+  CPU_AH = 0x08;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM PAUSE");
+
+  dos_puts(cpu, command_psp, g, "\r\n");
 }
 
 
@@ -670,8 +688,23 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
   }
 
   if (command_is(g->filename, "ECHO")) {
-    dos_puts(cpu, command_psp, g, args);
-    dos_puts(cpu, command_psp, g, "\r\n");
+    if (*args == '\0') {
+      dos_puts(cpu, command_psp, g,
+               g->echo_enabled ? "ECHO is on.\r\n"
+                               : "ECHO is off.\r\n");
+    } else if (strcasecmp(args, "ON") == 0) {
+      g->echo_enabled = 1;
+    } else if (strcasecmp(args, "OFF") == 0) {
+      g->echo_enabled = 0;
+    } else {
+      dos_puts(cpu, command_psp, g, args);
+      dos_puts(cpu, command_psp, g, "\r\n");
+    }
+    return 1;
+  }
+
+  if (command_is(g->filename, "PAUSE")) {
+    pause_command(cpu, command_psp, g);
     return 1;
   }
 
@@ -1807,13 +1840,22 @@ static int execute_command_core(CPU *cpu, UWORD command_psp,
 {
   char *args;
   char *command;
+  int suppress_echo = 0;
   int builtin;
   int rc;
   size_t n;
 
   command = skip_space(line);
-  if (*command == '@')
+  if (*command == '@') {
+    suppress_echo = 1;
     command = skip_space(command + 1);
+  }
+
+  if (g->batch_active && g->echo_enabled &&
+      !suppress_echo && *command != '\0' && *command != ':') {
+    dos_puts(cpu, command_psp, g, command);
+    dos_puts(cpu, command_psp, g, "\r\n");
+  }
 
   if (strncasecmp(command, "REM", 3) == 0 &&
       (command[3] == '\0' || command[3] == ' ' || command[3] == '\t'))
@@ -1904,13 +1946,176 @@ static int execute_command_core(CPU *cpu, UWORD command_psp,
 }
 
 
+
+static int split_pipe_command(struct fcom_guest *g, const char *line)
+{
+  const char *p = line;
+  const char *pipe = NULL;
+  int quoted = 0;
+  size_t left_len;
+  size_t right_len;
+
+  while (*p != '\0') {
+    if (*p == '"') {
+      quoted = !quoted;
+    } else if (!quoted && *p == '|') {
+      pipe = p;
+      break;
+    }
+    ++p;
+  }
+
+  if (pipe == NULL)
+    return 0;
+
+  left_len = (size_t)(pipe - line);
+  while (left_len != 0 &&
+         (line[left_len - 1] == ' ' || line[left_len - 1] == '\t'))
+    --left_len;
+
+  ++pipe;
+  while (*pipe == ' ' || *pipe == '\t')
+    ++pipe;
+  right_len = strlen(pipe);
+
+  if (left_len == 0 || right_len == 0 ||
+      left_len >= sizeof(g->pipe_left) ||
+      right_len >= sizeof(g->pipe_right))
+    return -1;
+
+  memcpy(g->pipe_left, line, left_len);
+  g->pipe_left[left_len] = '\0';
+  memcpy(g->pipe_right, pipe, right_len + 1);
+  return 1;
+}
+
+static int dos_delete_file(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g, const char *name)
+{
+  size_t n = strlen(name);
+
+  if (n >= sizeof(g->path))
+    return -3;
+
+  memcpy(g->path, name, n + 1);
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+  CPU_AH = 0x41;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM delete pipe temp");
+  return int21_failed(cpu) ? -(int)CPU_AX : 0;
+}
+
+static void build_pipe_temp_name(UWORD command_psp, struct fcom_guest *g)
+{
+  snprintf(g->pipe_temp, sizeof(g->pipe_temp),
+           "FC%04X%02X.TMP", command_psp, (unsigned)g->pipe_depth);
+}
+
+static int execute_pipeline(CPU *cpu, UWORD command_psp,
+                            struct fcom_guest *g,
+                            const char *left, const char *right)
+{
+  int saved_stdout = -1;
+  int saved_stdin = -1;
+  int handle;
+  int rc = 0;
+  int left_rc;
+  int right_rc;
+
+  ++g->pipe_depth;
+  build_pipe_temp_name(command_psp, g);
+  (void)dos_delete_file(cpu, command_psp, g, g->pipe_temp);
+
+  saved_stdout = dos_dup_handle(cpu, command_psp, 1);
+  if (saved_stdout < 0)
+    goto failed;
+
+  handle = dos_create_file(cpu, command_psp, g, g->pipe_temp);
+  if (handle < 0)
+    goto failed;
+
+  if (dos_force_dup(cpu, command_psp, (UWORD)handle, 1) < 0) {
+    fcom_close(cpu, command_psp, (UWORD)handle);
+    goto failed;
+  }
+  fcom_close(cpu, command_psp, (UWORD)handle);
+
+  left_rc = execute_command_line(cpu, command_psp, g, (char *)left);
+
+  (void)dos_force_dup(cpu, command_psp, (UWORD)saved_stdout, 1);
+  fcom_close(cpu, command_psp, (UWORD)saved_stdout);
+  saved_stdout = -1;
+
+  if (left_rc < 0) {
+    rc = left_rc;
+    goto cleanup;
+  }
+
+  saved_stdin = dos_dup_handle(cpu, command_psp, 0);
+  if (saved_stdin < 0)
+    goto failed;
+
+  handle = dos_open_mode(cpu, command_psp, g, g->pipe_temp, 0);
+  if (handle < 0)
+    goto failed;
+
+  if (dos_force_dup(cpu, command_psp, (UWORD)handle, 0) < 0) {
+    fcom_close(cpu, command_psp, (UWORD)handle);
+    goto failed;
+  }
+  fcom_close(cpu, command_psp, (UWORD)handle);
+
+  right_rc = execute_command_line(cpu, command_psp, g, (char *)right);
+  rc = right_rc;
+
+cleanup:
+  if (saved_stdin >= 0) {
+    (void)dos_force_dup(cpu, command_psp, (UWORD)saved_stdin, 0);
+    fcom_close(cpu, command_psp, (UWORD)saved_stdin);
+  }
+  if (saved_stdout >= 0) {
+    (void)dos_force_dup(cpu, command_psp, (UWORD)saved_stdout, 1);
+    fcom_close(cpu, command_psp, (UWORD)saved_stdout);
+  }
+  build_pipe_temp_name(command_psp, g);
+  (void)dos_delete_file(cpu, command_psp, g, g->pipe_temp);
+  --g->pipe_depth;
+  return rc;
+
+failed:
+  if (saved_stdin >= 0) {
+    (void)dos_force_dup(cpu, command_psp, (UWORD)saved_stdin, 0);
+    fcom_close(cpu, command_psp, (UWORD)saved_stdin);
+  }
+  if (saved_stdout >= 0) {
+    (void)dos_force_dup(cpu, command_psp, (UWORD)saved_stdout, 1);
+    fcom_close(cpu, command_psp, (UWORD)saved_stdout);
+  }
+  build_pipe_temp_name(command_psp, g);
+  (void)dos_delete_file(cpu, command_psp, g, g->pipe_temp);
+  --g->pipe_depth;
+  dos_puts(cpu, command_psp, g, "Pipe failed\r\n");
+  return 0;
+}
+
+
 static int execute_command_line(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g, char *line)
 {
   int append_output;
   int saved_stdin;
   int saved_stdout;
+  int pipe_state;
   int rc;
+
+  pipe_state = split_pipe_command(g, line);
+  if (pipe_state < 0) {
+    dos_puts(cpu, command_psp, g, "Invalid pipe\r\n");
+    return 0;
+  }
+  if (pipe_state > 0)
+    return execute_pipeline(cpu, command_psp, g,
+                            g->pipe_left, g->pipe_right);
 
   if (parse_redirections(g, line, &append_output) < 0) {
     dos_puts(cpu, command_psp, g, "Invalid redirection\r\n");
@@ -2095,6 +2300,7 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode)
 
   g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
   memset(g, 0, sizeof(*g));
+  g->echo_enabled = 1;
   init_stack_guard(command_psp);
 
   dos_printf("FCOM: PSP=%04x parent=%04x data=%04x..%04x "
