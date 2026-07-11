@@ -4667,7 +4667,7 @@ static bool IRAM_ATTR call_isr(CPUI386 *cpu, int no, bool pusherr, int ext)
 	}
 	#endif
 	if (!(cpu->cr0 & 1)) {
-#if 0
+#if BIOS_DEBUG
 u16 prev_cs = cpu->seg[SEG_CS].base;
 u16 prev_ip = cpu->next_ip;
 #endif
@@ -4697,7 +4697,7 @@ u16 prev_ip = cpu->next_ip;
 		cpu->next_ip = newip; PREFETCH_RESET
 		cpu->ip = newip;
 		cpu->flags &= ~(IF|TF);
-		#if 0
+		#if BIOS_DEBUG
     	if (no != 0x10 && no != 0x1C && no != 0x08) {
         	char buf[80];
         	snprintf(buf, 79, "INT %02Xh DOS? %05X+%04X->%05X+%04X AX:%04X  ",

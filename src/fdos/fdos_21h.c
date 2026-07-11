@@ -2052,7 +2052,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
 
       default:
-        no_handler(_cpu);
+        /// no_handler(_cpu);
+        goto error_invalid;
     }
     goto exit_dispatch;
 

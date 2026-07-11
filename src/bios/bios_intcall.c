@@ -32,6 +32,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
         .owner = owner
     };
     set_bios_callback(cpu, &params, true);
+#if BIOS_DEBUG
     if (intnum != 0x1C) {
         char buf[80];
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
@@ -40,6 +41,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
         snprintf(buf, 79, "INT %02Xh ARM? %04X:%04X->%04X:%04X AX:%04X  ", intnum, cs, ip, params.expected_cs, params.expected_ip, CPU_AX);
         print_line(buf, 0);
     }
+#endif
     // to handle IRET by intcall_waiter:
     SET_CS ( params.expected_cs ); // -> FFEFF
     SET_IP ( params.expected_ip );

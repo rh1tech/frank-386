@@ -386,7 +386,7 @@ static INLINE void decodeflagsword(CPU* cpu, uint16_t x) {
 }
 
 static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
-    #if 1
+    #if BIOS_DEBUG
     if (intnum != 0x10 && intnum != 0x1C && intnum != 0x08) {
         char buf[80];
         u16 new_cs = getmem16(0, (uint16_t) intnum * 4 + 2);
@@ -971,7 +971,9 @@ static void dpb_watch_native_checkpoint(CPU* cpu, const char *where, uint8_t int
 
 /// TODO: inline
 bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
+#if BIOS_DEBUG
     print_line2("BIOS", 0, 8);
+#endif
     dpb_watch_native_checkpoint(cpu, "entry", intnum);
     bool res = handlers[intnum](cpu);
     dpb_watch_native_checkpoint(cpu, "exit", intnum);

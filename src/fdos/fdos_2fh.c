@@ -723,6 +723,10 @@ bool fdos_2fh(CPU* cpu) {
         // AX = 1700h if this version of WINOLDAP doesn't support clipboard
         //CPU_AX = 0x1700;
     } else
+    if (CPU_AX == 0x4B02 && CPU_BX == 0x0000) {
+        SET_ES (0); CPU_DI = 0; // ES:DI = 0000h:0000h if task switcher not loaded
+        cf = 1;
+    } else
     if (CPU_AX == 0xAE00) {
         /*
         * INT 2F/AX=AE00h - DOS 3.3+ internal
@@ -763,7 +767,8 @@ bool fdos_2fh(CPU* cpu) {
     }
     else { 
         /// TODO:
-         no_handler(cpu);
+        /// no_handler(cpu);
+        cf = 1;
     }
     return true;
 }

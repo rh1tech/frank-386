@@ -1486,6 +1486,7 @@ void bios_post(PC *pc) {
 // DOS (set it later, if required):
 	point2iret(0x20);
 	point2iret(0x21);
+	point2iret(0x28); // Idle
 	point2iret(0x29);
 	point2iret(0x2f);
 // MS MOUSE
