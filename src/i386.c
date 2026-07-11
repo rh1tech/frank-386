@@ -3019,12 +3019,40 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	uword cx = lreg ## ABIT(1); \
 	while (cx) { \
 		TRY(translate ## BIT(cpu, &memls, 1, curr_seg, lreg ## ABIT(6))); \
+		if (memls.addr1 % (BIT / 8)) { \
 			/* slow path */ \
 			while (lreg ## ABIT(1)) { \
 				ldsioutdx(BIT, ABIT) \
 				sreg ## ABIT(1, lreg ## ABIT(1) - 1); \
 			} \
 			break; \
+		} \
+		uword count = cx; \
+		int counts; \
+		if (dir > 0) \
+			counts = (4096 - (memls.addr1 & 4095)) / (BIT / 8); \
+		else \
+			counts = 1 + (memls.addr1 & 4095) / (BIT / 8); \
+		if (counts < count) \
+			count = counts; \
+		if (cpu->cb.io_write_string && dir > 0 && (memls.addr1 | 4095) < phys_mem_size && !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
+			int count1 = cpu->cb.io_write_string( cpu->cb.io, lreg16(2), memls.addr1, BIT / 8, count); \
+			if (count1 > 0) { \
+				count = count1; \
+				sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \
+				sreg ## ABIT(1, cx - count); \
+				cx = lreg ## ABIT(1); \
+				continue; \
+			} \
+		} \
+		for (uword i = 0; i < count; i++) { \
+			ax = laddr ## BIT(&memls); \
+			cpu->cb.io_write ## BIT( cpu->cb.io, lreg16(2), ax); \
+			memls.addr1 += dir; \
+		} \
+		sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \
+		sreg ## ABIT(1, cx - count); \
+		cx = lreg ## ABIT(1); \
 	}
 
 #define OUTS_helper(BIT) \
