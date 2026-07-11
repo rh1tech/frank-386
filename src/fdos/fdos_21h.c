@@ -1070,8 +1070,18 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
 
       case 0x52: { // DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
-          SET_ES (DOS_PSP);
-          CPU_BX = 0x08F0 + 0x26; // see MARK0026H
+          /*
+          * DOS 2+ GET LIST OF LISTS.
+          *
+          * Return ES:BX pointing at LoL->DPBp (MARK0026H).
+          * Documented consumers access:
+          *
+          *   ES:[BX-2] = first MCB segment
+          *
+          * Do not duplicate the fixed-data and structure offsets here.
+          */
+          SET_ES(FP_SEG(x86_FIXED_DATA));
+          CPU_BX = FP_OFF(x86_FIXED_DATA) + offsetof(struct lol, DPBp); // see MARK0026H
         }
         break;
 // 53h — Translate BIOS
@@ -1294,6 +1304,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             cf = 0;
             break;
           case 0x01:            /* set allocation strategy */
+#ifdef INT21_DIAG
+            printf("STRAT 5801 bl=%02x by %04x:%04x\n", CPU_BL,
+                   readw86((CPU_SS << 4) + CPU_SP + 2),
+                   readw86((CPU_SS << 4) + CPU_SP));
+#endif
             if (CPU_BL != FIRST_FIT && CPU_BL != BEST_FIT && CPU_BL != LAST_FIT &&
                 CPU_BL != FIRST_FIT_UO && CPU_BL != BEST_FIT_UO && CPU_BL != LAST_FIT_UO &&
                 CPU_BL != FIRST_FIT_U && CPU_BL != BEST_FIT_U && CPU_BL != LAST_FIT_U)
@@ -1309,16 +1324,39 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             }
             break;
           case 0x02:            /* get UMB link state */
-            CPU_AL = LoL->uppermem_link & 1;
+            CPU_AL = LoL->uppermem_link;
             cf = 0;
             break;
           case 0x03:            /* set UMB link state */
-            DosUmbLink(CPU_BX ? 1 : 0);
+#ifdef INT21_DIAG
+            printf("LINK 5803 bx=%04x (was %u, root=%04x) by %04x:%04x\n",
+                   CPU_BX, LoL->uppermem_link & 1, LoL->uppermem_root,
+                   readw86((CPU_SS << 4) + CPU_SP + 2),
+                   readw86((CPU_SS << 4) + CPU_SP));
+#endif
+            /*
+             * FreeDOS accepts only BX=0 (unlink) and BX=1 (link).
+             * Do not silently normalize every non-zero value to 1.
+             */
+            if (CPU_BX > 1 || LoL->uppermem_root == 0xffff)
+            {
+              CPU_AX = (UWORD)-DE_INVLDFUNC;
+              cf = 1;
+            }
+            else
+            {
+              DosUmbLink(CPU_BX);
+              cf = 0;
+            }
+#ifdef INT21_DIAG
+            printf("LINK done: link=%u\n", LoL->uppermem_link & 1);
+            if (CPU_BX)
+              mcb_dump_chain();
+#endif
             cf = 0;
             break;
           default:
-            rc = DE_INVLDFUNC;
-            CPU_AX = (UWORD) (-rc);
+            CPU_AX = (UWORD)-DE_INVLDFUNC;
             cf = 1;
         }
         break;
@@ -2052,8 +2090,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
 
       default:
-        /// no_handler(_cpu);
-        goto error_invalid;
+        no_handler(_cpu);
     }
     goto exit_dispatch;
 

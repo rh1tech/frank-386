@@ -410,3 +410,4 @@ VOID ASMCFUNC exec_user(iregs FAR * irp, int disable_a20);
 
 #define ASSERT_CONST(x) { typedef struct { char _xx[x ? 1 : -1]; } xx ; }
 
+void mcb_dump_chain(void);

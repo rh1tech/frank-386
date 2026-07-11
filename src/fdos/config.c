@@ -658,6 +658,13 @@ STATIC void umb_init(void)
     ram_top = pload16(0x413); /// it was init_oem();
     LoL->uppermem_root = ram_top * 64 - 1;
 
+#ifdef INT21_DIAG
+    printf("UMBINIT ram_top=%u root=%04x base_seg=%04x zsize=%04x zend=%04x umb=%04x+%04x\n",
+           ram_top, LoL->uppermem_root, base_seg,
+           para2far(base_seg)->m_size,
+           (UWORD)(base_seg + 1 + para2far(base_seg)->m_size),
+           umb_seg, umb_size);
+#endif
     /* create link mcb (below) */
     para2far(base_seg)->m_type = MCB_NORMAL;
     para2far(base_seg)->m_size--;

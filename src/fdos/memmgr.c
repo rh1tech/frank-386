@@ -119,14 +119,15 @@ searchAgain:
   }
 
   /* Search through memory blocks */
+  {
 #ifdef INT21_DIAG
-{
   int diag_hops = 0;
 #endif
   for (;;)
   {
     /* check for corruption */
-    if (!mcbValid(p)) {
+    if (!mcbValid(p))
+    {
 #ifdef INT21_DIAG
       printf("MCB DESTROYED at %04x: type=%02x psp=%04x size=%04x\n",
              pseg, p->m_type, p->m_psp, p->m_size);
@@ -145,6 +146,7 @@ searchAgain:
       return DE_MCBDESTRY;
     }
 #endif
+
     if (mcbFree(p))
     {                            /* unused block, check if it applies to the rule */
       if (joinMCBs(pseg) != SUCCESS)    /* join following unused blocks */
@@ -199,9 +201,8 @@ searchAgain:
     pseg = nxtMCBseg(pseg, p);   /* advance to next MCB */
     p = para2far(pseg);
   }
-#ifdef INT21_DIAG
-}
-#endif
+  }
+
   if (mode == LARGEST && biggestSeg && biggestSeg->m_size >= size)
   {
     foundSeg = biggestSeg;
@@ -440,7 +441,28 @@ void DosUmbLink(unsigned n)
       q->m_type = MCB_LAST;
   }
   else if (p->m_type == MCB_LAST)
+  {
+    /* Linking flips the last conventional 'Z' block to 'M', which
+       makes the chain walk cross the SEAM into the bridge MCB at
+       uppermem_root for the first time. Validate the seam BEFORE
+       flipping: nxtMCB of this block must land exactly on a valid
+       MCB (the bridge). If the seam is broken (e.g. the block was
+       cropped by a device driver after PreConfig2 sized it, or
+       ram_top drifted), linking would corrupt every later walk -
+       the 'lh'-breaks-everything signature. Refuse to link instead:
+       high-loads then degrade to conventional memory gracefully. */
+    seg link_next = nxtMCBseg(pseg, p);
+    if (link_next != LoL->uppermem_root || !mcbValid(para2far(link_next)))
+    {
+#ifdef INT21_DIAG
+      printf("UMB SEAM BROKEN: Z at %04x size=%04x -> next %04x, root=%04x\n",
+             pseg, p->m_size, link_next, LoL->uppermem_root);
+      mcb_dump_chain();
+#endif
+      return;                    /* keep 'Z', keep link state = 0 */
+    }
     p->m_type = MCB_NORMAL;
+  }
   else
     return;
 

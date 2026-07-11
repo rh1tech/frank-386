@@ -98,7 +98,7 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   unsigned char njoined;       /* 34 number of joined devices             */
   unsigned short specialptr;   /* 35 pointer to list of spec. prog(unused)*/
   dos_far_ptr setverPtr;       /* 37 pointer to SETVER list               */
-  void (*a20ptr)(void);        /* 3b pointer to fix A20 ctrl           ???   */
+  u16 a20pt;                   /* 3b near pointer to fix A20 ctrl         */ /// TODO: may be some impl. is required
   unsigned short recentpsp;    /* 3d PSP of most recently exec'ed prog    */
   unsigned short nbuffers;     /* 3f Number of buffers                    */
   unsigned short nlookahead;   /* 41 Number of lookahead buffers          */
@@ -133,7 +133,7 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   unsigned short winInstanced; /* WinInit called                          */
   unsigned long  winStartupInfo[4];
   unsigned short instanceTable[5];
-  char os_release_str[10];
+  char os_release_str[12];
   char aux_str[4];
   char con_str[4];
   char prn_str[4];
@@ -165,8 +165,17 @@ _first_mcb      dw      0               ;-0002 Start of user memory
   /// adjust to sizeof(struct lol) to 1FBh, just to show reusable bytes
   BYTE _free_pad[2];
 };
-_Static_assert(offsetof(struct lol, DPBp) == 0x26, "LoL start offset looks incorrect, DPBp should be on +0x26");
-_Static_assert(offsetof(struct lol, firstsftt) == 0xCC, "firstsftt start offset looks incorrect, firstsftt should be on +0xCC");
+/*
+ * INT 21h/AH=52h exposes this binary layout to TSRs and command
+ * interpreters.  FreeCOM LOADHIGH reads first_mcb through ES:[BX-2]
+ * and accesses several later fields directly.
+ */
+_Static_assert(offsetof(struct lol, first_mcb)     == 0x24, "LoL ABI: first_mcb must be at MARK0026H-2");
+_Static_assert(offsetof(struct lol, DPBp)          == 0x26, "LoL ABI: DPBp/MARK0026H must be at 0x26");
+_Static_assert(offsetof(struct lol, a20pt)         == 0x61, "LoL ABI: a20ptr must be at MARK0026H+0x3B");
+_Static_assert(offsetof(struct lol, uppermem_link) == 0x89, "LoL ABI: uppermem_link must be at MARK0026H+0x63");
+_Static_assert(offsetof(struct lol, uppermem_root) == 0x8C, "LoL ABI: uppermem_root must be at MARK0026H+0x66");
+_Static_assert(offsetof(struct lol, firstsftt)     == 0xCC, "firstsftt start offset looks incorrect, firstsftt should be on +0xCC");
 _Static_assert(sizeof(sft) == 59, "sft size must match original 59-byte SFT entry");
 _Static_assert(sizeof(sftheader) == 6, "sftheader must be 6 bytes");
 _Static_assert(offsetof(struct lol, sft_table) == 0xCC + sizeof(sftheader), "built-in SFT table must follow firstsftt header");
