@@ -712,6 +712,17 @@ bool fdos_2fh(CPU* cpu) {
         .owner = "INT 2fH"
     };
 
+    /*
+     * Windows enhanced-mode installation check.
+     * No Windows/386 or Windows 3.x enhanced mode is running.
+     */
+    if (CPU_AX == 0x1600) {
+        CPU_AL = 0x00;
+    } else
+    if (CPU_AX == 0x1700) {
+        // AX = 1700h if this version of WINOLDAP doesn't support clipboard
+        //CPU_AX = 0x1700;
+    } else
     if (CPU_AX == 0xAE00) {
         /*
         * INT 2F/AX=AE00h - DOS 3.3+ internal
