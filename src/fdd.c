@@ -435,6 +435,8 @@ static int fdc_dma_handler(void *opaque, int nchan, int dma_pos, int dma_len)
                 if (fr != FR_OK) goto dma_error;
                 fr = f_write(fil, s->sector_buf, FDC_SECTOR_SIZE, &bw);
                 if (fr != FR_OK || bw != FDC_SECTOR_SIZE) goto dma_error;
+                fr = f_sync(fil);
+                if (fr != FR_OK) goto dma_error;
             }
 
             /* Advance CHS to next sector */
@@ -719,9 +721,11 @@ static void fdc_execute_command(FDCState *s)
                 uint32_t off = fdc_chs_to_offset(dn, cyl, head, sec);
                 if (off == (uint32_t)-1) continue;
                 UINT bw;
-                if (f_lseek(fil, off) == FR_OK)
-                    f_write(fil, s->sector_buf, FDC_SECTOR_SIZE, &bw);
-            }
+                if (f_lseek(fil, off) != FR_OK)
+                    break;
+                if (f_write(fil, s->sector_buf, FDC_SECTOR_SIZE, &bw) != FR_OK || bw != FDC_SECTOR_SIZE)
+                    break;            }
+            f_sync(fil);
         }
         {
             uint8_t st0 = (head ? ST0_HD : 0) | (uint8_t)(dn & ST0_DS);

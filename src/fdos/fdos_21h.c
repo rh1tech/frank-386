@@ -1210,6 +1210,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           UWORD asize = 0;
 
           rc = DosMemAlloc(CPU_BX, internal_data->mem_access_mode, &para, &asize);
+#ifdef INT21_DIAG
+          printf("MEM 48 by %04x:%04x bx=%04x -> rc=%d seg=%04x max=%04x\n",
+                 readw86((CPU_SS << 4) + CPU_SP + 2),
+                 readw86((CPU_SS << 4) + CPU_SP),
+                 CPU_BX, rc, (UWORD)(para + 1), asize);
+#endif
           if (rc < SUCCESS)
           {
             CPU_BX = asize;
@@ -1227,6 +1233,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* Free memory                                                  */
       case 0x49:
         rc = DosMemFree(CPU_ES - 1);
+#ifdef INT21_DIAG
+        printf("MEM 49 by %04x:%04x es=%04x -> rc=%d\n",
+               readw86((CPU_SS << 4) + CPU_SP + 2),
+               readw86((CPU_SS << 4) + CPU_SP), CPU_ES, rc);
+#endif
         if (rc < SUCCESS)
         {
           CPU_AX = (UWORD) (-rc);
@@ -1241,6 +1252,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           UWORD maxsize = 0;
 
           rc = DosMemChange(CPU_ES, CPU_BX, &maxsize);
+#ifdef INT21_DIAG
+          printf("MEM 4A by %04x:%04x es=%04x bx=%04x -> rc=%d max=%04x\n",
+                 readw86((CPU_SS << 4) + CPU_SP + 2),
+                 readw86((CPU_SS << 4) + CPU_SP),
+                 CPU_ES, CPU_BX, rc, maxsize);
+#endif
           if (rc < SUCCESS)
           {
             CPU_BX = maxsize;

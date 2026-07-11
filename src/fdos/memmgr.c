@@ -51,6 +51,31 @@ STATIC COUNT joinMCBs(seg para)
   return SUCCESS;
 }
 
+#ifdef INT21_DIAG
+/* Dump both MCB chains (conventional + UMB) - capped, cycle-safe. */
+void mcb_dump_chain(void)
+{
+  int pass;
+  for (pass = 0; pass < 2; pass++)
+  {
+    seg pseg = pass ? LoL->uppermem_root : LoL->first_mcb;
+    int n;
+    if (pass && (pseg == 0 || pseg == 0xffff))
+      break;
+    printf("MCB chain (%s):\n", pass ? "UMB" : "low");
+    for (n = 0; n < 64; n++)
+    {
+      mcb *p = para2far(pseg);
+      printf("  %04x: '%c' psp=%04x size=%04x\n",
+             pseg, (p->m_type >= ' ' && p->m_type < 127) ? p->m_type : '?',
+             p->m_psp, p->m_size);
+      if (p->m_type == MCB_LAST || !mcbValid(p))
+        break;
+      pseg = nxtMCBseg(pseg, p);
+    }
+  }
+}
+#endif
 /*
  * Allocate a new memory area. *para is assigned to the segment of the
  * MCB itself, not the segment of the data portion (i.e. the usable
@@ -94,12 +119,32 @@ searchAgain:
   }
 
   /* Search through memory blocks */
+#ifdef INT21_DIAG
+{
+  int diag_hops = 0;
+#endif
   for (;;)
   {
     /* check for corruption */
-    if (!mcbValid(p))
+    if (!mcbValid(p)) {
+#ifdef INT21_DIAG
+      printf("MCB DESTROYED at %04x: type=%02x psp=%04x size=%04x\n",
+             pseg, p->m_type, p->m_psp, p->m_size);
+      mcb_dump_chain();
+#endif
       return DE_MCBDESTRY;
-
+    }
+#ifdef INT21_DIAG
+    /* mcbValid() can't catch a CYCLE (sizes forming a loop): without
+       this guard a cycle spins DosMemAlloc forever - the silent-hang
+       signature. Turn it into data. */
+    if (++diag_hops > 4096)
+    {
+      printf("MCB CHAIN CYCLE suspected (4096 hops) at %04x\n", pseg);
+      mcb_dump_chain();
+      return DE_MCBDESTRY;
+    }
+#endif
     if (mcbFree(p))
     {                            /* unused block, check if it applies to the rule */
       if (joinMCBs(pseg) != SUCCESS)    /* join following unused blocks */
@@ -154,7 +199,9 @@ searchAgain:
     pseg = nxtMCBseg(pseg, p);   /* advance to next MCB */
     p = para2far(pseg);
   }
-
+#ifdef INT21_DIAG
+}
+#endif
   if (mode == LARGEST && biggestSeg && biggestSeg->m_size >= size)
   {
     foundSeg = biggestSeg;
