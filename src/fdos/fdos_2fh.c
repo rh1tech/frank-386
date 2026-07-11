@@ -522,7 +522,30 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             } else if (!move_data.source_handle) {
                 xms_move_to(move_data.destination_offset, move_data.source_offset, move_data.length);
             } else if (!move_data.destination_handle) {
-                xms_move_from(move_data.source_offset, move_data.destination_offset, move_data.length);
+                const uint32_t src = move_data.source_offset;
+                const uint32_t dst = move_data.destination_offset;
+                const uint32_t len = move_data.length;
+                xms_move_from(src, dst, len);
+#if XMS_DEBUG
+                uint32_t first_bad = len;
+                for (uint32_t i = 0; i < len; ++i) {
+                    uint8_t expected = *xms_ptr(src + i);
+                    uint8_t actual = read86(dst + i);
+                    if (expected != actual) {
+                        first_bad = i;
+                        printf("XMS RESTORE MISMATCH:"
+                               " off=%08lx src=%02x dst=%02x"
+                               " phys=%06lx\n",
+                               (unsigned long)i,
+                               expected, actual,
+                               (unsigned long)(dst + i));
+                        break;
+                    }
+                }
+                if (first_bad == len)
+                    printf("XMS RESTORE VERIFIED: len=%lu dst=%06lx\n",
+                           (unsigned long)len, (unsigned long)dst);
+#endif
             } else {
                 xms_move_xms_to_xms(move_data.destination_offset, move_data.source_offset, move_data.length);
             }

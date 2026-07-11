@@ -1556,6 +1556,77 @@ error:
   CfgFailure(pLine);
 }
 
+/* Resident placeholder for a memory manager implemented by the host.
+ *
+ * Some DOS diagnostics enumerate the device chain instead of probing the
+ * XMS/EMS APIs.  Keep a real DOS allocation and a valid character-device
+ * header in that chain even though the guest manager itself is skipped.
+ * The tiny x86 stubs accept any request and complete it successfully. */
+#pragma pack(push, 1)
+struct fake_memmgr_driver
+{
+  struct dhdr hdr;
+  UBYTE strategy[11];
+  UBYTE interrupt[26];
+  UWORD request_off;
+  UWORD request_seg;
+};
+#pragma pack(pop)
+
+STATIC BOOL InstallFakeMemMgr(const char devname[8], const char mcbname[8], COUNT mode)
+{
+  const size_t bytes = sizeof(struct fake_memmgr_driver);
+  const size_t paras = (bytes + 15) / 16;
+  dos_far_ptr x86_dhp = KernelAllocPara(paras, 'D', (char *)mcbname, mode);
+  struct fake_memmgr_driver *drv =
+      (struct fake_memmgr_driver *)ARM_PTR(x86_dhp);
+  UWORD req_off = (UWORD)offsetof(struct fake_memmgr_driver, request_off);
+  UWORD req_seg = (UWORD)offsetof(struct fake_memmgr_driver, request_seg);
+
+  memset(drv, 0, paras * 16);
+  drv->hdr.dh_next = LoL->nul_dev.dh_next;
+  drv->hdr.dh_attr = ATTR_CHAR;
+  drv->hdr.x86.dh_strategy =
+      (UWORD)offsetof(struct fake_memmgr_driver, strategy);
+  drv->hdr.x86.dh_interrupt =
+      (UWORD)offsetof(struct fake_memmgr_driver, interrupt);
+  memcpy(drv->hdr.dh_name, devname, sizeof(drv->hdr.dh_name));
+
+  /* strategy: save ES:BX request-header pointer in resident storage; RETF */
+  {
+    const UBYTE code[] = {
+      0x2e, 0x89, 0x1e, (UBYTE)req_off, (UBYTE)(req_off >> 8),
+      0x2e, 0x8c, 0x06, (UBYTE)req_seg, (UBYTE)(req_seg >> 8),
+      0xcb
+    };
+    memcpy(drv->strategy, code, sizeof(code));
+  }
+
+  /* interrupt: request->r_status = S_DONE; RETF */
+  {
+    const UBYTE code[] = {
+      0x50,                         /* push ax */
+      0x53,                         /* push bx */
+      0x1e,                         /* push ds */
+      0x2e, 0x8b, 0x1e, (UBYTE)req_off, (UBYTE)(req_off >> 8),
+      0x2e, 0xa1, (UBYTE)req_seg, (UBYTE)(req_seg >> 8),
+      0x8e, 0xd8,                   /* mov ds,ax */
+      0xc7, 0x47, 0x03,
+      (UBYTE)S_DONE, (UBYTE)(S_DONE >> 8),
+      0x1f,                         /* pop ds */
+      0x5b,                         /* pop bx */
+      0x58,                         /* pop ax */
+      0xcb                          /* retf */
+    };
+    memcpy(drv->interrupt, code, sizeof(code));
+  }
+
+  LoL->nul_dev.dh_next = x86_dhp;
+  CfgDbgPrintf(("Installed fake memory-manager device %.8s at %04x:0000 (%u paragraphs)\n",
+                devname, FP_SEG(x86_dhp), (unsigned)paras));
+  return TRUE;
+}
+
 STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 {
   exec_blk eb;
@@ -1581,15 +1652,30 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   /* Get the device driver name                                   */
   GetStringArg(pLine, szBuf);
   
-  if (strcasecmp(szBuf, "HIMEM.SYS") == 0) { // W/A to skip well known XMS manager
-    printf("Skip guest XMS manager: %s\n", szBuf);
-    return DE_DEVICE;
+  char* driver_name = szBuf + strlen((const char *)szBuf);
+  while (driver_name > szBuf &&
+         driver_name[-1] != '\\' &&
+         driver_name[-1] != '/' &&
+         driver_name[-1] != ':')
+    --driver_name;
+
+  if (strncasecmp(driver_name, "HIMEM.SYS", 9) == 0 ||
+      strncasecmp(driver_name, "HIMEMX.EXE", 10) == 0 ||
+      strncasecmp(driver_name, "XMGR.SYS", 8) == 0 ||
+      strncasecmp(driver_name, "XMGR.EXE", 8) == 0 ||
+      strncasecmp(driver_name, "QRAM.SYS", 8) == 0 ||
+      strncasecmp(driver_name, "QEMM.SYS", 8) == 0 ||
+      strncasecmp(driver_name, "386MAX.SYS", 10) == 0 ||
+      strncasecmp(driver_name, "QEMM386.SYS", 11) == 0 ||
+      strncasecmp(driver_name, "BLUEMAX.SYS", 11) == 0 ||
+      strncasecmp(driver_name, "NETROOM.SYS", 11) == 0) {
+    printf("Using host XMS manager; install guest device-chain placeholder instead of: %s\n", szBuf);
+    return InstallFakeMemMgr("XMSXXXX0", "HIMEM   ", mode) ? SUCCESS : DE_NOMEM;
   }
 #ifndef I386_MODE
-  if (strcasecmp(szBuf, "EMM386.EXE") == 0) { // W/A to skip well known EMM386
-    printf("Skip guest EMM386 manager: %s\n", szBuf);
-    return DE_DEVICE;
-  }
+  if (strncasecmp(driver_name, "EMM386.EXE", 10) == 0) {
+    printf("Using host EMM manager; install guest device-chain placeholder instead of: %s\n", szBuf);
+    return InstallFakeMemMgr("EMMXXXX0", "EMM386  ", mode) ? SUCCESS : DE_NOMEM;
 #endif
 
   /* The driver is loaded at the top of allocated memory.         */
