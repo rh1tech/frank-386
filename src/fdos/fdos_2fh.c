@@ -123,12 +123,13 @@ static void emb_free_stats(uint32_t *largest, uint32_t *total) {
     *largest = big;
 }
 
-/// TODO: remove it on debug finished
+#ifdef NO_HANDLER_DETECTOR
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "DOS 2FH - ERROR: no handler defined ");
 while(1); // remove it
     return true;
 }
+#endif
 
 typedef struct __attribute__((packed, aligned)) {
     uint32_t length;

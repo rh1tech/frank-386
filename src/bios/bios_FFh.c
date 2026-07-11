@@ -5,8 +5,10 @@
 
  // default callback for the bios_FFh
 static bool bios_no_callback(CPU* cpu, bios_callback_params_t* any) {
+#ifdef NO_HANDLER_DETECTOR
     cpu_err_msg(cpu, "ERROR: no bios callback defined");
 while(1); // remove it
+#endif
     return true; // IRET
 }
 

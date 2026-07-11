@@ -5348,11 +5348,13 @@ void cpu_enable_fpu(CPU* cpu)
 	cpu->fpu = fpu_new();
 }
 
+#ifdef NO_HANDLER_DETECTOR
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "ERROR: no handler defined");
 while(1); // remove it
     return true;
 }
+#endif
 
 CPU* cpu_new(int gen, CPU_CB **cb)
 {

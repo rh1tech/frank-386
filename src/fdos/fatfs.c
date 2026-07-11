@@ -833,7 +833,7 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
     /// left as a deliberate panic rather than silently doing nothing,
     /// in case that assumption ever stops holding.
     printf("PANIC: DosCloseSft reached share_close_file unexpectedly\n");
-    for (;;) ;
+    return DE_ACCESS;
   }
 /* /// End of additions for SHARE.  - Ron Cemer */
   sftp->sft_count -= 1;

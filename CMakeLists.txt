@@ -267,9 +267,11 @@ set(EMU_CORE_SOURCES
     src/fdos/chario.c
     src/fdos/kernel.c
     src/fdos/task.c
+    src/fdos/fcom/fcom.c
     src/fdos/nls.c
     src/fdos/ioctl.c
     src/fdos/fdos_21h.c
+    src/fdos/fdos_2528.c
     src/fdos/fdos_29h.c
     src/fdos/fdos_2fh.c
 
@@ -357,7 +359,7 @@ if(EMM)
     )
 endif()
 target_compile_definitions(${BUILD_NAME} PRIVATE
-    I386_MODE=1
+    #I386_MODE=1
     # Version information
     FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
     FRANK_386_VERSION_MINOR=${FRANK_386_VERSION_MINOR}

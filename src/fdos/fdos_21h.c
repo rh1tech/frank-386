@@ -13,11 +13,13 @@ static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
     dpb_watch_check_chain(tag);
 }
 
+#ifdef NO_HANDLER_DETECTOR
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined ");
 while(1); // remove it
     return true;
 }
+#endif
 
 COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError, struct dhdr FAR * lpDevice) {
 /// TODO: entry.asm
@@ -73,7 +75,7 @@ const UWORD *is_leap_year_monthdays(UWORD y)
   return days[1];
 }
 
-unsigned char DosGetDate(CPU* cpu)
+static unsigned char DosGetDateRegs(UWORD *out_year, UBYTE *out_month, UBYTE *out_day)
 {
   UWORD c;
   const UWORD *pdays;
@@ -104,14 +106,26 @@ unsigned char DosGetDate(CPU* cpu)
     ++Month;
   }
 
-  CPU_CX = Year;
-  CPU_DH = Month;
-  CPU_DL = c - pdays[Month - 1] + 1;
+  *out_year = Year;
+  *out_month = (UBYTE)Month;
+  *out_day = (UBYTE)(c - pdays[Month - 1] + 1);
 
   /* Day of week is simple. Take mod 7, add 2 (for Tuesday        */
   /* 1-1-80) and take mod again                                   */
 
   return (internal_data->ClkRecord.clkDays + 2) % 7;
+}
+
+unsigned char DosGetDate(CPU *cpu)
+{
+  UWORD year;
+  UBYTE month, day;
+  unsigned char dow = DosGetDateRegs(&year, &month, &day);
+
+  CPU_CX = year;
+  CPU_DH = month;
+  CPU_DL = day;
+  return dow;
 }
 
 UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth)
@@ -125,11 +139,8 @@ UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth)
 
 }
 
-int DosSetDate(CPU* cpu)
+static int DosSetDateRegs(UWORD Year, UWORD Month, UWORD DayOfMonth)
 {
-  UWORD Year = CPU_CX;
-  UWORD Month = CPU_DH;
-  UWORD DayOfMonth = CPU_DL;
   const UWORD *pdays = is_leap_year_monthdays(Year);
 
   if (Year < 1980 || Year > 2099
@@ -149,37 +160,58 @@ int DosSetDate(CPU* cpu)
   return SUCCESS;
 }
 
-void DosGetTime(CPU* cpu)
+int DosSetDate(CPU *cpu)
+{
+  return DosSetDateRegs(CPU_CX, CPU_DH, CPU_DL);
+}
+
+static void DosGetTimeRegs(UBYTE *out_hour, UBYTE *out_minute, UBYTE *out_second, UBYTE *out_hundredth)
 {
   ExecuteClockDriverRequest(C_INPUT);
 
   if (CharReqHdr.r_status & S_ERROR)
     return;
 
-  CPU_CH = internal_data->ClkRecord.clkHours;
-  CPU_CL = internal_data->ClkRecord.clkMinutes;
-  CPU_DH = internal_data->ClkRecord.clkSeconds;
-  CPU_DL = internal_data->ClkRecord.clkHundredths;
+  *out_hour = internal_data->ClkRecord.clkHours;
+  *out_minute = internal_data->ClkRecord.clkMinutes;
+  *out_second = internal_data->ClkRecord.clkSeconds;
+  *out_hundredth = internal_data->ClkRecord.clkHundredths;
 }
 
-int DosSetTime(CPU* cpu)
+void DosGetTime(CPU *cpu)
 {
-  if (CPU_CH > 23 || CPU_CL > 59 || CPU_DH > 59 || CPU_DL > 99)
+  UBYTE hour, minute, second, hundredth;
+
+  DosGetTimeRegs(&hour, &minute, &second, &hundredth);
+  CPU_CH = hour;
+  CPU_CL = minute;
+  CPU_DH = second;
+  CPU_DL = hundredth;
+}
+
+static int DosSetTimeRegs(UBYTE hour, UBYTE minute, UBYTE second, UBYTE hundredth)
+{
+  if (hour > 23 || minute > 59 || second > 59 || hundredth > 99)
      return DE_INVLDDATA;
  
   /* for ClkRecord.clkDays */
   ExecuteClockDriverRequest(C_INPUT);
 
-  internal_data->ClkRecord.clkHours = CPU_CH;
-  internal_data->ClkRecord.clkMinutes = CPU_CL;
-  internal_data->ClkRecord.clkSeconds = CPU_DH;
-  internal_data->ClkRecord.clkHundredths = CPU_DL;
+  internal_data->ClkRecord.clkHours = hour;
+  internal_data->ClkRecord.clkMinutes = minute;
+  internal_data->ClkRecord.clkSeconds = second;
+  internal_data->ClkRecord.clkHundredths = hundredth;
 
   ExecuteClockDriverRequest(C_OUTPUT);
 
   if (CharReqHdr.r_status & S_ERROR)
     return char_error(&CharReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
   return SUCCESS;
+}
+
+int DosSetTime(CPU *cpu)
+{
+  return DosSetTimeRegs(CPU_CH, CPU_CL, CPU_DH, CPU_DL);
 }
 
 /* get current directory structure for drive
@@ -222,7 +254,7 @@ static int fcb_parse_term(int c)
   return c == 0 || c == '\r' || c == '\n' || fcb_parse_sep(c);
 }
 
-static UBYTE DosParseFilenameIntoFcb(UBYTE mode, dos_far_ptr srcp, dos_far_ptr fcbp)
+static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp, dos_far_ptr fcbp, UWORD *next_si)
 {
   const BYTE *src = (const BYTE *)ARM_PTR(srcp);
   fcb *dst = (fcb *)ARM_PTR(fcbp);
@@ -309,26 +341,54 @@ static UBYTE DosParseFilenameIntoFcb(UBYTE mode, dos_far_ptr srcp, dos_far_ptr f
       src++;
   }
 
-  CPU_SI = FP_OFF(srcp) + (UWORD)(src - (const BYTE *)ARM_PTR(srcp));
+  *next_si = FP_OFF(srcp) + (UWORD)(src - (const BYTE *)ARM_PTR(srcp));
   return result;
 }
 
+/* INT 21h is dispatched against a local register frame, as in upstream
+ * FreeDOS int21_service().  Guest BIOS/device calls may use the live CPU as
+ * scratch state, but cannot leak register changes into this frame. */
+#define R_AX    regs->gprx[regax].r16
+#define R_BX    regs->gprx[regbx].r16
+#define R_CX    regs->gprx[regcx].r16
+#define R_DX    regs->gprx[regdx].r16
+#define R_SI    regs->gprx[regsi].r16
+#define R_DI    regs->gprx[regdi].r16
+#define R_BP    regs->gprx[regbp].r16
+#define R_AL    regs->gprx[regax].r8[0]
+#define R_AH    regs->gprx[regax].r8[1]
+#define R_BL    regs->gprx[regbx].r8[0]
+#define R_BH    regs->gprx[regbx].r8[1]
+#define R_CL    regs->gprx[regcx].r8[0]
+#define R_CH    regs->gprx[regcx].r8[1]
+#define R_DL    regs->gprx[regdx].r8[0]
+#define R_DH    regs->gprx[regdx].r8[1]
+#define R_DS    regs->ds
+#define R_ES    regs->es
+#define R_FS    regs->fs
+#define R_GS    regs->gs
+#define R_CF    regs->flags.bits.CF
+#define R_ZF    regs->flags.bits.ZF
+#define R_FP_DS_DX MK_FP(R_DS, R_DX)
+#define R_FP_DS_SI MK_FP(R_DS, R_SI)
+#define R_FP_ES_DI MK_FP(R_ES, R_DI)
+
 #ifdef WITHFAT32
-static COUNT int21_fat32(void)
+static COUNT int21_fat32_regs(CPU_regs *regs)
 {
   COUNT rc;
 
-  switch (CPU_AL)
+  switch (R_AL)
   {
     /* Get extended drive parameter block */
     case 0x02:
     {
       struct xdpbdata FAR *xddp;
 
-      if (CPU_CX < sizeof(struct xdpbdata))
+      if (R_CX < sizeof(struct xdpbdata))
         return DE_INVLDBUF;
 
-      dos_far_ptr _dpb = GetDriveDPB(CPU_DL, &rc);
+      dos_far_ptr _dpb = GetDriveDPB(R_DL, &rc);
       if (rc != SUCCESS)
         return rc;
 
@@ -339,7 +399,7 @@ static COUNT int21_fat32(void)
       if (media_check_tagged(_dpb, "INT21/7302/GetDriveDPB") < 0)
         return DE_INVLDDRV;
 
-      xddp = (struct xdpbdata FAR *)ARM_PTR(FP_ES_DI);
+      xddp = (struct xdpbdata FAR *)ARM_PTR(R_FP_ES_DI);
       memcpy(&xddp->xdd_dpb, dpb, sizeof(struct dpb));
       xddp->xdd_dpbsize = sizeof(struct dpb);
 
@@ -358,12 +418,12 @@ static COUNT int21_fat32(void)
     /* Get extended free drive space */
     case 0x03:
     {
-      struct xfreespace FAR *xfsp = (struct xfreespace FAR *)ARM_PTR(FP_ES_DI);
+      struct xfreespace FAR *xfsp = (struct xfreespace FAR *)ARM_PTR(R_FP_ES_DI);
 
-      if (CPU_CX < sizeof(struct xfreespace))
+      if (R_CX < sizeof(struct xfreespace))
         return DE_INVLDBUF;
 
-      rc = DosGetExtFree((BYTE FAR *)ARM_PTR(FP_DS_DX), xfsp);
+      rc = DosGetExtFree((BYTE FAR *)ARM_PTR(R_FP_DS_DX), xfsp);
       if (rc != SUCCESS)
         return rc;
       break;
@@ -373,14 +433,14 @@ static COUNT int21_fat32(void)
     case 0x04:
     {
 
-      if (CPU_CX < sizeof(struct xdpbforformat))
+      if (R_CX < sizeof(struct xdpbforformat))
         return DE_INVLDBUF;
 
-      dos_far_ptr _dpb = GetDriveDPB(CPU_DL, &rc);
+      dos_far_ptr _dpb = GetDriveDPB(R_DL, &rc);
       if (rc != SUCCESS)
         return rc;
 
-      struct xdpbforformat FAR *xdffp = (struct xdpbforformat FAR *)ARM_PTR(FP_ES_DI);
+      struct xdpbforformat FAR *xdffp = (struct xdpbforformat FAR *)ARM_PTR(R_FP_ES_DI);
       xdffp->xdff_datasize = sizeof(struct xdpbforformat);
       xdffp->xdff_version.actual = 0;
 
@@ -414,7 +474,7 @@ static COUNT int21_fat32(void)
 
         case 0x01:
         {
-          ddt *pddt = getddt(CPU_DL);
+          ddt *pddt = getddt(R_DL);
           memcpy(&pddt->ddt_bpb, ARM_PTR(xdffp->xdff_f.rebuilddpb.bpbp), sizeof(bpb));
         }
         /* fall through */
@@ -471,16 +531,16 @@ rebuild_dpb:
     /* Extended absolute disk read/write */
     case 0x05:
     {
-      BYTE FAR *SectorBlock = (BYTE FAR *)ARM_PTR(MK_FP(CPU_DS, CPU_BX));
+      BYTE FAR *SectorBlock = (BYTE FAR *)ARM_PTR(MK_FP(R_DS, R_BX));
       ULONG blkno;
       UWORD nblks;
       dos_far_ptr bufp;
       UBYTE mode;
 
-      if (CPU_CX != 0xffff || (CPU_SI & ~0x6001))
+      if (R_CX != 0xffff || (R_SI & ~0x6001))
         return DE_INVLDPARM;
 
-      if (CPU_DL > LoL->lastdrive || CPU_DL == 0)
+      if (R_DL > LoL->lastdrive || R_DL == 0)
         return -0x207;
 
       blkno =  (ULONG)SectorBlock[0]
@@ -492,14 +552,14 @@ rebuild_dpb:
       bufp = MK_FP((UWORD)(SectorBlock[8] | ((UWORD)SectorBlock[9] << 8)),
                    (UWORD)(SectorBlock[6] | ((UWORD)SectorBlock[7] << 8)));
         
-      mode = ((CPU_SI & 1) == 0) ? DSKREADINT25 : DSKWRITEINT26;
+      mode = ((R_SI & 1) == 0) ? DSKREADINT25 : DSKWRITEINT26;
 
-      CPU_AX = dskxfer(CPU_DL - 1, blkno, bufp, nblks, mode);
+      R_AX = dskxfer(R_DL - 1, blkno, bufp, nblks, mode);
 
-      if (mode == DSKWRITEINT26 && CPU_AX == 0)
-        setinvld(CPU_DL - 1);
+      if (mode == DSKWRITEINT26 && R_AX == 0)
+        setinvld(R_DL - 1);
 
-      if (CPU_AX > 0)
+      if (R_AX > 0)
         return -0x20c;
       break;
     }
@@ -510,6 +570,17 @@ rebuild_dpb:
 
   return SUCCESS;
 }
+
+static COUNT int21_fat32(void)
+{
+  CPU_regs regs;
+  COUNT rc;
+
+  cpu_save_regs(cpu, &regs);
+  rc = int21_fat32_regs(&regs);
+  cpu_restore_regs(cpu, &regs);
+  return rc;
+}
 #endif
 
 /*
@@ -517,10 +588,18 @@ DOS 1+ - main DOS handler
 */
 bool fdos_21h(CPU* _cpu) {
     COUNT rc;
+    CPU_regs lr;
+    CPU_regs *regs = &lr;
+    UWORD entry_ss, entry_sp;
+
     cpu = _cpu;
-    internal_data->Int21AX = CPU_AX;
+    entry_ss = CPU_SS;
+    entry_sp = CPU_SP;
+    cpu_save_regs(_cpu, regs);
+    uint16_t flags_on_stack = readw86(((uint32_t)entry_ss << 4) + entry_sp + 4);
+    regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
+    internal_data->Int21AX = R_AX;
     dpb_watch_int21_checkpoint(cpu, "entry");
-    uint16_t flags_on_stack = readw86((CPU_SS << 4) + CPU_SP + 4);
     /* STI: real DOS re-enables interrupts first thing in its INT 21h
        entry stub (FreeDOS entry.asm does "sti" right after the stack
        switch), because the INT dispatch itself cleared IF. This port
@@ -537,79 +616,79 @@ bool fdos_21h(CPU* _cpu) {
 dispatch:                       /* re-entry point for AH=5Dh AL=00h
                                    (remote server call), matching the
                                    original inthndlr.c dispatch: label */
-    switch (CPU_AH) {
+    switch (R_AH) {
       /* Read Keyboard With Echo                                      */
       case 0x01:
       DOS_01:
-        CPU_AL = read_char_stdin(TRUE);
-        write_char_stdout(CPU_AL);
+        R_AL = read_char_stdin(TRUE);
+        write_char_stdout(R_AL);
         break;
 
       case 0x02:
-        write_char_stdout(CPU_AL);
-        CPU_AL = (CPU_DL == HT) ? ' ' : CPU_DL;
+        write_char_stdout(R_AL);
+        R_AL = (R_DL == HT) ? ' ' : R_DL;
         break;
 
       /* Auxiliary Input                                              */
       case 0x03:
       {
         int sft_idx = get_sft_idx(STDAUX);
-        CPU_AL = read_char(sft_idx, sft_idx, TRUE);
+        R_AL = read_char(sft_idx, sft_idx, TRUE);
       }
         break;
 
       /* Auxiliary Output                                             */
       case 0x04:
-        write_char(CPU_DL, get_sft_idx(STDAUX));
+        write_char(R_DL, get_sft_idx(STDAUX));
         break;
 
       /* Print Character                                              */
       case 0x05:
-        write_char(CPU_DL, get_sft_idx(STDPRN));
+        write_char(R_DL, get_sft_idx(STDPRN));
         break;
 
       /* Direct Console I/O                                           */
       case 0x06:
       DOS_06:
-        if (CPU_DL != 0xff)
+        if (R_DL != 0xff)
         {
-          CPU_AL = CPU_DL;
-          write_char_stdout(CPU_AL);
+          R_AL = R_DL;
+          write_char_stdout(R_AL);
           break;
         }
-        CPU_AL = 0x00;
-        zf = 1;
+        R_AL = 0x00;
+        R_ZF = 1;
         if (StdinBusy())
         {
           DosIdle_int();
           break;
         }
-        zf = 0;
+        R_ZF = 0;
         /* fall through */
 
       /* Direct Console Input                                         */
       case 0x07:
       DOS_07:
-        CPU_AL = read_char_stdin(FALSE);
+        R_AL = read_char_stdin(FALSE);
         break;
 
       /* Read Keyboard Without Echo                                   */
       case 0x08:
       DOS_08:
-        CPU_AL = read_char_stdin(TRUE);
+        R_AL = read_char_stdin(TRUE);
         break;
 
       /* Buffered Keyboard Input                                      */
       case 0x0a:
       DOS_0A:
-        read_line(get_sft_idx(STDIN), get_sft_idx(STDOUT), (keyboard *)ARM_PTR(FP_DS_DX));
+        read_line(get_sft_idx(STDIN), get_sft_idx(STDOUT), (keyboard *)ARM_PTR(R_FP_DS_DX));
         break;
 
       /* Check Stdin Status                                           */
       case 0x0b:
-        CPU_AL = 0xFF;
+        R_AL = 0xFF;
         if (StdinBusy())
-          CPU_AL = 0x00;
+          R_AL = 0x00;
         break;
 
       /* Flush Buffer, Read Keyboard                                  */
@@ -618,7 +697,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         dos_far_ptr dev = sft_to_dev((sft*) ARM_PTR ( get_sft(STDIN) ) );
         if (FP_SEG(dev) || FP_OFF(dev))
           con_flush(&dev);
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0x01: goto DOS_01;
           case 0x06: goto DOS_06;
@@ -626,7 +705,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x08: goto DOS_08;
           case 0x0a: goto DOS_0A;
         }
-        CPU_AL = 0x00;
+        R_AL = 0x00;
       }
         break;
 
@@ -634,78 +713,77 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x09:
         {
           unsigned char c;
-          unsigned char FAR *bp = ARM_PTR( FP_DS_DX );
+          unsigned char FAR *bp = ARM_PTR( R_FP_DS_DX );
 
           while ((c = *bp++) != '$')
             write_char_stdout(c);
 
-          CPU_AL = c;
+          R_AL = c;
         }
         break;
 
       case 0x0E: // set drive
-        CPU_AL = DosSelectDrv(CPU_DL);
+        R_AL = DosSelectDrv(R_DL);
         break;
 
         /* Get default drive                                           */
       case 0x19:
-        CPU_AL = internal_data->default_drive;
+        R_AL = internal_data->default_drive;
         break;
 
       case 0x1A: // set DTA
-        internal_data->dta = FP_DS_DX;
+        internal_data->dta = R_FP_DS_DX;
         break;
 
       case 0x29: /* DOS 1+ - PARSE FILENAME INTO FCB */
-        CPU_AL = DosParseFilenameIntoFcb(CPU_AL, MK_FP(CPU_DS, CPU_SI),
-                                         MK_FP(CPU_ES, CPU_DI));
+        R_AL = DosParseFilenameIntoFcbRegs(R_AL, MK_FP(R_DS, R_SI), MK_FP(R_ES, R_DI), &R_SI);
         break;
 
         /* Set Interrupt Vector                                         */
       case 0x25:
       {
         /* AL = interrupt number, DS:DX = new handler. */
-        pstore16((uint32_t)CPU_AL * 4u, CPU_DX);
-        pstore16((uint32_t)CPU_AL * 4u + 2u, CPU_DS);
-        cf = 0;
+        pstore16((uint32_t)R_AL * 4u, R_DX);
+        pstore16((uint32_t)R_AL * 4u + 2u, R_DS);
+        R_CF = 0;
       }
         break;
 
         /* Get Date                                                     */
       case 0x2a:
-        CPU_AL = DosGetDate(_cpu);
+        R_AL = DosGetDateRegs(&R_CX, &R_DH, &R_DL);
         break;
 
         /* Set Date                                                     */
       case 0x2b:
-        CPU_AL = DosSetDate (_cpu) == SUCCESS ? 0 : 0xFF;
+        R_AL = DosSetDateRegs(R_CX, R_DH, R_DL) == SUCCESS ? 0 : 0xFF;
         break;
 
         /* Get Time                                                     */
       case 0x2c:
-        DosGetTime(cpu);
+        DosGetTimeRegs(&R_CH, &R_CL, &R_DH, &R_DL);
         break;
 
         /* Set Time                                                     */
       case 0x2d:
-        CPU_AL = DosSetTime (_cpu) == SUCCESS ? 0 : 0xFF;
+        R_AL = DosSetTimeRegs(R_CH, R_CL, R_DH, R_DL) == SUCCESS ? 0 : 0xFF;
         break;
         // get DTA
       case 0x2f:
-        CPU_BX = FP_OFF(internal_data->dta);
-        SET_ES(FP_SEG(internal_data->dta));
+        R_BX = FP_OFF(internal_data->dta);
+        R_ES = (FP_SEG(internal_data->dta));
         break;
 
       /* Get (editable) DOS Version                                   */
       case 0x30:
       {
-        if (CPU_AL == 1) /* from RBIL, if AL=1 then return version_flags */
-            CPU_BH = LoL->version_flags;
+        if (R_AL == 1) /* from RBIL, if AL=1 then return version_flags */
+            R_BH = LoL->version_flags;
         else
-            CPU_BH = OEM_ID;
-        CPU_AX = ((psp*)ARM_PTR(x86_PSP))->ps_retdosver;
-        CPU_BL = REVISION_SEQ;
-        CPU_CX = 0; /* do not set this to a serial number!
+            R_BH = OEM_ID;
+        R_AX = ((psp*)ARM_PTR(x86_PSP))->ps_retdosver;
+        R_BL = REVISION_SEQ;
+        R_CX = 0; /* do not set this to a serial number!
                       32RTM won't like non-zero values   */
 
         if (ReturnAnyDosVersionExpected)
@@ -721,15 +799,15 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           if (retp[0] == 0x3d &&  /* cmp ax, xxyy */
               (retp[3] == 0x75 || retp[3] == 0x74))       /* je/jne error    */
           {
-            CPU_AL = retp[1];
-            CPU_AH = retp[2];
+            R_AL = retp[1];
+            R_AH = retp[2];
           }
           else if (retp[0] == 0x86 &&     /* xchg al,ah   */
                   retp[1] == 0xc4 && retp[2] == 0x3d &&  /* cmp ax, xxyy */
                   (retp[5] == 0x75 || retp[5] == 0x74))  /* je/jne error    */
           {
-            CPU_AL = retp[4];
-            CPU_AH = retp[3];
+            R_AL = retp[4];
+            R_AH = retp[3];
           }
 
         }
@@ -741,25 +819,25 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* AL = interrupt number.  Return current vector in ES:BX.
            Upstream handles this in the re-entrant INT 21h front path as
            p = getvec(AL); ES = FP_SEG(p); BX = FP_OFF(p). */
-        uint32_t vec = (uint32_t)CPU_AL * 4u;
-        CPU_BX = pload16(vec);
-        SET_ES(pload16(vec + 2u));
-        cf = 0;
+        uint32_t vec = (uint32_t)R_AL * 4u;
+        R_BX = pload16(vec);
+        R_ES = (pload16(vec + 2u));
+        R_CF = 0;
       }
         break;
 
       case 0x37: /* DOS 2+ - SWITCHAR - GET/SET SWITCH CHARACTER */
-        switch (CPU_AL) {
+        switch (R_AL) {
         case 0x00:              /* get switch character */
-          CPU_DL = internal_data->switchar;
-          CPU_AL = 0x00;
+          R_DL = internal_data->switchar;
+          R_AL = 0x00;
           break;
         case 0x01:              /* set switch character */
-          internal_data->switchar = CPU_DL;
-          CPU_AL = 0x00;
+          internal_data->switchar = R_DL;
+          R_AL = 0x00;
           break;
         default:
-          CPU_AL = 0xff;
+          R_AL = 0xff;
           break;
         }
         break;
@@ -768,12 +846,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* Get/Set Country Info                                         */
       case 0x38:
         {
-          UWORD cntry = CPU_AL;
+          UWORD cntry = R_AL;
 
           if (cntry == 0xff)
-            cntry = CPU_BX;
+            cntry = R_BX;
 
-          if (0xffff == CPU_DX)
+          if (0xffff == R_DX)
           {
             /* Set Country Code */
             rc = DosSetCountry(cntry);
@@ -783,14 +861,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             if (cntry == 0)
               cntry--;
             /* Get Country Information */
-            rc = DosGetCountryInformation(cntry, ARM_PTR ( FP_DS_DX ) );
+            rc = DosGetCountryInformation(cntry, ARM_PTR ( R_FP_DS_DX ) );
             if (rc >= SUCCESS)
             {
               if (cntry == (UWORD) - 1) {
                 struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
                 cntry = ((struct nlsPackage *)ARM_PTR(nlsInfo->actPkg))->cntry;
               }
-              CPU_AX = CPU_BX = cntry;
+              R_AX = R_BX = cntry;
             }
           }
           goto short_check;
@@ -804,16 +882,16 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          same long_check convention as case 0x3d below. */
       case 0x3c:
       {
-        long result = DosOpen(FP_DS_DX, O_LEGACY | O_RDWR | O_CREAT | O_TRUNC, CPU_CL);
+        long result = DosOpen(R_FP_DS_DX, O_LEGACY | O_RDWR | O_CREAT | O_TRUNC, R_CL);
         if (result < SUCCESS)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-result);
+          R_CF = 1;
+          R_AX = (UWORD)(-result);
         }
         else
         {
-          cf = 0;
-          CPU_AX = (UWORD)result;
+          R_CF = 0;
+          R_AX = (UWORD)result;
         }
       }
         break;
@@ -821,21 +899,21 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x3d: // DOS 2+ - OPEN - OPEN EXISTING FILE
       {
         /* DS:DX = ASCIIZ pathname, AL = access mode.
-           Migrated from inthndlr.c's "case 0x3d" (DosOpen(FP_DS_DX,
+           Migrated from inthndlr.c's "case 0x3d" (DosOpen(R_FP_DS_DX,
            O_LEGACY | O_OPEN | lr.AL, 0)). On success: CF=0, AX=handle.
            On failure: CF=1, AX=DOS error code (negated, per the
            kernel-wide convention - see init_DosOpen()/dup2() above,
            which already expect this). */
-        long result = DosOpen(FP_DS_DX, O_LEGACY | O_OPEN | CPU_AL, 0);
+        long result = DosOpen(R_FP_DS_DX, O_LEGACY | O_OPEN | R_AL, 0);
         if (result < SUCCESS)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-result);
+          R_CF = 1;
+          R_AX = (UWORD)(-result);
         }
         else
         {
-          cf = 0;
-          CPU_AX = (UWORD)result;
+          R_CF = 0;
+          R_AX = (UWORD)result;
         }
       }
         break;
@@ -846,12 +924,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            (DosClose(lr.BX), "short_check": AX=-rc, CF=1 on error;
            CF=0, AX unchanged on success - DosClose() itself doesn't
            return a value the caller cares about on success). */
-        int result = DosClose(CPU_BX);
+        int result = DosClose(R_BX);
         if (result < SUCCESS) {
-          cf = 1;
-          CPU_AX = (UWORD)(-result);
+          R_CF = 1;
+          R_AX = (UWORD)(-result);
         } else {
-          cf = 0;
+          R_CF = 0;
         }
       }
         break;
@@ -860,19 +938,19 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       {
         /* BX = file handle, CX = byte count, DS:DX = buffer.
            Migrated from inthndlr.c's "case 0x3f" (DosRead(lr.BX,
-           lr.CX, FP_DS_DX)), same long_check convention as case 0x3d
+           lr.CX, R_FP_DS_DX)), same long_check convention as case 0x3d
            above: CF=0/AX=bytes-read on success, CF=1/AX=-rc on
            error. */
-        long result = DosRead(CPU_BX, CPU_CX, FP_DS_DX);
+        long result = DosRead(R_BX, R_CX, R_FP_DS_DX);
         if (result < SUCCESS)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-result);
+          R_CF = 1;
+          R_AX = (UWORD)(-result);
         }
         else
         {
-          cf = 0;
-          CPU_AX = (UWORD)result;
+          R_CF = 0;
+          R_AX = (UWORD)result;
         }
       }
         break;
@@ -881,18 +959,18 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       {
         /* BX = file handle, CX = byte count, DS:DX = buffer.
            Migrated from inthndlr.c's "case 0x40" (DosWrite(lr.BX,
-           lr.CX, FP_DS_DX)), same long_check convention as case 0x3f:
+           lr.CX, R_FP_DS_DX)), same long_check convention as case 0x3f:
            CF=0/AX=bytes-written on success, CF=1/AX=-rc on error. */
-        long result = DosWrite(CPU_BX, CPU_CX, FP_DS_DX);
+        long result = DosWrite(R_BX, R_CX, R_FP_DS_DX);
         if (result < SUCCESS)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-result);
+          R_CF = 1;
+          R_AX = (UWORD)(-result);
         }
         else
         {
-          cf = 0;
-          CPU_AX = (UWORD)result;
+          R_CF = 0;
+          R_AX = (UWORD)result;
         }
       }
         break;
@@ -901,37 +979,37 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* Remove directory                                               */
       /* classic top-level entry points were missing;
          DosMkRmdir() already exists and is used by the AH=43h/AL=FF path -
-         see inthndlr.c "case 0x39: case 0x3a: rc = DosMkRmdir(FP_DS_DX, lr.AH);" */
+         see inthndlr.c "case 0x39: case 0x3a: rc = DosMkRmdir(R_FP_DS_DX, lr.AH);" */
       case 0x39:
       case 0x3a:
-        rc = DosMkRmdir(FP_DS_DX, CPU_AH);
+        rc = DosMkRmdir(R_FP_DS_DX, R_AH);
         goto short_check;
 
       /* Rename file (classic entry point) */
       /* DosRename() already exists (used by the
          AH=43h/AL=FF/CL=56h path); wire the standard AH=56h entry point too -
-         see inthndlr.c "case 0x56: rc = DosRename(FP_DS_DX, FP_ES_DI);" */
+         see inthndlr.c "case 0x56: rc = DosRename(R_FP_DS_DX, R_FP_ES_DI);" */
       case 0x56:
-        rc = DosRename(FP_DS_DX, FP_ES_DI);
+        rc = DosRename(R_FP_DS_DX, R_FP_ES_DI);
         goto short_check;
 
       /* Change directory                                             */
       /* DosChangeDir() was declared but never
          implemented in this port at all - AH=3Bh had no backend. */
       case 0x3b:
-        rc = DosChangeDir(FP_DS_DX);
+        rc = DosChangeDir(R_FP_DS_DX);
         goto short_check;
 
       /* Delete file                                                  */
       /* DosDelete() was declared but never
          implemented in this port at all - AH=41h had no backend. */
       case 0x41:
-        rc = DosDelete(FP_DS_DX, D_ALL);
+        rc = DosDelete(R_FP_DS_DX, D_ALL);
         goto short_check;
 
       /* Find first matching file                                     */
       case 0x4e:
-        rc = DosFindFirst(CPU_CX, FP_DS_DX);
+        rc = DosFindFirst(R_CX, R_FP_DS_DX);
         goto short_check;
 
       /* Find next matching file                                      */
@@ -941,33 +1019,33 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         
       /* Get/Set File Attributes                                      */
       case 0x43:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0x00:
-            rc = DosGetFattr(FP_DS_DX);
+            rc = DosGetFattr(R_FP_DS_DX);
             if (rc >= SUCCESS)
-              CPU_CX = rc;
+              R_CX = rc;
             break;
 
           case 0x01:
-            rc = DosSetFattr(FP_DS_DX, CPU_CX);
-            CPU_AX = CPU_CX;
+            rc = DosSetFattr(R_FP_DS_DX, R_CX);
+            R_AX = R_CX;
             break;
 
           case 0xff: /* DOS 7.20 (w98) extended name (128 char length) functions */
           {
-            switch(CPU_CL)
+            switch(R_CL)
             {
                   /* Dos Create Directory                                         */
                   case 0x39:
                   /* Dos Remove Directory                                         */
                   case 0x3a:
-                    rc = DosMkRmdir(FP_DS_DX, CPU_CL);
+                    rc = DosMkRmdir(R_FP_DS_DX, R_CL);
                     goto short_check;
 
                   /* Dos rename file */
                   case 0x56:
-                    rc = DosRename(FP_DS_DX, FP_ES_DI);
+                    rc = DosRename(R_FP_DS_DX, R_FP_ES_DI);
                     goto short_check;
 
                 /* fall through to goto error_invaid */
@@ -979,29 +1057,40 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         goto short_check;
         /* Device I/O Control                                           */
       case 0x44:
+      {
+        CPU_regs live_saved;
+
+        /* DosDevIOctl() still has the historical port-specific API that
+         * reads and writes live CPU_* registers.  Isolate that API here;
+         * the rest of INT 21h uses the local frame. */
+        cpu_save_regs(_cpu, &live_saved);
+        cpu_restore_regs(_cpu, regs);
         rc = DosDevIOctl();      /* can set critical error code! */
+        cpu_save_regs(_cpu, regs);
+        cpu_restore_regs(_cpu, &live_saved);
 
         if (rc < SUCCESS)
         {
-          CPU_AX = -rc;
+          R_AX = -rc;
           if (rc != DE_DEVICE && rc != DE_ACCESS)
-            internal_data->CritErrCode = CPU_AX;
+            internal_data->CritErrCode = R_AX;
           goto error_carry;
         }
-        cf = 0;
+        R_CF = 0;
+      }
         break;
 
       case 0x45: /* DOS 2+ - DUP - DUPLICATE FILE HANDLE */
       {
-        unsigned old_hndl = CPU_BX;
+        unsigned old_hndl = R_BX;
         psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
         UBYTE *filetab = (UBYTE *)ARM_PTR(p->ps_filetab);
         unsigned new_hndl;
 
         if (old_hndl >= p->ps_maxfiles || filetab[old_hndl] == 0xff)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-DE_INVLDHNDL);
+          R_CF = 1;
+          R_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
 
@@ -1013,37 +1102,37 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         if (new_hndl >= p->ps_maxfiles)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-DE_TOOMANY);
+          R_CF = 1;
+          R_AX = (UWORD)(-DE_TOOMANY);
           break;
         }
 
         filetab[new_hndl] = filetab[old_hndl];
         ((sft*) ARM_PTR (idx_to_sft(filetab[new_hndl]) ))->sft_count++;
 
-        CPU_AX = (UWORD)new_hndl;
-        cf = 0;
+        R_AX = (UWORD)new_hndl;
+        R_CF = 0;
       }
         break;
 
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       // BX = existing handle (old), CX = handle to redirect (new)
       {
-        unsigned old_hndl = CPU_BX;
-        unsigned new_hndl = CPU_CX;
+        unsigned old_hndl = R_BX;
+        unsigned new_hndl = R_CX;
         psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
         UBYTE *filetab = (UBYTE *) ARM_PTR(p->ps_filetab);
 
         if (old_hndl >= p->ps_maxfiles || filetab[old_hndl] == 0xff)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-DE_INVLDHNDL);
+          R_CF = 1;
+          R_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
         if (new_hndl >= p->ps_maxfiles)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-DE_INVLDHNDL);
+          R_CF = 1;
+          R_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
         if (new_hndl != old_hndl)
@@ -1056,17 +1145,17 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           filetab[new_hndl] = filetab[old_hndl];
           ((sft*) ARM_PTR (idx_to_sft(filetab[new_hndl]) ))->sft_count++;
         }
-        cf = 0;
+        R_CF = 0;
       }
         break;
 
       case 0x47: /* DOS 2+ - CWD - GET CURRENT DIRECTORY */
-        rc = DosGetCuDir(CPU_DL, MK_FP(CPU_DS, CPU_SI));
+        rc = DosGetCuDir(R_DL, MK_FP(R_DS, R_SI));
         goto short_check;
 
         /* Set PSP                                                      */
       case 0x50:
-        internal_data->cu_psp = CPU_BX;
+        internal_data->cu_psp = R_BX;
         break;
 
       case 0x52: { // DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
@@ -1080,70 +1169,70 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           *
           * Do not duplicate the fixed-data and structure offsets here.
           */
-          SET_ES(FP_SEG(x86_FIXED_DATA));
-          CPU_BX = FP_OFF(x86_FIXED_DATA) + offsetof(struct lol, DPBp); // see MARK0026H
+          R_ES = (FP_SEG(x86_FIXED_DATA));
+          R_BX = FP_OFF(x86_FIXED_DATA) + offsetof(struct lol, DPBp); // see MARK0026H
         }
         break;
 // 53h — Translate BIOS
         /* Get PSP                                                      */
       case 0x51: // DOS 2+ internal - GET CURRENT PROCESS ID (GET PSP ADDRESS)
       case 0x62: // DOS 3.0+ - GET CURRENT PSP ADDRESS
-        CPU_BX = internal_data->cu_psp;
+        R_BX = internal_data->cu_psp;
         break;
 
       case 0x60: /* DOS 3+ - TRUENAME - canonicalize filename/path */
-        rc = DosTruename(MK_FP(CPU_DS, CPU_SI), FP_ES_DI);
-        CPU_AX = rc;
+        rc = DosTruename(MK_FP(R_DS, R_SI), R_FP_ES_DI);
+        R_AX = rc;
         goto short_check;
 
         /* Extended country information / NLS functions                */
       case 0x65:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0x20:             /* upcase single character */
-            CPU_DL = DosUpChar(CPU_DL);
-            cf = 0;
+            R_DL = DosUpChar(R_DL);
+            R_CF = 0;
             break;
           case 0x21:             /* upcase memory area */
-            DosUpMem(ARM_PTR(FP_DS_DX), CPU_CX);
-            cf = 0;
+            DosUpMem(ARM_PTR(R_FP_DS_DX), R_CX);
+            R_CF = 0;
             break;
           case 0x22:             /* upcase ASCIZ */
-            DosUpString((char FAR *)ARM_PTR(FP_DS_DX));
-            cf = 0;
+            DosUpString((char FAR *)ARM_PTR(R_FP_DS_DX));
+            R_CF = 0;
             break;
           case 0xA0:             /* upcase single filename character */
-            CPU_DL = DosUpFChar(CPU_DL);
-            cf = 0;
+            R_DL = DosUpFChar(R_DL);
+            R_CF = 0;
             break;
           case 0xA1:             /* upcase filename memory area */
-            DosUpFMem(ARM_PTR(FP_DS_DX), CPU_CX);
-            cf = 0;
+            DosUpFMem(ARM_PTR(R_FP_DS_DX), R_CX);
+            R_CF = 0;
             break;
           case 0xA2:             /* upcase filename ASCIZ */
-            DosUpFString((char FAR *)ARM_PTR(FP_DS_DX));
-            cf = 0;
+            DosUpFString((char FAR *)ARM_PTR(R_FP_DS_DX));
+            R_CF = 0;
             break;
           case 0x23:             /* check Yes/No response */
-            CPU_AX = DosYesNo(CPU_DL);
+            R_AX = DosYesNo(R_DL);
             CfgDbgPrintf(("INT21/65%02x YESNO in DL=%02x -> AX=%04x\n",
-                          CPU_AL, CPU_DL, CPU_AX));            
-            cf = 0;
+                          R_AL, R_DL, R_AX));            
+            R_CF = 0;
             break;
           default: {
             #if DEBUG
-            UBYTE subfct = CPU_AL;
-            UWORD in_bx = CPU_BX;
-            UWORD in_dx = CPU_DX;
-            UWORD in_cx = CPU_CX;
-            UWORD in_es = CPU_ES;
-            UWORD in_di = CPU_DI;
+            UBYTE subfct = R_AL;
+            UWORD in_bx = R_BX;
+            UWORD in_dx = R_DX;
+            UWORD in_cx = R_CX;
+            UWORD in_es = R_ES;
+            UWORD in_di = R_DI;
             #endif
-            rc = DosGetData(CPU_AL, CPU_BX, CPU_DX, CPU_CX, ARM_PTR(FP_ES_DI));
+            rc = DosGetData(R_AL, R_BX, R_DX, R_CX, ARM_PTR(R_FP_ES_DI));
             #if DEBUG
-            CfgDbgPrintf(("INT21/65%02x GetData bx=%04x dx=%04x cx=%04x es:di=%04x:%04x -> rc=%d ax=%04x cf=%d\n",
+            CfgDbgPrintf(("INT21/65%02x GetData bx=%04x dx=%04x cx=%04x es:di=%04x:%04x -> rc=%d ax=%04x R_CF=%d\n",
                           subfct, in_bx, in_dx, in_cx, in_es, in_di,
-                          rc, CPU_AX, cf));
+                          rc, R_AX, R_CF));
             #endif
             goto short_check;
           }
@@ -1162,16 +1251,16 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            dispatcher before calling DosSeek(); keep that behaviour here
            instead of relying only on SftSeek2(), so invalid modes report
            DE_INVLDFUNC through the normal INT 21h error path. */
-        if (CPU_AL > 2)
+        if (R_AL > 2)
           goto error_invalid;
 
-        result = DosSeek(CPU_BX,
-                         (LONG)(((UDWORD)CPU_CX << 16) | CPU_DX),
-                         CPU_AL,
+        result = DosSeek(R_BX,
+                         (LONG)(((UDWORD)R_CX << 16) | R_DX),
+                         R_AL,
                          &rc);
         if (rc == SUCCESS) {
-          CPU_DX = (UWORD)(result >> 16);
-          CPU_AX = (UWORD)result;
+          R_DX = (UWORD)(result >> 16);
+          R_AX = (UWORD)result;
         }
         goto short_check;
       }
@@ -1182,35 +1271,34 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            AL=0) */
       case 0x00:
         request_terminate(0, 0);
-        cf = 0;
+        R_CF = 0;
         break;
 
         /* Terminate process with return code                          */
       case 0x4c:
-        request_terminate(CPU_AL, 0);
-        cf = 0;
+        request_terminate(R_AL, 0);
+        R_CF = 0;
         break;
 
         /* Get return code (ERRORLEVEL)                                 */
       case 0x4d:
-        CPU_AX = DosGetRetCode();
-        cf = 0;
+        R_AX = DosGetRetCode();
+        R_CF = 0;
         break;
 
         /* EXEC - load and/or execute a program                        */
       case 0x4b: {
-          exec_blk *ep = (exec_blk *) ARM_PTR(MK_FP(CPU_ES, CPU_BX));
-          BYTE *lp = (BYTE *) ARM_PTR(FP_DS_DX);
-
-          rc = DosExec(CPU_AL, ep, lp);
+          exec_blk *ep = (exec_blk *) ARM_PTR(MK_FP(R_ES, R_BX));
+          BYTE *lp = (BYTE *) ARM_PTR(R_FP_DS_DX);
+          rc = DosExec(R_AL, ep, lp);
           dpb_watch_check_chain("0x4b");
           if (rc < SUCCESS)
           {
-            CPU_AX = (UWORD) (-rc);
-            cf = 1;
+            R_AX = (UWORD) (-rc);
+            R_CF = 1;
           }
           else
-            cf = 0;
+            R_CF = 0;
         }
         break;
 
@@ -1219,75 +1307,75 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           seg para;
           UWORD asize = 0;
 
-          rc = DosMemAlloc(CPU_BX, internal_data->mem_access_mode, &para, &asize);
+          rc = DosMemAlloc(R_BX, internal_data->mem_access_mode, &para, &asize);
 #ifdef INT21_DIAG
           printf("MEM 48 by %04x:%04x bx=%04x -> rc=%d seg=%04x max=%04x\n",
                  readw86((CPU_SS << 4) + CPU_SP + 2),
                  readw86((CPU_SS << 4) + CPU_SP),
-                 CPU_BX, rc, (UWORD)(para + 1), asize);
+                 R_BX, rc, (UWORD)(para + 1), asize);
 #endif
           if (rc < SUCCESS)
           {
-            CPU_BX = asize;
-            CPU_AX = (UWORD) (-rc);
-            cf = 1;
+            R_BX = asize;
+            R_AX = (UWORD) (-rc);
+            R_CF = 1;
           }
           else
           {
-            CPU_AX = para + 1;  /* segment of the usable block, not the MCB itself */
-            cf = 0;
+            R_AX = para + 1;  /* segment of the usable block, not the MCB itself */
+            R_CF = 0;
           }
         }
         break;
 
         /* Free memory                                                  */
       case 0x49:
-        rc = DosMemFree(CPU_ES - 1);
+        rc = DosMemFree(R_ES - 1);
 #ifdef INT21_DIAG
         printf("MEM 49 by %04x:%04x es=%04x -> rc=%d\n",
                readw86((CPU_SS << 4) + CPU_SP + 2),
-               readw86((CPU_SS << 4) + CPU_SP), CPU_ES, rc);
+               readw86((CPU_SS << 4) + CPU_SP), R_ES, rc);
 #endif
         if (rc < SUCCESS)
         {
-          CPU_AX = (UWORD) (-rc);
-          cf = 1;
+          R_AX = (UWORD) (-rc);
+          R_CF = 1;
         }
         else
-          cf = 0;
+          R_CF = 0;
         break;
 
         /* Resize (grow/shrink) an allocated memory block               */
       case 0x4a: {
           UWORD maxsize = 0;
 
-          rc = DosMemChange(CPU_ES, CPU_BX, &maxsize);
+          rc = DosMemChange(R_ES, R_BX, &maxsize);
 #ifdef INT21_DIAG
           printf("MEM 4A by %04x:%04x es=%04x bx=%04x -> rc=%d max=%04x\n",
                  readw86((CPU_SS << 4) + CPU_SP + 2),
                  readw86((CPU_SS << 4) + CPU_SP),
-                 CPU_ES, CPU_BX, rc, maxsize);
+                 R_ES, R_BX, rc, maxsize);
 #endif
           if (rc < SUCCESS)
           {
-            CPU_BX = maxsize;
-            CPU_AX = (UWORD) (-rc);
-            cf = 1;
+            R_BX = maxsize;
+            R_AX = (UWORD) (-rc);
+            R_CF = 1;
           }
           else
-            cf = 0;
+            R_CF = 0;
         }
         break;
       /* Get/Set File Date and Time                                   */
       case 0x57:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0x00:
-            rc = DosGetFtime((COUNT)CPU_BX, (ddate*)&CPU_DX, (dtime*)&CPU_CX);
+            rc = DosGetFtime((COUNT)R_BX, (ddate*)&R_DX, (dtime*)&R_CX);
             break;
 
           case 0x01:
-            rc = DosSetFtime((COUNT)CPU_BX, (ddate)CPU_DX, (dtime)CPU_CX);
+            rc = DosSetFtime((COUNT)R_BX, (ddate)R_DX, (dtime)R_CX);
             break;
 
           default:
@@ -1297,40 +1385,40 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         /* Get/Set memory allocation strategy, get/set UMB link state   */
       case 0x58:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0x00:            /* get allocation strategy */
-            CPU_AX = internal_data->mem_access_mode;
-            cf = 0;
+            R_AX = internal_data->mem_access_mode;
+            R_CF = 0;
             break;
           case 0x01:            /* set allocation strategy */
 #ifdef INT21_DIAG
-            printf("STRAT 5801 bl=%02x by %04x:%04x\n", CPU_BL,
+            printf("STRAT 5801 bl=%02x by %04x:%04x\n", R_BL,
                    readw86((CPU_SS << 4) + CPU_SP + 2),
                    readw86((CPU_SS << 4) + CPU_SP));
 #endif
-            if (CPU_BL != FIRST_FIT && CPU_BL != BEST_FIT && CPU_BL != LAST_FIT &&
-                CPU_BL != FIRST_FIT_UO && CPU_BL != BEST_FIT_UO && CPU_BL != LAST_FIT_UO &&
-                CPU_BL != FIRST_FIT_U && CPU_BL != BEST_FIT_U && CPU_BL != LAST_FIT_U)
+            if (R_BL != FIRST_FIT && R_BL != BEST_FIT && R_BL != LAST_FIT &&
+                R_BL != FIRST_FIT_UO && R_BL != BEST_FIT_UO && R_BL != LAST_FIT_UO &&
+                R_BL != FIRST_FIT_U && R_BL != BEST_FIT_U && R_BL != LAST_FIT_U)
             {
               rc = DE_INVLDFUNC;
-              CPU_AX = (UWORD) (-rc);
-              cf = 1;
+              R_AX = (UWORD) (-rc);
+              R_CF = 1;
             }
             else
             {
-              internal_data->mem_access_mode = CPU_BL;
-              cf = 0;
+              internal_data->mem_access_mode = R_BL;
+              R_CF = 0;
             }
             break;
           case 0x02:            /* get UMB link state */
-            CPU_AL = LoL->uppermem_link;
-            cf = 0;
+            R_AL = LoL->uppermem_link;
+            R_CF = 0;
             break;
           case 0x03:            /* set UMB link state */
 #ifdef INT21_DIAG
             printf("LINK 5803 bx=%04x (was %u, root=%04x) by %04x:%04x\n",
-                   CPU_BX, LoL->uppermem_link & 1, LoL->uppermem_root,
+                   R_BX, LoL->uppermem_link & 1, LoL->uppermem_root,
                    readw86((CPU_SS << 4) + CPU_SP + 2),
                    readw86((CPU_SS << 4) + CPU_SP));
 #endif
@@ -1338,26 +1426,25 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
              * FreeDOS accepts only BX=0 (unlink) and BX=1 (link).
              * Do not silently normalize every non-zero value to 1.
              */
-            if (CPU_BX > 1 || LoL->uppermem_root == 0xffff)
+            if (R_BX > 1 || LoL->uppermem_root == 0xffff)
             {
-              CPU_AX = (UWORD)-DE_INVLDFUNC;
-              cf = 1;
+              R_AX = (UWORD)-DE_INVLDFUNC;
+              R_CF = 1;
             }
             else
             {
-              DosUmbLink(CPU_BX);
-              cf = 0;
+              DosUmbLink(R_BX);
+              R_CF = 0;
             }
 #ifdef INT21_DIAG
             printf("LINK done: link=%u\n", LoL->uppermem_link & 1);
-            if (CPU_BX)
+            if (R_BX)
               mcb_dump_chain();
 #endif
-            cf = 0;
             break;
           default:
-            CPU_AX = (UWORD)-DE_INVLDFUNC;
-            cf = 1;
+            R_AX = (UWORD)-DE_INVLDFUNC;
+            R_CF = 1;
         }
         break;
       /* UNDOCUMENTED: Double byte and korean tables                  */
@@ -1369,19 +1456,19 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /*Bart: fails for PQDI and WATCOM utilities:
            use the above again */
 #endif
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0: {
             dos_far_ptr p = DosGetDBCS();
-            SET_DS ( FP_SEG(p) );
-            CPU_SI = FP_OFF(p) + 2;
+            R_DS = ( FP_SEG(p) );
+            R_SI = FP_OFF(p) + 2;
             break;
           }
           case 1: /* set Korean Hangul input method to DL 0/1 */
-            CPU_AL = 0xff;       /* flag error (AL would be 0 if okay) */
+            R_AL = 0xff;       /* flag error (AL would be 0 if okay) */
             break;
           case 2: /* get Korean Hangul input method setting to DL */
-            CPU_AL = 0xff;       /* flag error, do not set DL */
+            R_AL = 0xff;       /* flag error, do not set DL */
             break;
           default:      /* is this the proper way to handle invalid AL? */
             rc = -1;
@@ -1400,7 +1487,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            INT 2Fh/AH=11h a chance to handle the request.  Local filesystem
            support is still reported as unsupported. */
        case 0x71:
-        switch (CPU_AL)
+        switch (R_AL)
         {
 #ifdef WITHLFNAPI
           case 0x0d:
@@ -1421,7 +1508,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
           case 0x56:
           case 0x60:
-            switch (CPU_CL)
+            switch (R_CL)
             {
               case 0x00:
               case 0x01:
@@ -1436,7 +1523,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             goto lfn_unsupp;
 
           case 0xa7:
-            switch (CPU_BL)
+            switch (R_BL)
             {
               case 0x00:
               case 0x01:
@@ -1459,40 +1546,40 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 #ifdef WITHFAT32
         /* DOS 7.0+ FAT32 extended functions */
       case 0x73:
-        cf = 0;
+        R_CF = 0;
         internal_data->CritErrCode = SUCCESS;
-        rc = int21_fat32();
+        rc = int21_fat32_regs(regs);
         goto short_check;
 #endif
 
 #ifdef WITHLFNAPI
         /* FreeDOS LFN helper API functions */
       case 0x74:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0x01:
             rc = lfn_allocate_inode();
             break;
           case 0x02:
-            rc = lfn_free_inode(CPU_BX);
+            rc = lfn_free_inode(R_BX);
             break;
           case 0x03:
-            rc = lfn_setup_inode(CPU_BX, MK_ULONG(CPU_CX, CPU_DX), MK_ULONG(CPU_SI, CPU_DI));
+            rc = lfn_setup_inode(R_BX, MK_ULONG(R_CX, R_DX), MK_ULONG(R_SI, R_DI));
             break;
           case 0x04:
-            rc = lfn_create_entries(CPU_BX, (lfn_inode_ptr)ARM_PTR(FP_DS_DX));
+            rc = lfn_create_entries(R_BX, (lfn_inode_ptr)ARM_PTR(R_FP_DS_DX));
             break;
           case 0x05:
-            rc = lfn_dir_read(CPU_BX, (lfn_inode_ptr)ARM_PTR(FP_DS_DX));
+            rc = lfn_dir_read(R_BX, (lfn_inode_ptr)ARM_PTR(R_FP_DS_DX));
             break;
           case 0x06:
-            rc = lfn_dir_write(CPU_BX);
+            rc = lfn_dir_write(R_BX);
             break;
           default:
             goto error_invalid;
         }
-        CPU_AX = rc;
-        cf = 0;
+        R_AX = rc;
+        R_CF = 0;
         goto short_check;
 #endif
       /* ------------------------------------------------------------------
@@ -1501,79 +1588,79 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          ------------------------------------------------------------------ */
 
       case 0x0f:
-        CPU_AL = FcbOpen(FP_DS_DX, O_FCB | O_LEGACY | O_OPEN | O_RDWR);
+        R_AL = FcbOpen(R_FP_DS_DX, O_FCB | O_LEGACY | O_OPEN | O_RDWR);
         break;
 
       case 0x10:
-        CPU_AL = FcbClose(FP_DS_DX);
+        R_AL = FcbClose(R_FP_DS_DX);
         break;
 
       case 0x11:
-        CPU_AL = FcbFindFirstNext(FP_DS_DX, TRUE);
+        R_AL = FcbFindFirstNext(R_FP_DS_DX, TRUE);
         break;
 
       case 0x12:
-        CPU_AL = FcbFindFirstNext(FP_DS_DX, FALSE);
+        R_AL = FcbFindFirstNext(R_FP_DS_DX, FALSE);
         break;
 
       case 0x13:
-        CPU_AL = FcbDelete(FP_DS_DX);
+        R_AL = FcbDelete(R_FP_DS_DX);
         break;
 
       case 0x14:
         /* FCB read */
-        CPU_AL = FcbReadWrite(FP_DS_DX, 1, XFR_READ);
+        R_AL = FcbReadWrite(R_FP_DS_DX, 1, XFR_READ);
         break;
 
       case 0x15:
         /* FCB write */
-        CPU_AL = FcbReadWrite(FP_DS_DX, 1, XFR_WRITE);
+        R_AL = FcbReadWrite(R_FP_DS_DX, 1, XFR_WRITE);
         break;
 
       case 0x16:
-        CPU_AL = FcbOpen(FP_DS_DX, O_FCB | O_LEGACY | O_CREAT | O_TRUNC | O_RDWR);
+        R_AL = FcbOpen(R_FP_DS_DX, O_FCB | O_LEGACY | O_CREAT | O_TRUNC | O_RDWR);
         break;
 
       case 0x17:
-        CPU_AL = FcbRename(FP_DS_DX);
+        R_AL = FcbRename(R_FP_DS_DX);
         break;
 
       /* Random read using FCB: fields not updated
          (XFR_RANDOM should not be used here) */
       case 0x21:
-        CPU_AL = FcbRandomIO(FP_DS_DX, XFR_READ);
+        R_AL = FcbRandomIO(R_FP_DS_DX, XFR_READ);
         break;
 
       /* Random write using FCB */
       case 0x22:
-        CPU_AL = FcbRandomIO(FP_DS_DX, XFR_WRITE);
+        R_AL = FcbRandomIO(R_FP_DS_DX, XFR_WRITE);
         break;
 
       /* Get file size in records using FCB */
       case 0x23:
-        CPU_AL = FcbGetFileSize(FP_DS_DX);
+        R_AL = FcbGetFileSize(R_FP_DS_DX);
         break;
 
       /* Set random record field in FCB */
       case 0x24:
-        FcbSetRandom(FP_DS_DX);
+        FcbSetRandom(R_FP_DS_DX);
         break;
 
       /* Read random record(s) using FCB */
       case 0x27:
       {
-        UWORD nrec = CPU_CX;
-        CPU_AL = FcbRandomBlockIO(FP_DS_DX, &nrec, XFR_READ | XFR_FCB_RANDOM);
-        CPU_CX = nrec;
+        UWORD nrec = R_CX;
+        R_AL = FcbRandomBlockIO(R_FP_DS_DX, &nrec, XFR_READ | XFR_FCB_RANDOM);
+        R_CX = nrec;
         break;
       }
 
       /* Write random record(s) using FCB */
       case 0x28:
       {
-        UWORD nrec = CPU_CX;
-        CPU_AL = FcbRandomBlockIO(FP_DS_DX, &nrec, XFR_WRITE | XFR_FCB_RANDOM);
-        CPU_CX = nrec;
+        UWORD nrec = R_CX;
+        R_AL = FcbRandomBlockIO(R_FP_DS_DX, &nrec, XFR_WRITE | XFR_FCB_RANDOM);
+        R_CX = nrec;
         break;
       }
 
@@ -1592,9 +1679,9 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            return_code = AL | 0x300). Errors from DosMemChange() are
            deliberately ignored, exactly like the original. */
         DosMemChange(internal_data->cu_psp,
-                     CPU_DX < 6 ? 6 : CPU_DX, NULL);
-        request_terminate(CPU_AL, 3);
-        cf = 0;
+                     R_DX < 6 ? 6 : R_DX, NULL);
+        request_terminate(R_AL, 3);
+        R_CF = 0;
         break;
 
       /* ------------------------------------------------------------------
@@ -1604,26 +1691,26 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          ------------------------------------------------------------------ */
 
       case 0x5d:
-        switch (CPU_AL)
+        switch (R_AL)
         {
             /* Remote Server Call: DS:DX -> DOS parameter list holding
                the register frame AX,BX,CX,DX,SI,DI,DS,ES (original:
-               fmemcpy(&lr, FP_DS_DX, sizeof(lregs)); goto dispatch).
+               fmemcpy(&lr, R_FP_DS_DX, sizeof(lregs)); goto dispatch).
                Load DS/ES last - reading the frame uses the old DS.   */
           case 0x00:
           {
-            uint32_t frame = (CPU_DS << 4) + CPU_DX;
+            uint32_t frame = (R_DS << 4) + R_DX;
             UWORD new_ds, new_es;
-            CPU_AX = readw86(frame + 0);
-            CPU_BX = readw86(frame + 2);
-            CPU_CX = readw86(frame + 4);
-            CPU_DX = readw86(frame + 6);
-            CPU_SI = readw86(frame + 8);
-            CPU_DI = readw86(frame + 10);
+            R_AX = readw86(frame + 0);
+            R_BX = readw86(frame + 2);
+            R_CX = readw86(frame + 4);
+            R_DX = readw86(frame + 6);
+            R_SI = readw86(frame + 8);
+            R_DI = readw86(frame + 10);
             new_ds = readw86(frame + 12);
             new_es = readw86(frame + 14);
-            SET_DS ( new_ds );
-            SET_ES ( new_es );
+            R_DS = ( new_ds );
+            R_ES = ( new_es );
             goto dispatch;
           }
 
@@ -1638,13 +1725,13 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x06:
           {
             char *sda_base = (char *)ARM_PTR(MK_FP(DOS_PSP, 0));
-            SET_DS ( DOS_PSP );
-            CPU_SI = (UWORD)((char *)&internal_data->ErrorMode - sda_base);
-            CPU_CX = (UWORD)((char *)(internal_data + 1) -
+            R_DS = ( DOS_PSP );
+            R_SI = (UWORD)((char *)&internal_data->ErrorMode - sda_base);
+            R_CX = (UWORD)((char *)(internal_data + 1) -
                              (char *)&internal_data->ErrorMode);
-            CPU_DX = (UWORD)((char *)&internal_data->Int21AX -
+            R_DX = (UWORD)((char *)&internal_data->Int21AX -
                              (char *)&internal_data->ErrorMode);
-            cf = 0;
+            R_CF = 0;
             break;
           }
 
@@ -1653,7 +1740,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x09:
             rc = (int)network_redirector_mx(REM_PRINTREDIR,
                      NULL, (void *)(intptr_t)internal_data->Int21AX);
-            cf = 0;
+            R_CF = 0;
             if (rc != SUCCESS)
               goto error_exit;
             break;
@@ -1662,14 +1749,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
                (AX=0 BX=2 CX=4 DX=6 SI=8 DI=10 DS=12 ES=14)           */
           case 0x0a:
           {
-            uint32_t er = (CPU_DS << 4) + CPU_DX;
+            uint32_t er = (R_DS << 4) + R_DX;
             internal_data->CritErrCode   = readw86(er + 0);
             internal_data->CritErrDev    = MK_FP(readw86(er + 14),
                                                  readw86(er + 10));
             internal_data->CritErrLocus  = read86(er + 5);   /* CH */
             internal_data->CritErrClass  = read86(er + 3);   /* BH */
             internal_data->CritErrAction = read86(er + 2);   /* BL */
-            cf = 0;
+            R_CF = 0;
             break;
           }
 
@@ -1680,14 +1767,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
 
       case 0x5e:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 0x00:
-            CPU_CX = get_machine_name(FP_DS_DX);
+            R_CX = get_machine_name(R_FP_DS_DX);
             break;
 
           case 0x01:
-            set_machine_name(FP_DS_DX, CPU_CX);
+            set_machine_name(R_FP_DS_DX, R_CX);
             break;
 
           default:
@@ -1698,16 +1785,16 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
 
       case 0x5f:
-        if (CPU_AL == 7 || CPU_AL == 8)
+        if (R_AL == 7 || R_AL == 8)
         {
-          if (CPU_DL < LoL->lastdrive)
+          if (R_DL < LoL->lastdrive)
           {
             struct cds *cdsp =
-                (struct cds *)ARM_PTR(LoL->CDSp) + CPU_DL;
+                (struct cds *)ARM_PTR(LoL->CDSp) + R_DL;
             if (FP_OFF(cdsp->cdsDpb))   /* letter of physical drive?  */
             {
               cdsp->cdsFlags &= ~CDSPHYSDRV;
-              if (CPU_AL == 7)
+              if (R_AL == 7)
                 cdsp->cdsFlags |= CDSPHYSDRV;
               break;
             }
@@ -1727,26 +1814,26 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           if (rc != SUCCESS)
           {
             internal_data->CritErrCode = -rc;   /* Maybe set */
-            cf = 1;
+            R_CF = 1;
           }
-          CPU_AX = -rc;
+          R_AX = -rc;
           break;
         }
 
       /* Get/Set global code page                                     */
       case 0x66:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           case 1:
           {
             UWORD act, sys;
             rc = DosGetCodepage(&act, &sys);
-            CPU_BX = act;
-            CPU_DX = sys;
+            R_BX = act;
+            R_DX = sys;
             break;
           }
           case 2:
-            rc = DosSetCodepage(CPU_BX, CPU_DX);
+            rc = DosSetCodepage(R_BX, R_DX);
             break;
 
           default:
@@ -1754,7 +1841,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         }
         if (rc != SUCCESS)
           goto error_exit;
-        cf = 0;
+        R_CF = 0;
         break;
 
       /* ------------------------------------------------------------------
@@ -1767,51 +1854,51 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* Create Temporary File                                        */
       case 0x5a:
       {
-        long lrc = DosMkTmp(FP_DS_DX, CPU_CX);
+        long lrc = DosMkTmp(R_FP_DS_DX, R_CX);
         if (lrc < SUCCESS)
         {
           rc = (COUNT)lrc;
           goto error_exit;
         }
-        cf = 0;
-        CPU_AX = (UWORD)lrc;
+        R_CF = 0;
+        R_AX = (UWORD)lrc;
         break;
       }
 
       /* Create New File (fails with DE_FILEEXISTS if it exists)      */
       case 0x5b:
       {
-        long lrc = DosOpen(FP_DS_DX, O_LEGACY | O_RDWR | O_CREAT, CPU_CX);
+        long lrc = DosOpen(R_FP_DS_DX, O_LEGACY | O_RDWR | O_CREAT, R_CX);
         if (lrc < SUCCESS)
         {
           rc = (COUNT)lrc;
           goto error_exit;
         }
-        cf = 0;
-        CPU_AX = (UWORD)lrc;
+        R_CF = 0;
+        R_AX = (UWORD)lrc;
         break;
       }
 
       /* Lock/unlock file access (added for SHARE - Ron Cemer)        */
       case 0x5c:
-        rc = DosLockUnlock(CPU_BX,
-                           ((LONG)CPU_CX << 16) | CPU_DX,
-                           ((LONG)CPU_SI << 16) | CPU_DI,
-                           CPU_AL != 0);
+        rc = DosLockUnlock(R_BX,
+                           ((LONG)R_CX << 16) | R_DX,
+                           ((LONG)R_SI << 16) | R_DI,
+                           R_AL != 0);
         if (rc != SUCCESS)
           goto error_exit;
-        cf = 0;
+        R_CF = 0;
         break;
 
       /* Set Max file handle count                                    */
       case 0x67:
-        rc = SetJFTSize(CPU_BX);
+        rc = SetJFTSize(R_BX);
         goto short_check;
 
       /* Flush file buffer -- COMMIT FILE                             */
       case 0x68:
       case 0x6a:
-        rc = DosCommit(CPU_BX);
+        rc = DosCommit(R_BX);
         goto short_check;
 
       /* Extended Open/Create                                         */
@@ -1819,20 +1906,20 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       {
         long lrc;
         /* high nibble must be <= 1, low nibble must be <= 2 */
-        if ((CPU_DL & 0xef) > 0x2)
+        if ((R_DL & 0xef) > 0x2)
           goto error_invalid;
-        lrc = DosOpen(MK_FP(CPU_DS, CPU_SI),
-                      (CPU_BX & 0x70ff) | ((CPU_DL & 3) << 8) |
-                      ((CPU_DL & 0x10) << 6), CPU_CL);
+        lrc = DosOpen(MK_FP(R_DS, R_SI),
+                      (R_BX & 0x70ff) | ((R_DL & 3) << 8) |
+                      ((R_DL & 0x10) << 6), R_CL);
         if (lrc < SUCCESS)
         {
           rc = (COUNT)lrc;
           goto error_exit;
         }
         /* action taken */
-        CPU_CX = (UWORD)(lrc >> 16);
-        cf = 0;
-        CPU_AX = (UWORD)lrc;
+        R_CX = (UWORD)(lrc >> 16);
+        R_CF = 0;
+        R_AX = (UWORD)lrc;
         break;
       }
 
@@ -1842,24 +1929,24 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
       /* Get Default Drive Data                                       */
       case 0x1b:
-        CPU_DL = 0;
+        R_DL = 0;
         /* fall through */
       /* Get Drive Data                                               */
       case 0x1c:
       {
         UBYTE spc;
         UWORD bps, nc;
-        dos_far_ptr p = FatGetDrvData(CPU_DL, &spc, &bps, &nc);
+        dos_far_ptr p = FatGetDrvData(R_DL, &spc, &bps, &nc);
         if (!far_is_null(p))
         {
-          CPU_AL = spc;
-          CPU_CX = bps;
-          CPU_DX = nc;
-          SET_DS ( FP_SEG(p) );
-          CPU_BX = FP_OFF(p);
+          R_AL = spc;
+          R_CX = bps;
+          R_DX = nc;
+          R_DS = ( FP_SEG(p) );
+          R_BX = FP_OFF(p);
         }
         else
-          CPU_AL = 0xff;  /* return 0xff on invalid drive */
+          R_AL = 0xff;  /* return 0xff on invalid drive */
         break;
       }
 
@@ -1870,15 +1957,15 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* r->DL is NOT changed by MS 6.22 */
       /* INT21/32 is documented to reread the DPB */
       {
-        int drv = (CPU_DL == 0 || CPU_AH == 0x1f)
-                    ? internal_data->default_drive : CPU_DL - 1;
+        int drv = (R_DL == 0 || R_AH == 0x1f)
+                    ? internal_data->default_drive : R_DL - 1;
         dos_far_ptr dpbp_x86 = get_dpb(drv);
         struct dpb *dpbp;
 
         if (far_is_null(dpbp_x86))
         {
           internal_data->CritErrCode = -DE_INVLDDRV;
-          CPU_AL = 0xFF;
+          R_AL = 0xFF;
           break;
         }
         dpbp = (struct dpb *) ARM_PTR (dpbp_x86);
@@ -1892,13 +1979,13 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         if (media_check(dpbp_x86) < 0)
 #endif
         {
-          CPU_AL = 0xff;
+          R_AL = 0xff;
           internal_data->CritErrCode = -DE_INVLDDRV;
           break;
         }
-        SET_DS ( FP_SEG(dpbp_x86) );
-        CPU_BX = FP_OFF(dpbp_x86);
-        CPU_AL = 0;
+        R_DS = ( FP_SEG(dpbp_x86) );
+        R_BX = FP_OFF(dpbp_x86);
+        R_AL = 0;
         break;
       }
 
@@ -1906,14 +1993,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x36:
       {
         UWORD navc, bps, nc;
-        CPU_AX = DosGetFree(CPU_DL, &navc, &bps, &nc);
-        if (CPU_AX != 0xffff)
+        R_AX = DosGetFree(R_DL, &navc, &bps, &nc);
+        if (R_AX != 0xffff)
         {
           /* original copies its whole reg frame back, leaving the
              outputs untouched on error; only assign on success */
-          CPU_BX = navc;
-          CPU_CX = bps;
-          CPU_DX = nc;
+          R_BX = navc;
+          R_CX = bps;
+          R_DX = nc;
         }
         break;
       }
@@ -1922,12 +2009,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          PARAM BLOCK: DS:SI -> BPB, ES:BP -> DPB to fill              */
       case 0x53:
 #ifdef WITHFAT32
-        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(CPU_DS, CPU_SI)),
-                   (struct dpb *) ARM_PTR (MK_FP(CPU_ES, CPU_BP)),
-                   (CPU_CX == 0x4558 && CPU_DX == 0x4152));
+        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(R_DS, R_SI)),
+                   (struct dpb *) ARM_PTR (MK_FP(R_ES, R_BP)),
+                   (R_CX == 0x4558 && R_DX == 0x4152));
 #else
-        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(CPU_DS, CPU_SI)),
-                   (struct dpb *) ARM_PTR (MK_FP(CPU_ES, CPU_BP)));
+        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(R_DS, R_SI)),
+                   (struct dpb *) ARM_PTR (MK_FP(R_ES, R_BP)));
 #endif
         break;
 
@@ -1936,8 +2023,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          in BL, which DosDevIOctl's 0Dh path reads directly.          */
       case 0x69:
       {
-        int drv = (CPU_BL == 0 ? internal_data->default_drive : CPU_BL - 1);
-        if (CPU_AL < 2)
+        int drv = (R_BL == 0 ? internal_data->default_drive : R_BL - 1);
+        if (R_AL < 2)
         {
           if (far_is_null(get_cds(drv)))
           {
@@ -1946,11 +2033,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           }
           if (!far_is_null(get_dpb(drv)))
           {
-            UWORD saveCX = CPU_CX;
-            CPU_CX = (CPU_AL == 0) ? 0x0866 : 0x0846;
-            CPU_AL = 0x0d;
+            UWORD saveCX = R_CX;
+            R_CX = (R_AL == 0) ? 0x0866 : 0x0846;
+            R_AL = 0x0d;
             rc = DosDevIOctl();
-            CPU_CX = saveCX;
+            R_CX = saveCX;
             goto short_check;
           }
         }
@@ -1971,98 +2058,98 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          as in the original (new_psp(lr.DX, r->CS)). The caller's CS
          sits on the INT frame: SS:SP -> IP, CS, FLAGS.               */
       case 0x26:
-        new_psp(CPU_DX, readw86((CPU_SS << 4) + CPU_SP + 2));
+        new_psp(R_DX, readw86((CPU_SS << 4) + CPU_SP + 2));
         break;
 
       /* Set Verify Flag                                              */
       case 0x2e:
-        internal_data->verify_ena = CPU_AL & 1;
+        internal_data->verify_ena = R_AL & 1;
         break;
 
       /* DosVars - get/set dos variables (original: int21_syscall).
          Does not touch carry.                                        */
       case 0x33:
-        switch (CPU_AL)
+        switch (R_AL)
         {
           /* Set Ctrl-C flag; returns DL = break_ena. break_ena is the
              SDA byte at internal_data+17h - the single source of truth
              (guest programs peek it directly), see kernel.c.          */
           case 0x01:
-            internal_data->break_ena = CPU_DL & 1;
+            internal_data->break_ena = R_DL & 1;
             /* fall through so DL only low bit (as in MS-DOS) */
           /* Get Ctrl-C flag                                          */
           case 0x00:
-            CPU_DL = internal_data->break_ena;
+            R_DL = internal_data->break_ena;
             break;
           case 0x02:            /* get/set extended control break     */
           {
             UBYTE tmp = internal_data->break_ena;
-            internal_data->break_ena = CPU_DL & 1;
-            CPU_DL = tmp;
+            internal_data->break_ena = R_DL & 1;
+            R_DL = tmp;
             break;
           }
           /* Get Boot Drive                                           */
           case 0x05:
-            CPU_DL = LoL->BootDrive;
+            R_DL = LoL->BootDrive;
             break;
           /* Get (real) DOS-C version                                 */
           case 0x06:
-            CPU_BL = LoL->os_major;
-            CPU_BH = LoL->os_minor;
-            CPU_DL = 0;                    /* revision, remaining 0   */
-            CPU_DH = LoL->version_flags;   /* bit3: ROM, bit4: HMA    */
+            R_BL = LoL->os_major;
+            R_BH = LoL->os_minor;
+            R_DL = 0;                    /* revision, remaining 0   */
+            R_DH = LoL->version_flags;   /* bit3: ROM, bit4: HMA    */
             break;
           /* FreeDOS extension: CPU family. Both emulator cores are at
              least 286-class; keep the conservative answer.           */
           case 0xfa:
-            CPU_AL = 2;
+            R_AL = 2;
             break;
           /* FreeDOS extension: set version returned by INT 21h/30h   */
           case 0xfc:
-            LoL->os_setver_major = CPU_BL;
-            LoL->os_setver_minor = CPU_BH;
+            LoL->os_setver_major = R_BL;
+            LoL->os_setver_minor = R_BH;
             break;
           /* FreeDOS extension: get release string pointer in DX:AX   */
           case 0xff:
-            CPU_DX = DOS_PSP;
-            CPU_AX = (UWORD)((char *)LoL->os_release_str -
+            R_DX = DOS_PSP;
+            R_AX = (UWORD)((char *)LoL->os_release_str -
                              (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
             break;
           default:              /* set AL=0xFF as error, NOT carry    */
-            CPU_AL = 0xff;
+            R_AL = 0xff;
             break;
         }
         break;
 
       /* Get InDOS flag address                                       */
       case 0x34:
-        SET_ES ( DOS_PSP );
-        CPU_BX = (UWORD)((char *)&internal_data->InDOS -
+        R_ES = ( DOS_PSP );
+        R_BX = (UWORD)((char *)&internal_data->InDOS -
                          (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
         break;
 
       /* Get Verify Flag                                              */
       case 0x54:
-        CPU_AL = internal_data->verify_ena;
+        R_AL = internal_data->verify_ena;
         break;
 
       /* UNDOCUMENTED: create child PSP at DX, memory top in SI       */
       case 0x55:
-        child_psp(CPU_DX, internal_data->cu_psp, CPU_SI);
+        child_psp(R_DX, internal_data->cu_psp, R_SI);
         /* copy command line from the parent (required for some device
            loaders) */
-        fmemcpy(MK_FP(CPU_DX, 0x80), MK_FP(internal_data->cu_psp, 0x80), 128);
-        internal_data->cu_psp = CPU_DX;
+        fmemcpy(MK_FP(R_DX, 0x80), MK_FP(internal_data->cu_psp, 0x80), 128);
+        internal_data->cu_psp = R_DX;
         break;
 
       /* Get Extended Error information                               */
       case 0x59:
-        CPU_AX = internal_data->CritErrCode;
-        CPU_CH = internal_data->CritErrLocus;
-        CPU_BH = internal_data->CritErrClass;
-        CPU_BL = internal_data->CritErrAction;
-        CPU_DI = FP_OFF(internal_data->CritErrDev);
-        SET_ES ( FP_SEG(internal_data->CritErrDev) );
+        R_AX = internal_data->CritErrCode;
+        R_CH = internal_data->CritErrLocus;
+        R_BH = internal_data->CritErrClass;
+        R_BL = internal_data->CritErrAction;
+        R_DI = FP_OFF(internal_data->CritErrDev);
+        R_ES = ( FP_SEG(internal_data->CritErrDev) );
         break;
 
       /* DOS 5+ internal (set driver lookahead): original rejects it  */
@@ -2086,46 +2173,78 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x20:
       case 0x61:
       case 0x6b:
-        CPU_AL = 0;
+        R_AL = 0;
         break;
 
       default:
+#ifdef NO_HANDLER_DETECTOR
         no_handler(_cpu);
+#endif
+        goto error_invalid;
     }
     goto exit_dispatch;
 
 short_check:
     if (rc < SUCCESS)
         goto error_exit;
-    cf = 0;
+    R_CF = 0;
     goto exit_dispatch;
 
 lfn_unsupp:
-    CPU_AL = 0x00;
-    cf = 1;
+    R_AL = 0x00;
+    R_CF = 1;
     goto exit_dispatch;
 
 error_invalid:
     rc = DE_INVLDFUNC;
 
 error_exit:
-    CPU_AX = (UWORD)(-rc);
+    R_AX = (UWORD)(-rc);
     if (internal_data->CritErrCode == SUCCESS)
-        internal_data->CritErrCode = CPU_AX;      /* Maybe set */
-    cf = 1;
+        internal_data->CritErrCode = R_AX;      /* Maybe set */
+    R_CF = 1;
     goto exit_dispatch;
 
 error_carry:
-    cf = 1;
+    R_CF = 1;
 
 exit_dispatch:
+    flags_on_stack = (flags_on_stack & ~0x0041u)
+                   | (regs->flags.value & 0x0041u);
+
+    /* Upstream copies its local lregs frame back only after dispatch.
+     * Do the same here, then patch CF/ZF in the caller's IRET frame. */
+    cpu_restore_regs(_cpu, regs);
     dpb_watch_int21_checkpoint(cpu, "exit");
-    flags_on_stack = (flags_on_stack & ~0x0041) // reset ZF, CF
-                   | (cpu_getflags(cpu) & 0x0041); // set them back from CPU
-    writew86((CPU_SS << 4) + CPU_SP + 4, flags_on_stack);
+    writew86(((uint32_t)entry_ss << 4) + entry_sp + 4, flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
     return true;
 }
+
+#undef R_AX
+#undef R_BX
+#undef R_CX
+#undef R_DX
+#undef R_SI
+#undef R_DI
+#undef R_BP
+#undef R_AL
+#undef R_AH
+#undef R_BL
+#undef R_BH
+#undef R_CL
+#undef R_CH
+#undef R_DL
+#undef R_DH
+#undef R_DS
+#undef R_ES
+#undef R_FS
+#undef R_GS
+#undef R_CF
+#undef R_ZF
+#undef R_FP_DS_DX
+#undef R_FP_DS_SI
+#undef R_FP_ES_DI
 
 UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
     CPU_regs saved;

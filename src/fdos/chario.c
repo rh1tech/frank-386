@@ -371,13 +371,20 @@ void handle_break(dos_far_ptr *pdev, int sft_out)
 {
   (void)pdev;
   (void)sft_out;
-  printf("PANIC: handle_break() called but not implemented\n");
-  for (;;) ;
+  /* Ctrl-Break delivery is not ported yet. Do not deadlock DOS if this
+     path is reached; the caller continues as though no custom INT 23h
+     action was installed. */
+  return;
 }
 
 void DosIdle_int(void)
 {
-  /// TODO: issue INT 28h (DOS idle) via bios_intcall
+  CPU_regs saved;
+  /* INT 28h is advisory. Like upstream DosIdle_int(), preserve the
+     DOS caller's complete register context around the hook. */
+  cpu_save_regs(cpu, &saved);
+  bios_intcall(cpu, 0x28, "DOS IDLE");
+  cpu_restore_regs(cpu, &saved);
 }
 
 /*

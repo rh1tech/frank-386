@@ -133,11 +133,13 @@ void cpu_err_msg(CPU* cpu, const char* msg) {
              readw86(sp + 0), readw86(sp + 2), readw86(sp + 4));
     print_line(buf, 9);
 }
+#ifdef NO_HANDLER_DETECTOR
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "ERROR: no handler defined");
 while(1); // remove it
     return true;
 }
+#endif
 
 void cpu_init_286(CPU* cpu) {
 	CPU_ext_accessors_t* cpue = cpu->ext_accessors;
@@ -161,10 +163,12 @@ void cpu_init_286(CPU* cpu) {
 }
 
 void cpu_install_bios_handlers(CPU* cpu) {
+#ifdef NO_HANDLER_DETECTOR
     for(int i = 0; i < 256; ++i) {
         if (i == 0x21 || i == 0x29 || i == 0x2f) continue;
         handlers[i] = no_handler;
     }
+#endif
     handlers[0x00] = bios_00h; // DIVIDE BY ZERO
     handlers[0x05] = bios_05h; // PRINT SCREEN / BOUND EXCEPTION
     handlers[0x08] = bios_08h; // IRQ0: Timer
@@ -192,6 +196,22 @@ void cpu_install_dos_handlers(CPU* cpu) {
 	pstore16(0x21*4, 0x0021);
 	pstore16(0x21*4 + 2, 0xFFE0);
 
+    handlers[0x25] = fdos_25h; // absolute disk read
+	pstore16(0x25*4, 0x0025);
+	pstore16(0x25*4 + 2, 0xFFE0);
+
+    handlers[0x26] = fdos_26h; // absolute disk write
+	pstore16(0x26*4, 0x0026);
+	pstore16(0x26*4 + 2, 0xFFE0);
+
+    handlers[0x27] = fdos_27h; // old-style TSR
+	pstore16(0x27*4, 0x0027);
+	pstore16(0x27*4 + 2, 0xFFE0);
+
+    handlers[0x28] = fdos_28h; // DOS idle
+	pstore16(0x28*4, 0x0028);
+	pstore16(0x28*4 + 2, 0xFFE0);
+    
     handlers[0x29] = fdos_29h; // fast console output.
 	pstore16(0x29*4, 0x0029);
 	pstore16(0x29*4 + 2, 0xFFE0);

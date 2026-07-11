@@ -1676,6 +1676,7 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   if (strncasecmp(driver_name, "EMM386.EXE", 11) == 0) {
     printf("Using host EMM manager; install guest device-chain placeholder instead of: %s\n", szBuf);
     return InstallFakeMemMgr("EMMXXXX0", "EMM386  ", mode) ? SUCCESS : DE_NOMEM;
+  }
 #endif
 
   /* The driver is loaded at the top of allocated memory.         */

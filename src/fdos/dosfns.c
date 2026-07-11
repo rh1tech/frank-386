@@ -309,7 +309,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     /// "not implemented" failure rather than silently doing nothing,
     /// in case that assumption ever stops holding.
     printf("PANIC: DosOpenSft reached the SHARE-installed branch unexpectedly\n");
-    for (;;) ;
+    return DE_ACCESS;
   }
 
 /* /// End of additions for SHARE.  - Ron Cemer */
@@ -326,7 +326,8 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     {
       /// unreachable alongside the IsShareInstalled() branch above.
       printf("PANIC: DosOpenSft reached share_close_file unexpectedly\n");
-      for (;;) ;
+      sftp->sft_count--;
+      return DE_ACCESS;
     }
 /* /// End of additions for SHARE.  - Ron Cemer */
     sftp->sft_count--;
@@ -611,7 +612,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
     /// left as a deliberate panic rather than silently doing nothing,
     /// in case that assumption ever stops holding.
     printf("PANIC: DosRWSft reached share_access_check unexpectedly\n");
-    for (;;) ;
+    return DE_ACCESS;
   }
   /* /// End of additions for SHARE - Ron Cemer */
   return rwblock(sft_idx, bp, n, mode);

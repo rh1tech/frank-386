@@ -21,6 +21,7 @@
 
 #include "hdrs.h"
 #include <ctype.h>
+#include "fcom/fcom.h"
 
 /* pc_step()/pc - same declaration bios/bios_intcall.c and
    kernel.c's cpu_far_call() use; there is no shared header for it. */
@@ -844,6 +845,9 @@ COUNT res_DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 /* start process 0 (the shell) */
 VOID P_0(CPU * cpu_, struct config FAR *Config)
 {
+  for ( ; ; )   /* endless shell load loop - reboot or shut down to exit it! */
+  {
+#if GUEST_SHELL
   BYTE *tailp, *endp;
   exec_blk exb;
   UBYTE mode = Config->cfgP_0_startmode;
@@ -858,8 +862,6 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
   fstrcpy(Shell + strlen(Shell), Config->cfgInitTail);
   endp =  Shell + strlen(Shell);
 
-  for ( ; ; )   /* endless shell load loop - reboot or shut down to exit it! */
-  {
     BYTE *p;
     /* if there are no parameters, point to end without "\r\n" */
     if((tailp = strchr(Shell,'\t')) == NULL &&
@@ -888,6 +890,17 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
     put_string(" Enter the full shell command line: ");
     endp = Shell + res_read(cpu_, STDIN, linear_to_far(Shell), NAMEMAX);
     *endp = '\0';                             /* terminate string for strchr */
+#else
+    /*
+     * One fcom_run() call represents one COMMAND process lifetime.
+     * If it exits, recreate process 0 just as the original P_0 loop
+     * recreated COMMAND.COM.
+     */
+    fcom_run(cpu_, (const char *)Config->cfgInitTail, Config->cfgP_0_startmode);
+
+    put_string("Native COMMAND.COM restarting as process #0 with parameters: ");
+    put_string((BYTE *)Config->cfgInitTail);
+#endif
   }
   __unreachable();
 }
