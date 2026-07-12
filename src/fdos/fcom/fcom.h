@@ -3,6 +3,7 @@
 
 #include "286/cpu.h"
 
-void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode);
+int fcom_is_command_com(const char *name);
+void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode, UWORD environment_seg, UBYTE own_environment);
 
 #endif

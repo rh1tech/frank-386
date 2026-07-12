@@ -847,6 +847,25 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
   return SUCCESS;
 }
 
+static void fcom_copy_exec_tail(char *dst, size_t dst_size, const CommandTail *tail)
+{
+  size_t count;
+
+  if (dst_size == 0)
+    return;
+
+  dst[0] = '\0';
+  if (tail == NULL)
+    return;
+
+  count = tail->ctCount;
+  if (count >= dst_size)
+    count = dst_size - 1;
+
+  memcpy(dst, tail->ctBuffer, count);
+  dst[count] = '\0';
+}
+
 /*
     DosExec() - COUNT DosExec(COUNT mode, exec_blk FAR *ep, BYTE FAR *lp)
 
@@ -868,6 +887,33 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   long openresult;
   dos_far_ptr x86_lp;
 
+  if ((mode & 0x7f) == EXEC_LOADNGO &&
+      fcom_is_command_com((const char *)lp))
+  {
+    char tail[sizeof(((CommandTail *)0)->ctBuffer) + 1];
+    const CommandTail *command_tail = NULL;
+    UWORD child_env_mcb = 0;
+    COUNT env_rc;
+
+    if (!far_is_null(ep->exec.cmd_line) &&
+        !far_is_end(ep->exec.cmd_line))
+      command_tail =
+          (const CommandTail *)ARM_PTR(ep->exec.cmd_line);
+
+    /*
+     * Match ordinary EXEC semantics: ChildEnv() copies either the explicit
+     * EPB environment or, for env_seg == 0, the current process environment,
+     * and appends argv[0].  FCOM owns that copy for its whole lifetime.
+     */
+    env_rc = ChildEnv(ep, &child_env_mcb, (char *)lp);
+    if (env_rc < SUCCESS)
+      return env_rc;
+
+    fcom_copy_exec_tail(tail, sizeof(tail), command_tail);
+    fcom_run(cpu, tail, mode & LOAD_HIGH, child_env_mcb + 1, 1);
+    return SUCCESS;
+  }
+  
   if ((mode & 0x7f) > EXEC_OVERLAY || (mode & 0x7f) == 2)
     return DE_INVLDFMT;
 
@@ -972,8 +1018,7 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
      * recreated COMMAND.COM.
      * Config->cfgP_0_startmode - ignored, try HMA/UMB anytime
      */
-    fcom_run(cpu_, (const char *)Config->cfgInitTail, 0x80);
-
+    fcom_run(cpu_, (const char *)Config->cfgInitTail, 0x80, DOS_PSP + 8, 0);
     put_string("Native COMMAND.COM restarting as process #0 with parameters: ");
     put_string((BYTE *)Config->cfgInitTail);
 #endif

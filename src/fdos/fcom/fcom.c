@@ -18,7 +18,12 @@ int snprintf(char *s, size_t n, const char *fmt, ...);
 #define FCOM_STACK_RESERVE     0x2000u
 #define FCOM_ALIGN16(v)        (((v) + 15u) & ~15u)
 
+struct fcom_guest;
 static int fcom_write(CPU *cpu, UWORD command_psp, UWORD offset, UWORD count);
+static void build_tail(struct fcom_guest *g, const char *args);
+static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g);
+static int execute_command_line(CPU *cpu, UWORD command_psp, struct fcom_guest *g, char *line);
+static const char *command_basename(const char *name);
 
 #pragma pack(push, 1)
 struct fcom_guest {
@@ -82,8 +87,14 @@ struct fcom_batch_context {
 };
 #pragma pack(pop)
 
-static int execute_command_line(CPU *cpu, UWORD command_psp,
-                                struct fcom_guest *g, char *line);
+int fcom_is_command_com(const char *name)
+{
+  const char *base;
+  if (name == NULL)
+    return 0;
+  base = command_basename(name);
+  return strcasecmp(base, "COMMAND.COM") == 0;
+}
 
 #define FCOM_BATCH_CONTEXTS    8u
 #define FCOM_BATCH_CONTEXT_BYTES \
@@ -245,7 +256,6 @@ static int command_is(const char *name, const char *command)
 {
   return strcasecmp(name, command) == 0;
 }
-
 
 static const char *command_basename(const char *name)
 {
@@ -515,23 +525,99 @@ static void ensure_prompt_column_zero(CPU *cpu, UWORD command_psp,
     dos_puts(cpu, command_psp, g, "\n");
 }
 
-static void clear_screen(CPU *cpu, UWORD command_psp)
+static int fcom_handle_attributes(CPU *cpu, UWORD command_psp,
+                                  UWORD handle, UWORD *attributes)
 {
-  CPU_AX = 0x0003;
-  fcom_intcall(cpu, command_psp, 0x10, "FCOM CLS");
+  CPU_BX = handle;
+  CPU_AX = 0x4400;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM IOCTL get attributes");
+
+  if (int21_failed(cpu))
+    return 0;
+
+  *attributes = CPU_DX;
+  return 1;
 }
 
+static void clear_screen(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g)
+{
+  UWORD attributes;
+
+  /*
+   * cmd/cls.c always emits form feed first. The BIOS clear is used only
+   * when stdout is the standard CON device.
+   */
+  g->io[0] = 0x0c;
+  (void)fcom_write(cpu, command_psp,
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 1);
+
+  if (!fcom_handle_attributes(cpu, command_psp, 1, &attributes))
+    return;
+
+  if ((attributes & 0x009fu) == 0x0093u) {
+    unsigned mode;
+    UWORD fill = 0x0700u;
+
+    CPU_AH = 0x0f;
+    fcom_intcall(cpu, command_psp, 0x10, "FCOM CLS video mode");
+    mode = CPU_AL & 0x7fu;
+
+    switch (mode) {
+    case 0x04:
+    case 0x05:
+    case 0x09:
+    case 0x0a:
+    case 0x0b:
+    case 0x0d:
+    case 0x0e:
+    case 0x0f:
+    case 0x10:
+    case 0x11:
+    case 0x12:
+    case 0x13:
+    case 0x59:
+      fill = 0;
+      break;
+    default:
+      break;
+    }
+
+    CPU_AX = 0x0600;
+    CPU_BX = fill;
+    CPU_CX = 0x0000;
+    CPU_DX = 0x184f;
+    fcom_intcall(cpu, command_psp, 0x10, "FCOM CLS scroll");
+
+    CPU_BH = 0;
+    CPU_DX = 0;
+    CPU_AH = 0x02;
+    fcom_intcall(cpu, command_psp, 0x10, "FCOM CLS home");
+  } else if ((attributes & 0x009cu) == 0x0080u) {
+    g->io[0] = 0x1b;
+    g->io[1] = '[';
+    g->io[2] = '2';
+    g->io[3] = 'J';
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 4);
+  }
+}
 
 static void pause_command(CPU *cpu, UWORD command_psp,
-                          struct fcom_guest *g)
+                          struct fcom_guest *g, const char *args)
 {
-  dos_puts(cpu, command_psp, g,
-           "Press any key to continue . . .");
+  const char *message = skip_space((char *)args);
+
+  if (*message != '\0')
+    dos_puts(cpu, command_psp, g, message);
+  else
+    dos_puts(cpu, command_psp, g,
+             "Press any key to continue . . .");
 
   CPU_AH = 0x08;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM PAUSE");
 
-  dos_puts(cpu, command_psp, g, "\r\n");
+  dos_puts(cpu, command_psp, g, "\n");
 }
 
 
@@ -875,7 +961,7 @@ static void builtin_dir(CPU *cpu, UWORD command_psp,
           dos_puts(cpu, command_psp, g, "\r\n");
           wide_column = 0;
         }
-        pause_command(cpu, command_psp, g);
+        pause_command(cpu, command_psp, g, "");
         displayed_lines = 0;
       }
     }
@@ -1876,22 +1962,19 @@ static void builtin_break(CPU *cpu, UWORD command_psp,
   }
 }
 
-static void builtin_truename(CPU *cpu, UWORD command_psp,
-                             struct fcom_guest *g, char *args)
+static int fcom_truepath(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g,
+                         const char *source,
+                         char *destination,
+                         size_t destination_size)
 {
-  char *p = skip_space(args);
-  size_t n;
+  size_t n = strlen(source);
 
-  if (*p == '\0')
-    p = ".";
+  if (n >= sizeof(g->path) || destination_size == 0)
+    return 0;
 
-  n = strlen(p);
-  if (n >= sizeof(g->path)) {
-    dos_puts(cpu, command_psp, g, "Invalid path.\r\n");
-    return;
-  }
-
-  memcpy(g->path, p, n + 1);
+  memcpy(g->path, source, n + 1);
+  memset(g->text, 0, sizeof(g->text));
 
   SET_DS(command_psp);
   CPU_SI = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
@@ -1900,14 +1983,33 @@ static void builtin_truename(CPU *cpu, UWORD command_psp,
   CPU_AH = 0x60;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM TRUENAME");
 
-  if (int21_failed(cpu)) {
-    dos_puts(cpu, command_psp, g, "Invalid path.\r\n");
-    return;
-  }
+  if (int21_failed(cpu))
+    return 0;
 
-  dos_puts(cpu, command_psp, g, g->text);
+  n = strnlen(g->text, sizeof(g->text));
+  if (n >= destination_size)
+    return 0;
+
+  memcpy(destination, g->text, n + 1);
+  return 1;
+}
+
+static void builtin_truename(CPU *cpu, UWORD command_psp,
+                             struct fcom_guest *g, char *args)
+{
+  char *p = skip_space(args);
+
+  if (*p == '\0')
+    p = ".";
+
+  if (!fcom_truepath(cpu, command_psp, g, p,
+                     g->path2, sizeof(g->path2)))
+    return;
+
+  dos_puts(cpu, command_psp, g, g->path2);
   dos_puts(cpu, command_psp, g, "\r\n");
 }
+
 
 static int fcom_get_current_directory(CPU *cpu, UWORD command_psp,
                                       struct fcom_guest *g,
@@ -4110,6 +4212,41 @@ static int fcom_find_which(CPU *cpu, UWORD command_psp,
   return 0;
 }
 
+static int fcom_which_candidate(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g,
+                                const char *base,
+                                char *result, size_t result_size)
+{
+  static const char *const suffixes[] = {
+    ".COM", ".EXE", ".BAT"
+  };
+  size_t base_len = strlen(base);
+  unsigned i;
+
+  if (has_extension(base)) {
+    if (base_len >= result_size)
+      return 0;
+
+    memcpy(result, base, base_len + 1);
+    return fcom_file_exists(cpu, command_psp, g, result);
+  }
+
+  for (i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); ++i) {
+    size_t suffix_len = strlen(suffixes[i]);
+
+    if (base_len + suffix_len >= result_size)
+      continue;
+
+    memcpy(result, base, base_len);
+    memcpy(result + base_len, suffixes[i], suffix_len + 1);
+
+    if (fcom_file_exists(cpu, command_psp, g, result))
+      return 1;
+  }
+
+  return 0;
+}
+
 static void builtin_which(CPU *cpu, UWORD command_psp,
                           struct fcom_guest *g, char *args)
 {
@@ -4117,26 +4254,17 @@ static void builtin_which(CPU *cpu, UWORD command_psp,
   char *name;
 
   while ((name = next_argument(&cursor)) != NULL) {
-    size_t name_len = strlen(name);
+    dos_puts(cpu, command_psp, g, name);
 
-    if (name_len >= sizeof(g->path2))
-      name_len = sizeof(g->path2) - 1;
-    memcpy(g->path2, name, name_len);
-    g->path2[name_len] = '\0';
-
-    dos_puts(cpu, command_psp, g, g->path2);
-
-    if (fcom_find_which(cpu, command_psp, g, g->path2,
-                        g->program, sizeof(g->program))) {
+    if (fcom_find_which(cpu, command_psp, g, name,
+                        g->path2, sizeof(g->path2))) {
       dos_puts(cpu, command_psp, g, "\t");
-      dos_puts(cpu, command_psp, g, g->program);
+      dos_puts(cpu, command_psp, g, g->path2);
     }
 
     dos_puts(cpu, command_psp, g, "\r\n");
   }
 }
-
-
 
 static int fcom_open_readwrite(CPU *cpu, UWORD command_psp,
                                struct fcom_guest *g, const char *name)
@@ -5928,8 +6056,16 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
     /*
      * Each nested COMMAND has its own MCB/PSP.  /C returns after one
      * command; an interactive child returns to this shell on EXIT.
+
+     * Route both COMMAND and COMMAND.COM through INT 21h/4B00h.  The kernel
+     * interceptor then applies normal ChildEnv() semantics instead of sharing
+     * this shell's environment block with the nested shell.
      */
-    fcom_run(cpu, args, 0);
+    strcpy(g->filename, "COMMAND.COM");
+    build_tail(g, args);
+    int rc = exec_once(cpu, command_psp, g);
+    if (rc < 0)
+      dos_puts(cpu, command_psp, g, "Unable to start COMMAND.COM\r\n");
     return 1;
   }
 
@@ -5960,7 +6096,7 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
   }
 
   if (command_is(g->filename, "CLS")) {
-    clear_screen(cpu, command_psp);
+    clear_screen(cpu, command_psp, g);
     return 1;
   }
 
@@ -5981,7 +6117,7 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
   }
 
   if (command_is(g->filename, "PAUSE")) {
-    pause_command(cpu, command_psp, g);
+    pause_command(cpu, command_psp, g, args);
     return 1;
   }
 
@@ -7955,7 +8091,7 @@ static enum fcom_start_action parse_init_tail(struct fcom_guest *g,
 
 
 static UWORD create_command_process(const char *init_tail, UBYTE start_mode,
-                                    UWORD parent_psp)
+                                    UWORD parent_psp, UWORD environment_seg)
 {
   seg mcb_seg;
   UWORD largest = 0;
@@ -8003,8 +8139,7 @@ static UWORD create_command_process(const char *init_tail, UBYTE start_mode,
   process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
   process->ps_parent = parent_psp;
   process->ps_prevpsp = MK_FP(parent_psp, 0);
-  process->ps_environ =
-      ((psp *)ARM_PTR(MK_FP(parent_psp, 0)))->ps_environ;
+  process->ps_environ = environment_seg;
 
   if (n > sizeof(process->ps_cmd.ctBuffer) - 1)
     n = sizeof(process->ps_cmd.ctBuffer) - 1;
@@ -8018,12 +8153,11 @@ static UWORD create_command_process(const char *init_tail, UBYTE start_mode,
   return command_psp;
 }
 
-void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode)
+void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode, UWORD environment_seg, UBYTE own_environment)
 {
   UWORD parent_psp = internal_data->cu_psp;
   dos_far_ptr parent_dta = internal_data->dta;
-  UWORD command_psp =
-      create_command_process(init_tail, start_mode, parent_psp);
+  UWORD command_psp = create_command_process(init_tail, start_mode, parent_psp, environment_seg);
   struct fcom_guest *g;
   enum fcom_start_action start_action;
   char *start_command = NULL;
@@ -8035,6 +8169,8 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode)
 
   g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
   memset(g, 0, sizeof(*g));
+  if (own_environment)
+    g->owned_env_seg = environment_seg;
   memset(fcom_dir_stack_storage(command_psp), 0, FCOM_DIR_STACK_BYTES);
   memset(fcom_alias_storage(command_psp), 0, FCOM_ALIAS_BYTES);
   memset(fcom_history_storage(command_psp), 0, FCOM_HISTORY_BYTES);
