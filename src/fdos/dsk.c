@@ -139,9 +139,28 @@ STATIC WORD getbpb(CPU *cpu, ddt *pddt)
   memcpy(pbpbarray, &buf[BT_BPB], sizeof(bpb));
 
   {
-    struct FS_info *fs = (struct FS_info *)&buf[0x27];
-    BYTE sig = buf[0x26];
+    struct FS_info *fs;
+    BYTE sig;
 
+    /* The extended BPB sits at a different offset on FAT32: bpb_nfsect
+       (sectors per FAT) is always zero there, and that is the discriminator
+       the original getbpb() uses. Without it the serial number and the volume
+       label of a FAT32 volume are read out of the middle of the FAT32 BPB. */
+#ifdef WITHFAT32
+    if (pbpbarray->bpb_nfsect == 0)
+    {
+      fs  = (struct FS_info *)&buf[0x43];
+      sig = buf[0x42];
+    }
+    else
+#endif
+    {
+      fs  = (struct FS_info *)&buf[0x27];
+      sig = buf[0x26];
+    }
+
+    /* 0x29: serial# + volume label + fstype are valid;
+       0x28: older EBPB signature, only the serial# is valid */
     if (sig == 0x29 || sig == 0x28)
       pddt->ddt_serialno = fgetlong(&fs->serialno);
     else
@@ -622,16 +641,369 @@ STATIC WORD IoctlQueblk(CPU* cpu, request FAR *rq, ddt *pddt)
   return failure(E_CMD);
 }
 
-/* C_GENIOCTL is not ported yet - see Genblkdev() in the original dsk.c.
-   Report "unknown command" rather than "general failure", exactly like the
-   undefined dispatch slots do, so callers can fall back cleanly. */
+/* ------------------------------------------------------------------------ */
+/* BIOS floppy helpers, the C equivalents of floppy.asm                       */
+/* ------------------------------------------------------------------------ */
+
+/* fl_setmediatype(): INT 13h AH=18h - set media type for format.
+   Returns the BIOS status: 0 = ok, 0Ch = geometry not supported by the
+   drive, 80h = no media, anything else = older BIOS without AH=18h. */
+STATIC int fl_setmediatype(CPU *cpu, UBYTE drive, UWORD tracks, UWORD sectors)
+{
+  CPU_regs saved;
+  int ret;
+
+  cpu_save_regs(cpu, &saved);
+  CPU_AH = 0x18;
+  CPU_CH = (UBYTE)((tracks - 1) & 0xFF);
+  CPU_CL = (UBYTE)((sectors & 0x3F) | (((tracks - 1) >> 2) & 0xC0));
+  CPU_DL = drive;
+  bios_13h(cpu);
+  ret = cf ? CPU_AH : 0;
+  cpu_restore_regs(cpu, &saved);
+  return ret;
+}
+
+/* fl_setdisktype(): INT 13h AH=17h - set disk type for format. */
+STATIC int fl_setdisktype(CPU *cpu, UBYTE drive, UBYTE type)
+{
+  CPU_regs saved;
+  int ret;
+
+  cpu_save_regs(cpu, &saved);
+  CPU_AH = 0x17;
+  CPU_AL = type;
+  CPU_DL = drive;
+  bios_13h(cpu);
+  ret = cf ? CPU_AH : 0;
+  cpu_restore_regs(cpu, &saved);
+  return ret;
+}
+
+/* fl_read(): INT 13h AH=02h - plain CHS read, used to probe for a medium. */
+STATIC int fl_read(CPU *cpu, UBYTE drive, UWORD head, UWORD track,
+                   UWORD sector, UWORD count, dos_far_ptr buffer)
+{
+  CPU_regs saved;
+  int ret;
+
+  cpu_save_regs(cpu, &saved);
+  CPU_AH = 0x02;
+  CPU_AL = (UBYTE)count;
+  CPU_CH = (UBYTE)(track & 0xFF);
+  CPU_CL = (UBYTE)((sector & 0x3F) | ((track >> 2) & 0xC0));
+  CPU_DH = (UBYTE)head;
+  CPU_DL = drive;
+  CPU_BX = FP_OFF(buffer);
+  SET_ES(FP_SEG(buffer));
+  bios_13h(cpu);
+  ret = cf ? CPU_AH : 0;
+  cpu_restore_regs(cpu, &saved);
+  return ret;
+}
+
+/* read/write block with CHS based off start of drive's partition */
+STATIC COUNT Genblockio(CPU *cpu, ddt *pddt, UWORD mode, WORD head, WORD track,
+                        WORD sector, WORD count, dos_far_ptr buffer)
+{
+  UWORD transferred;
+
+  /* apparently sector is ZERO, not ONE based !!! */
+  return LBA_Transfer(cpu, pddt, mode, buffer,
+                      ((ULONG) track * pddt->ddt_bpb.bpb_nheads + head) *
+                      (ULONG) pddt->ddt_bpb.bpb_nsecs +
+                      pddt->ddt_offset + sector, count, &transferred);
+}
+
+/* read/write block with CHS based off start of disk drive is on */
+STATIC COUNT GenblockioAbs(CPU *cpu, ddt *pddt, UWORD mode, WORD head, WORD track,
+                           WORD sector, WORD count, dos_far_ptr buffer)
+{
+  UWORD transferred;
+
+  /* apparently sector is ZERO, not ONE based !!! */
+  return LBA_Transfer(cpu, pddt, mode, buffer,
+                      ((ULONG) track * pddt->ddt_bpb.bpb_nheads + head) *
+                      (ULONG) pddt->ddt_bpb.bpb_nsecs +
+                      sector, count, &transferred);
+}
+
+/*
+    C_GENIOCTL - generic IOCTL, ported from Genblkdev() in dsk.c.
+
+    40h/60h set/get device parameters, 41h/61h write/read track,
+    42h/62h format/verify track, 46h/66h set/get media id,
+    47h/67h set/get access flag.
+*/
 STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 {
-  UNREFERENCED_PARAMETER(cpu);
-  UNREFERENCED_PARAMETER(pddt);
-  UNREFERENCED_PARAMETER(rq);
+  int ret;
+  unsigned descflags = pddt->ddt_descflags;
+#ifdef WITHFAT32
+  int extended = 0;
 
-  return failure(E_CMD);
+  if (rq->r_cat == 0x48)
+    extended = 1;
+  else
+#endif
+  if (rq->r_cat != 8)
+    return failure(E_CMD);
+
+  switch (rq->r_fun)
+  {
+    case 0x40:                 /* set device parameters */
+      {
+        struct gblkio *gblp = (struct gblkio *)ARM_PTR(rq->r_io);
+        bpb *pbpb;
+
+        pddt->ddt_type = gblp->gbio_devtype;
+        pddt->ddt_descflags = (descflags & ~3) | (gblp->gbio_devattrib & 3)
+            | (DF_DPCHANGED | DF_REFORMAT);
+        pddt->ddt_ncyl = gblp->gbio_ncyl;
+        /* use default dpb or current bpb? */
+        pbpb =
+            (gblp->gbio_spcfunbit & 0x01) ==
+            0 ? &pddt->ddt_defbpb : &pddt->ddt_bpb;
+#ifdef WITHFAT32
+        memcpy(pbpb, &gblp->gbio_bpb,
+               extended ? sizeof(gblp->gbio_bpb) : BPB_SIZEOF);
+#else
+        memcpy(pbpb, &gblp->gbio_bpb, sizeof(gblp->gbio_bpb));
+#endif
+        /*pbpb->bpb_nsector = gblp->gbio_nsecs; */
+        break;
+      }
+
+    case 0x41:                 /* write track - CHS is absolute not relative to partition start */
+      {
+        struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq->r_rw);
+        ret = GenblockioAbs(cpu, pddt, LBA_WRITE, rw->gbrw_head, rw->gbrw_cyl,
+                            rw->gbrw_sector, rw->gbrw_nsecs, rw->gbrw_buffer);
+        if (ret != 0)
+          return (WORD)ret;
+      }
+      break;
+
+    case 0x42:                 /* format/verify track */
+      {
+        struct gblkfv *fv = (struct gblkfv *)ARM_PTR(rq->r_fv);
+        BYTE *dtb = (BYTE *)ARM_PTR(DiskTransferBuffer);
+        COUNT tracks;
+        struct thst {
+          UBYTE track, head, sector, type;
+        } *addrfield, afentry;
+
+        pddt->ddt_descflags &= ~DF_DPCHANGED;
+        if (hd(descflags))
+        {
+          /* XXX no low-level formatting for hard disks implemented */
+          fv->gbfv_spcfunbit = 1;       /* "not supported by bios" */
+          return S_DONE;
+        }
+        if (descflags & DF_DPCHANGED)
+        {
+          /* first try newer setmediatype function */
+          ret = fl_setmediatype(cpu, pddt->ddt_driveno, pddt->ddt_ncyl,
+                                pddt->ddt_bpb.bpb_nsecs);
+          if (ret == 0xc)
+          {
+            /* specified tracks, sectors/track not allowed for drive */
+            fv->gbfv_spcfunbit = 2;
+            return dskerr(ret);
+          }
+          else if (ret == 0x80)
+          {
+            fv->gbfv_spcfunbit = 3;     /* no disk in drive */
+            return dskerr(ret);
+          }
+          else if (ret != 0)
+            /* otherwise, setdisktype */
+          {
+            unsigned char type;
+            unsigned ntracks, secs;
+            if ((fv->gbfv_spcfunbit & 1) &&
+                (ret = fl_read(cpu, pddt->ddt_driveno, 0, 0, 1, 1,
+                               DiskTransferBuffer)) != 0)
+            {
+              fv->gbfv_spcfunbit = 3;   /* no disk in drive */
+              return dskerr(ret);
+            }
+            /* type 1: 320/360K disk in 360K drive */
+            /* type 2: 320/360K disk in 1.2M drive */
+            ntracks = pddt->ddt_ncyl;
+            secs = pddt->ddt_bpb.bpb_nsecs;
+            type = pddt->ddt_type + 1;
+            if (!(ntracks == 40 && (secs == 9 || secs == 8) && type < 3))
+            {
+              /* type 3: 1.2M disk in 1.2M drive */
+              /* type 4: 720kb disk in 1.44M or 720kb drive */
+              type++;
+              if (type == 9) /* 1.44M drive */
+                type = 4;
+              if (!(ntracks == 80 && ((secs == 15 && type == 3) ||
+                                      (secs == 9 && type == 4))))
+              {
+                /* specified tracks, sectors/track not allowed for drive */
+                fv->gbfv_spcfunbit = 2;
+                return dskerr(0xc);
+              }
+            }
+            fl_setdisktype(cpu, pddt->ddt_driveno, type);
+          }
+        }
+        if (fv->gbfv_spcfunbit & 1)
+          return S_DONE;
+
+        afentry.type = 2;       /* 512 byte sectors */
+        afentry.track = fv->gbfv_cyl;
+        afentry.head = fv->gbfv_head;
+
+        for (tracks = fv->gbfv_spcfunbit & 2 ? fv->gbfv_ntracks : 1;
+             tracks > 0; tracks--)
+        {
+          addrfield = (struct thst *)dtb;
+
+          if (afentry.track > pddt->ddt_ncyl)
+            return failure(E_FAILURE);
+
+          for (afentry.sector = 1;
+               afentry.sector <= pddt->ddt_bpb.bpb_nsecs; afentry.sector++)
+            memcpy(addrfield++, &afentry, sizeof(afentry));
+
+          ret = Genblockio(cpu, pddt, LBA_FORMAT, afentry.head, afentry.track, 0,
+                           pddt->ddt_bpb.bpb_nsecs, DiskTransferBuffer);
+          if (ret != 0)
+            return (WORD)ret;
+
+          afentry.head++;
+          if (afentry.head >= pddt->ddt_bpb.bpb_nheads)
+          {
+            afentry.head = 0;
+            afentry.track++;
+          }
+        }
+      }
+
+      /* fall through to verify */
+
+    case 0x62:                 /* verify track */
+      {
+        struct gblkfv *fv = (struct gblkfv *)ARM_PTR(rq->r_fv);
+
+        ret = Genblockio(cpu, pddt, LBA_VERIFY, fv->gbfv_head, fv->gbfv_cyl, 0,
+                         (fv->gbfv_spcfunbit ?
+                          fv->gbfv_ntracks * pddt->ddt_defbpb.bpb_nsecs :
+                          pddt->ddt_defbpb.bpb_nsecs), DiskTransferBuffer);
+        if (ret != 0)
+          return (WORD)ret;
+        fv->gbfv_spcfunbit = 0; /* success */
+      }
+      break;
+
+    case 0x61:                 /* read track - CHS is absolute on disk not relative to start of partition */
+      {
+        struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq->r_rw);
+        ret = GenblockioAbs(cpu, pddt, LBA_READ, rw->gbrw_head, rw->gbrw_cyl,
+                            rw->gbrw_sector, rw->gbrw_nsecs, rw->gbrw_buffer);
+        if (ret != 0)
+          return (WORD)ret;
+      }
+      break;
+
+    case 0x46:                 /* set volume serial number */
+      {
+        struct Gioc_media *gioc = (struct Gioc_media *)ARM_PTR(rq->r_gioc);
+        BYTE *buf = (BYTE *)ARM_PTR(DiskTransferBuffer);
+        struct FS_info *fs;
+        BYTE extended_BPB_signature;
+
+        ret = getbpb(cpu, pddt);
+        if (ret != 0)
+          return (WORD)ret;
+
+        extended_BPB_signature =
+          buf[(pddt->ddt_bpb.bpb_nfsect != 0 ? 0x26 : 0x42)];
+        /* return error if media lacks extended BPB with serial # */
+        if ((extended_BPB_signature != 0x29) && (extended_BPB_signature != 0x28))
+          return failure(E_MEDIA);
+
+        /* otherwise, store serial # in extended BPB */
+        fs = (struct FS_info *)&buf
+            [(pddt->ddt_bpb.bpb_nfsect != 0 ? 0x27 : 0x43)];
+        fs->serialno = gioc->ioc_serialno;
+        pddt->ddt_serialno = fs->serialno;
+
+        /* And volume name if BPB supports it */
+        if (extended_BPB_signature == 0x29)
+        {
+          memcpy(fs->volume, gioc->ioc_volume, 11);
+          memcpy(pddt->ddt_volume, fs->volume, 11);
+        }
+
+        ret = RWzero(cpu, pddt, LBA_WRITE);
+        if (ret != 0)
+          return (WORD)ret;
+      }
+      break;
+
+    case 0x47:                 /* set access flag */
+      {
+        struct Access_info *ai = (struct Access_info *)ARM_PTR(rq->r_ai);
+        pddt->ddt_descflags = (descflags & ~DF_NOACCESS) |
+          (ai->AI_Flag ? 0 : DF_NOACCESS);
+      }
+      break;
+
+    case 0x60:                 /* get device parameters */
+      {
+        struct gblkio *gblp = (struct gblkio *)ARM_PTR(rq->r_io);
+        bpb *pbpb;
+
+        gblp->gbio_devtype = pddt->ddt_type;
+        gblp->gbio_devattrib = descflags & 3;
+        /* 360 kb disk in 1.2 MB drive */
+        gblp->gbio_media = (pddt->ddt_type == 1) && (pddt->ddt_ncyl == 40);
+        gblp->gbio_ncyl = pddt->ddt_ncyl;
+        /* use default dpb or current bpb? */
+        pbpb =
+            (gblp->gbio_spcfunbit & 0x01) ==
+            0 ? &pddt->ddt_defbpb : &pddt->ddt_bpb;
+#ifdef WITHFAT32
+        memcpy(&gblp->gbio_bpb, pbpb,
+               extended ? sizeof(gblp->gbio_bpb) : BPB_SIZEOF);
+#else
+        memcpy(&gblp->gbio_bpb, pbpb, sizeof(gblp->gbio_bpb));
+#endif
+        /*gblp->gbio_nsecs = pbpb->bpb_nsector; */
+        break;
+      }
+
+    case 0x66:                 /* get volume serial number */
+      {
+        struct Gioc_media *gioc = (struct Gioc_media *)ARM_PTR(rq->r_gioc);
+
+        ret = getbpb(cpu, pddt);
+        if (ret != 0)
+          return (WORD)ret;
+
+        /* Note: getbpb() will initialize extended BPB fields with default values */
+        gioc->ioc_serialno = pddt->ddt_serialno;
+        memcpy(gioc->ioc_volume, pddt->ddt_volume, 11);
+        memcpy(gioc->ioc_fstype, pddt->ddt_fstype, 8);
+      }
+      break;
+
+    case 0x67:                 /* get access flag */
+      {
+        struct Access_info *ai = (struct Access_info *)ARM_PTR(rq->r_ai);
+        ai->AI_Flag = descflags & DF_NOACCESS ? 0 : 1;        /* bit 9 */
+      }
+      break;
+
+    default:
+      return failure(E_CMD);
+  }
+  return S_DONE;
 }
 
 /*                                                                      */

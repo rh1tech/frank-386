@@ -1066,6 +1066,76 @@ static bool bios_13h_48h(CPU* cpu)
     return true;
 }
 
+/*
+ * INT 13h AH=17h - SET DISK TYPE FOR FORMAT (obsolete, pre-AT)
+ *   AL = format type: 1 = 320/360K in 360K drive
+ *                     2 = 320/360K in 1.2M drive
+ *                     3 = 1.2M in 1.2M drive
+ *                     4 = 720K in 720K drive
+ *   DL = drive
+ * The emulated floppies are fixed-geometry image files: there is no media
+ * type to program into a controller, so simply acknowledge a present drive.
+ */
+static bool bios_13h_17h(CPU* cpu)
+{
+    BiosDisk d;
+    uint8_t drive = CPU_DL;
+
+    if ((drive & 0x80) || !int13_get_disk(drive, &d) || !d.f) {
+        int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
+        return true;
+    }
+    if (CPU_AL < 1 || CPU_AL > 4) {
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
+        return true;
+    }
+    int13_set_status(cpu, drive, INT13_ST_OK);
+    return true;
+}
+
+/*
+ * INT 13h AH=18h - SET MEDIA TYPE FOR FORMAT
+ *   CH = low eight bits of (number of cylinders - 1)
+ *   CL = sectors per track (bits 5-0), high two bits of (cylinders - 1)
+ *        in bits 7-6
+ *   DL = drive
+ * Return: AH = 00h success, ES:DI -> diskette parameter table
+ *         AH = 0Ch media type not available for this drive
+ *         AH = 80h no media in drive
+ *
+ * The geometry of a disk image cannot be reprogrammed, so the request is
+ * granted only when it matches the geometry the image already has - which is
+ * exactly what a real drive does when asked for an unsupported media type.
+ */
+static bool bios_13h_18h(CPU* cpu)
+{
+    BiosDisk d;
+    uint8_t drive = CPU_DL;
+    unsigned cyls, secs;
+
+    if (drive & 0x80) {
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
+        return true;
+    }
+    if (!int13_get_disk(drive, &d) || !d.f) {
+        int13_set_status(cpu, drive, 0x80);   /* no media in drive */
+        return true;
+    }
+
+    cyls = (unsigned)((((CPU_CL & 0xC0) << 2) | CPU_CH) + 1);
+    secs = (unsigned)(CPU_CL & 0x3F);
+
+    if (cyls != d.cyls || secs != d.sects) {
+        int13_set_status(cpu, drive, 0x0C);   /* media type not available */
+        return true;
+    }
+
+    SET_ES(FLOPPY_DPT_SEG);
+    CPU_DI = FLOPPY_DPT_OFF;
+    int13_set_status(cpu, drive, INT13_ST_OK);
+    return true;
+}
+
 bool bios_13h(CPU* cpu) {
     bool res = true;
     switch(CPU_AH) {
@@ -1114,6 +1184,12 @@ bool bios_13h(CPU* cpu) {
             break;
         case 0x16:
             res = bios_13h_16h(cpu); // DETECT DISK CHANGE
+            break;
+        case 0x17:
+            res = bios_13h_17h(cpu); // SET DISK TYPE FOR FORMAT
+            break;
+        case 0x18:
+            res = bios_13h_18h(cpu); // SET MEDIA TYPE FOR FORMAT
             break;
         case 0x41:
             res = bios_13h_41h(cpu); // EXTENSIONS INSTALLATION CHECK

@@ -66,10 +66,25 @@ struct fcom_guest {
   UBYTE lfncomplete_enabled;
   UBYTE fddebug_enabled;
   UBYTE trace_mode;
+  UBYTE batch_depth;
+  UBYTE batch_shiftlevel;
   UWORD fddebug_handle;
   char fddebug_name[128];
 };
+#pragma pack(push, 1)
+struct fcom_batch_context {
+  char name[128];
+  char args[128];
+  char goto_label[128];
+  UBYTE active;
+  UBYTE exit_batch_only;
+  UBYTE shiftlevel;
+};
 #pragma pack(pop)
+
+#define FCOM_BATCH_CONTEXTS    8u
+#define FCOM_BATCH_CONTEXT_BYTES \
+  (FCOM_BATCH_CONTEXTS * sizeof(struct fcom_batch_context))
 
 #define FCOM_DATA_END          (FCOM_WORK_OFFSET + sizeof(struct fcom_guest))
 #define FCOM_DIR_STACK_BYTES   1024u
@@ -81,7 +96,8 @@ struct fcom_guest {
 #define FCOM_ALIAS_OFFSET      (FCOM_DIR_STACK_OFFSET + FCOM_DIR_STACK_BYTES)
 #define FCOM_HISTORY_OFFSET    (FCOM_ALIAS_OFFSET + FCOM_ALIAS_BYTES)
 #define FCOM_LOADFIX_OFFSET    (FCOM_HISTORY_OFFSET + FCOM_HISTORY_BYTES)
-#define FCOM_GUARD_OFFSET      (FCOM_LOADFIX_OFFSET + FCOM_LOADFIX_BYTES)
+#define FCOM_BATCH_CONTEXT_OFFSET   FCOM_ALIGN16(FCOM_LOADFIX_OFFSET + FCOM_LOADFIX_BYTES)
+#define FCOM_GUARD_OFFSET   FCOM_ALIGN16(FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES)
 #define FCOM_STACK_BOTTOM      (FCOM_GUARD_OFFSET + FCOM_STACK_GUARD)
 #define FCOM_PROCESS_BYTES     FCOM_ALIGN16(FCOM_STACK_BOTTOM + FCOM_STACK_RESERVE)
 #define FCOM_PROCESS_PARAS     (FCOM_PROCESS_BYTES >> 4)
@@ -127,6 +143,14 @@ static char *fcom_history_storage(UWORD command_psp)
 static UWORD *fcom_loadfix_storage(UWORD command_psp)
 {
   return (UWORD *)ARM_PTR(MK_FP(command_psp, FCOM_LOADFIX_OFFSET));
+}
+
+
+static struct fcom_batch_context *fcom_batch_context_storage(
+    UWORD command_psp)
+{
+  return (struct fcom_batch_context *)ARM_PTR(
+      MK_FP(command_psp, FCOM_BATCH_CONTEXT_OFFSET));
 }
 
 static void init_stack_guard(UWORD command_psp)
@@ -926,32 +950,6 @@ static char *fcom_type_next_argument(char **cursor)
   return start;
 }
 
-static int fcom_type_build_match(char *dst, size_t dst_size,
-                                 const char *pattern,
-                                 const char *matched_name)
-{
-  const char *slash1 = strrchr(pattern, '\\');
-  const char *slash2 = strrchr(pattern, '/');
-  const char *colon = strrchr(pattern, ':');
-  const char *cut = slash1;
-  size_t prefix;
-  size_t name_len = strlen(matched_name);
-
-  if (slash2 != NULL && (cut == NULL || slash2 > cut))
-    cut = slash2;
-  if (colon != NULL && (cut == NULL || colon > cut))
-    cut = colon;
-
-  prefix = cut != NULL ? (size_t)(cut - pattern + 1) : 0;
-  if (prefix + name_len >= dst_size)
-    return 0;
-
-  if (prefix != 0)
-    memcpy(dst, pattern, prefix);
-  memcpy(dst + prefix, matched_name, name_len + 1);
-  return 1;
-}
-
 static int fcom_type_one(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, const char *name)
 {
@@ -960,84 +958,68 @@ static int fcom_type_one(CPU *cpu, UWORD command_psp,
 
   handle = dos_open_read(cpu, command_psp, g, name);
   if (handle < 0) {
-    dos_puts(cpu, command_psp, g, "File not found. - '");
-    dos_puts(cpu, command_psp, g, name);
-    dos_puts(cpu, command_psp, g, "'.\r\n");
+    dos_puts(cpu, command_psp, g, "File not found.\r\n");
     return handle;
   }
 
-  while ((count = fcom_read(cpu, command_psp, g, (UWORD)handle)) > 0) {
-    int written = fcom_write(
-        cpu, command_psp,
-        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io),
-        (UWORD)count);
+  while ((count = fcom_read(cpu, command_psp, g, (UWORD)handle)) >= 0) {
+    UWORD begin = 0;
+    UWORD i;
 
-    if (written < 0 || written != count) {
-      fcom_close(cpu, command_psp, (UWORD)handle);
-      return -5;
+    for (i = 0; i < (UWORD)count; ++i) {
+      if (g->io[i] == 0x1a)
+        break;
+
+      if (g->io[i] == '\r' || g->io[i] == '\n') {
+        if (i > begin) {
+          int written = fcom_write(
+              cpu, command_psp,
+              FCOM_WORK_OFFSET +
+                (UWORD)offsetof(struct fcom_guest, io) + begin,
+              (UWORD)(i - begin));
+
+          if (written < 0 || written != (int)(i - begin)) {
+            fcom_close(cpu, command_psp, (UWORD)handle);
+            return -5;
+          }
+        }
+
+        if (g->io[i] == '\n') {
+          g->text[0] = '\r';
+          g->text[1] = '\n';
+          if (fcom_write(
+                  cpu, command_psp,
+                  FCOM_WORK_OFFSET +
+                    (UWORD)offsetof(struct fcom_guest, text),
+                  2) != 2) {
+            fcom_close(cpu, command_psp, (UWORD)handle);
+            return -5;
+          }
+        }
+
+        begin = i + 1;
+      }
     }
+
+    if (i > begin) {
+      int written = fcom_write(
+          cpu, command_psp,
+          FCOM_WORK_OFFSET +
+            (UWORD)offsetof(struct fcom_guest, io) + begin,
+          (UWORD)(i - begin));
+
+      if (written < 0 || written != (int)(i - begin)) {
+        fcom_close(cpu, command_psp, (UWORD)handle);
+        return -5;
+      }
+    }
+
+    if (count == 0 || i != (UWORD)count)
+      break;
   }
 
   fcom_close(cpu, command_psp, (UWORD)handle);
   return count < 0 ? count : 0;
-}
-
-static int fcom_type_pattern(CPU *cpu, UWORD command_psp,
-                             struct fcom_guest *g,
-                             const char *pattern)
-{
-  int rc;
-  int found = 0;
-
-  if (strchr(pattern, '*') == NULL &&
-      strchr(pattern, '?') == NULL)
-    return fcom_type_one(cpu, command_psp, g, pattern);
-
-  if (strlen(pattern) >= sizeof(g->batch_arg)) {
-    dos_puts(cpu, command_psp, g, "Path too long.\r\n");
-    return -3;
-  }
-  strcpy(g->batch_arg, pattern);
-
-  memset(&g->find, 0, sizeof(g->find));
-  if (set_find_dta(cpu, command_psp) < 0)
-    return -1;
-
-  rc = dos_find_first_attr(cpu, command_psp, g,
-                           g->batch_arg, 0x27);
-  while (rc == 0) {
-    if (!(g->find.dm_attr_fnd & D_DIR) &&
-        strcmp(g->find.dm_name, ".") != 0 &&
-        strcmp(g->find.dm_name, "..") != 0 &&
-        fcom_type_build_match(g->program, sizeof(g->program),
-                              g->batch_arg, g->find.dm_name)) {
-      found = 1;
-
-      rc = fcom_type_one(cpu, command_psp, g, g->program);
-      if (rc < 0) {
-        restore_default_dta(cpu, command_psp);
-        return rc;
-      }
-
-      if (set_find_dta(cpu, command_psp) < 0) {
-        restore_default_dta(cpu, command_psp);
-        return -1;
-      }
-    }
-
-    rc = dos_find_next(cpu, command_psp);
-  }
-
-  restore_default_dta(cpu, command_psp);
-
-  if (!found) {
-    dos_puts(cpu, command_psp, g, "File not found. - '");
-    dos_puts(cpu, command_psp, g, g->batch_arg);
-    dos_puts(cpu, command_psp, g, "'.\r\n");
-    return -2;
-  }
-
-  return 0;
 }
 
 static void builtin_type(CPU *cpu, UWORD command_psp,
@@ -1045,15 +1027,16 @@ static void builtin_type(CPU *cpu, UWORD command_psp,
 {
   char *cursor = args;
   char *name;
-  unsigned count = 0;
+  unsigned argc = 0;
 
   while ((name = fcom_type_next_argument(&cursor)) != NULL) {
-    ++count;
-    if (fcom_type_pattern(cpu, command_psp, g, name) < 0)
-      return;
+    ++argc;
+
+    if (fcom_type_one(cpu, command_psp, g, name) < 0)
+      break;
   }
 
-  if (count == 0)
+  if (argc == 0)
     dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
 }
 
@@ -2401,92 +2384,59 @@ static int make_delete_name(struct fcom_guest *g,
 }
 
 struct fcom_del_options {
-  UBYTE prompt;
-  UBYTE quiet;
-  UBYTE required_attr;
-  UBYTE excluded_attr;
+  int prompt;
+  int verbose;
 };
 
-static int fcom_del_attr_bit(int ch, UBYTE *bit)
+static int fcom_del_bool_option(const char *arg,
+                                int letter, int *value)
 {
-  switch (toupper((unsigned char)ch)) {
-  case 'R':
-    *bit = 0x01;
-    return 1;
-  case 'H':
-    *bit = 0x02;
-    return 1;
-  case 'S':
-    *bit = 0x04;
-    return 1;
-  case 'A':
-    *bit = 0x20;
-    return 1;
-  default:
+  const char *p = arg;
+  int enabled = 1;
+
+  if (*p != '/' && *p != '-')
     return 0;
-  }
-}
+  ++p;
 
-static int fcom_parse_del_attr(char *p, struct fcom_del_options *options)
-{
-  int exclude = 0;
-
-  if (*p == ':')
+  if (*p == '-') {
+    enabled = 0;
     ++p;
-
-  if (*p == '\0')
-    return 1;
-
-  while (*p != '\0') {
-    UBYTE bit;
-
-    if (*p == '-') {
-      exclude = 1;
-      ++p;
-      continue;
-    }
-
-    if (!fcom_del_attr_bit((unsigned char)*p++, &bit))
-      return 0;
-
-    if (exclude) {
-      options->excluded_attr |= bit;
-      options->required_attr &= (UBYTE)~bit;
-    } else {
-      options->required_attr |= bit;
-      options->excluded_attr &= (UBYTE)~bit;
-    }
   }
 
+  if (toupper((unsigned char)p[0]) != letter || p[1] != '\0')
+    return 0;
+
+  *value = enabled;
   return 1;
 }
 
-static int fcom_del_attr_matches(const struct fcom_del_options *options,
-                                 UBYTE attributes)
-{
-  if ((attributes & options->required_attr) != options->required_attr)
-    return 0;
-  if ((attributes & options->excluded_attr) != 0)
-    return 0;
-  return 1;
-}
-
-static int fcom_del_confirm(CPU *cpu, UWORD command_psp,
-                            struct fcom_guest *g, const char *name)
+static int fcom_del_confirm_all(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g,
+                                const char *directory)
 {
   int ch;
 
-  dos_puts(cpu, command_psp, g, "Delete ");
-  dos_puts(cpu, command_psp, g, name);
-  dos_puts(cpu, command_psp, g, " (Y/N)? ");
+  dos_puts(cpu, command_psp, g, "All files in '");
+  dos_puts(cpu, command_psp, g, directory);
+  dos_puts(cpu, command_psp, g,
+           "' will be deleted!\r\nAre you sure (Y/N)? ");
 
   for (;;) {
     CPU_AH = 0x08;
-    fcom_intcall(cpu, command_psp, 0x21, "FCOM DEL confirm");
+    fcom_intcall(cpu, command_psp, 0x21, "FCOM DEL all prompt");
     ch = toupper((unsigned char)CPU_AL);
-    if (ch == 'Y' || ch == 'N')
+
+    if (ch == 'Y' || ch == 'N' ||
+        ch == '\r' || ch == '\n' || ch == 0x03)
       break;
+
+    g->io[0] = '\a';
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 1);
   }
+
+  if (ch == '\r' || ch == '\n' || ch == 0x03)
+    ch = 'N';
 
   g->io[0] = (UBYTE)ch;
   g->io[1] = '\r';
@@ -2497,121 +2447,245 @@ static int fcom_del_confirm(CPU *cpu, UWORD command_psp,
   return ch == 'Y';
 }
 
+static int fcom_del_confirm_file(CPU *cpu, UWORD command_psp,
+                                 struct fcom_guest *g,
+                                 const char *filename,
+                                 int *all)
+{
+  int ch;
+
+  if (*all)
+    return 1;
+
+  dos_puts(cpu, command_psp, g, "Delete '");
+  dos_puts(cpu, command_psp, g, filename);
+  dos_puts(cpu, command_psp, g,
+           "' (Yes/No/All/Quit) ? ");
+
+  for (;;) {
+    CPU_AH = 0x08;
+    fcom_intcall(cpu, command_psp, 0x21, "FCOM DEL file prompt");
+    ch = toupper((unsigned char)CPU_AL);
+
+    if (ch == 'Y' || ch == 'N' ||
+        ch == 'A' || ch == 'Q' ||
+        ch == '\r' || ch == '\n' || ch == 0x1b)
+      break;
+
+    g->io[0] = '\a';
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 1);
+  }
+
+  if (ch == '\r' || ch == '\n')
+    ch = 'Y';
+  else if (ch == 0x1b)
+    ch = 'Q';
+
+  g->io[0] = (UBYTE)ch;
+  g->io[1] = '\r';
+  g->io[2] = '\n';
+  (void)fcom_write(cpu, command_psp,
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 3);
+
+  if (ch == 'A') {
+    *all = 1;
+    return 1;
+  }
+  if (ch == 'Q')
+    return -1;
+  return ch == 'Y';
+}
+
+static const char *fcom_copy_basename(const char *name)
+{
+  const char *base = name;
+  const char *p;
+
+  for (p = name; *p != '\0'; ++p) {
+    if (*p == '\\' || *p == '/' || *p == ':')
+      base = p + 1;
+  }
+
+  return base;
+}
+
+static int fcom_del_is_all_pattern(const char *pattern)
+{
+  const char *name = fcom_copy_basename(pattern);
+  const char *dot;
+
+  if (*name != '*')
+    return 0;
+
+  dot = strrchr(name, '.');
+  return dot == NULL || strcmp(dot, ".*") == 0;
+}
+
+static int fcom_del_directory_text(char *dst, size_t dst_size,
+                                   const char *pattern)
+{
+  const char *slash1 = strrchr(pattern, '\\');
+  const char *slash2 = strrchr(pattern, '/');
+  const char *colon = strrchr(pattern, ':');
+  const char *cut = slash1;
+  size_t n;
+
+  if (slash2 != NULL && (cut == NULL || slash2 > cut))
+    cut = slash2;
+  if (colon != NULL && (cut == NULL || colon > cut))
+    cut = colon;
+
+  if (cut == NULL) {
+    if (dst_size < 2)
+      return 0;
+    strcpy(dst, ".");
+    return 1;
+  }
+
+  n = (size_t)(cut - pattern);
+  if (cut == colon)
+    ++n;
+
+  if (n == 0)
+    n = 1;
+
+  if (n >= dst_size)
+    return 0;
+
+  memcpy(dst, pattern, n);
+  dst[n] = '\0';
+  return 1;
+}
+
 static void builtin_del(CPU *cpu, UWORD command_psp,
                         struct fcom_guest *g, char *args)
 {
   struct fcom_del_options options;
-  char *cursor = args;
+  char *cursor;
   char *arg;
-  unsigned pattern_count = 0;
-  unsigned deleted = 0;
+  unsigned argc = 0;
+  unsigned count = 0;
+  int all = 0;
 
   memset(&options, 0, sizeof(options));
 
-  /*
-   * First pass parses switches only. The original command line is copied
-   * to another guest-resident buffer for the pattern pass because
-   * next_argument() inserts NUL terminators.
-   */
   if (strlen(args) >= sizeof(g->batch_line)) {
-    dos_puts(cpu, command_psp, g, "Command line too long.\r\n");
+    dos_puts(cpu, command_psp, g, "Filename too long.\r\n");
     return;
   }
 
   strcpy(g->batch_line, args);
+  cursor = args;
 
   while ((arg = next_argument(&cursor)) != NULL) {
+    if (fcom_del_bool_option(arg, 'P', &options.prompt) ||
+        fcom_del_bool_option(arg, 'V', &options.verbose))
+      continue;
+
     if ((arg[0] == '/' || arg[0] == '-') && arg[1] != '\0') {
-      char *p = arg + 1;
-
-      switch (toupper((unsigned char)*p++)) {
-      case 'P':
-        if (*p != '\0') {
-          dos_puts(cpu, command_psp, g, "Invalid DEL parameter.\r\n");
-          return;
-        }
-        options.prompt = 1;
-        break;
-
-      case 'Q':
-        if (*p != '\0') {
-          dos_puts(cpu, command_psp, g, "Invalid DEL parameter.\r\n");
-          return;
-        }
-        options.quiet = 1;
-        options.prompt = 0;
-        break;
-
-      case 'A':
-        if (!fcom_parse_del_attr(p, &options)) {
-          dos_puts(cpu, command_psp, g, "Invalid DEL parameter.\r\n");
-          return;
-        }
-        break;
-
-      default:
-        dos_puts(cpu, command_psp, g, "Invalid DEL parameter.\r\n");
-        return;
-      }
-    } else {
-      ++pattern_count;
+      dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
+      return;
     }
+
+    ++argc;
   }
 
-  if (pattern_count == 0) {
+  if (argc == 0) {
     dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
     return;
   }
 
   cursor = g->batch_line;
   while ((arg = next_argument(&cursor)) != NULL) {
-    char *pattern = arg;
     int rc;
     int matched = 0;
 
-    if ((arg[0] == '/' || arg[0] == '-') && arg[1] != '\0')
+    if (fcom_del_bool_option(arg, 'P', &options.prompt) ||
+        fcom_del_bool_option(arg, 'V', &options.verbose))
       continue;
 
-    /*
-     * Keep the pattern away from path/path2 because DOS calls below use
-     * those buffers. batch_arg is guest-resident and not touched by find.
-     */
-    if (strlen(pattern) >= sizeof(g->batch_arg)) {
-      report_file_error(cpu, command_psp, g,
-                        "Path too long. - '", pattern);
-      continue;
+    if (strlen(arg) >= sizeof(g->batch_arg)) {
+      dos_puts(cpu, command_psp, g, "Filename too long. - '");
+      dos_puts(cpu, command_psp, g, arg);
+      dos_puts(cpu, command_psp, g, "'\r\n");
+      return;
     }
-    strcpy(g->batch_arg, pattern);
-    pattern = g->batch_arg;
+
+    strcpy(g->batch_arg, arg);
+
+    {
+      UWORD attributes;
+
+      if (fcom_get_file_attr(cpu, command_psp, g,
+                             g->batch_arg, &attributes) == 0 &&
+          (attributes & D_DIR)) {
+        size_t n = strlen(g->batch_arg);
+
+        if (n + 4 >= sizeof(g->batch_arg)) {
+          dos_puts(cpu, command_psp, g, "Filename too long. - '");
+          dos_puts(cpu, command_psp, g, arg);
+          dos_puts(cpu, command_psp, g, "'\r\n");
+          return;
+        }
+
+        if (n != 0 &&
+            g->batch_arg[n - 1] != '\\' &&
+            g->batch_arg[n - 1] != '/')
+          g->batch_arg[n++] = '\\';
+
+        strcpy(g->batch_arg + n, "*.*");
+      }
+    }
+
+    if (!options.prompt &&
+        fcom_del_is_all_pattern(g->batch_arg)) {
+      if (!fcom_del_directory_text(g->path2, sizeof(g->path2),
+                                   g->batch_arg) ||
+          !fcom_del_confirm_all(cpu, command_psp, g, g->path2))
+        return;
+    }
 
     memset(&g->find, 0, sizeof(g->find));
     if (set_find_dta(cpu, command_psp) < 0)
-      break;
+      return;
 
-    rc = dos_find_first_attr(cpu, command_psp, g, pattern, 0x27);
+    rc = dos_find_first_attr(cpu, command_psp, g,
+                             g->batch_arg, 0x20);
     while (rc == 0) {
       if (!(g->find.dm_attr_fnd & D_DIR) &&
-          fcom_del_attr_matches(&options, g->find.dm_attr_fnd) &&
-          make_delete_name(g, pattern, g->find.dm_name)) {
+          make_delete_name(g, g->batch_arg, g->find.dm_name)) {
+        int answer = 1;
+
         matched = 1;
 
-        if (!options.prompt ||
-            fcom_del_confirm(cpu, command_psp, g, g->path2)) {
-          if (dos_unlink(cpu, command_psp, g, g->path2) == 0) {
-            ++deleted;
-          } else if (!options.quiet) {
-            report_file_error(cpu, command_psp, g,
-                              "Unable to delete. - '", g->path2);
-          }
-        }
+        if (options.prompt)
+          answer = fcom_del_confirm_file(
+              cpu, command_psp, g, g->path2, &all);
 
-        /*
-         * Reinstall the DTA explicitly after a DOS operation performed
-         * between FindFirst/FindNext calls.
-         */
-        if (set_find_dta(cpu, command_psp) < 0) {
+        if (answer < 0) {
           restore_default_dta(cpu, command_psp);
           return;
+        }
+
+        if (answer) {
+          if (options.verbose && !options.prompt) {
+            dos_puts(cpu, command_psp, g, "Deleting file \"");
+            dos_puts(cpu, command_psp, g, g->path2);
+            dos_puts(cpu, command_psp, g, "\".\r\n");
+          }
+
+          if (dos_unlink(cpu, command_psp, g, g->path2) == 0)
+            ++count;
+          else {
+            dos_puts(cpu, command_psp, g, g->path2);
+            dos_puts(cpu, command_psp, g, "\r\n");
+          }
+
+          if (set_find_dta(cpu, command_psp) < 0) {
+            restore_default_dta(cpu, command_psp);
+            return;
+          }
         }
       }
 
@@ -2620,65 +2694,67 @@ static void builtin_del(CPU *cpu, UWORD command_psp,
 
     restore_default_dta(cpu, command_psp);
 
-    if (!matched && !options.quiet)
-      report_file_error(cpu, command_psp, g,
-                        "File not found. - '", pattern);
+    if (!matched)
+      dos_puts(cpu, command_psp, g, "File not found.\r\n");
   }
 
-  if (!options.quiet) {
-    int n = snprintf(g->text, sizeof(g->text),
-                     "%u file(s) deleted.\r\n", deleted);
-    if (n > 0)
-      (void)fcom_write(cpu, command_psp,
-          FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
-          (UWORD)n);
+  if (g->echo_enabled) {
+    if (count == 0) {
+      dos_puts(cpu, command_psp, g, "no file removed.\r\n");
+    } else if (count == 1) {
+      dos_puts(cpu, command_psp, g, "one file removed.\r\n");
+    } else {
+      int n = snprintf(g->text, sizeof(g->text),
+                       "%u files removed.\r\n", count);
+
+      if (n > 0)
+        (void)fcom_write(cpu, command_psp,
+            FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+            (UWORD)n);
+    }
   }
 }
 
-static int fcom_rename_component(char *dst, size_t dst_size,
-                                 const char *source,
-                                 const char *pattern)
+static int fcom_rename_fill_component(char *dst, size_t dst_size,
+                                      const char *pattern,
+                                      const char *source)
 {
   size_t out = 0;
-  size_t source_pos = 0;
 
-  while (*pattern != '\0') {
-    if (*pattern == '*') {
-      size_t remain = strlen(source + source_pos);
+  while (*pattern != '\0' && out + 1 < dst_size) {
+    switch (*pattern++) {
+    case '?':
+      if (*source != '\0')
+        dst[out++] = *source;
+      break;
 
-      if (out + remain >= dst_size)
-        return 0;
+    case '*': {
+      size_t n = strlen(source);
 
-      memcpy(dst + out, source + source_pos, remain);
-      out += remain;
-      source_pos += remain;
-      ++pattern;
-      continue;
+      if (n >= dst_size - out)
+        n = dst_size - out - 1;
+
+      memcpy(dst + out, source, n);
+      out += n;
+      source += n;
+      dst[out] = '\0';
+      return 1;
     }
 
-    if (*pattern == '?') {
-      if (source[source_pos] != '\0') {
-        if (out + 1 >= dst_size)
-          return 0;
-        dst[out++] = source[source_pos++];
-      }
-      ++pattern;
-      continue;
+    default:
+      dst[out++] = pattern[-1];
+      break;
     }
 
-    if (out + 1 >= dst_size)
-      return 0;
-
-    dst[out++] = *pattern++;
-    if (source[source_pos] != '\0')
-      ++source_pos;
+    if (*source != '\0')
+      ++source;
   }
 
   dst[out] = '\0';
-  return 1;
+  return *pattern == '\0';
 }
 
-static int fcom_apply_rename_mask(char *dst, size_t dst_size,
+static int fcom_rename_apply_mask(char *dst, size_t dst_size,
                                   const char *source_name,
                                   const char *destination_mask)
 {
@@ -2690,23 +2766,20 @@ static int fcom_apply_rename_mask(char *dst, size_t dst_size,
   char mask_ext[4];
   char result_base[13];
   char result_ext[4];
-  size_t source_base_len;
-  size_t mask_base_len;
-  size_t result_len;
+  size_t n;
 
   if (source_dot == source_name)
     source_dot = NULL;
   if (mask_dot == destination_mask)
     mask_dot = NULL;
 
-  source_base_len = source_dot != NULL
+  n = source_dot != NULL
       ? (size_t)(source_dot - source_name)
       : strlen(source_name);
-  if (source_base_len >= sizeof(source_base))
+  if (n >= sizeof(source_base))
     return 0;
-
-  memcpy(source_base, source_name, source_base_len);
-  source_base[source_base_len] = '\0';
+  memcpy(source_base, source_name, n);
+  source_base[n] = '\0';
 
   if (source_dot != NULL) {
     if (strlen(source_dot + 1) >= sizeof(source_ext))
@@ -2716,14 +2789,13 @@ static int fcom_apply_rename_mask(char *dst, size_t dst_size,
     source_ext[0] = '\0';
   }
 
-  mask_base_len = mask_dot != NULL
+  n = mask_dot != NULL
       ? (size_t)(mask_dot - destination_mask)
       : strlen(destination_mask);
-  if (mask_base_len >= sizeof(mask_base))
+  if (n >= sizeof(mask_base))
     return 0;
-
-  memcpy(mask_base, destination_mask, mask_base_len);
-  mask_base[mask_base_len] = '\0';
+  memcpy(mask_base, destination_mask, n);
+  mask_base[n] = '\0';
 
   if (mask_dot != NULL) {
     if (strlen(mask_dot + 1) >= sizeof(mask_ext))
@@ -2733,47 +2805,43 @@ static int fcom_apply_rename_mask(char *dst, size_t dst_size,
     mask_ext[0] = '\0';
   }
 
-  if (!fcom_rename_component(result_base, sizeof(result_base),
-                             source_base, mask_base))
+  if (!fcom_rename_fill_component(
+          result_base, sizeof(result_base),
+          mask_base, source_base) ||
+      !fcom_rename_fill_component(
+          result_ext, sizeof(result_ext),
+          mask_ext, source_ext))
     return 0;
 
-  if (mask_dot != NULL) {
-    if (!fcom_rename_component(result_ext, sizeof(result_ext),
-                               source_ext, mask_ext))
-      return 0;
-  } else {
-    strcpy(result_ext, source_ext);
-  }
-
-  result_len = strlen(result_base);
+  n = strlen(result_base);
   if (result_ext[0] != '\0') {
-    size_t ext_len = strlen(result_ext);
+    size_t en = strlen(result_ext);
 
-    if (result_len + 1 + ext_len >= dst_size)
+    if (n + 1 + en >= dst_size)
       return 0;
 
-    memcpy(dst, result_base, result_len);
-    dst[result_len++] = '.';
-    memcpy(dst + result_len, result_ext, ext_len + 1);
+    memcpy(dst, result_base, n);
+    dst[n++] = '.';
+    memcpy(dst + n, result_ext, en + 1);
   } else {
-    if (result_len >= dst_size)
+    if (n >= dst_size)
       return 0;
-    memcpy(dst, result_base, result_len + 1);
+    memcpy(dst, result_base, n + 1);
   }
 
   return 1;
 }
 
-static int fcom_build_rename_path(char *dst, size_t dst_size,
+static int fcom_rename_build_path(char *dst, size_t dst_size,
                                   const char *source_pattern,
-                                  const char *new_name)
+                                  const char *name)
 {
   const char *slash1 = strrchr(source_pattern, '\\');
   const char *slash2 = strrchr(source_pattern, '/');
   const char *colon = strrchr(source_pattern, ':');
   const char *cut = slash1;
   size_t prefix;
-  size_t name_len = strlen(new_name);
+  size_t n = strlen(name);
 
   if (slash2 != NULL && (cut == NULL || slash2 > cut))
     cut = slash2;
@@ -2781,12 +2849,12 @@ static int fcom_build_rename_path(char *dst, size_t dst_size,
     cut = colon;
 
   prefix = cut != NULL ? (size_t)(cut - source_pattern + 1) : 0;
-  if (prefix + name_len >= dst_size)
+  if (prefix + n >= dst_size)
     return 0;
 
   if (prefix != 0)
     memcpy(dst, source_pattern, prefix);
-  memcpy(dst + prefix, new_name, name_len + 1);
+  memcpy(dst + prefix, name, n + 1);
   return 1;
 }
 
@@ -2794,82 +2862,71 @@ static void builtin_rename(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, char *args)
 {
   char *cursor = args;
-  char *old_name = next_argument(&cursor);
-  char *new_name = next_argument(&cursor);
+  char *source = next_argument(&cursor);
+  char *destination = next_argument(&cursor);
   int rc;
-  unsigned renamed = 0;
-  int matched = 0;
 
-  if (old_name == NULL || new_name == NULL) {
+  if (source == NULL || destination == NULL) {
     dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
     return;
   }
+
   if (next_argument(&cursor) != NULL) {
     dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
     return;
   }
 
-  /*
-   * FreeCOM rejects a drive or directory in the destination argument.
-   * The source path supplies the directory for every generated name.
-   */
-  if (strchr(new_name, ':') != NULL ||
-      strchr(new_name, '\\') != NULL ||
-      strchr(new_name, '/') != NULL) {
-    report_file_error(cpu, command_psp, g,
-                      "Syntax error. - '", new_name);
+  if (strchr(destination, ':') != NULL ||
+      strchr(destination, '\\') != NULL ||
+      strchr(destination, '/') != NULL) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
     return;
   }
 
-  if (strlen(old_name) >= sizeof(g->batch_name) ||
-      strlen(new_name) >= sizeof(g->batch_args)) {
-    dos_puts(cpu, command_psp, g, "Path too long.\r\n");
+  if (strlen(source) >= sizeof(g->batch_name) ||
+      strlen(destination) >= sizeof(g->batch_args)) {
+    dos_puts(cpu, command_psp, g, "Filename too long.\r\n");
     return;
   }
 
-  strcpy(g->batch_name, old_name);
-  strcpy(g->batch_args, new_name);
+  strcpy(g->batch_name, source);
+  strcpy(g->batch_args, destination);
 
   memset(&g->find, 0, sizeof(g->find));
   if (set_find_dta(cpu, command_psp) < 0)
     return;
 
   rc = dos_find_first_attr(cpu, command_psp, g,
-                           g->batch_name, 0x27);
-  while (rc == 0) {
-    if (!(g->find.dm_attr_fnd & D_DIR) &&
-        strcmp(g->find.dm_name, ".") != 0 &&
+                           g->batch_name, 0x37);
+  if (rc < 0) {
+    restore_default_dta(cpu, command_psp);
+    dos_puts(cpu, command_psp, g, "File not found.\r\n");
+    return;
+  }
+
+  do {
+    if (strcmp(g->find.dm_name, ".") != 0 &&
         strcmp(g->find.dm_name, "..") != 0) {
-      matched = 1;
-
-      if (!make_delete_name(g, g->batch_name, g->find.dm_name) ||
-          strlen(g->path2) >= sizeof(g->batch_arg)) {
+      if (!fcom_rename_apply_mask(
+              g->program, sizeof(g->program),
+              g->find.dm_name, g->batch_args) ||
+          !fcom_rename_build_path(
+              g->batch_arg, sizeof(g->batch_arg),
+              g->batch_name, g->find.dm_name) ||
+          !fcom_rename_build_path(
+              g->path2, sizeof(g->path2),
+              g->batch_name, g->program)) {
         restore_default_dta(cpu, command_psp);
-        dos_puts(cpu, command_psp, g, "Path too long.\r\n");
-        return;
-      }
-      strcpy(g->batch_arg, g->path2);
-
-      if (!fcom_apply_rename_mask(g->program, sizeof(g->program),
-                                  g->find.dm_name, g->batch_args) ||
-          !fcom_build_rename_path(g->path2, sizeof(g->path2),
-                                  g->batch_name, g->program)) {
-        restore_default_dta(cpu, command_psp);
-        report_file_error(cpu, command_psp, g,
-                          "Invalid destination mask. - '",
-                          g->batch_args);
+        dos_puts(cpu, command_psp, g, "Filename too long.\r\n");
         return;
       }
 
       if (dos_rename_file(cpu, command_psp, g,
                           g->batch_arg, g->path2) < 0) {
         restore_default_dta(cpu, command_psp);
-        report_file_error(cpu, command_psp, g,
-                          "Unable to rename. - '", g->batch_arg);
+        dos_puts(cpu, command_psp, g, "rename\r\n");
         return;
       }
-
-      ++renamed;
 
       if (set_find_dta(cpu, command_psp) < 0) {
         restore_default_dta(cpu, command_psp);
@@ -2878,26 +2935,10 @@ static void builtin_rename(CPU *cpu, UWORD command_psp,
     }
 
     rc = dos_find_next(cpu, command_psp);
-  }
+  } while (rc == 0);
 
   restore_default_dta(cpu, command_psp);
-
-  if (!matched) {
-    report_file_error(cpu, command_psp, g,
-                      "File not found. - '", g->batch_name);
-    return;
-  }
-
-  {
-    int n = snprintf(g->text, sizeof(g->text),
-                     "%u file(s) renamed.\r\n", renamed);
-    if (n > 0)
-      (void)fcom_write(cpu, command_psp,
-          FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
-          (UWORD)n);
-  }
 }
-
 
 
 static int parse_uint_field(const char **cursor, unsigned *value)
@@ -3787,19 +3828,6 @@ static int fcom_path_is_directory(CPU *cpu, UWORD command_psp,
   return fcom_get_file_attr(cpu, command_psp, g,
                             name, &attributes) == 0 &&
          (attributes & D_DIR) != 0;
-}
-
-static const char *fcom_copy_basename(const char *name)
-{
-  const char *base = name;
-  const char *p;
-
-  for (p = name; *p != '\0'; ++p) {
-    if (*p == '\\' || *p == '/' || *p == ':')
-      base = p + 1;
-  }
-
-  return base;
 }
 
 static int fcom_copy_join_path(char *dst, size_t dst_size,
@@ -5761,29 +5789,57 @@ static int batch_label_matches(const char *line, const char *wanted)
          strncasecmp(p, wanted, len) == 0;
 }
 
-static void batch_shift_args(struct fcom_guest *g)
+static const char *batch_argument_at(struct fcom_guest *g,
+                                     unsigned index)
 {
-  char *p = skip_space(g->batch_args);
-  char *rest;
+  const char *p = g->batch_args;
+  unsigned logical = index + g->batch_shiftlevel;
 
-  if (*p == '\0') {
-    g->batch_args[0] = '\0';
-    return;
-  }
+  while (*p != '\0') {
+    const char *start;
 
-  if (*p == '"') {
-    ++p;
-    while (*p != '\0' && *p != '"')
-      ++p;
+    p = skip_space((char *)p);
+    if (*p == '\0')
+      break;
+
+    if (*p == '"') {
+      start = ++p;
+      while (*p != '\0' && *p != '"')
+        ++p;
+    } else {
+      start = p;
+      while (*p != '\0' && *p != ' ' && *p != '\t')
+        ++p;
+    }
+
+    if (logical == 0) {
+      size_t n = (size_t)(p - start);
+
+      if (n >= sizeof(g->batch_arg))
+        n = sizeof(g->batch_arg) - 1;
+      memcpy(g->batch_arg, start, n);
+      g->batch_arg[n] = '\0';
+      return g->batch_arg;
+    }
+
     if (*p == '"')
       ++p;
-  } else {
-    while (*p != '\0' && *p != ' ' && *p != '\t')
-      ++p;
+    --logical;
   }
 
-  rest = skip_space(p);
-  memmove(g->batch_args, rest, strlen(rest) + 1);
+  return "";
+}
+
+static void batch_shift_args(struct fcom_guest *g, const char *args)
+{
+  char *p = skip_space((char *)args);
+
+  if (strcasecmp(p, "DOWN") == 0) {
+    if (g->batch_shiftlevel != 0)
+      --g->batch_shiftlevel;
+  } else {
+    ++g->batch_shiftlevel;
+  }
 }
 
 static void split_call_target(char *args, char **target, char **tail)
@@ -5812,53 +5868,27 @@ static void split_call_target(char *args, char **target, char **tail)
   *tail = skip_space(p);
 }
 
-static void expand_batch_parameters(struct fcom_guest *g, char *line)
+static int expand_batch_parameters(struct fcom_guest *g, char *line)
 {
-  char expanded[FCOM_LINE_MAX + 1];
   const char *srcp = line;
-  char *dst = expanded;
-  char *end = expanded + FCOM_LINE_MAX;
+  char *dst = g->for_command;
+  char *end = g->for_command + FCOM_LINE_MAX;
 
   while (*srcp != '\0' && dst < end) {
     if (*srcp == '%' && srcp[1] != '\0') {
       const char *value = NULL;
-      char digit = srcp[1];
+      char code = srcp[1];
 
-      if (digit == '0')
+      if (code == '0') {
         value = g->batch_name;
-      else if (digit >= '1' && digit <= '9') {
+      } else if (code >= '1' && code <= '9') {
+        value = batch_argument_at(g, (unsigned)(code - '1'));
+      } else if (code == '*') {
         const char *p = g->batch_args;
-        unsigned wanted = (unsigned)(digit - '1');
+        unsigned skip = g->batch_shiftlevel;
 
-        while (*p != '\0') {
+        while (skip-- != 0 && *p != '\0') {
           p = skip_space((char *)p);
-          if (*p == '\0')
-            break;
-
-          if (wanted == 0) {
-            char *a = g->batch_arg;
-            char *aend = g->batch_arg + sizeof(g->batch_arg) - 1;
-            int quoted = 0;
-
-            if (*p == '"') {
-              quoted = 1;
-              ++p;
-            }
-
-            while (*p != '\0' && a < aend) {
-              if (quoted) {
-                if (*p == '"')
-                  break;
-              } else if (*p == ' ' || *p == '\t') {
-                break;
-              }
-              *a++ = *p++;
-            }
-            *a = '\0';
-            value = g->batch_arg;
-            break;
-          }
-
           if (*p == '"') {
             ++p;
             while (*p != '\0' && *p != '"')
@@ -5869,9 +5899,9 @@ static void expand_batch_parameters(struct fcom_guest *g, char *line)
             while (*p != '\0' && *p != ' ' && *p != '\t')
               ++p;
           }
-          --wanted;
         }
-      } else if (digit == '%') {
+        value = skip_space((char *)p);
+      } else if (code == '%') {
         *dst++ = '%';
         srcp += 2;
         continue;
@@ -5888,8 +5918,12 @@ static void expand_batch_parameters(struct fcom_guest *g, char *line)
     *dst++ = *srcp++;
   }
 
+  if (*srcp != '\0')
+    return 0;
+
   *dst = '\0';
-  strcpy(line, expanded);
+  strcpy(line, g->for_command);
+  return 1;
 }
 
 static int execute_batch_handle(CPU *cpu, UWORD command_psp,
@@ -5912,7 +5946,10 @@ static int execute_batch_handle(CPU *cpu, UWORD command_psp,
             return 0;
           }
         } else {
-          expand_batch_parameters(g, g->batch_line);
+          if (!expand_batch_parameters(g, g->batch_line)) {
+            dos_puts(cpu, command_psp, g, "Line too long.\r\n");
+            return 1;
+          }
           if (execute_command_line(cpu, command_psp, g,
                                    g->batch_line) < 0)
             return -1;
@@ -5948,7 +5985,10 @@ static int execute_batch_handle(CPU *cpu, UWORD command_psp,
 
         /* Labels are declarations, not executable command lines. */
         if (*line != ':') {
-          expand_batch_parameters(g, g->batch_line);
+          if (!expand_batch_parameters(g, g->batch_line)) {
+            dos_puts(cpu, command_psp, g, "Line too long.\r\n");
+            return 1;
+          }
           if (execute_command_line(cpu, command_psp, g,
                                    g->batch_line) < 0)
             return -1;
@@ -5979,22 +6019,28 @@ static int execute_batch_file(CPU *cpu, UWORD command_psp,
                               struct fcom_guest *g, const char *name,
                               const char *args)
 {
-  int handle = find_batch_file(cpu, command_psp, g, name);
+  struct fcom_batch_context *contexts =
+      fcom_batch_context_storage(command_psp);
+  struct fcom_batch_context *saved;
+  int handle;
   int rc;
-  char saved_name[sizeof(g->batch_name)];
-  char saved_args[sizeof(g->batch_args)];
-  char saved_goto[sizeof(g->batch_goto)];
-  UBYTE saved_active;
-  UBYTE saved_exit_batch_only;
 
+  if (g->batch_depth >= FCOM_BATCH_CONTEXTS) {
+    dos_puts(cpu, command_psp, g, "Out of memory.\r\n");
+    return -8;
+  }
+
+  handle = find_batch_file(cpu, command_psp, g, name);
   if (handle < 0)
     return handle;
 
-  memcpy(saved_name, g->batch_name, sizeof(saved_name));
-  memcpy(saved_args, g->batch_args, sizeof(saved_args));
-  memcpy(saved_goto, g->batch_goto, sizeof(saved_goto));
-  saved_active = g->batch_active;
-  saved_exit_batch_only = g->exit_batch_only;
+  saved = &contexts[g->batch_depth++];
+  memcpy(saved->name, g->batch_name, sizeof(saved->name));
+  memcpy(saved->args, g->batch_args, sizeof(saved->args));
+  memcpy(saved->goto_label, g->batch_goto, sizeof(saved->goto_label));
+  saved->active = g->batch_active;
+  saved->exit_batch_only = g->exit_batch_only;
+  saved->shiftlevel = g->batch_shiftlevel;
 
   strncpy(g->batch_name, name, sizeof(g->batch_name) - 1);
   g->batch_name[sizeof(g->batch_name) - 1] = '\0';
@@ -6003,6 +6049,7 @@ static int execute_batch_file(CPU *cpu, UWORD command_psp,
   g->batch_goto[0] = '\0';
   g->batch_active = 1;
   g->exit_batch_only = 0;
+  g->batch_shiftlevel = 0;
 
   rc = execute_batch_handle(cpu, command_psp, g, (UWORD)handle);
   fcom_close(cpu, command_psp, (UWORD)handle);
@@ -6010,11 +6057,15 @@ static int execute_batch_file(CPU *cpu, UWORD command_psp,
   if (g->exit_batch_only)
     rc = 0;
 
-  memcpy(g->batch_name, saved_name, sizeof(g->batch_name));
-  memcpy(g->batch_args, saved_args, sizeof(g->batch_args));
-  memcpy(g->batch_goto, saved_goto, sizeof(g->batch_goto));
-  g->batch_active = saved_active;
-  g->exit_batch_only = saved_exit_batch_only;
+  memcpy(g->batch_name, saved->name, sizeof(g->batch_name));
+  memcpy(g->batch_args, saved->args, sizeof(g->batch_args));
+  memcpy(g->batch_goto, saved->goto_label, sizeof(g->batch_goto));
+  g->batch_active = saved->active;
+  g->exit_batch_only = saved->exit_batch_only;
+  g->batch_shiftlevel = saved->shiftlevel;
+  memset(saved, 0, sizeof(*saved));
+  --g->batch_depth;
+
   return rc;
 }
 
@@ -6047,104 +6098,182 @@ enum fcom_start_action {
 };
 
 
-static char *parse_if_operand(char *p, char *dst, size_t dst_size)
+static char *fcom_if_match_token(char *p, const char *token)
 {
-  char *d = dst;
-  char *end = dst + dst_size - 1;
-  int quoted = 0;
+  size_t n = strlen(token);
 
   p = skip_space(p);
-  if (*p == '"') {
-    quoted = 1;
+  if (strncasecmp(p, token, n) != 0)
+    return NULL;
+  if (p[n] != '\0' && p[n] != ' ' && p[n] != '\t')
+    return NULL;
+  return skip_space(p + n);
+}
+
+static char *fcom_if_skip_quoted_word(char *p, const char *stop)
+{
+  int quote = 0;
+
+  while (*p != '\0') {
+    if (*p == '"' || *p == '\'') {
+      if (quote == *p)
+        quote = 0;
+      else if (quote == 0)
+        quote = *p;
+      ++p;
+      continue;
+    }
+
+    if (quote == 0) {
+      if (stop != NULL && p[0] == stop[0] && p[1] == stop[1])
+        break;
+      if (stop == NULL && (*p == ' ' || *p == '\t'))
+        break;
+    }
     ++p;
   }
 
-  while (*p != '\0' && d < end) {
-    if (quoted) {
-      if (*p == '"') {
-        ++p;
-        break;
-      }
-    } else if (*p == '=' || *p == ' ' || *p == '\t') {
-      break;
-    }
-    *d++ = *p++;
-  }
-
-  *d = '\0';
   return p;
 }
 
 static int dos_file_exists(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, const char *name)
 {
-  int handle = dos_open_read(cpu, command_psp, g, name);
+  int rc;
 
-  if (handle < 0)
+  memset(&g->find, 0, sizeof(g->find));
+  if (set_find_dta(cpu, command_psp) < 0)
     return 0;
-  fcom_close(cpu, command_psp, (UWORD)handle);
-  return 1;
+
+  rc = dos_find_first_attr(cpu, command_psp, g, name,
+                           0x01 | 0x02 | 0x04 | 0x20);
+  restore_default_dta(cpu, command_psp);
+  return rc == 0;
 }
 
 static int execute_if(CPU *cpu, UWORD command_psp,
                       struct fcom_guest *g, char *args)
 {
   char *p = skip_space(args);
-  char *command;
+  char *next;
+  char *command = NULL;
   int negate = 0;
+  int ignore_case = 0;
   int condition = 0;
 
-  if (strncasecmp(p, "NOT", 3) == 0 &&
-      (p[3] == '\0' || p[3] == ' ' || p[3] == '\t')) {
+  /* FreeCOM accepts both "IF /I NOT" and "IF NOT /I". */
+  next = fcom_if_match_token(p, "NOT");
+  if (next != NULL) {
     negate = 1;
-    p = skip_space(p + 3);
+    p = next;
   }
 
-  if (strncasecmp(p, "ERRORLEVEL", 10) == 0 &&
-      (p[10] == '\0' || p[10] == ' ' || p[10] == '\t')) {
-    unsigned wanted = 0;
+  next = fcom_if_match_token(p, "/I");
+  if (next != NULL) {
+    ignore_case = 1;
+    p = next;
+  }
 
-    p = skip_space(p + 10);
-    if (!isdigit((unsigned char)*p)) {
-      dos_puts(cpu, command_psp, g, "Invalid IF syntax\r\n");
+  next = fcom_if_match_token(p, "NOT");
+  if (next != NULL) {
+    negate = 1;
+    p = next;
+  }
+
+  next = fcom_if_match_token(p, "EXIST");
+  if (next != NULL) {
+    char *end;
+
+    p = next;
+    if (*p == '\0') {
+      dos_puts(cpu, command_psp, g,
+               "IF EXIST requires a filename.\r\n");
       return 0;
     }
 
-    while (isdigit((unsigned char)*p)) {
-      wanted = wanted * 10u + (unsigned)(*p - '0');
-      ++p;
+    end = fcom_if_skip_quoted_word(p, NULL);
+    if ((size_t)(end - p) >= sizeof(g->if_left)) {
+      dos_puts(cpu, command_psp, g, "Line too long.\r\n");
+      return 0;
     }
 
-    condition = (DosGetRetCode() & 0xffu) >= wanted;
-    command = skip_space(p);
-  } else if (strncasecmp(p, "EXIST", 5) == 0 &&
-             (p[5] == '\0' || p[5] == ' ' || p[5] == '\t')) {
-    p = skip_space(p + 5);
-    p = parse_if_operand(p, g->if_left, sizeof(g->if_left));
+    memcpy(g->if_left, p, (size_t)(end - p));
+    g->if_left[end - p] = '\0';
+
+    if (g->if_left[0] == '"' &&
+        strlen(g->if_left) >= 2 &&
+        g->if_left[strlen(g->if_left) - 1] == '"') {
+      memmove(g->if_left, g->if_left + 1,
+              strlen(g->if_left));
+      g->if_left[strlen(g->if_left) - 1] = '\0';
+    }
+
     condition = dos_file_exists(cpu, command_psp, g, g->if_left);
-    command = skip_space(p);
+    command = skip_space(end);
   } else {
-    p = parse_if_operand(p, g->if_left, sizeof(g->if_left));
-    p = skip_space(p);
+    next = fcom_if_match_token(p, "ERRORLEVEL");
+    if (next != NULL) {
+      unsigned n = 0;
+      char *q;
 
-    if (*p != '=') {
-      dos_puts(cpu, command_psp, g, "Invalid IF syntax\r\n");
-      return 0;
+      p = next;
+      if (*p == '\0') {
+        dos_puts(cpu, command_psp, g,
+                 "IF ERRORLEVEL requires a number.\r\n");
+        return 0;
+      }
+
+      q = p;
+      do {
+        n = n * 10u + (unsigned)((unsigned char)*q - '0');
+      } while (*++q != '\0' && *q != ' ' && *q != '\t');
+
+      n &= 0xffu;
+      condition = (DosGetRetCode() & 0xffu) >= n;
+      command = skip_space(q);
+    } else {
+      char *equal;
+      char *right;
+      char *right_end;
+      size_t left_len;
+      size_t right_len;
+
+      equal = fcom_if_skip_quoted_word(p, "==");
+      while (*equal != '\0' && *equal != '=' &&
+             *equal != ' ' && *equal != '\t')
+        ++equal;
+
+      if (equal[0] != '=' || equal[1] != '=') {
+        dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+        return 0;
+      }
+
+      right = skip_space(equal + 2);
+      right_end = fcom_if_skip_quoted_word(right, NULL);
+
+      while (equal > p &&
+             (equal[-1] == ' ' || equal[-1] == '\t'))
+        --equal;
+
+      left_len = (size_t)(equal - p);
+      right_len = (size_t)(right_end - right);
+
+      condition = left_len == right_len &&
+          (ignore_case
+              ? strncasecmp(p, right, left_len) == 0
+              : memcmp(p, right, left_len) == 0);
+      command = skip_space(right_end);
     }
-
-    while (*p == '=')
-      ++p;
-
-    p = parse_if_operand(p, g->if_right, sizeof(g->if_right));
-    condition = strcmp(g->if_left, g->if_right) == 0;
-    command = skip_space(p);
   }
 
-  if (negate)
-    condition = !condition;
-
-  if (condition && *command != '\0')
+  if (condition ^ negate) {
+    if (command == NULL || *command == '\0') {
+      dos_puts(cpu, command_psp, g,
+               "IF requires a command.\r\n");
+      return 0;
+    }
     return execute_command_line(cpu, command_psp, g, command);
+  }
 
   return 0;
 }
@@ -6216,6 +6345,12 @@ static int execute_for_pattern(CPU *cpu, UWORD command_psp,
       restore_default_dta(cpu, command_psp);
       return -1;
     }
+
+    if (set_find_dta(cpu, command_psp) < 0) {
+      restore_default_dta(cpu, command_psp);
+      return -1;
+    }
+
     rc = dos_find_next(cpu, command_psp);
   } while (rc == 0);
 
@@ -6231,32 +6366,62 @@ static int execute_for(CPU *cpu, UWORD command_psp,
   char *list_start;
   char *list_end;
   char *command;
+  int quote = 0;
 
-  if (*p != '%' || p[1] == '\0') {
-    dos_puts(cpu, command_psp, g, "Invalid FOR syntax\r\n");
-    return 0;
+  if (*p != '%') {
+    dos_puts(cpu, command_psp, g,
+             "FOR variable must be a single letter.\r\n");
+    return 1;
   }
 
-  variable = p[1];
-  p = skip_space(p + 2);
+  while (*p == '%')
+    ++p;
+
+  if (!isalpha((unsigned char)*p) ||
+      (p[1] != ' ' && p[1] != '\t')) {
+    dos_puts(cpu, command_psp, g,
+             "FOR variable must be a single letter.\r\n");
+    return 1;
+  }
+
+  variable = *p++;
+  p = skip_space(p);
 
   if (strncasecmp(p, "IN", 2) != 0 ||
       (p[2] != ' ' && p[2] != '\t' && p[2] != '(')) {
-    dos_puts(cpu, command_psp, g, "Invalid FOR syntax\r\n");
-    return 0;
+    dos_puts(cpu, command_psp, g,
+             "FOR requires IN.\r\n");
+    return 1;
   }
 
   p = skip_space(p + 2);
   if (*p != '(') {
-    dos_puts(cpu, command_psp, g, "Invalid FOR syntax\r\n");
-    return 0;
+    dos_puts(cpu, command_psp, g,
+             "FOR requires parentheses around the set.\r\n");
+    return 1;
   }
 
   list_start = ++p;
-  list_end = strchr(list_start, ')');
+  list_end = NULL;
+
+  while (*p != '\0') {
+    if (*p == '"' || *p == '\'') {
+      if (quote == *p)
+        quote = 0;
+      else if (quote == 0)
+        quote = *p;
+    } else if (*p == ')' && quote == 0 &&
+               (p[1] == '\0' || p[1] == ' ' || p[1] == '\t')) {
+      list_end = p;
+      break;
+    }
+    ++p;
+  }
+
   if (list_end == NULL) {
-    dos_puts(cpu, command_psp, g, "Invalid FOR syntax\r\n");
-    return 0;
+    dos_puts(cpu, command_psp, g,
+             "FOR requires parentheses around the set.\r\n");
+    return 1;
   }
 
   *list_end = '\0';
@@ -6264,14 +6429,16 @@ static int execute_for(CPU *cpu, UWORD command_psp,
 
   if (strncasecmp(p, "DO", 2) != 0 ||
       (p[2] != '\0' && p[2] != ' ' && p[2] != '\t')) {
-    dos_puts(cpu, command_psp, g, "Invalid FOR syntax\r\n");
-    return 0;
+    dos_puts(cpu, command_psp, g,
+             "FOR requires DO.\r\n");
+    return 1;
   }
 
   command = skip_space(p + 2);
   if (*command == '\0') {
-    dos_puts(cpu, command_psp, g, "Invalid FOR syntax\r\n");
-    return 0;
+    dos_puts(cpu, command_psp, g,
+             "FOR requires a command.\r\n");
+    return 1;
   }
 
   p = list_start;
@@ -6635,45 +6802,96 @@ static int execute_command_core(CPU *cpu, UWORD command_psp,
   if (command_is(g->filename, "LOADFIX"))
     return builtin_loadfix(cpu, command_psp, g, args);
 
-  if (g->batch_active && command_is(g->filename, "GOTO")) {
-    args = skip_space(args);
+  if (command_is(g->filename, "GOTO")) {
+    char *end;
 
-    if (strcasecmp(args, ":EOF") == 0 ||
-        strcasecmp(args, "EOF") == 0) {
+    if (!g->batch_active)
+      return 1;
+
+    args = skip_space(args);
+    if (*args == ':')
+      args = skip_space(args + 1);
+
+    if (*args == '\0') {
+      dos_puts(cpu, command_psp, g,
+               "GOTO requires a label.\r\n");
       g->exit_batch_only = 1;
       return -1;
     }
 
-    if (*args == ':')
-      ++args;
-    args = skip_space(args);
+    end = args;
+    while (*end != '\0' && *end != ' ' && *end != '\t')
+      ++end;
+    *end = '\0';
 
-    if (*args == '\0') {
-      dos_puts(cpu, command_psp, g, "Required parameter missing\r\n");
-    } else {
-      strncpy(g->batch_goto, args, sizeof(g->batch_goto) - 1);
-      g->batch_goto[sizeof(g->batch_goto) - 1] = '\0';
+    if (strcasecmp(args, "EOF") == 0) {
+      g->exit_batch_only = 1;
+      return -1;
     }
+
+    strncpy(g->batch_goto, args, sizeof(g->batch_goto) - 1);
+    g->batch_goto[sizeof(g->batch_goto) - 1] = '\0';
     return 0;
   }
 
-  if (g->batch_active && command_is(g->filename, "SHIFT")) {
-    batch_shift_args(g);
+  if (command_is(g->filename, "SHIFT")) {
+    if (!g->batch_active)
+      return 1;
+
+    batch_shift_args(g, args);
     return 0;
   }
 
-  if (g->batch_active && command_is(g->filename, "CALL")) {
+  if (command_is(g->filename, "CALL")) {
     char *target;
     char *call_args;
     int call_rc;
+    int force_trace = 0;
+
+    if (!g->batch_active)
+      return 1;
+
+    args = skip_space(args);
+    while ((args[0] == '/' || args[0] == '-') &&
+           args[1] != '\0') {
+      char *option = args;
+      char *next = option;
+
+      while (*next != '\0' && *next != ' ' && *next != '\t')
+        ++next;
+      if (*next != '\0')
+        *next++ = '\0';
+
+      if (strcasecmp(option, "/Y") == 0 ||
+          strcasecmp(option, "-Y") == 0) {
+        force_trace = 1;
+      } else if (strcasecmp(option, "/S") != 0 &&
+                 strcasecmp(option, "/N") != 0 &&
+                 strcasecmp(option, "-S") != 0 &&
+                 strcasecmp(option, "-N") != 0) {
+        dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
+        return 1;
+      }
+
+      args = skip_space(next);
+    }
 
     split_call_target(args, &target, &call_args);
     if (*target == '\0') {
-      dos_puts(cpu, command_psp, g, "Required parameter missing\r\n");
-      return 0;
+      dos_puts(cpu, command_psp, g,
+               "Required parameter missing.\r\n");
+      return 1;
     }
 
-    call_rc = execute_batch_file(cpu, command_psp, g, target, call_args);
+    if (force_trace)
+      ++g->trace_mode;
+
+    call_rc = execute_batch_file(cpu, command_psp, g,
+                                 target, call_args);
+
+    if (force_trace)
+      --g->trace_mode;
+
     if (call_rc < 0 && call_rc != -1)
       error_bad_command(cpu, command_psp, g, target);
     return call_rc == -1 ? -1 : 0;
@@ -7164,6 +7382,8 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode)
   memset(fcom_alias_storage(command_psp), 0, FCOM_ALIAS_BYTES);
   memset(fcom_history_storage(command_psp), 0, FCOM_HISTORY_BYTES);
   memset(fcom_loadfix_storage(command_psp), 0, FCOM_LOADFIX_BYTES);
+  memset(fcom_batch_context_storage(command_psp), 0,
+         FCOM_BATCH_CONTEXT_BYTES);
   g->fddebug_handle = 1;
   strcpy(g->fddebug_name, "stdout");
   g->echo_enabled = 1;
