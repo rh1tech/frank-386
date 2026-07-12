@@ -3312,8 +3312,33 @@ static void builtin_ctty(CPU *cpu, UWORD command_psp,
 
 
 
-static int fcom_create_truncate(CPU *cpu, UWORD command_psp,
-                                struct fcom_guest *g, const char *name)
+
+#define FCOM_COPY_ASCII   0x01u
+#define FCOM_COPY_BINARY  0x02u
+
+#pragma pack(push, 1)
+struct fcom_copy_item {
+  UBYTE flags;
+  UBYTE group;
+  char name[128];
+};
+#pragma pack(pop)
+
+struct fcom_copy_parse {
+  struct fcom_copy_item *items;
+  UWORD item_segment;
+  unsigned count;
+  unsigned groups;
+  int opt_y;
+  int opt_v;
+  int opt_a;
+  int opt_b;
+  int dest_flags;
+};
+
+static int fcom_create_mode(CPU *cpu, UWORD command_psp,
+                            struct fcom_guest *g,
+                            const char *name, int append)
 {
   size_t n = strlen(name);
 
@@ -3321,6 +3346,28 @@ static int fcom_create_truncate(CPU *cpu, UWORD command_psp,
     return -3;
 
   memcpy(g->path, name, n + 1);
+
+  if (append) {
+    SET_DS(command_psp);
+    CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+    CPU_AX = 0x3d01;
+    fcom_intcall(cpu, command_psp, 0x21, "FCOM COPY open append");
+
+    if (!int21_failed(cpu)) {
+      UWORD handle = CPU_AX;
+
+      CPU_BX = handle;
+      CPU_CX = 0;
+      CPU_DX = 0;
+      CPU_AX = 0x4202;
+      fcom_intcall(cpu, command_psp, 0x21, "FCOM COPY seek end");
+      if (!int21_failed(cpu))
+        return handle;
+
+      fcom_close(cpu, command_psp, handle);
+    }
+  }
+
   SET_DS(command_psp);
   CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
   CPU_CX = 0;
@@ -3329,32 +3376,51 @@ static int fcom_create_truncate(CPU *cpu, UWORD command_psp,
   return int21_failed(cpu) ? -(int)CPU_AX : (int)CPU_AX;
 }
 
+static int fcom_copy_write(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g,
+                           UWORD handle, UWORD count)
+{
+  int written = fcom_write_handle(
+      cpu, command_psp, handle,
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io),
+      count);
+
+  return written == (int)count ? 0 : -5;
+}
+
 static int fcom_copy_stream(CPU *cpu, UWORD command_psp,
                             struct fcom_guest *g,
-                            UWORD source, UWORD destination)
+                            UWORD source, UWORD destination,
+                            int ascii)
 {
   for (;;) {
     int count = fcom_read(cpu, command_psp, g, source);
-    int written;
+    UWORD write_count;
+    UWORD i;
 
     if (count < 0)
       return count;
     if (count == 0)
       return 0;
 
-    SET_DS(command_psp);
-    CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io);
-    CPU_BX = destination;
-    CPU_CX = (UWORD)count;
-    CPU_AH = 0x40;
-    fcom_intcall(cpu, command_psp, 0x21, "FCOM COPY write");
+    write_count = (UWORD)count;
 
-    if (int21_failed(cpu))
-      return -(int)CPU_AX;
+    if (ascii) {
+      for (i = 0; i < write_count; ++i) {
+        if (g->io[i] == 0x1a) {
+          write_count = i;
+          break;
+        }
+      }
+    }
 
-    written = CPU_AX;
-    if (written != count)
+    if (write_count != 0 &&
+        fcom_copy_write(cpu, command_psp, g,
+                        destination, write_count) < 0)
       return -5;
+
+    if (ascii && write_count != (UWORD)count)
+      return 0;
   }
 }
 
@@ -3382,18 +3448,16 @@ static const char *fcom_copy_basename(const char *name)
   return base;
 }
 
-static int fcom_make_path_from_directory(char *dst, size_t dst_size,
-                                         const char *directory,
-                                         const char *name)
+static int fcom_copy_join_path(char *dst, size_t dst_size,
+                               const char *directory,
+                               const char *name)
 {
   size_t dir_len = strlen(directory);
   size_t name_len = strlen(name);
-  int need_slash;
-
-  need_slash = dir_len != 0 &&
-               directory[dir_len - 1] != '\\' &&
-               directory[dir_len - 1] != '/' &&
-               directory[dir_len - 1] != ':';
+  int need_slash = dir_len != 0 &&
+                   directory[dir_len - 1] != '\\' &&
+                   directory[dir_len - 1] != '/' &&
+                   directory[dir_len - 1] != ':';
 
   if (dir_len + (size_t)need_slash + name_len >= dst_size)
     return 0;
@@ -3405,23 +3469,14 @@ static int fcom_make_path_from_directory(char *dst, size_t dst_size,
   return 1;
 }
 
-static int fcom_make_copy_destination(struct fcom_guest *g,
-                                      const char *directory,
-                                      const char *source)
-{
-  return fcom_make_path_from_directory(
-      g->path2, sizeof(g->path2),
-      directory, fcom_copy_basename(source));
-}
-
-static int fcom_build_copy_match(char *dst, size_t dst_size,
+static int fcom_copy_build_match(char *dst, size_t dst_size,
                                  const char *pattern,
                                  const char *matched_name)
 {
-  const char *slash = strrchr(pattern, '\\');
+  const char *slash1 = strrchr(pattern, '\\');
   const char *slash2 = strrchr(pattern, '/');
   const char *colon = strrchr(pattern, ':');
-  const char *cut = slash;
+  const char *cut = slash1;
   size_t prefix;
   size_t name_len = strlen(matched_name);
 
@@ -3440,17 +3495,175 @@ static int fcom_build_copy_match(char *dst, size_t dst_size,
   return 1;
 }
 
-static int fcom_copy_has_wildcards(const char *name)
+static int fcom_copy_apply_component(char *dst, size_t dst_size,
+                                     const char *source,
+                                     const char *mask)
 {
-  return strchr(name, '*') != NULL || strchr(name, '?') != NULL;
+  size_t out = 0;
+  size_t src = 0;
+
+  while (*mask != '\0') {
+    if (*mask == '*') {
+      size_t n = strlen(source + src);
+
+      if (out + n >= dst_size)
+        return 0;
+      memcpy(dst + out, source + src, n);
+      out += n;
+      src += n;
+      ++mask;
+      continue;
+    }
+
+    if (*mask == '?') {
+      if (source[src] != '\0') {
+        if (out + 1 >= dst_size)
+          return 0;
+        dst[out++] = source[src++];
+      }
+      ++mask;
+      continue;
+    }
+
+    if (out + 1 >= dst_size)
+      return 0;
+
+    dst[out++] = *mask++;
+    if (source[src] != '\0')
+      ++src;
+  }
+
+  dst[out] = '\0';
+  return 1;
+}
+
+static int fcom_copy_apply_mask(char *dst, size_t dst_size,
+                                const char *source_name,
+                                const char *mask)
+{
+  const char *source_dot = strrchr(source_name, '.');
+  const char *mask_dot = strrchr(mask, '.');
+  char source_base[13];
+  char source_ext[4];
+  char mask_base[13];
+  char mask_ext[4];
+  char result_base[13];
+  char result_ext[4];
+  size_t n;
+
+  if (source_dot == source_name)
+    source_dot = NULL;
+  if (mask_dot == mask)
+    mask_dot = NULL;
+
+  n = source_dot != NULL
+      ? (size_t)(source_dot - source_name)
+      : strlen(source_name);
+  if (n >= sizeof(source_base))
+    return 0;
+  memcpy(source_base, source_name, n);
+  source_base[n] = '\0';
+
+  if (source_dot != NULL) {
+    if (strlen(source_dot + 1) >= sizeof(source_ext))
+      return 0;
+    strcpy(source_ext, source_dot + 1);
+  } else {
+    source_ext[0] = '\0';
+  }
+
+  n = mask_dot != NULL ? (size_t)(mask_dot - mask) : strlen(mask);
+  if (n >= sizeof(mask_base))
+    return 0;
+  memcpy(mask_base, mask, n);
+  mask_base[n] = '\0';
+
+  if (mask_dot != NULL) {
+    if (strlen(mask_dot + 1) >= sizeof(mask_ext))
+      return 0;
+    strcpy(mask_ext, mask_dot + 1);
+  } else {
+    strcpy(mask_ext, source_ext);
+  }
+
+  if (!fcom_copy_apply_component(result_base, sizeof(result_base),
+                                  source_base, mask_base))
+    return 0;
+  if (!fcom_copy_apply_component(result_ext, sizeof(result_ext),
+                                  source_ext, mask_ext))
+    return 0;
+
+  n = strlen(result_base);
+  if (result_ext[0] != '\0') {
+    size_t en = strlen(result_ext);
+
+    if (n + 1 + en >= dst_size)
+      return 0;
+    memcpy(dst, result_base, n);
+    dst[n++] = '.';
+    memcpy(dst + n, result_ext, en + 1);
+  } else {
+    if (n >= dst_size)
+      return 0;
+    memcpy(dst, result_base, n + 1);
+  }
+
+  return 1;
+}
+
+static int fcom_copy_destination(char *dst, size_t dst_size,
+                                 const char *destination,
+                                 const char *source_name,
+                                 int destination_is_directory)
+{
+  const char *mask = fcom_copy_basename(destination);
+  const char *slash1 = strrchr(destination, '\\');
+  const char *slash2 = strrchr(destination, '/');
+  const char *colon = strrchr(destination, ':');
+  const char *cut = slash1;
+  char generated[16];
+  size_t prefix;
+
+  if (destination_is_directory)
+    return fcom_copy_join_path(dst, dst_size,
+                               destination, source_name);
+
+  if (slash2 != NULL && (cut == NULL || slash2 > cut))
+    cut = slash2;
+  if (colon != NULL && (cut == NULL || colon > cut))
+    cut = colon;
+
+  if (strchr(mask, '*') == NULL && strchr(mask, '?') == NULL) {
+    if (strlen(destination) >= dst_size)
+      return 0;
+    strcpy(dst, destination);
+    return 1;
+  }
+
+  if (!fcom_copy_apply_mask(generated, sizeof(generated),
+                            source_name, mask))
+    return 0;
+
+  prefix = cut != NULL ? (size_t)(cut - destination + 1) : 0;
+  if (prefix + strlen(generated) >= dst_size)
+    return 0;
+
+  if (prefix != 0)
+    memcpy(dst, destination, prefix);
+  strcpy(dst + prefix, generated);
+  return 1;
 }
 
 static int fcom_copy_confirm_overwrite(CPU *cpu, UWORD command_psp,
                                        struct fcom_guest *g,
-                                       const char *destination)
+                                       const char *destination,
+                                       int *all)
 {
   UWORD attributes;
   int ch;
+
+  if (*all)
+    return 1;
 
   if (fcom_get_file_attr(cpu, command_psp, g,
                          destination, &attributes) < 0)
@@ -3458,14 +3671,14 @@ static int fcom_copy_confirm_overwrite(CPU *cpu, UWORD command_psp,
 
   dos_puts(cpu, command_psp, g, "Overwrite ");
   dos_puts(cpu, command_psp, g, destination);
-  dos_puts(cpu, command_psp, g, " (Y/N)? ");
+  dos_puts(cpu, command_psp, g, " (Yes/No/All/Quit)? ");
 
   for (;;) {
     CPU_AH = 0x08;
     fcom_intcall(cpu, command_psp, 0x21, "FCOM COPY confirm");
     ch = toupper((unsigned char)CPU_AL);
 
-    if (ch == 'Y' || ch == 'N')
+    if (ch == 'Y' || ch == 'N' || ch == 'A' || ch == 'Q')
       break;
   }
 
@@ -3475,219 +3688,567 @@ static int fcom_copy_confirm_overwrite(CPU *cpu, UWORD command_psp,
   (void)fcom_write(cpu, command_psp,
       FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 3);
 
+  if (ch == 'A') {
+    *all = 1;
+    return 1;
+  }
+  if (ch == 'Q')
+    return -1;
   return ch == 'Y';
 }
 
-static int fcom_copy_one(CPU *cpu, UWORD command_psp,
-                         struct fcom_guest *g,
-                         const char *source, const char *destination,
-                         int prompt_overwrite)
+static void fcom_copy_error1(CPU *cpu, UWORD command_psp,
+                             struct fcom_guest *g,
+                             const char *prefix, const char *name)
 {
-  int input;
-  int output;
-  int rc;
-
-  if (prompt_overwrite &&
-      !fcom_copy_confirm_overwrite(cpu, command_psp, g, destination))
-    return 1;
-
-  input = dos_open_read(cpu, command_psp, g, source);
-  if (input < 0) {
-    dos_puts(cpu, command_psp, g, "File not found - ");
-    dos_puts(cpu, command_psp, g, source);
-    dos_puts(cpu, command_psp, g, "\r\n");
-    return input;
-  }
-
-  output = fcom_create_truncate(cpu, command_psp, g, destination);
-  if (output < 0) {
-    fcom_close(cpu, command_psp, (UWORD)input);
-    dos_puts(cpu, command_psp, g, "Unable to create - ");
-    dos_puts(cpu, command_psp, g, destination);
-    dos_puts(cpu, command_psp, g, "\r\n");
-    return output;
-  }
-
-  rc = fcom_copy_stream(cpu, command_psp, g,
-                        (UWORD)input, (UWORD)output);
-
-  fcom_close(cpu, command_psp, (UWORD)output);
-  fcom_close(cpu, command_psp, (UWORD)input);
-
-  if (rc < 0) {
-    dos_puts(cpu, command_psp, g, "Error copying - ");
-    dos_puts(cpu, command_psp, g, source);
-    dos_puts(cpu, command_psp, g, "\r\n");
-  }
-
-  return rc;
+  dos_puts(cpu, command_psp, g, prefix);
+  dos_puts(cpu, command_psp, g, name);
+  dos_puts(cpu, command_psp, g, "\r\n");
 }
 
-static int fcom_copy_pattern(CPU *cpu, UWORD command_psp,
-                             struct fcom_guest *g,
-                             const char *pattern,
-                             const char *destination,
-                             int destination_is_directory,
-                             int prompt_overwrite,
-                             unsigned *copied)
+static char *fcom_copy_scan_token(char **cursor, int *plus)
 {
+  char *p = skip_space(*cursor);
+  char *start;
+  char *dst;
+
+  *plus = 0;
+
+  while (*p == '+') {
+    *plus = 1;
+    ++p;
+    p = skip_space(p);
+  }
+
+  if (*p == '\0') {
+    *cursor = p;
+    return NULL;
+  }
+
+  start = p;
+  dst = p;
+
+  if (*p == '"') {
+    ++p;
+    start = dst = p;
+    while (*p != '\0' && *p != '"')
+      *dst++ = *p++;
+    if (*p == '"')
+      ++p;
+  } else {
+    while (*p != '\0' && *p != ' ' && *p != '\t' && *p != '+')
+      *dst++ = *p++;
+  }
+
+  *dst = '\0';
+
+  p = skip_space(p);
+  if (*p == '+') {
+    *plus = 1;
+    while (*p == '+')
+      ++p;
+  }
+
+  *cursor = p;
+  return start;
+}
+
+static int fcom_copy_option(const char *arg,
+                            struct fcom_copy_parse *parse,
+                            int *file_flags)
+{
+  int enable = 1;
+  const char *p = arg;
+
+  if (*p != '/' && *p != '-')
+    return 0;
+  ++p;
+
+  if (*p == '-') {
+    enable = 0;
+    ++p;
+  }
+
+  if (p[0] == '\0' || p[1] != '\0')
+    return 0;
+
+  switch (toupper((unsigned char)p[0])) {
+  case 'Y':
+    parse->opt_y = enable;
+    return 1;
+  case 'V':
+    parse->opt_v = enable;
+    return 1;
+  case 'A':
+    parse->opt_a = enable;
+    if (enable) {
+      parse->opt_b = 0;
+      *file_flags = FCOM_COPY_ASCII;
+    }
+    return 1;
+  case 'B':
+    parse->opt_b = enable;
+    if (enable) {
+      parse->opt_a = 0;
+      *file_flags = FCOM_COPY_BINARY;
+    }
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static void fcom_copy_parse_env(UWORD command_psp,
+                                struct fcom_copy_parse *parse)
+{
+  const char *env = fcom_env_value(command_psp, "COPYCMD");
+  char *cursor;
+  char *arg;
+
+  if (env == NULL || *env == '\0')
+    return;
+
+  if (strlen(env) >= sizeof(((struct fcom_guest *)0)->batch_line))
+    return;
+
+  /*
+   * COPYCMD contributes options only. FreeCOM explicitly discards any
+   * non-option parameters returned by scanCmdline().
+   */
+  cursor = (char *)env;
+  while (*cursor != '\0') {
+    char token[8];
+    size_t n = 0;
+
+    cursor = skip_space(cursor);
+    while (*cursor != '\0' && *cursor != ' ' && *cursor != '\t' &&
+           n + 1 < sizeof(token))
+      token[n++] = *cursor++;
+    token[n] = '\0';
+
+    if (n != 0) {
+      int flags = 0;
+      (void)fcom_copy_option(token, parse, &flags);
+    }
+  }
+}
+
+static int fcom_copy_count_items(char *line, unsigned *items,
+                                 unsigned *groups)
+{
+  char *cursor = line;
+  char *arg;
+  int plus;
+  int previous = 0;
+
+  *items = 0;
+  *groups = 0;
+
+  while ((arg = fcom_copy_scan_token(&cursor, &plus)) != NULL) {
+    if ((arg[0] == '/' || arg[0] == '-') && arg[1] != '\0')
+      continue;
+
+    if (plus && !previous)
+      return -1;
+
+    ++*items;
+    if (!plus)
+      ++*groups;
+    previous = 1;
+  }
+
+  if (plus)
+    return -2;
+  return 0;
+}
+
+static int fcom_copy_parse_items(CPU *cpu, UWORD command_psp,
+                                 struct fcom_guest *g,
+                                 struct fcom_copy_parse *parse,
+                                 char *line)
+{
+  char *cursor = line;
+  char *arg;
+  int plus;
+  int flags = parse->opt_a
+      ? FCOM_COPY_ASCII
+      : (parse->opt_b ? FCOM_COPY_BINARY : 0);
+  unsigned group = 0;
+  unsigned index = 0;
+
+  while ((arg = fcom_copy_scan_token(&cursor, &plus)) != NULL) {
+    if (fcom_copy_option(arg, parse, &flags)) {
+      if (index != 0)
+        parse->items[index - 1].flags = (UBYTE)flags;
+      continue;
+    }
+
+    if (!plus)
+      ++group;
+
+    if (index >= parse->count ||
+        strlen(arg) >= sizeof(parse->items[index].name))
+      return 0;
+
+    parse->items[index].flags = (UBYTE)flags;
+    parse->items[index].group = (UBYTE)group;
+    strcpy(parse->items[index].name, arg);
+    ++index;
+  }
+
+  parse->count = index;
+  parse->groups = group;
+  (void)cpu;
+  (void)command_psp;
+  (void)g;
+  return 1;
+}
+
+static int fcom_copy_source_exists(CPU *cpu, UWORD command_psp,
+                                   struct fcom_guest *g,
+                                   const char *name)
+{
+  int handle = dos_open_read(cpu, command_psp, g, name);
+
+  if (handle < 0)
+    return 0;
+  fcom_close(cpu, command_psp, (UWORD)handle);
+  return 1;
+}
+
+static int fcom_copy_group(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g,
+                           struct fcom_copy_parse *parse,
+                           unsigned first, unsigned last,
+                           const char *destination,
+                           int destination_is_directory,
+                           int append_destination,
+                           int destination_flags,
+                           int *all,
+                           unsigned *copied)
+{
+  struct fcom_copy_item *lead = &parse->items[first];
+  int wildcard = strchr(lead->name, '*') != NULL ||
+                 strchr(lead->name, '?') != NULL;
   int rc;
   int found = 0;
 
-  if (!fcom_copy_has_wildcards(pattern)) {
-    if (destination_is_directory) {
-      if (!fcom_make_copy_destination(g, destination, pattern))
-        return -3;
-    } else {
-      strcpy(g->path2, destination);
+  if (!wildcard) {
+    if (!fcom_copy_source_exists(cpu, command_psp, g, lead->name)) {
+      fcom_copy_error1(cpu, command_psp, g,
+                       "Unable to open file '", lead->name);
+      dos_puts(cpu, command_psp, g, "'\r\n");
+      return 0;
     }
 
-    rc = fcom_copy_one(cpu, command_psp, g,
-                       pattern, g->path2, prompt_overwrite);
-    if (rc == 0)
-      ++*copied;
-    return rc < 0 ? rc : 0;
+    if (strlen(lead->name) >= sizeof(g->batch_arg))
+      return 0;
+    strcpy(g->batch_arg, lead->name);
+    found = 1;
+  } else {
+    memset(&g->find, 0, sizeof(g->find));
+    if (set_find_dta(cpu, command_psp) < 0)
+      return 0;
+
+    rc = dos_find_first_attr(cpu, command_psp, g, lead->name, 0x21);
+    if (rc < 0) {
+      restore_default_dta(cpu, command_psp);
+      fcom_copy_error1(cpu, command_psp, g,
+                       "File not found - ", lead->name);
+      return 0;
+    }
   }
 
-  memset(&g->find, 0, sizeof(g->find));
-  if (set_find_dta(cpu, command_psp) < 0)
-    return -1;
+  do {
+    const char *source_name;
+    const char *base;
+    unsigned i;
+    int output;
+    int confirmation;
+    int dest_ascii =
+        (destination_flags & FCOM_COPY_ASCII) != 0;
 
-  rc = dos_find_first_attr(cpu, command_psp, g, pattern, 0x27);
-  while (rc == 0) {
-    if (!(g->find.dm_attr_fnd & D_DIR) &&
-        strcmp(g->find.dm_name, ".") != 0 &&
-        strcmp(g->find.dm_name, "..") != 0) {
+    if (wildcard) {
+      if (g->find.dm_attr_fnd & D_DIR) {
+        rc = dos_find_next(cpu, command_psp);
+        continue;
+      }
+
+      if (!fcom_copy_build_match(g->batch_arg,
+                                 sizeof(g->batch_arg),
+                                 lead->name, g->find.dm_name)) {
+        restore_default_dta(cpu, command_psp);
+        return 0;
+      }
       found = 1;
-
-      if (!fcom_build_copy_match(g->path, sizeof(g->path),
-                                 pattern, g->find.dm_name)) {
-        restore_default_dta(cpu, command_psp);
-        return -3;
-      }
-
-      if (destination_is_directory) {
-        if (!fcom_make_path_from_directory(
-                g->path2, sizeof(g->path2),
-                destination, g->find.dm_name)) {
-          restore_default_dta(cpu, command_psp);
-          return -3;
-        }
-      } else {
-        strcpy(g->path2, destination);
-      }
-
-      /*
-       * fcom_copy_one() changes the DTA buffers used by DOS calls, so keep
-       * the matched source name in batch_arg before invoking it.
-       */
-      strcpy(g->batch_arg, g->path);
-      rc = fcom_copy_one(cpu, command_psp, g,
-                         g->batch_arg, g->path2, prompt_overwrite);
-      if (rc < 0) {
-        restore_default_dta(cpu, command_psp);
-        return rc;
-      }
-      if (rc == 0)
-        ++*copied;
-
-      if (set_find_dta(cpu, command_psp) < 0)
-        return -1;
     }
 
-    rc = dos_find_next(cpu, command_psp);
-  }
+    source_name = g->batch_arg;
+    base = fcom_copy_basename(source_name);
 
-  restore_default_dta(cpu, command_psp);
+    if (!fcom_copy_destination(g->path2, sizeof(g->path2),
+                               destination, base,
+                               destination_is_directory)) {
+      if (wildcard)
+        restore_default_dta(cpu, command_psp);
+      return 0;
+    }
 
-  if (!found) {
-    dos_puts(cpu, command_psp, g, "File not found - ");
-    dos_puts(cpu, command_psp, g, pattern);
-    dos_puts(cpu, command_psp, g, "\r\n");
-    return -2;
-  }
+    for (i = first; i <= last; ++i) {
+      if (strcasecmp(parse->items[i].name, g->path2) == 0) {
+        fcom_copy_error1(cpu, command_psp, g,
+                         "Cannot copy '", g->path2);
+        dos_puts(cpu, command_psp, g, "' to itself\r\n");
+        if (wildcard)
+          restore_default_dta(cpu, command_psp);
+        return 0;
+      }
+    }
 
-  return 0;
+    confirmation = parse->opt_y
+        ? 1
+        : fcom_copy_confirm_overwrite(
+              cpu, command_psp, g, g->path2, all);
+    if (confirmation < 0) {
+      if (wildcard)
+        restore_default_dta(cpu, command_psp);
+      return 0;
+    }
+    if (!confirmation) {
+      if (wildcard)
+        rc = dos_find_next(cpu, command_psp);
+      continue;
+    }
+
+    output = fcom_create_mode(cpu, command_psp, g,
+                              g->path2, append_destination);
+    if (output < 0) {
+      fcom_copy_error1(cpu, command_psp, g,
+                       "Unable to open file '", g->path2);
+      dos_puts(cpu, command_psp, g, "'\r\n");
+      if (wildcard)
+        restore_default_dta(cpu, command_psp);
+      return 0;
+    }
+
+    for (i = first; i <= last; ++i) {
+      char source_path[128];
+      int input;
+      int ascii = (parse->items[i].flags & FCOM_COPY_ASCII) != 0;
+
+      if (i == first) {
+        if (strlen(source_name) >= sizeof(source_path)) {
+          fcom_close(cpu, command_psp, (UWORD)output);
+          if (wildcard)
+            restore_default_dta(cpu, command_psp);
+          return 0;
+        }
+        strcpy(source_path, source_name);
+      } else if (!fcom_copy_build_match(
+                     source_path, sizeof(source_path),
+                     parse->items[i].name, base)) {
+        fcom_close(cpu, command_psp, (UWORD)output);
+        if (wildcard)
+          restore_default_dta(cpu, command_psp);
+        return 0;
+      }
+
+      input = dos_open_read(cpu, command_psp, g, source_path);
+      if (input < 0) {
+        fcom_copy_error1(cpu, command_psp, g,
+                         "Unable to open file '", source_path);
+        dos_puts(cpu, command_psp, g, "'\r\n");
+        fcom_close(cpu, command_psp, (UWORD)output);
+        if (wildcard)
+          restore_default_dta(cpu, command_psp);
+        return 0;
+      }
+
+      {
+        int n = snprintf(g->text, sizeof(g->text),
+                         "%s %s %s\r\n", source_path,
+                         (append_destination || i != first)
+                             ? "=>>" : "=>",
+                         g->path2);
+        if (n > 0)
+          (void)fcom_write(cpu, command_psp,
+              FCOM_WORK_OFFSET +
+                (UWORD)offsetof(struct fcom_guest, text),
+              (UWORD)n);
+      }
+
+      rc = fcom_copy_stream(cpu, command_psp, g,
+                            (UWORD)input, (UWORD)output, ascii);
+      fcom_close(cpu, command_psp, (UWORD)input);
+      if (rc < 0) {
+        fcom_close(cpu, command_psp, (UWORD)output);
+        if (wildcard)
+          restore_default_dta(cpu, command_psp);
+        dos_puts(cpu, command_psp, g, "COPY failed\r\n");
+        return 0;
+      }
+
+    }
+
+    if (dest_ascii) {
+      g->io[0] = 0x1a;
+      if (fcom_copy_write(cpu, command_psp, g,
+                          (UWORD)output, 1) < 0) {
+        fcom_close(cpu, command_psp, (UWORD)output);
+        if (wildcard)
+          restore_default_dta(cpu, command_psp);
+        return 0;
+      }
+    }
+
+    fcom_close(cpu, command_psp, (UWORD)output);
+    ++*copied;
+
+    if (wildcard)
+      rc = dos_find_next(cpu, command_psp);
+  } while (wildcard && rc == 0);
+
+  if (wildcard)
+    restore_default_dta(cpu, command_psp);
+
+  return found;
 }
 
 static void builtin_copy(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, char *args)
 {
-  char *cursor;
-  char *arg;
-  char *destination = NULL;
-  unsigned operand_count = 0;
+  struct fcom_copy_parse parse;
+  unsigned item_count;
+  unsigned group_count;
+  unsigned destination_index;
+  unsigned group;
   unsigned copied = 0;
-  int prompt_overwrite = 0;
   int destination_is_directory;
+  int all = 0;
+  int count_rc;
+  int allocated;
+  UWORD paras;
 
-  if (strlen(args) >= sizeof(g->batch_line)) {
-    dos_puts(cpu, command_psp, g, "Command line too long.\r\n");
+  memset(&parse, 0, sizeof(parse));
+  fcom_copy_parse_env(command_psp, &parse);
+
+  if (strlen(args) >= sizeof(g->batch_line) ||
+      strlen(args) >= sizeof(g->redirect_command)) {
+    dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
     return;
   }
 
-  /*
-   * Preserve the original command line. Each pass tokenizes a separate
-   * guest-resident copy; no native pointer array is required.
-   */
   strcpy(g->batch_line, args);
+  count_rc = fcom_copy_count_items(
+      g->batch_line, &item_count, &group_count);
+
+  if (count_rc == -1) {
+    dos_puts(cpu, command_psp, g,
+             "The concatenation character '+' cannot lead the arguments.\r\n");
+    return;
+  }
+  if (count_rc == -2) {
+    dos_puts(cpu, command_psp, g,
+             "The concatenation character '+' cannot trail the arguments.\r\n");
+    return;
+  }
+  if (item_count == 0) {
+    dos_puts(cpu, command_psp, g, "Nothing to do.\r\n");
+    return;
+  }
+
+  paras = (UWORD)(((size_t)item_count *
+                   sizeof(struct fcom_copy_item) + 15u) >> 4);
+  allocated = guest_alloc(cpu, command_psp, paras);
+  if (allocated < 0) {
+    dos_puts(cpu, command_psp, g, "Out of memory.\r\n");
+    return;
+  }
+
+  parse.item_segment = (UWORD)allocated;
+  parse.items = (struct fcom_copy_item *)ARM_PTR(
+      MK_FP(parse.item_segment, 0));
+  parse.count = item_count;
+  memset(parse.items, 0,
+         (size_t)paras << 4);
+
   strcpy(g->redirect_command, args);
-
-  cursor = g->redirect_command;
-  while ((arg = next_argument(&cursor)) != NULL) {
-    if (strcasecmp(arg, "/Y") == 0) {
-      prompt_overwrite = 0;
-      continue;
-    }
-    if (strcasecmp(arg, "/-Y") == 0) {
-      prompt_overwrite = 1;
-      continue;
-    }
-
-    destination = arg;
-    ++operand_count;
-  }
-
-  if (operand_count < 2 || destination == NULL) {
-    dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
+  if (!fcom_copy_parse_items(cpu, command_psp, g,
+                             &parse, g->redirect_command)) {
+    guest_free(cpu, command_psp, parse.item_segment);
+    dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
     return;
   }
 
-  if (strlen(destination) >= sizeof(g->program)) {
-    dos_puts(cpu, command_psp, g, "Path too long.\r\n");
-    return;
+  if (parse.groups > 1) {
+    destination_index = parse.count - 1;
+
+    if (destination_index != 0 &&
+        parse.items[destination_index].group ==
+        parse.items[destination_index - 1].group) {
+      guest_free(cpu, command_psp, parse.item_segment);
+      dos_puts(cpu, command_psp, g,
+               "The COPY destination must not contain plus ('+') characters.\r\n");
+      return;
+    }
+
+    if (strlen(parse.items[destination_index].name) >= sizeof(g->program)) {
+      guest_free(cpu, command_psp, parse.item_segment);
+      dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
+      return;
+    }
+    strcpy(g->program, parse.items[destination_index].name);
+    parse.dest_flags = parse.items[destination_index].flags;
+    --parse.count;
+    --parse.groups;
+  } else {
+    strcpy(g->program, ".\\*.*");
+    parse.dest_flags = 0;
   }
-  strcpy(g->program, destination);
 
   destination_is_directory =
       fcom_path_is_directory(cpu, command_psp, g, g->program);
 
-  if (operand_count > 2 && !destination_is_directory) {
-    dos_puts(cpu, command_psp, g,
-             "Multiple sources require a destination directory.\r\n");
-    return;
-  }
+  for (group = 1; group <= parse.groups; ++group) {
+    unsigned first = 0;
+    unsigned last;
 
-  cursor = g->batch_line;
-  {
-    unsigned source_no = 0;
+    while (first < parse.count &&
+           parse.items[first].group != group)
+      ++first;
+    if (first == parse.count)
+      continue;
 
-    while ((arg = next_argument(&cursor)) != NULL) {
-      if (strcasecmp(arg, "/Y") == 0 ||
-          strcasecmp(arg, "/-Y") == 0)
-        continue;
+    last = first;
+    while (last + 1 < parse.count &&
+           parse.items[last + 1].group == group)
+      ++last;
 
-      ++source_no;
-      if (source_no == operand_count)
-        break;
+    /*
+     * FreeCOM copy.c: concatenation defaults to ASCII for every source
+     * whose mode was not specified, and for the destination as well.
+     */
+    if (last != first) {
+      unsigned i;
 
-      if (fcom_copy_pattern(cpu, command_psp, g,
-                            arg, g->program,
-                            destination_is_directory,
-                            prompt_overwrite, &copied) < 0)
-        return;
+      for (i = first; i <= last; ++i) {
+        if (parse.items[i].flags == 0)
+          parse.items[i].flags = FCOM_COPY_ASCII;
+      }
+
+      if (parse.dest_flags == 0)
+        parse.dest_flags = FCOM_COPY_ASCII;
     }
+
+    if (!fcom_copy_group(cpu, command_psp, g, &parse,
+                         first, last, g->program,
+                         destination_is_directory,
+                         0, parse.dest_flags,
+                         &all, &copied))
+      break;
   }
+
+  guest_free(cpu, command_psp, parse.item_segment);
 
   {
     int n = snprintf(g->text, sizeof(g->text),

@@ -1411,6 +1411,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 #endif
         if (rc < SUCCESS)
         {
+          /*
+           * Upstream verifies the complete MCB chain when a free fails.
+           * Report structural corruption as DE_MCBDESTRY instead of
+           * returning the less specific invalid-MCB error.
+           */
+          if (DosMemCheck() != SUCCESS)
+            rc = DE_MCBDESTRY;
+
           R_AX = (UWORD) (-rc);
           R_CF = 1;
         }
@@ -1421,6 +1429,19 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* Resize (grow/shrink) an allocated memory block               */
       case 0x4a: {
           UWORD maxsize = 0;
+          /*
+           * Upstream checks the chain before resizing.  A damaged chain
+           * must not be modified further; return the normal DOS MCB
+           * corruption error rather than entering the original panic path.
+           */
+          rc = DosMemCheck();
+          if (rc < SUCCESS)
+          {
+            R_BX = 0;
+            R_AX = (UWORD)(-rc);
+            R_CF = 1;
+            break;
+          }
 
           rc = DosMemChange(R_ES, R_BX, &maxsize);
 #ifdef INT21_DIAG
