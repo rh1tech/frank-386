@@ -1257,6 +1257,107 @@ bool fdos_2fh(CPU* cpu) {
         cf = 0;
     }
     else
+    if (CPU_AX == 0x1226) {
+        /*
+         * Internal OPEN wrapper from upstream INT 2Fh/1226h.
+         * Input: DS:DX -> name, CL = open mode.
+         * Output: AX = handle or positive DOS error, CF accordingly.
+         */
+        CPU_regs saved;
+        const dos_far_ptr name = MK_FP(CPU_DS, CPU_DX);
+        const UBYTE mode = CPU_CL;
+        long result;
+
+        cpu_save_regs(cpu, &saved);
+        internal_data->CritErrCode = SUCCESS;
+        result = DosOpen(name, O_LEGACY | O_OPEN | mode, 0);
+        cpu_restore_regs(cpu, &saved);
+
+        if (result < SUCCESS) {
+            CPU_AX = (UWORD)(-result);
+            cf = 1;
+        } else {
+            CPU_AX = (UWORD)result;
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x1227) {
+        /* Internal CLOSE wrapper from upstream INT 2Fh/1227h. */
+        CPU_regs saved;
+        const UWORD handle = CPU_BX;
+        COUNT result;
+
+        cpu_save_regs(cpu, &saved);
+        internal_data->CritErrCode = SUCCESS;
+        result = DosClose(handle);
+        cpu_restore_regs(cpu, &saved);
+
+        if (result < SUCCESS) {
+            CPU_AX = (UWORD)(-result);
+            cf = 1;
+        } else {
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x1228) {
+        /*
+         * Internal LSEEK wrapper from upstream INT 2Fh/1228h.
+         * BP must contain 4200h, 4201h or 4202h.
+         */
+        CPU_regs saved;
+        const UWORD handle = CPU_BX;
+        const UWORD method = CPU_BP;
+        const LONG offset = (LONG)MK_ULONG(CPU_CX, CPU_DX);
+        ULONG position;
+        COUNT result;
+
+        if (method < 0x4200 || method > 0x4202) {
+            CPU_AX = (UWORD)(-DE_INVLDFUNC);
+            cf = 1;
+        } else {
+            cpu_save_regs(cpu, &saved);
+            internal_data->CritErrCode = SUCCESS;
+            position = DosSeek(handle, offset, method & 0xff, &result);
+            cpu_restore_regs(cpu, &saved);
+
+            if (result < SUCCESS) {
+                CPU_AX = (UWORD)(-result);
+                cf = 1;
+            } else {
+                CPU_AX = (UWORD)position;
+                CPU_DX = (UWORD)(position >> 16);
+                cf = 0;
+            }
+        }
+    }
+    else
+    if (CPU_AX == 0x1229) {
+        /*
+         * Internal READ wrapper from upstream INT 2Fh/1229h.
+         * Input: BX=handle, CX=count, DS:DX=destination.
+         */
+        CPU_regs saved;
+        const UWORD handle = CPU_BX;
+        const UWORD count = CPU_CX;
+        const dos_far_ptr buffer = MK_FP(CPU_DS, CPU_DX);
+        long result;
+
+        cpu_save_regs(cpu, &saved);
+        internal_data->CritErrCode = SUCCESS;
+        result = DosRead(handle, count, buffer);
+        cpu_restore_regs(cpu, &saved);
+
+        if (result < SUCCESS) {
+            CPU_AX = (UWORD)(-result);
+            cf = 1;
+        } else {
+            CPU_AX = (UWORD)result;
+            cf = 0;
+        }
+    }
+    else
     if (CPU_AX == 0x1225) {
         /* DOS internal: length of DS:SI ASCIIZ, including the NUL. */
         const char *s = (const char *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));

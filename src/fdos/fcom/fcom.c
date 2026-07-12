@@ -1840,6 +1840,254 @@ static void builtin_attrib(CPU *cpu, UWORD command_psp,
 }
 
 
+
+static void builtin_beep(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g)
+{
+  g->io[0] = '\a';
+  (void)fcom_write(cpu, command_psp,
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 1);
+}
+
+static int fcom_file_exists(CPU *cpu, UWORD command_psp,
+                            struct fcom_guest *g, const char *name)
+{
+  int handle = dos_open_read(cpu, command_psp, g, name);
+
+  if (handle < 0)
+    return 0;
+
+  fcom_close(cpu, command_psp, (UWORD)handle);
+  return 1;
+}
+
+static int has_extension(const char *name)
+{
+  const char *base = name;
+  const char *p;
+  for (p = name; *p; ++p) {
+    if (*p == '\\' || *p == '/' || *p == ':')
+      base = p + 1;
+  }
+  return strchr(base, '.') != NULL;
+}
+
+static int fcom_try_which_candidate(CPU *cpu, UWORD command_psp,
+                                    struct fcom_guest *g,
+                                    const char *base,
+                                    char *result, size_t result_size)
+{
+  static const char *const suffixes[] = {
+    "", ".COM", ".EXE", ".BAT", ".CMD"
+  };
+  unsigned first = has_extension(base) ? 0u : 1u;
+  unsigned last = has_extension(base) ? 1u :
+                  (unsigned)(sizeof(suffixes) / sizeof(suffixes[0]));
+  unsigned i;
+
+  for (i = first; i < last; ++i) {
+    size_t base_len = strlen(base);
+    size_t suffix_len = strlen(suffixes[i]);
+
+    if (base_len + suffix_len >= result_size)
+      continue;
+
+    memcpy(result, base, base_len);
+    memcpy(result + base_len, suffixes[i], suffix_len + 1);
+
+    if (fcom_file_exists(cpu, command_psp, g, result))
+      return 1;
+  }
+
+  return 0;
+}
+
+static int path_is_explicit(const char *name)
+{
+  return strchr(name, '\\') != NULL ||
+         strchr(name, '/') != NULL ||
+         strchr(name, ':') != NULL;
+}
+
+static const char *find_path_value(UWORD command_psp)
+{
+  const psp *p = (const psp *)ARM_PTR(MK_FP(command_psp, 0));
+  const char *env;
+  unsigned left = 0x8000u;
+
+  if (p->ps_environ == 0)
+    return NULL;
+
+  env = (const char *)ARM_PTR(MK_FP(p->ps_environ, 0));
+  while (left && *env) {
+    size_t n = strnlen(env, left);
+    if (n == left)
+      break;
+    if (n >= 5 && strncasecmp(env, "PATH=", 5) == 0)
+      return env + 5;
+    env += n + 1;
+    left -= (unsigned)n + 1u;
+  }
+  return NULL;
+}
+
+static int make_path_candidate(char *dst, size_t dst_size,
+                               const char *dir, size_t dir_len,
+                               const char *program)
+{
+  size_t pn = strlen(program);
+  int need_sep = dir_len != 0 && dir[dir_len - 1] != '\\' &&
+                 dir[dir_len - 1] != '/' && dir[dir_len - 1] != ':';
+
+  if (dir_len + (size_t)need_sep + pn >= dst_size)
+    return 0;
+  memcpy(dst, dir, dir_len);
+  if (need_sep)
+    dst[dir_len++] = '\\';
+  memcpy(dst + dir_len, program, pn + 1);
+  return 1;
+}
+
+static int fcom_find_which(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g,
+                           const char *name,
+                           char *result, size_t result_size)
+{
+  const char *path;
+
+  if (path_is_explicit(name))
+    return fcom_try_which_candidate(cpu, command_psp, g,
+                                    name, result, result_size);
+
+  if (fcom_try_which_candidate(cpu, command_psp, g,
+                               name, result, result_size))
+    return 1;
+
+  path = find_path_value(command_psp);
+  while (path != NULL && *path != '\0') {
+    const char *end = strchr(path, ';');
+    size_t len = end != NULL ? (size_t)(end - path) : strlen(path);
+    const char *dir = path;
+
+    while (len != 0 && (*dir == ' ' || *dir == '\t')) {
+      ++dir;
+      --len;
+    }
+    while (len != 0 &&
+           (dir[len - 1] == ' ' || dir[len - 1] == '\t'))
+      --len;
+
+    if (len != 0 &&
+        make_path_candidate(g->text, sizeof(g->text),
+                            dir, len, name) &&
+        fcom_try_which_candidate(cpu, command_psp, g,
+                                 g->text, result, result_size))
+      return 1;
+
+    if (end == NULL)
+      break;
+    path = end + 1;
+  }
+
+  return 0;
+}
+
+static void builtin_which(CPU *cpu, UWORD command_psp,
+                          struct fcom_guest *g, char *args)
+{
+  char *cursor = args;
+  char *name;
+
+  while ((name = next_argument(&cursor)) != NULL) {
+    size_t name_len = strlen(name);
+
+    if (name_len >= sizeof(g->path2))
+      name_len = sizeof(g->path2) - 1;
+    memcpy(g->path2, name, name_len);
+    g->path2[name_len] = '\0';
+
+    dos_puts(cpu, command_psp, g, g->path2);
+
+    if (fcom_find_which(cpu, command_psp, g, g->path2,
+                        g->program, sizeof(g->program))) {
+      dos_puts(cpu, command_psp, g, "\t");
+      dos_puts(cpu, command_psp, g, g->program);
+    }
+
+    dos_puts(cpu, command_psp, g, "\r\n");
+  }
+}
+
+
+
+static int fcom_open_readwrite(CPU *cpu, UWORD command_psp,
+                               struct fcom_guest *g, const char *name)
+{
+  size_t n = strlen(name);
+
+  if (n >= sizeof(g->path))
+    return -3;
+
+  memcpy(g->path, name, n + 1);
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+  CPU_AX = 0x3d02;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM CTTY open");
+  return int21_failed(cpu) ? -(int)CPU_AX : (int)CPU_AX;
+}
+
+static int fcom_force_dup_handle(CPU *cpu, UWORD command_psp,
+                                 UWORD source, UWORD target)
+{
+  CPU_BX = source;
+  CPU_CX = target;
+  CPU_AH = 0x46;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM CTTY duplicate");
+  return int21_failed(cpu) ? -(int)CPU_AX : 0;
+}
+
+static void builtin_ctty(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g, char *args)
+{
+  char *cursor = args;
+  char *device = next_argument(&cursor);
+  int handle;
+
+  if (device == NULL) {
+    dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
+    return;
+  }
+
+  if (next_argument(&cursor) != NULL) {
+    dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
+    return;
+  }
+
+  handle = fcom_open_readwrite(cpu, command_psp, g, device);
+  if (handle < 0) {
+    dos_puts(cpu, command_psp, g, "Invalid device - ");
+    dos_puts(cpu, command_psp, g, device);
+    dos_puts(cpu, command_psp, g, "\r\n");
+    return;
+  }
+
+  /*
+   * CTTY changes the controlling terminal of the current COMMAND process:
+   * stdin, stdout and stderr must all refer to the selected character
+   * device.  The duplicated handles remain installed after this command.
+   */
+  if (fcom_force_dup_handle(cpu, command_psp, (UWORD)handle, 0) < 0 ||
+      fcom_force_dup_handle(cpu, command_psp, (UWORD)handle, 1) < 0 ||
+      fcom_force_dup_handle(cpu, command_psp, (UWORD)handle, 2) < 0) {
+    fcom_close(cpu, command_psp, (UWORD)handle);
+    dos_puts(cpu, command_psp, g, "Unable to redirect console.\r\n");
+    return;
+  }
+
+  fcom_close(cpu, command_psp, (UWORD)handle);
+}
+
+
 static int run_builtin(CPU *cpu, UWORD command_psp,
                        struct fcom_guest *g, char *args)
 {
@@ -1978,6 +2226,21 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
     return 1;
   }
 
+  if (command_is(g->filename, "BEEP")) {
+    builtin_beep(cpu, command_psp, g);
+    return 1;
+  }
+
+  if (command_is(g->filename, "WHICH")) {
+    builtin_which(cpu, command_psp, g, args);
+    return 1;
+  }
+
+  if (command_is(g->filename, "CTTY")) {
+    builtin_ctty(cpu, command_psp, g, args);
+    return 1;
+  }
+
   if (command_is(g->filename, "CHCP")) {
     builtin_chcp(cpu, command_psp, g, args);
     return 1;
@@ -2058,17 +2321,6 @@ static char *split_command(struct fcom_guest *g)
   return skip_space(src);
 }
 
-static int has_extension(const char *name)
-{
-  const char *base = name;
-  const char *p;
-  for (p = name; *p; ++p) {
-    if (*p == '\\' || *p == '/' || *p == ':')
-      base = p + 1;
-  }
-  return strchr(base, '.') != NULL;
-}
-
 static void build_tail(struct fcom_guest *g, const char *args)
 {
   size_t n = strlen(args);
@@ -2101,13 +2353,6 @@ static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
   return int21_failed(cpu) ? -(int)CPU_AX : 0;
 }
 
-static int path_is_explicit(const char *name)
-{
-  return strchr(name, '\\') != NULL ||
-         strchr(name, '/') != NULL ||
-         strchr(name, ':') != NULL;
-}
-
 static int exec_program(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
                         const char *name)
 {
@@ -2135,45 +2380,6 @@ static int exec_program(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
       return rc;
   }
   return rc;
-}
-
-static const char *find_path_value(UWORD command_psp)
-{
-  const psp *p = (const psp *)ARM_PTR(MK_FP(command_psp, 0));
-  const char *env;
-  unsigned left = 0x8000u;
-
-  if (p->ps_environ == 0)
-    return NULL;
-
-  env = (const char *)ARM_PTR(MK_FP(p->ps_environ, 0));
-  while (left && *env) {
-    size_t n = strnlen(env, left);
-    if (n == left)
-      break;
-    if (n >= 5 && strncasecmp(env, "PATH=", 5) == 0)
-      return env + 5;
-    env += n + 1;
-    left -= (unsigned)n + 1u;
-  }
-  return NULL;
-}
-
-static int make_path_candidate(char *dst, size_t dst_size,
-                               const char *dir, size_t dir_len,
-                               const char *program)
-{
-  size_t pn = strlen(program);
-  int need_sep = dir_len != 0 && dir[dir_len - 1] != '\\' &&
-                 dir[dir_len - 1] != '/' && dir[dir_len - 1] != ':';
-
-  if (dir_len + (size_t)need_sep + pn >= dst_size)
-    return 0;
-  memcpy(dst, dir, dir_len);
-  if (need_sep)
-    dst[dir_len++] = '\\';
-  memcpy(dst + dir_len, program, pn + 1);
-  return 1;
 }
 
 static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
@@ -2221,8 +2427,6 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
   }
   return rc;
 }
-
-
 
 static int execute_command_line(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g, char *line);
