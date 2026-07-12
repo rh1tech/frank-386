@@ -15,6 +15,11 @@
 #include "mpu401.c.inl"
 void netredirect_init(CPU *cpu, int enable);
 
+/* 1 = печатать в POST дамп ключевых полей (проверка, что патч реально в прошивке) */
+#ifndef NATIVE_POST_SELFTEST
+#define NATIVE_POST_SELFTEST 1
+#endif
+
 unsigned long phys_mem_size = 8l << 20;
 void* g_pc;
 
@@ -340,18 +345,23 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	        return mpu401_read(addr);
 		return 0xFF;
 
-	// Disney Sound Source
+	/* --- LPT1 (0x378): принтер + Disney Sound Source ---------------------
+	 * data:    защёлка (нужна для detect: write 0xAA/0x55 -> read back).
+	 *          При включённом DSS dss_in(0x378) отдаёт тот же последний байт.
+	 * status:  DSS использует ТОЛЬКО бит6 (FIFO full). Остальные биты
+	 *          доливаем как "принтер готов", иначе INT 17h всегда timeout:
+	 *          bit7 nBusy=1, bit4 Select=1, bit3 nError=1  => 0x98.
+	 * control: настоящая защёлка (init = 0x04, как было раньше константой).
+	 *          dss_out() ведёт свой собственный control, чтение ему не нужно.
+	 */
 	case 0x378: return pc->dss_enabled ? dss_in(addr) : pc->lpt_data[0];
-	case 0x379: return pc->dss_enabled ? dss_in(addr) : 0xD8; /* idle, НЕ 0xF8 */
-	case 0x37A: return pc->lpt_ctrl[0] | 0xC0;
-	/* LPT control ports */
-///	case 0x37a:
-///		return 0x04;
+	case 0x379: return pc->dss_enabled ? (dss_in(addr) | 0x98) : 0xD8;
+	case 0x37A: return pc->lpt_ctrl[0];
 
-	/* LPT data ports (Covox): write-only DAC, reads return 0xFF */
+	/* --- LPT2 (0x278): принтер + Covox ---------------------------------- */
 	case 0x278: return pc->lpt_data[1];
-	case 0x279: return 0xD8;                                  /* idle */
-	case 0x27A: return pc->lpt_ctrl[1] | 0xC0;
+	case 0x279: return 0xD8;                 /* idle: nBusy|nAck|Select|nError */
+	case 0x27A: return pc->lpt_ctrl[1];
 	default:
 		//fprintf(stderr, "in 0x%x <= 0x%x\n", addr, 0xff);
 		return 0xff;
@@ -1170,6 +1180,11 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	pc->dss_enabled = 0;
 	pc->mouse_enabled = 1;
 
+	/* LPT: защёлки data/control. control=0x04 (nInit=1) — то же значение,
+	 * которое раньше жёстко возвращалось из порта 0x37A. */
+	pc->lpt_data[0] = pc->lpt_data[1] = 0xFF;
+	pc->lpt_ctrl[0] = pc->lpt_ctrl[1] = 0x04;
+
 	pc->port92 = 0x2;
 	pc->shutdown_state = 0;
 	pc->reset_request = 0;
@@ -1535,7 +1550,13 @@ void bios_post(PC *pc) {
 	point2iret(0x29);
 	point2iret(0x2f);
 // MS MOUSE
-	point2zero(0x33);
+	bios_33h_install(pc->mouse_enabled);
+	if (pc->mouse_enabled) {
+		pstore16(0x33*4,     0x0033);   /* маркер FFE0:0033 -> handlers[0x33] */
+		pstore16(0x33*4 + 2, 0xFFE0);
+	} else {
+		point2zero(0x33);               /* вектор 0 == "драйвера мыши нет" */
+	}
 // IRQ14 - HARD DISK CONTROLLER OPERATION COMPLETE (AT and later)
 	point2iret(0x76);
 
@@ -1555,6 +1576,26 @@ void bios_post(PC *pc) {
     pstore8(0xFFFFD, 0x00);                          /* checksum-заглушка    */
     pstore8(0xFFFFE, 0xFC);                          /* model byte: IBM AT   */
     pstore8(0xFFFFF, 0x01);                          /* submodel/revision    */
+
+#if NATIVE_POST_SELFTEST
+    /* Печатается сразу после VGA-баннера. */
+    {
+        char cp[17];
+        for (int i = 0; i < 16; ++i) {
+            uint8_t c = pload8(0xFE000 + i);
+            cp[i] = (c >= 32 && c < 127) ? (char)c : '.';
+        }
+        cp[16] = 0;
+        bios_printf(pc->cpu,
+            "\n\nPOST: F000:E000=[%s] 40:96=%02X 40:08=%04X 40:0A=%04X EQ=%04X\n",
+            cp, pload8(0x496), pload16(0x408), pload16(0x40A), pload16(0x410));
+        bios_printf(pc->cpu,
+            "POST: CMOS 10=%02X 12=%02X 14=%02X 2E=%02X 2F=%02X  HD=%u\n",
+            cmos_read(pc->cpu, 0x10), cmos_read(pc->cpu, 0x12),
+            cmos_read(pc->cpu, 0x14), cmos_read(pc->cpu, 0x2E),
+            cmos_read(pc->cpu, 0x2F), (unsigned)pload8(0x475));
+    }
+#endif
 
 //	bios_19h(pc->cpu);
     pstore8(0xFFFF0, 0xCD); // INT 19h - bootstrap

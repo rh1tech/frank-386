@@ -184,6 +184,7 @@ void cpu_install_bios_handlers(CPU* cpu) {
     handlers[0x18] = bios_18h; // BASIC
     handlers[0x19] = bios_19h; // BOOTSTRAP
     handlers[0x1A] = bios_1Ah; // CMOS TIME
+    handlers[0x33] = bios_33h; // MS MOUSE
     handlers[0xFF] = bios_FFh; // W/A BIOS callback
 }
 

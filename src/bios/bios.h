@@ -25,6 +25,7 @@ bool bios_17h(CPU*); // PRINTERS
 bool bios_18h(CPU*); // Call internal Basic
 bool bios_19h(CPU*); // Bootstrap
 bool bios_1Ah(CPU*); // Time/Date services
+bool bios_33h(CPU*); // MS MOUSE
 bool bios_FFh(CPU*); // W/A BIOS callback
 bool set_bios_callback(CPU*, bios_callback_params_t*, bool reenter);
 bool drop_bios_callback(CPU*, bios_callback_params_t*);
@@ -33,6 +34,12 @@ void bios_intcall(CPU*, uint8_t, const char*); // sync call
 bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page);
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9
 void bios_10h_install_rom_fonts(CPU*); // INT 10h support
+
+/* INT 33h (bios_33h.c) */
+void bios_33h_install(int enabled);              // вызывается из bios_post()
+void bios_33h_reset(void);
+void bios_33h_mouse_event(int dx, int dy, int buttons); // хук из main.c
+
 void vga_bios_baner(CPU* cpu);
 void bios_puts(CPU* cpu, const char* str);
 void bios_printf(CPU* cpu, const char *fmt, ...);
