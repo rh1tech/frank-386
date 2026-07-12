@@ -356,8 +356,30 @@ STATIC int ddt_LBA_to_CHS(ULONG LBA_address, struct CHS *chs,
      BIOS, not from some random boot sector, except when
      we're dealing with a floppy */
   const bpb *pbpb = hd(pddt->ddt_descflags) ? &pddt->ddt_defbpb : &pddt->ddt_bpb;
-  unsigned hs = pbpb->bpb_nsecs * pbpb->bpb_nheads;
-  unsigned hsrem = (unsigned)(LBA_address % hs);
+  unsigned hs;
+  unsigned hsrem;
+
+  /*
+   * PORTING HAZARD, and the reason this has to be checked here.
+   *
+   * The original runs on a 8086: a DIV by zero raises INT 00h and the whole
+   * thing stops loudly. Cortex-M33 UDIV by zero just returns 0 (DIV_0_TRP is
+   * off), so a ddt with an unbuilt BPB (nsecs == 0) silently produces
+   * Sector = 1 here, and then LBA_Transfer()'s end-of-track clamp computes
+   *     count = bpb_nsecs + 1 - chs.Sector == 0
+   * which means totaltodo never decreases and its "for (; totaltodo != 0;)"
+   * spins forever - in native code, with no pc_step() in the loop, so core0
+   * stops polling the keyboard and even the hot keys die.
+   */
+  if (pbpb->bpb_nsecs == 0 || pbpb->bpb_nheads == 0)
+  {
+    printf("LBA-Transfer error : drive %u has no geometry (nsecs=%u nheads=%u)\n",
+           pddt->ddt_logdriveno, pbpb->bpb_nsecs, pbpb->bpb_nheads);
+    return 1;
+  }
+
+  hs = pbpb->bpb_nsecs * pbpb->bpb_nheads;
+  hsrem = (unsigned)(LBA_address % hs);
 
   LBA_address /= hs;
 
@@ -381,7 +403,15 @@ STATIC int ddt_LBA_to_CHS(ULONG LBA_address, struct CHS *chs,
 STATIC unsigned DMA_max_transfer(dos_far_ptr buffer, unsigned count)
 {
   unsigned dma_off = FP_OFF(buffer);
-  unsigned sectors_to_dma_boundary = (dma_off == 0 ? 0xffff / LoL->maxsecsize : (UWORD)(-dma_off) / LoL->maxsecsize);
+  unsigned maxsecsize = LoL->maxsecsize;
+  unsigned sectors_to_dma_boundary;
+
+  /* same ARM-vs-8086 division trap difference as in ddt_LBA_to_CHS() */
+  if (maxsecsize == 0)
+    return count;
+
+  sectors_to_dma_boundary = (dma_off == 0 ? 0xffff / maxsecsize
+                                          : (UWORD)(-dma_off) / maxsecsize);
   return min(count, sectors_to_dma_boundary);
 }
 
@@ -536,6 +566,16 @@ STATIC int LBA_Transfer(CPU* cpu,
         if (chs.Sector + count > (unsigned)pbpb->bpb_nsecs + 1)
         {
           count = pbpb->bpb_nsecs + 1 - chs.Sector;
+        }
+
+        /* Belt and braces: the loop below only terminates while every pass
+           transfers at least one sector. A zero (or wrapped) count would make
+           "totaltodo -= count" a no-op and hang core0 in native code. */
+        if (count == 0 || count > (unsigned)pbpb->bpb_nsecs)
+        {
+          printf("LBA-Transfer error : bad sector count %u (nsecs=%u, chs=%u/%u/%u)\n",
+                 count, pbpb->bpb_nsecs, chs.Cylinder, chs.Head, chs.Sector);
+          return failure(E_FAILURE);
         }
 
         CPU_AL = (UBYTE)count;
@@ -862,6 +902,25 @@ STATIC COUNT GenblockioAbs(CPU *cpu, ddt *pddt, UWORD mode, WORD head, WORD trac
                       sector, count, &transferred);
 }
 
+/* The 41h/61h track transfers take head/cyl/sector/count straight out of the
+   caller's buffer. Genblockio*() feeds them into LBA_Transfer(), which loops
+   natively (no pc_step() inside), so a wild count is a core0 lockup, not just
+   a bad read. Sanity-check them against the drive's own geometry first. */
+STATIC BOOL gen_rw_sane(const ddt *pddt, const struct gblkrw *rw)
+{
+  const bpb *pbpb = hd(pddt->ddt_descflags) ? &pddt->ddt_defbpb : &pddt->ddt_bpb;
+
+  if (pbpb->bpb_nsecs == 0 || pbpb->bpb_nheads == 0)
+    return FALSE;
+  if (rw->gbrw_nsecs == 0 || rw->gbrw_nsecs > pbpb->bpb_nsecs)
+    return FALSE;
+  if (rw->gbrw_head >= pbpb->bpb_nheads)
+    return FALSE;
+  if (rw->gbrw_sector >= pbpb->bpb_nsecs)
+    return FALSE;
+  return TRUE;
+}
+
 /*
     C_GENIOCTL - generic IOCTL, ported from Genblkdev() in dsk.c.
 
@@ -869,10 +928,28 @@ STATIC COUNT GenblockioAbs(CPU *cpu, ddt *pddt, UWORD mode, WORD head, WORD trac
     42h/62h format/verify track, 46h/66h set/get media id,
     47h/67h set/get access flag.
 */
+/*
+ * Bisect switch. Before the dispatch table was completed, C_GENIOCTL simply
+ * returned E_CMD and callers moved on. Set BLK_GENIOCTL to 0 to go back to
+ * that behaviour without touching anything else - if a hang goes away, it is
+ * somewhere behind this door (getbpb -> RWzero -> LBA_Transfer, or one of the
+ * track functions).
+ */
+#ifndef BLK_GENIOCTL
+#define BLK_GENIOCTL 1
+#endif
+
 STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 {
+#if !BLK_GENIOCTL
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(rq);
+  UNREFERENCED_PARAMETER(pddt);
+  return failure(E_CMD);
+#else
   int ret;
   unsigned descflags = pddt->ddt_descflags;
+
 #ifdef WITHFAT32
   int extended = 0;
 
@@ -911,6 +988,8 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
     case 0x41:                 /* write track - CHS is absolute not relative to partition start */
       {
         struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq->r_rw);
+        if (!gen_rw_sane(pddt, rw))
+          return failure(E_FAILURE);
         ret = GenblockioAbs(cpu, pddt, LBA_WRITE, rw->gbrw_head, rw->gbrw_cyl,
                             rw->gbrw_sector, rw->gbrw_nsecs, rw->gbrw_buffer);
         if (ret != 0)
@@ -1024,10 +1103,20 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
       {
         struct gblkfv *fv = (struct gblkfv *)ARM_PTR(rq->r_fv);
 
-        ret = Genblockio(cpu, pddt, LBA_VERIFY, fv->gbfv_head, fv->gbfv_cyl, 0,
-                         (fv->gbfv_spcfunbit ?
-                          fv->gbfv_ntracks * pddt->ddt_defbpb.bpb_nsecs :
-                          pddt->ddt_defbpb.bpb_nsecs), DiskTransferBuffer);
+        {
+          /* gbfv_ntracks comes straight from the caller's buffer, and the
+             product is passed as a WORD - a wild value turns into a negative
+             count and then into a ~4G-sector native loop. Clamp it. */
+          ULONG nsec = fv->gbfv_spcfunbit
+                     ? (ULONG)fv->gbfv_ntracks * pddt->ddt_defbpb.bpb_nsecs
+                     : (ULONG)pddt->ddt_defbpb.bpb_nsecs;
+
+          if (nsec == 0 || nsec > 0x7FFFul)
+            return failure(E_FAILURE);
+
+          ret = Genblockio(cpu, pddt, LBA_VERIFY, fv->gbfv_head, fv->gbfv_cyl, 0,
+                           (WORD)nsec, DiskTransferBuffer);
+        }
         if (ret != 0)
           return (WORD)ret;
         fv->gbfv_spcfunbit = 0; /* success */
@@ -1037,6 +1126,8 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
     case 0x61:                 /* read track - CHS is absolute on disk not relative to start of partition */
       {
         struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq->r_rw);
+        if (!gen_rw_sane(pddt, rw))
+          return failure(E_FAILURE);
         ret = GenblockioAbs(cpu, pddt, LBA_READ, rw->gbrw_head, rw->gbrw_cyl,
                             rw->gbrw_sector, rw->gbrw_nsecs, rw->gbrw_buffer);
         if (ret != 0)
@@ -1138,6 +1229,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
       return failure(E_CMD);
   }
   return S_DONE;
+#endif /* BLK_GENIOCTL */
 }
 
 /*                                                                      */
