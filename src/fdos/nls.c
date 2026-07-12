@@ -273,10 +273,21 @@ BOOL nlsIsDBCS(UBYTE ch)
     return FALSE;
 
   {
-    UWORD FAR *t = ((struct nlsDBCS FAR *)
-                    ARM_PTR(getTable7(nlsInfo->actPkg)))->dbcsTbl;
+    /* Same class of problem as upMMem(): the original walks dbcsTbl[] until a
+       zero word, trusting the table to be zero-terminated. dbcsTbl is a fixed
+       4-word slot here (struct nlsDBCS), and a COUNTRY.SYS DBCS table that
+       fills all four words carries no terminator - the loop would then walk
+       straight into the NLS scratch area behind the table. Bound it by
+       numEntries (the table length in bytes) as well. */
+    struct nlsDBCS FAR *dbcs =
+        (struct nlsDBCS FAR *)ARM_PTR(getTable7(nlsInfo->actPkg));
+    UWORD FAR *t = dbcs->dbcsTbl;
+    unsigned n = dbcs->numEntries / sizeof(UWORD);
 
-    for (; *t != 0; ++t)
+    if (n > LENGTH(dbcs->dbcsTbl))
+      n = LENGTH(dbcs->dbcsTbl);
+
+    for (; n != 0 && *t != 0; --n, ++t)
       if (ch >= (*t & 0xFF) && ch <= (*t >> 8))
         return TRUE;
   }

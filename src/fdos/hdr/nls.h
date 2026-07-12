@@ -658,11 +658,20 @@ struct subf_tbl {
  * Each table is a "length word + payload", so the payload capacity is
  * SIZE - 2.
  */
+/* upMMem() maps character c through tbl[c - 0x80], which is only correct
+   while the payload is exactly 128 entries - see the numEntries comment on
+   struct nlsCharTbl ("If <= 0x80, the first element ... corresponds to
+   character 0x80"). Keep the slots at 2 + 128. */
 #define NLS_HC_TBL2_SIZE  130u  /* subfct 2: upcase          2 + 128 */
 #define NLS_HC_TBL4_SIZE  130u  /* subfct 4: filename upcase 2 + 128 */
 #define NLS_HC_TBL5_SIZE   24u  /* subfct 5: fname term      2 +  22 */
 #define NLS_HC_TBL6_SIZE  258u  /* subfct 6: collate         2 + 256 */
 #define NLS_HC_TBL7_SIZE   10u  /* subfct 7: DBCS            2 +   8 */
+
+_Static_assert(NLS_HC_TBL2_SIZE - 2 == 0x80,
+               "upcase table must hold exactly the 128 chars 80h..FFh");
+_Static_assert(NLS_HC_TBL4_SIZE - 2 == 0x80,
+               "file upcase table must hold exactly the 128 chars 80h..FFh");
 
 struct subf_data {   /* subfunction data */
   char signature[8];  /* \377CTYINFO|UCASE|LCASE|FUCASE|FCHAR|COLLATE|DBCS|YESNO */
