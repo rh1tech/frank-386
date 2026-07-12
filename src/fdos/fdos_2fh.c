@@ -740,6 +740,73 @@ bool fdos_2fh(CPU* cpu) {
      * Windows enhanced-mode installation check.
      * No Windows/386 or Windows 3.x enhanced mode is running.
      */
+    if (CPU_AX == 0x1000) {
+        /*
+         * SHARE.EXE installation check.
+         *
+         * SHARE is intentionally not implemented on this single-user
+         * target.  Return the documented "not installed" result rather
+         * than falling into the generic unsupported-multiplex path.
+         */
+        CPU_AL = 0x00;
+        cf = 0;
+    } else
+    if (CPU_AX == 0x1100) {
+        /*
+         * Network redirector installation check.
+         *
+         * There is no network redirector in the native DOS build.  DOS
+         * programs use AL=00h to distinguish this normal condition from a
+         * broken INT 2Fh service, so answer the probe explicitly.
+         */
+        CPU_AL = 0x00;
+        cf = 0;
+    } else
+    if (CPU_AX == 0x122A) {
+        /* FASTOPEN entry-point registration.  FreeDOS itself implements
+         * this as a successful no-op when FASTOPEN support is absent. */
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x122C) {
+        /* Return the second device in the chain, skipping NUL. */
+        CPU_BX = FP_SEG(LoL->nul_dev.dh_next);
+        CPU_AX = FP_OFF(LoL->nul_dev.dh_next);
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x122D) {
+        /* DOS internal: get the current extended error code. */
+        CPU_AX = internal_data->CritErrCode;
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x122E) {
+        /* Error-table address API.  Original FreeDOS currently ignores it
+         * and returns success for compatibility. */
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x122F) {
+        /* Set/reset the DOS version returned by INT 21h/AH=30h. */
+        if (CPU_DX) {
+            LoL->os_setver_major = CPU_DL;
+            LoL->os_setver_minor = CPU_DH;
+        } else {
+            LoL->os_setver_major = LoL->os_major;
+            LoL->os_setver_minor = LoL->os_minor;
+        }
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1680) {
+        /*
+         * Release current virtual-machine time slice / DOS idle call.
+         * In a non-multitasking environment this is a successful no-op.
+         */
+        CPU_AL = 0x00;
+        cf = 0;
+    } else
     if (CPU_AX == 0x1600) {
         CPU_AL = 0x00;
     } else
@@ -772,6 +839,350 @@ bool fdos_2fh(CPU* cpu) {
          */
         DoInstall();
         CPU_AL = 0x00;
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x121F) {
+        /*
+         * DOS internal: build a temporary CDS for the drive letter pushed
+         * by the caller before INT 2Fh.
+         *
+         * Input:  callerARG1 low byte = ASCII drive letter.
+         * Output: ES:DI -> SDA TempCDS, CX = sizeof(struct cds), CF clear.
+         */
+        const uint32_t caller_arg_addr =
+            ((uint32_t)CPU_SS << 4) + (uint16_t)(CPU_SP + 6u);
+        const UBYTE drive_letter = (UBYTE)readw86(caller_arg_addr);
+        const int drive = (drive_letter & 0x1f) - 1;
+        struct cds FAR *source = get_cds_unvalidated((unsigned)drive);
+
+        if (drive < 0 || source == NULL) {
+            cf = 1;
+        } else {
+            struct cds *tmp = (struct cds *)internal_data->TempCDS;
+            const dos_far_ptr tmp_fp = linear_to_far(tmp);
+
+            memset(tmp, 0, sizeof(*tmp));
+            strcpy(tmp->cdsCurrentPath, "?:\\");
+            tmp->cdsCurrentPath[0] = drive_letter;
+            tmp->cdsBackslashOffset = 2;
+
+            if (source->cdsFlags) {
+                tmp->cdsDpb = source->cdsDpb;
+                tmp->cdsFlags = CDSPHYSDRV;
+            } else {
+                tmp->cdsDpb = MK_FP(0, 0);
+                tmp->cdsFlags = 0;
+            }
+
+            tmp->cdsStrtClst = 0xffff;
+            tmp->cdsParam = 0xffff;
+            tmp->cdsStoreUData = 0xffff;
+
+            CPU_CX = sizeof(*tmp);
+            SET_ES(FP_SEG(tmp_fp));
+            CPU_DI = FP_OFF(tmp_fp);
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x1200) {
+        /* DOS internal services installation check. */
+        CPU_AL = 0xff;
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1202) {
+        /*
+         * Get interrupt vector without re-entering INT 21h.
+         * Input: CL = vector number.  Output: ES:BX = handler.
+         */
+        dos_far_ptr vec = getvec(CPU_CL);
+        SET_ES(FP_SEG(vec));
+        CPU_BX = FP_OFF(vec);
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1203) {
+        /* Return the segment containing DOS fixed data / NUL header. */
+        SET_DS(FP_SEG(x86_FIXED_DATA));
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1205) {
+        /*
+         * Kernel-internal character output.  Preserve the caller's
+         * register set: character/device paths may execute guest BIOS or
+         * driver code, while upstream runs this service against its saved
+         * int2f register frame.
+         */
+        CPU_regs saved;
+        UBYTE ch = CPU_AL;
+
+        cpu_save_regs(cpu, &saved);
+        check_handle_break(&LoL->syscon);
+        write_char_stdout(ch);
+        cpu_restore_regs(cpu, &saved);
+
+        CPU_AL = ch;
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1206) {
+        /*
+         * Invoke the DOS critical-error path with explicit parameters.
+         * callerARG1 is the word pushed by the caller before INT 2Fh and
+         * therefore lives at SS:[SP+6] in this native interrupt frame.
+         */
+        UWORD arg = readw86(((uint32_t)CPU_SS << 4) +
+                            (UWORD)(CPU_SP + 6));
+        UWORD flags = arg >> 8;
+        UWORD drive = (flags & EFLG_CHAR) ? 0 : (arg & 0xff);
+        struct dhdr *dev = (struct dhdr *)ARM_PTR(MK_FP(CPU_BP, CPU_SI));
+
+        CPU_AL = CriticalError(flags, drive, CPU_DI, dev);
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1208) {
+        /* Raw SFT reference-count decrement, matching upstream 1208h. */
+        sft *entry = (sft *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
+
+        CPU_AX = entry->sft_count;
+        if (--entry->sft_count == 0)
+            --entry->sft_count;       /* 0xffff marks a free SFT */
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1220) {
+        /*
+         * DOS internal: get pointer to the current process' JFT entry.
+         *
+         * Input:  BX = process file handle.
+         * Output: ES:DI -> one-byte JFT entry containing the SFN.
+         *         CF clear on success.
+         *         AL = DOS error, CF set on an invalid handle.
+         */
+        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+
+        if (CPU_BX >= p->ps_maxfiles) {
+            CPU_AL = (UBYTE)(-DE_INVLDHNDL);
+            cf = 1;
+        } else {
+            dos_far_ptr jft_entry =
+                MK_FP(FP_SEG(p->ps_filetab),
+                      (UWORD)(FP_OFF(p->ps_filetab) + CPU_BX));
+
+            SET_ES(FP_SEG(jft_entry));
+            CPU_DI = FP_OFF(jft_entry);
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x1216) {
+        /*
+         * DOS internal: get SFT entry by system file number.
+         *
+         * Input:  BX = SFN.
+         * Output: ES:DI -> SFT entry;
+         *         BX = index relative to the containing SFT block;
+         *         CF clear on success, set for an invalid SFN.
+         */
+        int rel_idx = idx_to_sft_(CPU_BX);
+
+        if (rel_idx < 0) {
+            cf = 1;
+        } else {
+            CPU_BX = (UWORD)rel_idx;
+            SET_ES(FP_SEG(internal_data->lpCurSft));
+            CPU_DI = FP_OFF(internal_data->lpCurSft);
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x1211) {
+        /*
+         * DOS internal: normalize an ASCIIZ filename.
+         *
+         * Input:  DS:SI -> source, ES:DI -> destination.
+         * Output: destination contains the NUL-terminated source with
+         *         ASCII a..z uppercased and '/' converted to '\\'.
+         *
+         * This is the same deliberately ASCII-only implementation used by
+         * upstream FreeDOS: the internal NLS helpers cannot safely process
+         * a source string whose segment is not the kernel data segment.
+         */
+        const char *src = (const char *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
+        char *dst = (char *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
+        char ch;
+
+        do {
+            ch = *src++;
+            if (ch >= 'a' && ch <= 'z')
+                ch -= 'a' - 'A';
+            else if (ch == '/')
+                ch = '\\';
+            *dst++ = ch;
+        } while (ch != '\0');
+
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1212) {
+        /* DOS internal: length of ES:DI ASCIIZ, including the NUL. */
+        const char *s = (const char *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
+        CPU_CX = (UWORD)(strlen(s) + 1u);
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1213) {
+        /*
+         * DOS internal: uppercase one ASCII character.
+         *
+         * The caller invokes this service as:
+         *
+         *     push character
+         *     mov  ax,1213h
+         *     int  2fh
+         *
+         * At native-handler entry SS:SP points at the INT frame
+         * IP,CS,FLAGS, so callerARG1 is the word at SS:[SP+6].
+         */
+        const uint32_t caller_arg_addr =
+            ((uint32_t)CPU_SS << 4) + (uint16_t)(CPU_SP + 6u);
+        UBYTE ch = (UBYTE)readw86(caller_arg_addr);
+
+        if (ch >= 'a' && ch <= 'z')
+            ch -= 'a' - 'A';
+
+        CPU_AL = ch;
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1214) {
+        /*
+         * DOS internal: compare two far pointers exactly.  Do not
+         * canonicalize aliases which map to the same physical address.
+         */
+        zf = (CPU_DS == CPU_ES && CPU_SI == CPU_DI);
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1217) {
+        /*
+         * DOS internal: return the CDS slot for a zero-based drive number
+         * pushed by the caller before INT 2Fh.
+         *
+         * Stack on native-handler entry:
+         *   SS:SP+0  return IP
+         *   SS:SP+2  return CS
+         *   SS:SP+4  FLAGS
+         *   SS:SP+6  callerARG1 (drive: 0=A:, 1=B:, ...)
+         */
+        const uint32_t caller_arg_addr =
+            ((uint32_t)CPU_SS << 4) + (uint16_t)(CPU_SP + 6u);
+        const UBYTE drive = (UBYTE)readw86(caller_arg_addr);
+        struct cds FAR *cdsp = get_cds_unvalidated(drive);
+
+        if (cdsp == NULL || far_is_null(LoL->CDSp)) {
+            cf = 1;
+        } else {
+            const dos_far_ptr cds_ptr =
+                MK_FP(FP_SEG(LoL->CDSp),
+                      (UWORD)(FP_OFF(LoL->CDSp) +
+                              (UWORD)drive * sizeof(struct cds)));
+
+            SET_DS(FP_SEG(cds_ptr));
+            CPU_SI = FP_OFF(cds_ptr);
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x1219) {
+        /* DOS internal: set default drive, AL is zero-based (0=A:). */
+        const UBYTE drv = CPU_AL;
+
+        if (drv >= LoL->lastdrive || get_cds_unvalidated(drv) == NULL) {
+            CPU_AX = (UWORD)-DE_INVLDDRV;
+            cf = 1;
+        } else {
+            CPU_AL = DosSelectDrv(drv);
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x121a) {
+        /*
+         * DOS internal: parse an optional leading drive letter at DS:SI.
+         * AL=0 means no explicit drive; AL=1..26 means A:..Z:; AL=FFh
+         * means an invalid drive designator.  On a valid X: prefix SI is
+         * advanced past the two characters, matching upstream FreeDOS.
+         */
+        const BYTE *p = (const BYTE *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
+        UBYTE ch = p[0];
+
+        if (ch == 0 || p[1] != ':') {
+            CPU_AL = 0;
+        } else {
+            ch |= 0x20;
+            if (ch >= 'a' && ch <= 'z') {
+                CPU_AL = (UBYTE)(ch - 'a' + 1);
+                CPU_SI = (UWORD)(CPU_SI + 2);
+            } else {
+                CPU_AL = 0xff;
+            }
+        }
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x121b) {
+        /* DOS internal: days in February, using DOS' year-modulo-4 rule. */
+        CPU_AL = (CPU_CL & 3) ? 28 : 29;
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x121e) {
+        /* DOS internal: case-insensitive ASCII comparison of two ASCIIZ names. */
+        const BYTE *s1 = (const BYTE *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
+        const BYTE *s2 = (const BYTE *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
+        UBYTE c1, c2;
+
+        do {
+            c1 = *s1++;
+            c2 = *s2++;
+            if (c1 >= 'a' && c1 <= 'z') c1 -= 'a' - 'A';
+            if (c2 >= 'a' && c2 <= 'z') c2 -= 'a' - 'A';
+        } while (c1 != 0 && c1 == c2);
+
+        zf = (c1 == c2);
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1221) {
+        /* DOS internal wrapper for INT 21h/AH=60h TRUENAME. */
+        const COUNT rc = DosTruename(MK_FP(CPU_DS, CPU_SI),
+                                     MK_FP(CPU_ES, CPU_DI));
+        if (rc < SUCCESS) {
+            CPU_AX = (UWORD)-rc;
+            cf = 1;
+        } else {
+            CPU_AX = (UWORD)rc;
+            cf = 0;
+        }
+    }
+    else
+    if (CPU_AX == 0x1224) {
+        /* DOS internal SHARE retry parameters.  SHARE itself is absent,
+         * but these words are also exposed through IOCTL 440Bh. */
+        LoL->NetDelay = CPU_CX;
+        LoL->NetRetry = CPU_DX;
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x1225) {
+        /* DOS internal: length of DS:SI ASCIIZ, including the NUL. */
+        const char *s = (const char *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
+        CPU_CX = (UWORD)(strlen(s) + 1u);
         cf = 0;
     }
     else

@@ -214,6 +214,22 @@ int DosSetTime(CPU *cpu)
   return DosSetTimeRegs(CPU_CH, CPU_CL, CPU_DH, CPU_DL);
 }
 
+/*
+ * Return a CDS entry by zero-based drive index without validating its
+ * flags or DPB.
+ *
+ * This mirrors upstream FreeDOS get_cds_unvalidated(): internal DOS
+ * services use it when they need the CDS slot itself, including disabled,
+ * JOINed or not-yet-completely-initialized entries.
+ */
+struct cds FAR *get_cds_unvalidated(unsigned drive)
+{
+  if (drive >= LoL->lastdrive || far_is_null(LoL->CDSp))
+    return NULL;
+
+  return (struct cds FAR *)ARM_PTR(LoL->CDSp) + drive;
+}
+
 /* get current directory structure for drive
    return NULL if the CDS is not valid or the
    drive is not within range */
@@ -244,41 +260,75 @@ UBYTE DosSelectDrv(UBYTE drv)
   return LoL->lastdrive;
 }
 
-static int fcb_parse_sep(int c)
+static int fcb_parse_common_sep(int c)
 {
-  return c == ' ' || c == '\t' || c == ',' || c == ';' || c == '=';
+  return c != 0 && strchr(":;,=+ \t", c) != NULL;
 }
-
-static int fcb_parse_term(int c)
+ 
+static int fcb_parse_field_sep(int c)
 {
-  return c == 0 || c == '\r' || c == '\n' || fcb_parse_sep(c);
+  return (unsigned char)c <= ' ' || strchr("/\\\"[]<>|.:;,=+\t", c) != NULL;
+}
+ 
+static const BYTE *fcb_parse_skip_wh(const BYTE *src)
+{
+  while (*src == ' ' || *src == '\t')
+    ++src;
+  return src;
+}
+ 
+static const BYTE *fcb_parse_name_field(const BYTE *src, BYTE *dst,
+                                        COUNT field_size, BOOL *wild)
+{
+  COUNT i = 0;
+  BYTE fill = ' ';
+
+  while (*src != 0 && !fcb_parse_field_sep(*src) && i < field_size)
+  {
+    if (*src == '*')
+    {
+      *wild = TRUE;
+      fill = '?';
+      ++src;
+      break;
+    }
+    if (*src == '?')
+      *wild = TRUE;
+
+    *dst++ = DosUpFChar(*src++);
+    ++i;
+  }
+ 
+  memset(dst, fill, field_size - i);
+  return src;
 }
 
 static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp, dos_far_ptr fcbp, UWORD *next_si)
 {
-  const BYTE *src = (const BYTE *)ARM_PTR(srcp);
+  const BYTE *base = (const BYTE *)ARM_PTR(srcp);
+  const BYTE *src = base;
   fcb *dst = (fcb *)ARM_PTR(fcbp);
-  UBYTE result = 0;
-  int i;
-
+  BOOL bad_drive = FALSE;
+  BOOL wild_name = FALSE;
+  BOOL wild_ext = FALSE;
+ 
   if (mode & 0x01)
+    while (fcb_parse_common_sep(*src))
+      ++src;
+
+  /* MS-DOS skips spaces and tabs even without PARSE_SKIP_LEAD_SEP. */
+  src = fcb_parse_skip_wh(src);
+
+  if (!fcb_parse_field_sep(*src) && src[1] == ':')
   {
-    while (fcb_parse_sep(*src))
-      src++;
-  }
-
-  if (src[0] && src[1] == ':')
-  {
-    UBYTE drive = DosUpFChar(src[0]);
-
-    if (drive < 'A' || drive > 'Z')
-      return 0xff;
-
-    drive = drive - 'A' + 1;
-    if (get_cds1(drive) == NULL)
-      return 0xff;
-
-    dst->fcb_drive = drive;
+    UBYTE drive = DosUpFChar(*src) - 'A';
+ 
+    /* Keep parsing even for an invalid drive, as DOS does. */
+    dos_far_ptr cds_ = get_cds(drive);
+    if (far_is_null(cds_))
+      bad_drive = TRUE;
+ 
+    dst->fcb_drive = drive + 1;
     src += 2;
   }
   else if (!(mode & 0x02))
@@ -286,63 +336,39 @@ static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp, dos_far_p
     dst->fcb_drive = 0;
   }
 
+  /* Undocumented DOS behaviour: these two fields are always reset. */
+  dst->fcb_cublock = 0;
+  dst->fcb_recsiz = 0;
+
   if (!(mode & 0x04))
     memset(dst->fcb_fname, ' ', FNAME_SIZE);
   if (!(mode & 0x08))
     memset(dst->fcb_fext, ' ', FEXT_SIZE);
 
-  if (!fcb_parse_term(*src) && *src != '.')
-  {
-    for (i = 0; i < FNAME_SIZE && !fcb_parse_term(*src) && *src != '.'; )
-    {
-      BYTE c = *src++;
-      if (c == '*')
-      {
-        result = 1;
-        while (i < FNAME_SIZE)
-          dst->fcb_fname[i++] = '?';
-        while (!fcb_parse_term(*src) && *src != '.')
-          src++;
-        break;
-      }
-      if (c == '?')
-        result = 1;
-      dst->fcb_fname[i++] = DosUpFChar(c);
-    }
-
-    while (!fcb_parse_term(*src) && *src != '.')
-      src++;
-  }
-
+  /* Special names '.' and '..' return immediately, without extension. */
   if (*src == '.')
   {
-    src++;
-    if (!(mode & 0x08))
-      memset(dst->fcb_fext, ' ', FEXT_SIZE);
-
-    for (i = 0; i < FEXT_SIZE && !fcb_parse_term(*src) && *src != '.'; )
-    {
-      BYTE c = *src++;
-      if (c == '*')
-      {
-        result = 1;
-        while (i < FEXT_SIZE)
-          dst->fcb_fext[i++] = '?';
-        while (!fcb_parse_term(*src) && *src != '.')
-          src++;
-        break;
-      }
-      if (c == '?')
-        result = 1;
-      dst->fcb_fext[i++] = DosUpFChar(c);
+    dst->fcb_fname[0] = '.';
+    ++src;
+    if (*src == '.')
+     {
+      dst->fcb_fname[1] = '.';
+      ++src;
     }
-
-    while (!fcb_parse_term(*src) && *src != '.')
-      src++;
+    *next_si = FP_OFF(srcp) + (UWORD)(src - base);
+    return 0;
   }
-
-  *next_si = FP_OFF(srcp) + (UWORD)(src - (const BYTE *)ARM_PTR(srcp));
-  return result;
+ 
+  src = fcb_parse_name_field(src, dst->fcb_fname, FNAME_SIZE, &wild_name);
+ 
+  if (*src == '.')
+    src = fcb_parse_name_field(src + 1, dst->fcb_fext, FEXT_SIZE, &wild_ext);
+ 
+  *next_si = FP_OFF(srcp) + (UWORD)(src - base);
+ 
+  if (bad_drive)
+    return 0xff;
+  return (wild_name || wild_ext) ? 1 : 0;
 }
 
 /* INT 21h is dispatched against a local register frame, as in upstream
@@ -781,7 +807,16 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             R_BH = LoL->version_flags;
         else
             R_BH = OEM_ID;
-        R_AX = ((psp*)ARM_PTR(x86_PSP))->ps_retdosver;
+        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+        UWORD ver = p->ps_retdosver;
+
+        /* PSP мог быть создан не через child_psp() (нативный загрузчик FreeCOM)
+           — тогда поле нулевое. Фолбэк на реальную версию ядра. */
+        if ((ver & 0x00FF) == 0)
+            ver = ((UWORD)LoL->os_setver_minor << 8) | LoL->os_setver_major;
+
+        R_BH = (R_AL == 1) ? LoL->version_flags : OEM_ID;
+        R_AX = ver;
         R_BL = REVISION_SEQ;
         R_CX = 0; /* do not set this to a serial number!
                       32RTM won't like non-zero values   */

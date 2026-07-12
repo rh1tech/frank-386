@@ -57,9 +57,9 @@
  *   Port: calls fdos_29h(cpu) - same handler, no BIOS stack games needed.
  *   Requires extern CPU *cpu from fdos_21h.c (see note there).
  *
- * ctrl_break_pressed(), check_handle_break(), handle_break(),
- * DosIdle_int(): stubs for this iteration (same approach as the
- * cooked_read/write stubs that were in kernel.c).
+ * Control-Break handling is kept in this file, as in upstream break.c;
+ * the only architectural adaptation is using bios_intcall()/
+ * request_terminate() instead of the real-mode spawn_int23() trampoline.
  *
  * DosWrite(STDPRN, 1, &c) in PrinterEcho path:
  *   DosWrite is a macro -> DosRWSft(..., XFR_WRITE).
@@ -342,39 +342,58 @@ long cooked_read(dos_far_ptr *pdev, size_t n, char *bp)
   return xfer;
 }
 
-/*
- * ctrl_break_pressed / check_handle_break / handle_break / DosIdle_int
- *
- * These are not yet implemented (same //TODO category as the former
- * cooked_read/write stubs in kernel.c). Stubs below panic loudly so
- * that any path that reaches them is immediately visible.
- *
- * ctrl_break_pressed(): should sample i8042/keyboard buffer for ^C/^Break.
- * check_handle_break(): should call ndread(syscon) and handle ^C/^S.
- * handle_break():       should invoke INT 23h (^C handler) and terminate.
- * DosIdle_int():        should issue INT 28h (DOS idle).
- */
+#define CTRL_BREAK_FLAG_ADDR 0x0471u
+#define CTRL_BREAK_FLAG_MASK 0x80u
+
+/* Check the BIOS data-area Ctrl-Break latch (0040:0071 bit 7), exactly
+   like upstream FreeDOS' CB_FLG.  Keyboard IRQ handling is responsible
+   for setting this bit for the dedicated Break key sequence. */
 unsigned char ctrl_break_pressed(void)
 {
-  /// TODO: sample keyboard for ^C/^Break
-  return 0; /* never reports break for now */
+  return pload8(CTRL_BREAK_FLAG_ADDR) & CTRL_BREAK_FLAG_MASK;
 }
 
 unsigned char check_handle_break(dos_far_ptr *pdev)
 {
-  /// TODO: check for ^C/^S on the device; handle break if found
-  (void)pdev;
-  return 0;
+  unsigned char c = CTL_C;
+
+  if (!ctrl_break_pressed())
+    c = (unsigned char)ndread(&LoL->syscon);
+
+  if (c != CTL_C && EFFECTIVE(*pdev) != EFFECTIVE(LoL->syscon))
+    c = (unsigned char)ndread(pdev);
+
+  if (c == CTL_C)
+    handle_break(pdev, -1);
+
+  return c;
 }
 
 void handle_break(dos_far_ptr *pdev, int sft_out)
 {
-  (void)pdev;
-  (void)sft_out;
-  /* Ctrl-Break delivery is not ported yet. Do not deadlock DOS if this
-     path is reached; the caller continues as though no custom INT 23h
-     action was installed. */
-  return;
+  static char ctrl_c_text[] = "^C\r\n";
+
+  /* Reset the BIOS Ctrl-Break latch before invoking user code. */
+  pstore8(CTRL_BREAK_FLAG_ADDR,
+          pload8(CTRL_BREAK_FLAG_ADDR) & ~CTRL_BREAK_FLAG_MASK);
+
+  /* Match upstream: discard pending console input and echo ^C either
+     to the supplied output SFT or to the current input device. */
+  con_flush(pdev);
+  if (sft_out == -1)
+    cooked_write(pdev, sizeof(ctrl_c_text) - 1, ctrl_c_text);
+  else
+    DosRWSft(sft_out, sizeof(ctrl_c_text) - 1,
+             linear_to_far(ctrl_c_text), XFR_FORCE_WRITE);
+
+  /* Upstream spawn_int23() switches to the user stack, invokes the
+     process' INT 23h handler, and does not return to the interrupted
+     DOS call.  bios_intcall() already performs the required guest
+     INT/IRET transition in this port.  A handler which IRETs instead
+     of terminating is followed by the standard Ctrl-Break termination
+     path, so native DOS execution cannot resume inside the aborted I/O. */
+  bios_intcall(cpu, 0x23, "DOS Ctrl-Break INT23");
+  request_terminate(0, 1);
 }
 
 void DosIdle_int(void)

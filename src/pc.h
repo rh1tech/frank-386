@@ -93,6 +93,9 @@ typedef struct PC {
 
 	int enable_serial;
 	int full_update;
+
+	uint8_t lpt_data[2];   /* защёлки data-регистров LPT1(0x378)/LPT2(0x278) */
+	uint8_t lpt_ctrl[2];   /* защёлки control-регистров 0x37A/0x27A  	*/
 } PC;
 
 typedef struct {

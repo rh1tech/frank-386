@@ -333,29 +333,25 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 		 * Bits 3-0: axes timeout (0 = timed out, no joystick)
 		 * Return 0xF0 to indicate axes have timed out (no joystick present) */
 		return 0xf0;
-	case 0x27A: // Covox Speech Thing
-		return 0;
 	// MPU-401
 	case 0x330:
 	case 0x331:
 		if (pc->mpu401_enabled)
 	        return mpu401_read(addr);
 		return 0xFF;
+
 	// Disney Sound Source
-	case 0x378:
-	case 0x379:
-		if (pc->dss_enabled)
-			return dss_in(addr);
-		return 0xFF;
-	/* LPT data ports (Covox): write-only DAC, reads return 0xFF */
-	case 0x278:
-		return 0xff;
-	/* LPT status ports: bit7=nBusy(1=ready), bits6..3=1 (idle/ready) */
-	case 0x279:
-		return 0xf8;
+	case 0x378: return pc->dss_enabled ? dss_in(addr) : pc->lpt_data[0];
+	case 0x379: return pc->dss_enabled ? dss_in(addr) : 0xD8; /* idle, НЕ 0xF8 */
+	case 0x37A: return pc->lpt_ctrl[0] | 0xC0;
 	/* LPT control ports */
-	case 0x37a:
-		return 0x04;
+///	case 0x37a:
+///		return 0x04;
+
+	/* LPT data ports (Covox): write-only DAC, reads return 0xFF */
+	case 0x278: return pc->lpt_data[1];
+	case 0x279: return 0xD8;                                  /* idle */
+	case 0x27A: return pc->lpt_ctrl[1] | 0xC0;
 	default:
 		//fprintf(stderr, "in 0x%x <= 0x%x\n", addr, 0xff);
 		return 0xff;
@@ -632,8 +628,11 @@ static void pc_io_write(void *o, int addr, u8 val)
 	/* Covox Speech Thing (parallel port DAC)
 	 * 0x278 = LPT2 data. */
 	case 0x278:
-		if (pc->covox_enabled)
-			pc->covox_sample = val;
+		pc->lpt_data[1] = val;              /* latch! */
+		if (pc->covox_enabled) pc->covox_sample = val;
+		return;
+	case 0x27A:
+		pc->lpt_ctrl[1] = val & 0x1F;
 		return;
 	// MPU-401
 	case 0x330:
@@ -642,15 +641,16 @@ static void pc_io_write(void *o, int addr, u8 val)
 			mpu401_write(addr, val);
 		return;
 	// Disney Sound Source
-    case 0x378:
-    case 0x37A:
-		if (pc->dss_enabled)
-			dss_out(addr, val);
+	case 0x378:
+		pc->lpt_data[0] = val;              /* latch! */
+		if (pc->dss_enabled) dss_out(addr, val);
 		return;
+	case 0x37A:
+		pc->lpt_ctrl[0] = val & 0x1F;
+		if (pc->dss_enabled) dss_out(addr, val);
+		return;	
 	/* LPT status/control ports are read-only - writes ignored */
 	case 0x379: case 0x279:
-	case 0x27a:
-		return;
 	default:
 ///		fprintf(stderr, "out 0x%x => 0x%x\n", val, addr);
 		return;
@@ -790,7 +790,7 @@ void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
 	}
 
 #if 0
-	/* Dump profile every ~10M instructions */
+	/* Dump profile every ~10M inАions */
 	static uint32_t prof_dump_counter = 0;
 	prof_dump_counter += 4096;
 	if (prof_dump_counter >= 10000000) {
@@ -1069,15 +1069,24 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	ide_fill_cmos(pc->ide, pc->cmos, cmos_set);
 
-	/* we have emulation for 2 FDDs (CMOS 0x10):
-		биты 7-4 = тип A:
-		биты 3-0 = тип B:
-		значение 4 = 1.44MB 3.5"
-	*/
-//	cmos_set(pc->cmos, 0x10, 0x44); // A: = 1.44MB, B: = 1.44MB
-//	cmos_set(pc->cmos, 0x14, 0x41); // бит 0 = флоппи есть, биты 7-6 = 01 = два дисковода
-	/* Checksum ПОСЛЕ всех записей в диапазон 0x10-0x2D */
-//	cmos_update_checksum(pc->cmos);
+	/* CMOS 0x10 — типы FDD (4 = 1.44M 3.5") */
+	cmos_set(pc->cmos, 0x10, (uint8_t)fdds_types());
+
+	/* CMOS 0x14 — equipment byte:
+	 *   bit 0     : floppy installed
+	 *   bit 1     : math coprocessor
+	 *   bit 2     : keyboard present
+	 *   bit 3     : display enabled
+	 *   bits 5-4  : 00 = EGA/VGA
+	 *   bits 7-6  : (число FDD - 1)
+	 */
+	uint8_t nfd = 2;                        /* эмулируем два дисковода */
+	uint8_t eq  = 0x01 | 0x04 | 0x08;
+	if (conf->fpu) eq |= 0x02;
+	eq |= (uint8_t)((nfd - 1) << 6);
+	cmos_set(pc->cmos, 0x14, eq);
+
+	cmos_update_checksum(pc->cmos);         /* обязательно, после ide_fill_cmos */
 
 	int piix3_devfn;
 	pc->i440fx = i440fx_init(&pc->pcibus, &piix3_devfn);
@@ -1167,10 +1176,34 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	return pc;
 }
 
+static void rom_puts(uint32_t addr, const char *s) {
+    while (*s) pstore8(addr++, (uint8_t)*s++);
+    pstore8(addr, 0x00);
+}
+
+/* "Jul 12 2026" (__DATE__) -> "07/12/26" */
+static void rom_bios_date(uint32_t addr) {
+    static const char mon[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    const char *d = __DATE__;               /* "Mmm dd yyyy" */
+    int m = 0;
+    for (int i = 0; i < 12; ++i)
+        if (!strncmp(d, mon + i * 3, 3)) { m = i + 1; break; }
+    char buf[9];
+    buf[0] = '0' + m / 10;  buf[1] = '0' + m % 10;  buf[2] = '/';
+    buf[3] = (d[4] == ' ') ? '0' : d[4];
+    buf[4] = d[5];          buf[5] = '/';
+    buf[6] = d[9];          buf[7] = d[10]; buf[8] = 0;
+    for (int i = 0; i < 8; ++i) pstore8(addr + i, (uint8_t)buf[i]);
+}
+
 // IRET is saved on 0xFFF06
 static void point2iret(u32 intno) {
 	pstore16(intno*4, 0x0006);
 	pstore16(intno*4 + 2, 0xFFF0);
+}
+static void point2zero(u32 intno) {
+	pstore16(intno*4, 0);
+	pstore16(intno*4 + 2, 0);
 }
 
 static void install_dpte(int idx, uint32_t addr)
@@ -1259,6 +1292,12 @@ void bios_post(PC *pc) {
     const uint32_t ebda_phys = (uint32_t)ebda_seg << 4;
     reset_umb();
 
+    /* Native-режим: в F000 никто ничего не грузил -> там мусор из PSRAM,
+     * который SysInfo/CheckIt показывают как "Copyright notice".
+     * Чистим сегмент целиком, дальше кладём нормальный ROM-identity. */
+    for (uint32_t a = 0xF0000u; a < 0x100000u; ++a)
+        pstore8(a, 0x00);
+
 	uint32_t ext_ram = phys_mem_size <= (1024 << 10) ? 0 : (phys_mem_size - (1024 << 10)) >> 10;
 	if (ext_ram > 0xFFFF)
 		ext_ram = 0xFFFF;
@@ -1281,12 +1320,17 @@ void bios_post(PC *pc) {
 //	pstore16(0x402, 0x0000);                              /* COM2 base */
 //	pstore16(0x404, 0x0000);                              /* COM3 base */
 //	pstore16(0x406, 0x0000);                              /* COM4 base */
-//	pstore16(0x408, 0x0000);                              /* LPT1 base */
-//	pstore16(0x40A, 0x0000);                              /* LPT2 base */
-//	pstore16(0x40C, 0x0000);                              /* LPT3 base */
+	/* LPT1 = 0x378 (Disney Sound Source / принтер), LPT2 = 0x278 (Covox) */
+	uint8_t lpt_count = 0;
+	if (pc->dss_enabled)
+		pstore16(0x408 + 2 * lpt_count++, 0x0378);
+	if (pc->covox_enabled)
+		pstore16(0x408 + 2 * lpt_count++, 0x0278);
+	for (unsigned i = 0; i < lpt_count; ++i)
+		pstore8(0x478 + i, 0x14);   /* printer timeout, 20 тиков */
 	pstore16(0x40E, ebda_seg);                            /* EBDA segment */
 
-	uint16_t equipment = 0x0000;
+	uint16_t equipment = (uint16_t)(lpt_count & 3) << 14; /* биты 15-14 LPT */
 	equipment |= 0x0001;                                  /* diskette subsystem present */
 	equipment |= 0x0020;                                  /* initial video: 80x25 color */
 	if (pc->enable_serial)
@@ -1355,7 +1399,8 @@ void bios_post(PC *pc) {
 	pstore8 (0x488, 0xF9);                               /* switches */
 //	pstore8 (0x489, 0x00);                               /* VGA flags */
 	pstore8 (0x48E, 0x77);                               /* fdd */
-//	pstore8 (0x496, 0x00);                               /* kbd_flag1: E0/E1/RCtrl/RAlt state */
+	pstore8(0x496, 0x10);   /* KF1: bit4 = enhanced (101/102-key) keyboard */
+	pstore8(0x497, 0x00);   /* LED flags */
 
 // init PIC (i8259) — IBM PC/AT sequence
 	// Master PIC: base vector 0x08 (IRQ0→INT 08h … IRQ7→INT 0Fh)
@@ -1490,9 +1535,26 @@ void bios_post(PC *pc) {
 	point2iret(0x29);
 	point2iret(0x2f);
 // MS MOUSE
-	point2iret(0x33);
+	point2zero(0x33);
 // IRQ14 - HARD DISK CONTROLLER OPERATION COMPLETE (AT and later)
 	point2iret(0x76);
+
+/* --- ROM identity ------------------------------------------------- */
+    static const char rom_copyright[] = "Copyright (C) 2026 Murmulator Group";
+    static const char rom_biosname[]  = "RP2350 ARM Cortex-M33 BIOS";
+
+    rom_puts(0xF0000, rom_biosname);                 /* F000:0000          */
+    rom_puts(0xF0000 + 32, rom_copyright);
+    rom_puts(0xFC600, rom_biosname);                 /* F000:C600 (свободно)*/
+    rom_puts(0xFC600 + 32, rom_copyright);
+    rom_puts(0xFE000, rom_copyright);                /* F000:E000 — классика*/
+    rom_puts(0xFE000 + 40, rom_biosname);
+    rom_puts(0xFE000 + 72, "Murmulator Group MURM-386");
+
+    rom_bios_date(0xFFFF5);                          /* F000:FFF5 "MM/DD/YY" */
+    pstore8(0xFFFFD, 0x00);                          /* checksum-заглушка    */
+    pstore8(0xFFFFE, 0xFC);                          /* model byte: IBM AT   */
+    pstore8(0xFFFFF, 0x01);                          /* submodel/revision    */
 
 //	bios_19h(pc->cpu);
     pstore8(0xFFFF0, 0xCD); // INT 19h - bootstrap
