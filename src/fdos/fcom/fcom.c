@@ -8194,7 +8194,7 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode, UWORD environme
   strcpy(g->fddebug_name, "stdout");
   g->echo_enabled = 1;
   init_stack_guard(command_psp);
-
+#if FCOM_DEBUG
   dos_printf("FCOM: PSP=%04x parent=%04x block=%u paras (%u bytes) "
              "data=%04x..%04x stack=%04x..%04x (%u bytes) %s\n",
              command_psp,
@@ -8207,7 +8207,10 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode, UWORD environme
              (unsigned)(FCOM_STACK_TOP - 1u),
              (unsigned)FCOM_STACK_BYTES,
              command_psp >= 0xa000u ? "HIGH" : "LOW");
-
+#else
+  dos_printf("FreeCom v.0.86 (for RP2350) @ %04Xh [%s]\n",
+    command_psp, command_psp >= 0xa000u ? "UMB" : "LOW");
+#endif
   if (init_tail) {
     strncpy(g->init_tail, init_tail, sizeof(g->init_tail) - 1);
     g->init_tail[sizeof(g->init_tail) - 1] = '\0';

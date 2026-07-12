@@ -133,13 +133,13 @@ void cpu_err_msg(CPU* cpu, const char* msg) {
              readw86(sp + 0), readw86(sp + 2), readw86(sp + 4));
     print_line(buf, 9);
 }
-#ifdef NO_HANDLER_DETECTOR
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "ERROR: no handler defined");
+#ifdef NO_HANDLER_DETECTOR
 while(1); // remove it
+#endif
     return true;
 }
-#endif
 
 void cpu_init_286(CPU* cpu) {
 	CPU_ext_accessors_t* cpue = cpu->ext_accessors;
@@ -163,12 +163,10 @@ void cpu_init_286(CPU* cpu) {
 }
 
 void cpu_install_bios_handlers(CPU* cpu) {
-#ifdef NO_HANDLER_DETECTOR
     for(int i = 0; i < 256; ++i) {
         if (i == 0x21 || i == 0x29 || i == 0x2f) continue;
         handlers[i] = no_handler;
     }
-#endif
     handlers[0x00] = bios_00h; // DIVIDE BY ZERO
     handlers[0x05] = bios_05h; // PRINT SCREEN / BOUND EXCEPTION
     handlers[0x08] = bios_08h; // IRQ0: Timer
