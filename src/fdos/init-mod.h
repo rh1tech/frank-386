@@ -68,8 +68,13 @@
 #define x86_subf_hdr            ADD_OFF(x86_nlsScratch, sizeof(UWORD) + sizeof(UWORD)) // struct subf_hdr * 9
 #define x86_subf_data           ADD_OFF(x86_nlsScratch, sizeof(UWORD) + sizeof(UWORD) + sizeof(struct subf_hdr) * 9) // struct subf_data
 #define x86_subf_data_buffer    ADD_OFF(x86_subf_data, offsetof(struct subf_data, buffer)) // internal in pref
-#define X86_NLS_END_OFF         (X86_NLS_SCRATCH_OFF + sizeof(UWORD) + sizeof(UWORD) \
+#define X86_NLS_SCRATCH_SIZE    (sizeof(UWORD) + sizeof(UWORD) \
                                  + sizeof(struct subf_hdr) * 9 + sizeof(struct subf_data))
+/* One guest-addressable byte. The original upcases a single character with
+   xUpMem(nls, MK_FP(_SS, &ch), 1) - the address must be reachable by the MUX-14
+   handler through ES:DI, so an ARM stack local will not do. */
+#define x86_nlsUpChar           ADD_OFF(x86_nlsScratch, X86_NLS_SCRATCH_SIZE)
+#define X86_NLS_END_OFF         (X86_NLS_SCRATCH_OFF + X86_NLS_SCRATCH_SIZE + 1u)
 
 #define X86_BSS_OFF       0x19F4u
 #define x86_BSS           MK_FP(DOS_PSP, X86_BSS_OFF) // _BSS -> DiskTransferBuffer[MAX_SEC_SIZE=512]

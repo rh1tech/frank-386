@@ -1752,82 +1752,11 @@ int network_redirector_fp(unsigned cmd, void *s)
 /*
     -----------------------------------------------------------------
     DosUpChar/DosUpString/DosUpMem/DosUpFChar/DosUpFString/DosUpFMem
+    are implemented in nls.c, as in the original kernel: they honour
+    NLS_FLAG_DIRECT_UPCASE / NLS_FLAG_DIRECT_FUPCASE and fall back to
+    MUX-14 (NLSFUNC_UPMEM / NLSFUNC_FILE_UPMEM) otherwise.
     -----------------------------------------------------------------
 */
-STATIC unsigned char nls_upchar(unsigned char ch, unsigned table_index)
-{
-  if (ch >= 'a' && ch <= 'z')
-    return (unsigned char)(ch - 'a' + 'A');
-
-  if (ch >= 0x80)
-  {
-    struct nlsInfoBlock *info =
-        (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-
-    if (info != NULL && !far_is_null(info->actPkg))
-    {
-      struct nlsPackage *pkg =
-          (struct nlsPackage *)ARM_PTR(info->actPkg);
-
-      if (table_index < pkg->numSubfct)
-      {
-        dos_far_ptr table_ptr = pkg->nlsPointers[table_index].pointer;
-
-        if (!far_is_null(table_ptr))
-        {
-          struct nlsCharTbl *table =
-              (struct nlsCharTbl *)ARM_PTR(table_ptr);
-          unsigned index = (unsigned)ch - 0x80;
-
-          if (index < table->numEntries)
-            return table->tbl[index];
-        }
-      }
-    }
-  }
-
-  return ch;
-}
-
-VOID DosUpMem(VOID *str, unsigned len)
-{
-  unsigned char *p = (unsigned char *)str;
-  while (len--)
-  {
-    *p = nls_upchar(*p, 0); /* NLS subfunction 2: normal uppercase */
-    p++;
-  }
-}
-
-unsigned char DosUpChar(unsigned char ch)
-{
-  return nls_upchar(ch, 0);
-}
-
-VOID DosUpString(char *str)
-{
-  DosUpMem(str, strlen(str));
-}
-
-VOID DosUpFMem(VOID *str, unsigned len)
-{
-  unsigned char *p = (unsigned char *)str;
-  while (len--)
-  {
-    *p = nls_upchar(*p, 1); /* NLS subfunction 4: filename uppercase */
-    p++;
-  }
-}
-
-unsigned char DosUpFChar(unsigned char ch)
-{
-  return nls_upchar(ch, 1);
-}
-
-VOID DosUpFString(char *str)
-{
-  DosUpFMem(str, strlen(str));
-}
 
 #define PATHLEN 128
 
@@ -2842,11 +2771,14 @@ void kernel(CPU* _cpu) {
     internal_data->DayOfWeek = 2;
     internal_data->dosidle_flag = 1;
     internal_data->last_component = 0xffff; // 296 - 0xffff or offset of last component in filename
+    /* stacks are made to initialize to no-ops so that high-water
+       testing can be performed (kernel.asm: apistk_bottom..apistk_top) */
     memset(
         internal_data->sda_tmp_dm_ren,
         0x90,
-        sizeof(internal_data->sda_tmp_dm_ren) + sizeof(internal_data->SearchDir_ren) + sizeof(internal_data->api_stacks) +
-        sizeof(internal_data->error_tos) + sizeof(internal_data->disk_api_tos) + sizeof(internal_data->char_api_tos)
+        sizeof(internal_data->sda_tmp_dm_ren) + sizeof(internal_data->SearchDir_ren) +
+        sizeof(internal_data->error_stack) +
+        sizeof(internal_data->disk_stack) + sizeof(internal_data->char_stack)
     );
 
     // adjust boot drive to DOS format

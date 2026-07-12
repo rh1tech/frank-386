@@ -327,15 +327,43 @@ struct dos_data {
 
     BYTE  pad2E7[0x300 - 0x2E7];
 
+/* apistk_bottom: (300h)
+ *
+ * kernel.asm keeps three API stacks here.  _error_tos / _disk_api_tos /
+ * _char_api_tos are the stack *TOP* labels (480h / 600h / 780h) - the storage
+ * lies BELOW each of them, and apistk_top == _char_api_tos == 780h:
+ *
+ *   apistk_bottom:                              ; 300h
+ *   _sda_tmp_dm_ren: times 21 db 0x90           ; 300h
+ *   _SearchDir_ren:  times 32 db 0x90           ; 315h
+ *                    times STACK_SIZE*2-($-apistk_bottom) db 0x90
+ *   _error_tos:                                 ; 480h
+ *                    times STACK_SIZE dw 0x9090
+ *   _disk_api_tos:                              ; 600h
+ *                    times STACK_SIZE dw 0x9090
+ *   _char_api_tos:
+ *   apistk_top:                                 ; 780h
+ *
+ * i.e. the whole stack area is STACK_SIZE*2*3 == 480h bytes, 300h..780h.
+ * Declaring error_tos/disk_api_tos/char_api_tos as ARRAYS at those labels
+ * added an extra STACK_SIZE*2 (180h) bytes and pushed device_lookahead and
+ * everything behind it from 780h to 900h, so every SDA consumer (INT 21h
+ * AX=5D06h -> device_lookahead, fat32_ext, absrdwrflg, high_words) read the
+ * wrong fields.
+ *
+ * The port handles INT 21h natively and never switches stacks, so this is
+ * pure layout padding - but the offsets behind it must stay correct.
+ * The bottom of the error stack doubles as the rename scratch buffer,
+ * exactly as in kernel.asm.
+ */
     BYTE  sda_tmp_dm_ren[21];   // 300 - 21 byte search state for rename
     BYTE  SearchDir_ren[32];    // 315 - 32 byte dir entry for rename
-
-    BYTE  api_stacks[STACK_SIZE * 2 - 0x35]; // 335.. before _error_tos
-
-    UWORD error_tos[STACK_SIZE];     // 300 - Error Processing Stack
-    UWORD disk_api_tos[STACK_SIZE];  // 480 - Disk Function Stack
-    UWORD char_api_tos[STACK_SIZE];  // 600 - Char Function Stack
-// apistk_top: ^
+    BYTE  error_stack[STACK_SIZE * 2 - 0x35];  // 335 - rest of the error stack
+// _error_tos: ^ 480
+    UWORD disk_stack[STACK_SIZE];    // 480 - Disk Function Stack
+// _disk_api_tos: ^ 600
+    UWORD char_stack[STACK_SIZE];    // 600 - Char Function Stack
+// _char_api_tos / apistk_top: ^ 780
     BYTE  device_lookahead;    // 780 device driver look-ahead (printer), see ah=64h
     BYTE  VolChange;           // 781 volume change
     BYTE  VirtOpen;            // 782 virtual open flag
@@ -368,4 +396,16 @@ struct dos_data {
                                       needs a guest address here since
                                       truename() takes a guest src)    */
 };
+
+/* The SDA is what INT 21h AX=5D06h hands out; its base is &ErrorMode. Guest
+   software (Win3.x, network redirectors, SHARE, ...) hardcodes these offsets. */
+#define SDA_OFF(f) (offsetof(struct dos_data, f) - offsetof(struct dos_data, ErrorMode))
+_Static_assert(SDA_OFF(sda_tmp_dm_ren)  == 0x300, "SDA ABI: sda_tmp_dm_ren must be at 300h");
+_Static_assert(SDA_OFF(SearchDir_ren)   == 0x315, "SDA ABI: SearchDir_ren must be at 315h");
+_Static_assert(SDA_OFF(disk_stack)      == 0x480, "SDA ABI: _error_tos must be at 480h");
+_Static_assert(SDA_OFF(char_stack)      == 0x600, "SDA ABI: _disk_api_tos must be at 600h");
+_Static_assert(SDA_OFF(device_lookahead)== 0x780, "SDA ABI: apistk_top/device_lookahead must be at 780h");
+_Static_assert(SDA_OFF(fat32_ext)       == 0x78C, "SDA ABI: fat32_ext must be at 78Ch");
+_Static_assert(SDA_OFF(absrdwrflg)      == 0x7BB, "SDA ABI: absrdwrflg must be at 7BBh");
+_Static_assert(SDA_OFF(high_words)      == 0x7BC, "SDA ABI: high_words must be at 7BCh");
 #pragma pack(pop)

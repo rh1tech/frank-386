@@ -275,6 +275,7 @@ COUNT extend_dir(f_node_ptr fnp);
 COUNT lfn_remove_entries(COUNT handle);
 
 /* nls.c */
+BOOL nlsIsDBCS(UBYTE ch);
 BYTE DosYesNo(UWORD ch);
 #ifndef DosUpMem
 VOID DosUpMem(VOID FAR * str, unsigned len);

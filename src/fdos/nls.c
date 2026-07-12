@@ -42,18 +42,15 @@ ULONG call_nls(UWORD bp,
 }
 /*== DS:SI _always_ points to global NLS info structure <-> no
  * subfct can use these registers for anything different. ==ska*/
-STATIC int muxGo(int subfct, UWORD bp, UWORD cp, UWORD cntry, UWORD bufsize, void FAR *buf)
+STATIC long muxGo(int subfct, UWORD bp, UWORD cp, UWORD cntry, UWORD bufsize,
+		  void FAR *buf)
 {
+  long ret;
   log(("NLS: muxGo(): subfct=%x, cntry=%u, cp=%u, ES:DI=%p\n",
        subfct, cntry, cp, buf));
-  ULONG ret = call_nls(bp, buf, subfct, cp, cntry, bufsize);
-  int16_t r16 = (int16_t)(ret & 0xFFFF);
-  if (r16 < 0) {
-    log(("NLS: muxGo(): return value = %d\n", r16));
-    return r16;
-  }
-  log(("NLS: muxGo(): return value = %p\n", ret));
-  return (int)ret;
+  ret = (long)call_nls(bp, buf, subfct, cp, cntry, bufsize);
+  log(("NLS: muxGo(): return value = %lx\n", ret));
+  return ret;
 }
 
 STATIC int muxBufGo(int subfct, int bp, UWORD cp, UWORD cntry,
@@ -61,7 +58,13 @@ STATIC int muxBufGo(int subfct, int bp, UWORD cp, UWORD cntry,
 {
   log(("NLS: muxBufGo(): subfct=%x, BP=%u, cp=%u, cntry=%u, len=%u, buf=%p\n",
        subfct, bp, cp, cntry, bufsize, buf));
-  return muxGo(subfct, bp, cp, cntry, bufsize, buf);
+
+  /* The original is a 16-bit kernel, where "(int)" of the long returned by
+     call_nls() keeps AX only - the high word carries BX and is used by the
+     install check in muxLoadPkg() alone.  On ARM "int" is 32 bit, so the
+     truncation has to be explicit; without it every MUX result came back as
+     (BX << 16) | AX, i.e. non-zero == error even on success. */
+  return (int)(int16_t)muxGo(subfct, bp, cp, cntry, bufsize, buf);
 }
 
 /*
@@ -76,6 +79,25 @@ static inline dos_far_ptr nls_null_ptr(void) {
 static inline struct nlsPackage *nls_pkg_ptr(dos_far_ptr p) {
   return far_is_null(p) ? NULL : (struct nlsPackage *)ARM_PTR(p);
 }
+
+        /* getTableX return the pointer to the X'th table; X==subfct */
+        /* subfct 2: normal upcase table; 4: filename upcase table */
+#ifdef NLS_REORDER_POINTERS
+#define getTable2(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[0].pointer)
+#define getTable4(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[1].pointer)
+#define getTable7(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[4].pointer)
+#else
+#define getTable2(nls)	getTable(2, (nls))
+#define getTable4(nls)	getTable(4, (nls))
+#define getTable7(nls)	getTable(7, (nls))
+#define NEED_GET_TABLE
+#endif
+        /*== both chartables must be 128 bytes long and lower range is
+		identical to 7bit-US-ASCII ==ska*/
+#define getCharTbl2(nls)			\
+	 (((struct nlsCharTbl *)ARM_PTR(getTable2(nls)))->tbl - 0x80)
+#define getCharTbl4(nls)			\
+	 (((struct nlsCharTbl *)ARM_PTR(getTable4(nls)))->tbl - 0x80)
 
 STATIC dos_far_ptr/*struct nlsPackage*/ searchPackage(UWORD cp, UWORD cntry)
 {
@@ -156,6 +178,26 @@ STATIC COUNT cpyBuf(VOID FAR * dst, UWORD dstlen, VOID FAR * src,
   return DE_INVLDFUNC;          /* buffer too small */
 }
 
+/*
+ *	This function assumes that 'map' is adjusted such that
+ *	map[0x80] is the uppercase of character 0x80.
+ *== 128 byte chartables, lower range conform to 7bit-US-ASCII ==ska*/
+STATIC VOID upMMem(UBYTE FAR * map, UBYTE FAR * str, unsigned len)
+{
+  REG unsigned c;
+
+  if (len)
+    do
+    {
+      if ((c = *str) >= 'a' && c <= 'z')
+        *str += 'A' - 'a';
+      else if (c > 0x7f)
+        *str = map[c];
+      ++str;
+    }
+    while (--len);
+}
+
 
 /* GetData function used by both the MUX-callback function and
 	the direct-access interface.
@@ -193,8 +235,157 @@ STATIC int nlsGetData(struct nlsPackage FAR * nls, int subfct,
   return DE_INVLDFUNC;
 }
 
-BYTE DosYesNo(UWORD ch) {
+STATIC void nlsUpMem(dos_far_ptr nls, VOID FAR * str, int len)
+{
+  log(("NLS: nlsUpMem()\n"));
+  upMMem(getCharTbl2(nls), (UBYTE FAR *) str, len);
+}
+STATIC void nlsFUpMem(dos_far_ptr nls, VOID FAR * str, int len)
+{
+  log(("NLS: nlsFUpMem()\n"));
+  upMMem(getCharTbl4(nls), (UBYTE FAR *) str, len);
+}
+
+STATIC VOID xUpMem(dos_far_ptr nlsp, VOID FAR * str, unsigned len)
+/* upcase a memory area */
+{
+  struct nlsPackage *nls = nls_pkg_ptr(nlsp);
+
+  if (nls == NULL)
+    return;
+
+  log(("NLS: xUpMem(): cp=%u, cntry=%u\n", nls->cp, nls->cntry));
+
+  if (nls->flags & NLS_FLAG_DIRECT_UPCASE)
+    nlsUpMem(nlsp, str, len);
+  else
+    muxBufGo(NLSFUNC_UPMEM, 0, nls->cp, nls->cntry, len, str);
+}
+
+BOOL nlsIsDBCS(UBYTE ch)
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+
+  if (ch < 128)
+    return FALSE;              /* No leadbyte is smaller than that */
+
+  if (far_is_null(nlsInfo->actPkg))
+    return FALSE;
+
+  {
+    UWORD FAR *t = ((struct nlsDBCS FAR *)
+                    ARM_PTR(getTable7(nlsInfo->actPkg)))->dbcsTbl;
+
+    for (; *t != 0; ++t)
+      if (ch >= (*t & 0xFF) && ch <= (*t >> 8))
+        return TRUE;
+  }
+
+  return FALSE;
+}
+
+STATIC int nlsYesNo(dos_far_ptr nlsp, UWORD ch)
+{
+  struct nlsPackage *nls = nls_pkg_ptr(nlsp);
+
+  if (nls == NULL)
+    return 2;
+
+  /* Check if it is a dual byte character */
+  if (!nlsIsDBCS(ch & 0xFF)) {
+    UBYTE *guest_ch = (UBYTE *)ARM_PTR(x86_nlsUpChar);
+
+    ch &= 0xFF;
+    /* Upcase character. Cannot use DosUpChar(), because
+       maybe: nls != current NLS pkg
+       However: Upcase character within lowlevel
+       function to allow a yesNo() function
+       catched by external MUX-14 handler, which
+       does NOT upcase character. */
+    *guest_ch = (UBYTE)ch;
+    xUpMem(nlsp, guest_ch, 1);
+    ch = *guest_ch;
+  }
+
+  if (ch == nls->yeschar)
+    return 1;
+  if (ch == nls->nochar)
+    return 0;
+  return 2;
+}
+
+/********************************************************************
+ ***** DOS API ******************************************************
+ ********************************************************************/
+
+BYTE DosYesNo(UWORD ch)
+/* returns: 0: ch == "No", 1: ch == "Yes", 2: ch crap */
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+  struct nlsPackage *act = nls_pkg_ptr(nlsInfo->actPkg);
+
+  if (act != NULL && (act->flags & NLS_FLAG_DIRECT_YESNO))
+    return (BYTE)nlsYesNo(nlsInfo->actPkg, ch);
+  else
     return (BYTE)muxYesNo(ch);
+}
+
+#ifndef DosUpMem
+VOID DosUpMem(VOID FAR * str, unsigned len)
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+  xUpMem(nlsInfo->actPkg, str, len);
+}
+#endif
+
+/*
+ * This function is also called by the backdoor entry specified by
+ * the "upCaseFct" member of the Country Information structure. Therefore
+ * the HiByte of the first argument must remain unchanged.
+ *	See NLSSUPT.ASM -- 2000/03/30 ska
+ */
+unsigned char ASMCFUNC DosUpChar(unsigned char ch)
+ /* upcase a single character */
+{
+  UBYTE *guest_ch = (UBYTE *)ARM_PTR(x86_nlsUpChar);
+
+  *guest_ch = ch;
+  DosUpMem(guest_ch, 1);
+  return *guest_ch;
+}
+
+VOID DosUpString(char FAR * str)
+/* upcase a string */
+{
+  DosUpMem(str, fstrlen(str));
+}
+
+VOID DosUpFMem(VOID FAR * str, unsigned len)
+/* upcase a memory area for file names */
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+  struct nlsPackage *act = nls_pkg_ptr(nlsInfo->actPkg);
+
+  if (act != NULL && (act->flags & NLS_FLAG_DIRECT_FUPCASE))
+    nlsFUpMem(nlsInfo->actPkg, str, len);
+  else
+    muxUpMem(NLSFUNC_FILE_UPMEM, str, len);
+}
+
+unsigned char DosUpFChar(unsigned char ch)
+ /* upcase a single character for file names */
+{
+  UBYTE *guest_ch = (UBYTE *)ARM_PTR(x86_nlsUpChar);
+
+  *guest_ch = ch;
+  DosUpFMem(guest_ch, 1);
+  return *guest_ch;
+}
+
+VOID DosUpFString(char FAR * str)
+/* upcase a string for file names */
+{
+  DosUpFMem(str, fstrlen(str));
 }
 /*
  *	Called for all subfunctions other than 0x20-0x23,& 0xA0-0xA2
@@ -264,15 +455,52 @@ STATIC COUNT muxLoadPkg(int subfct, UWORD cp, UWORD cntry)
      NLSFUNC ID.  call_nls will set the high word = BX on return.
   */
   ret = muxGo(0, 0, NLS_FREEDOS_NLSFUNC_VERSION, 0, NLS_FREEDOS_NLSFUNC_ID, 0);
-  if ((int)ret != 0x14ff)
+  if ((int16_t)ret != 0x14ff)   /* AX; the kernel's built-in MUX-14 root */
     return DE_FILENOTFND;       /* No NLSFUNC --> no load */
-  if ((int)(ret >> 16) != NLS_FREEDOS_NLSFUNC_ID) /* FreeDOS NLSFUNC will return */
+  if ((UWORD)(ret >> 16) != NLS_FREEDOS_NLSFUNC_ID) /* FreeDOS NLSFUNC will return */
     return DE_INVLDACC;         /* This magic number */
 
   /* OK, the correct NLSFUNC is available --> load pkg */
   /* If cp == -1 on entry, NLSFUNC updates cp to the codepage loaded
      into memory. The system must then change to this one later */
   return (int)muxGo(subfct, 0, cp, cntry, 0, 0);
+}
+
+VOID nlsCPchange(UWORD cp)
+{
+  UNREFERENCED_PARAMETER(cp);
+  put_string("\7\nchange codepage not yet done ska");
+}
+
+/*
+ *	Changes the current active codepage or cntry
+ *
+ *	Note: Usually any call sees a value of -1 (0xFFFF) as "the current
+ *	country/CP". When a new NLS pkg is loaded, there is however a little
+ *	difference, because one could mean that when switching to country XY
+ *	the system may change to any codepage required.
+ *	Therefore, setPackage() will substitute the current country ID, if
+ *	cntry==-1, but leaves cp==-1 in order to let NLSFUNC choose the most
+ *	appropriate codepage on its own.
+ */
+STATIC COUNT nlsSetPackage(dos_far_ptr nlsp)
+{
+  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+  struct nlsPackage *nls = nls_pkg_ptr(nlsp);
+  struct nlsPackage *act = nls_pkg_ptr(nlsInfo->actPkg);
+
+  if (nls == NULL)
+    return DE_INVLDDATA;
+
+  if (act != NULL && nls->cp != act->cp)
+    /* Codepage gets changed --> inform all character drivers thereabout.
+       If this fails, it would be possible that the old NLS pkg had been
+       removed from memory by NLSFUNC. */
+    nlsCPchange(nls->cp);
+
+  nlsInfo->actPkg = nlsp;
+
+  return SUCCESS;
 }
 
 STATIC COUNT nlsLoadPackage(dos_far_ptr nls)
@@ -334,148 +562,100 @@ COUNT DosSetCountry(UWORD cntry)
   return DosLoadPackage(NLS_DEFAULT, cntry);
 }
 
-        /* getTableX return the pointer to the X'th table; X==subfct */
-        /* subfct 2: normal upcase table; 4: filename upcase table */
-#ifdef NLS_REORDER_POINTERS
-#define getTable2(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[0].pointer)
-#define getTable4(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[1].pointer)
-#define getTable7(nls)	(((struct nlsPackage *)ARM_PTR(nls))->nlsPointers[4].pointer)
-#else
-#define getTable2(nls)	getTable(2, (nls))
-#define getTable4(nls)	getTable(4, (nls))
-#define getTable7(nls)	getTable(7, (nls))
-#define NEED_GET_TABLE
-#endif
-
 dos_far_ptr DosGetDBCS(void)
 {
   struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
 	return getTable7(nlsInfo->actPkg);
 }
 
-/*
- * INT 2Fh / AH=14h - FreeDOS NLS MUX root handler.
- *
- * call_nls() enters here with:
- *   AL = NLSFUNC_* subfunction
- *   BP = DOS-65 subfunction / package-load selector
- *   BX = codepage
- *   DX = country
- *   CX = buffer size or character
- *   DS:SI = nlsInfoBlock
- *   ES:DI = caller buffer, when applicable
- *
- * Return convention used by nls.c:
- *   AX = DOS error/status, SUCCESS == 0
- *   BX may carry an extra word for install-check.
- */
+/* This is the kernel's default NLSFUNC multiplex int 2F/14 (MUX-14)
+   handling.  If made it here then no other program has hooked MUX-14
+   and handled request -- either none loaded or choose to pass request
+   on.
+
+   Registers:
+	AH == 14
+	AL == subfunction
+	BP == DOS-65 subfunction (GETDATA)
+	BX == codepage
+	CX == buffer size / character
+	DX == country code
+	DS:SI == internal global nlsInfo
+	ES:DI == user block
+
+	Return value: AX (SUCCESS == 0, otherwise a negative DOS error).
+	Ported 1:1 from syscall_MUX14() in the original kernel/nls.c.
+*/
 bool fdos_nls_2fh(CPU *cpu)
 {
-  COUNT rc = SUCCESS;
-  UWORD subfct = CPU_AL;
-  UWORD cp = CPU_BX;
-  UWORD cntry = CPU_DX;
-  UWORD bufsize = CPU_CX;
+  dos_far_ptr nlsp;             /* addressed NLS package */
+  struct nlsPackage *nls;
   VOID FAR *buf = far_is_null(FP_ES_DI) ? NULL : ARM_PTR(FP_ES_DI);
-  struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-  dos_far_ptr pkgp = MK_FP(0, 0);
+  COUNT rc;
 
-  switch (subfct)
+  log(("NLS: MUX14(): subfct=%x, cp=%u, cntry=%u\n", CPU_AL, CPU_BX, CPU_DX));
+
+  nlsp = searchPackage(CPU_BX, CPU_DX);
+  if (far_is_null(nlsp))
+  {
+    CPU_AX = (UWORD)DE_INVLDFUNC;   /* no such package */
+    return true;
+  }
+  nls = nls_pkg_ptr(nlsp);
+
+  log(("NLS: MUX14(): NLS pkg found\n"));
+
+  switch (CPU_AL)
   {
     case NLSFUNC_INSTALL_CHECK:
-      /*
-       * muxLoadPkg() expects AX=14FFh and BX=NLS_FREEDOS_NLSFUNC_ID.
-       * This is the kernel's built-in MUX-14 root, not an external TSR,
-       * but it is sufficient for internal NLS routing.
-       */
-      CPU_AX = 0x14ff;
+      /* The kernel just simulates the default functions: it is NOT an
+         installed NLSFUNC, so AX stays != 14FFh and muxLoadPkg() correctly
+         reports "no NLSFUNC --> no load". */
       CPU_BX = NLS_FREEDOS_NLSFUNC_ID;
-      return true;
-
-    case NLSFUNC_LOAD_PKG:
-    case NLSFUNC_LOAD_PKG2:
-      /*
-       * No external COUNTRY.SYS loader lives here.  We can only activate a
-       * package that is already present in the in-memory NLS chain.
-       */
-      pkgp = searchPackage(cp, cntry);
-      if (!far_is_null(pkgp))
-        rc = nlsLoadPackage(pkgp);
-      else
-        rc = DE_FILENOTFND;
-      CPU_AX = (UWORD)rc;
-      return true;
-
-    case NLSFUNC_GETDATA:
-      log(("NLS 2F/1402: BP=%04x BX(cp)=%04x DX(cntry)=%04x CX(size)=%04x ES:DI=%04x:%04x\n",
-           CPU_BP, cp, cntry, bufsize, CPU_ES, CPU_DI));
-      pkgp = searchPackage(cp, cntry);
-      log(("NLS 2F/1402: pkgp=%04x:%04x\n", FP_SEG(pkgp), FP_OFF(pkgp)));
-      rc = !far_is_null(pkgp)
-           ? nlsGetData((struct nlsPackage *)ARM_PTR(pkgp), CPU_BP, buf, bufsize)
-           : DE_FILENOTFND;
-      log(("NLS 2F/1402: rc=%d AX=%04x\n", rc, (UWORD)rc));
-      CPU_AX = (UWORD)rc;
-      return true;
+      rc = SUCCESS;
+      break;
 
     case NLSFUNC_DOS38:
-      pkgp = searchPackage(cp, cntry);
-      rc = !far_is_null(pkgp)
-           ? nlsGetData((struct nlsPackage *)ARM_PTR(pkgp), NLS_DOS_38, buf, bufsize)
-           : DE_FILENOTFND;
-      CPU_AX = (UWORD)rc;
-      return true;
+      rc = nlsGetData(nls, NLS_DOS_38, buf, 34);
+      break;
+
+    case NLSFUNC_GETDATA:
+      rc = nlsGetData(nls, CPU_BP, buf, CPU_CX);
+      break;
 
     case NLSFUNC_DRDOS_GETDATA:
-      /*
-       * DR-DOS compatible alias: same register contract as GETDATA in this
-       * port.  Keep it handled so callers do not fall into no_handler().
-       */
-      pkgp = searchPackage(cp, cntry);
-      rc = !far_is_null(pkgp)
-           ? nlsGetData((struct nlsPackage *)ARM_PTR(pkgp), CPU_BP, buf, bufsize)
-           : DE_FILENOTFND;
-      CPU_AX = (UWORD)rc;
-      return true;
+      /* Does not pass buffer length */
+      rc = nlsGetData(nls, CPU_CL, buf, 512);
+      break;
 
-    case NLSFUNC_YESNO: {
-      /*
-       * CX carries the character in muxYesNo().  Return 1 for yes,
-       * 0 for no, DE_INVLDFUNC for neither.
-       */
-      struct nlsPackage *pkg = (struct nlsPackage *)ARM_PTR(nlsInfo->actPkg);
-      if (toupper((unsigned char)bufsize) == toupper((unsigned char)pkg->yeschar))
-        CPU_AX = 1;
-      else if (toupper((unsigned char)bufsize) == toupper((unsigned char)pkg->nochar))
-        CPU_AX = 0;
-      else
-        CPU_AX = (UWORD)DE_INVLDFUNC;
-      return true;
-    }
+    case NLSFUNC_LOAD_PKG:
+      rc = nlsLoadPackage(nlsp);
+      break;
+
+    case NLSFUNC_LOAD_PKG2:
+      rc = nlsSetPackage(nlsp);
+      break;
+
+    case NLSFUNC_YESNO:
+      rc = nlsYesNo(nlsp, CPU_CX);
+      break;
+
     case NLSFUNC_UPMEM:
+      nlsUpMem(nlsp, buf, CPU_CX);
+      rc = SUCCESS;
+      break;
+
     case NLSFUNC_FILE_UPMEM:
-      /*
-       * Minimal safe built-in service: CP437 hardcoded tables currently map
-       * ASCII correctly, and non-ASCII remains byte-preserving unless the
-       * direct table path is used elsewhere.
-       */
-      if (buf == NULL)
-        rc = DE_INVLDDATA;
-      else
-      {
-        UBYTE *p = (UBYTE *)buf;
-        while (bufsize--)
-        {
-          if (*p >= 'a' && *p <= 'z')
-            *p -= 'a' - 'A';
-          p++;
-        }
-      }
-      CPU_AX = (UWORD)rc;
-      return true;
+      nlsFUpMem(nlsp, buf, CPU_CX);
+      rc = SUCCESS;
+      break;
 
     default:
-      CPU_AX = (UWORD)DE_INVLDFUNC;
-      return true;
+      log(("NLS: MUX14(): Invalid function %x\n", CPU_AL));
+      rc = DE_INVLDFUNC;        /* no such function */
+      break;
   }
+
+  CPU_AX = (UWORD)rc;
+  return true;
 }
