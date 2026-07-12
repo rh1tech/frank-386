@@ -1729,19 +1729,43 @@ dos_far_ptr /*sft*/ idx_to_sft(int SftIndex)
     /// through to its local (non-networked) path resolution, the same
     /// way it would on real DOS with no redirector present.
 */
+/*
+    The guest-visible contract of "no redirector loaded":
+
+      INT 2Fh AX=1100h  -> AL = 00h  (fdos_2fh.c: installation check)
+      INT 2Fh AX=1000h  -> AL = 00h  (SHARE not installed)
+      INT 21h AH=5Eh    -> CF=1, AX=0001h (invalid function)
+      INT 21h AH=5Fh    -> CF=1, AX=0001h (invalid function)
+
+    which is exactly what MS-DOS answers with no redirector present. It comes
+    out of the -DE_INVLDFUNC below: fdos_21h's error_exit does AX = -rc.
+
+    truename() also depends on QRemote_Fn() failing here, so that path
+    resolution falls through to the local (non-networked) code, the same way
+    it does on real DOS without a redirector.
+*/
 long network_redirector_mx(unsigned cmd, void *s, void *arg)
 {
   UNREFERENCED_PARAMETER(cmd);
   UNREFERENCED_PARAMETER(s);
   UNREFERENCED_PARAMETER(arg);
-  return -1;
+  return -DE_INVLDFUNC;
 }
 
 int network_redirector_fp(unsigned cmd, void *s)
 {
   UNREFERENCED_PARAMETER(cmd);
   UNREFERENCED_PARAMETER(s);
-  return -1;
+  return -DE_INVLDFUNC;
+}
+
+/* Declared in proto.h but never defined until now: the ///-disabled call
+   sites in dosfns.c (REM_GETATTRZ, REM_MKDIR/REM_RMDIR, REM_RENAME, ...)
+   reference it, so they can be re-enabled without a link error. */
+int network_redirector(unsigned cmd)
+{
+  UNREFERENCED_PARAMETER(cmd);
+  return -DE_INVLDFUNC;
 }
 
 /*

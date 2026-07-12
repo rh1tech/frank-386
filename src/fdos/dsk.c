@@ -72,31 +72,141 @@ struct FS_info {
  * fall back to rereading the BPB/serial number, as upstream FreeDOS
  * does.
  */
+/* ReadPCClock(): BIOS tick counter at 0040:006C, the original reads the same
+   place through the CLOCK$ driver. Used only to throttle boot sector rereads. */
+STATIC ULONG ReadPCClock(void)
+{
+  return pload32(0x46C);
+}
+
+STATIC VOID tmark(ddt *pddt)
+{
+  pddt->ddt_fh.ddt_lasttime = ReadPCClock();
+}
+
+STATIC BOOL tdelay(ddt *pddt, ULONG ticks)
+{
+  return ReadPCClock() - pddt->ddt_fh.ddt_lasttime >= ticks;
+}
+
+/* fl_readkey(): INT 16h AH=00h - wait for a keystroke. */
+STATIC VOID fl_readkey(CPU *cpu)
+{
+  CPU_regs saved;
+
+  cpu_save_regs(cpu, &saved);
+  CPU_AH = 0x00;
+  bios_16h(cpu);
+  cpu_restore_regs(cpu, &saved);
+}
+
+/* floppy_change(): INT 2Fh AX=4A00h - let a multitasker (Windows) put up the
+   "insert diskette" dialog itself. Returns 0xFFFF when nobody handles it, in
+   which case we print the prompt ourselves, exactly as the original does. */
+STATIC UWORD floppy_change(CPU *cpu, UWORD dx)
+{
+  CPU_regs saved;
+  UWORD ret;
+
+  cpu_save_regs(cpu, &saved);
+  CPU_AX = 0x4A00;
+  CPU_DX = dx;
+  bios_intcall(cpu, 0x2F, "DJ 2F/4A00");
+  ret = CPU_AX;
+  cpu_restore_regs(cpu, &saved);
+  return ret;
+}
+
+/*
+    play_dj() - the "DJ mechanism": A: and B: are the same physical drive
+    (DF_MULTLOG). Whenever the logical drive changes, the user has to swap the
+    diskette. Ported from dsk.c.
+
+    put_string() in this port appends a newline, so the three lines the
+    original assembles out of template_string are printed directly instead.
+*/
+STATIC WORD play_dj(CPU *cpu, ddt *pddt)
+{
+  if ((pddt->ddt_descflags & (DF_MULTLOG | DF_CURLOG)) == DF_MULTLOG)
+  {
+    int i;
+    ddt *pddt2 = NULL;
+
+    for (i = 0; i < blk_dev->dh_name[0]; i++)
+    {
+      pddt2 = getddt(i);
+      if (pddt->ddt_driveno == pddt2->ddt_driveno &&
+          (pddt2->ddt_descflags & (DF_MULTLOG | DF_CURLOG)) ==
+          (DF_MULTLOG | DF_CURLOG))
+        break;
+    }
+
+    if (i == blk_dev->dh_name[0])
+    {
+      put_string("Error in the DJ mechanism!");   /* should not happen! */
+    }
+    else
+    {
+      xreg dx;
+      dx.b.l = pddt->ddt_logdriveno;
+      dx.b.h = pddt2->ddt_logdriveno;
+
+      /* call int2f/ax=4a00 */
+      if (floppy_change(cpu, dx.x) != 0xffff)
+      {
+        /* if someone else does not make a nice dialog... */
+        dos_printf("Remove diskette in drive %c:\n",
+                   'A' + pddt2->ddt_logdriveno);
+        dos_printf("Insert diskette in drive %c:\n",
+                   'A' + pddt->ddt_logdriveno);
+        dos_printf("Press any key to continue ... \n");
+        fl_readkey(cpu);
+      }
+
+      pddt2->ddt_descflags &= ~DF_CURLOG;
+      pddt->ddt_descflags |= DF_CURLOG;
+      pstore8(0x504, pddt->ddt_logdriveno);   /* pokeb(0, 0x504, ...) */
+    }
+    return M_CHANGED;
+  }
+  return M_NOT_CHANGED;
+}
+
 STATIC WORD diskchange(CPU *cpu, ddt *pddt)
 {
   CPU_regs saved;
   WORD result;
 
+  /* if it's a hard drive, media never changes */
   if (hd(pddt->ddt_descflags))
     return M_NOT_CHANGED;
 
-  if (!(pddt->ddt_descflags & DF_CHANGELINE))
-    return M_DONT_KNOW;
+  if (play_dj(cpu, pddt) == M_CHANGED)
+    return M_CHANGED;
 
-  cpu_save_regs(cpu, &saved);
-  CPU_AH = 0x16;
-  CPU_DL = pddt->ddt_driveno;
-  bios_13h(cpu);
+  if (pddt->ddt_descflags & DF_CHANGELINE)   /* if we can detect a change ... */
+  {
+    cpu_save_regs(cpu, &saved);
+    CPU_AH = 0x16;
+    CPU_DL = pddt->ddt_driveno;
+    bios_13h(cpu);
 
-  if (!cf && CPU_AH == 0x00)
-    result = M_NOT_CHANGED;
-  else if (cf && CPU_AH == 0x06)
-    result = M_CHANGED;
-  else
-    result = M_DONT_KNOW;
+    if (!cf && CPU_AH == 0x00)
+      result = M_NOT_CHANGED;
+    else if (cf && CPU_AH == 0x06)
+      result = M_CHANGED;
+    else
+      result = M_DONT_KNOW;
 
-  cpu_restore_regs(cpu, &saved);
-  return result;
+    cpu_restore_regs(cpu, &saved);
+
+    if (result != M_DONT_KNOW)
+      return result;
+  }
+
+  /* can not detect or error... - do not reread the boot sector more often
+     than every ~2 seconds (37 ticks), as the original does */
+  return tdelay(pddt, 37ul) ? M_DONT_KNOW : M_NOT_CHANGED;
 }
 
 STATIC int LBA_Transfer(CPU* cpu,
@@ -179,9 +289,16 @@ STATIC WORD getbpb(CPU *cpu, ddt *pddt)
   secs_per_cyl = pbpbarray->bpb_nheads * pbpbarray->bpb_nsecs;
 
   if (secs_per_cyl == 0)
+  {
+    tmark(pddt);
     return failure(E_FAILURE);
+  }
 
+  /* this field is problematic for partitions > 65535 cylinders,
+     in general > 512 GiB. However: we are not using it ourselves. */
   pddt->ddt_ncyl = (UWORD)((count + (secs_per_cyl - 1)) / secs_per_cyl);
+
+  tmark(pddt);
   return 0;
 }
 
@@ -481,37 +598,52 @@ STATIC int LBA_Transfer(CPU* cpu,
 */
 STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
 {
-  UWORD mode;
-  UWORD transferred;
-  ULONG start;
-  int err;
+  ULONG start, size;
+  WORD ret;
+  UWORD done;
+  int action;
+  const bpb *pbpb;
 
   switch (rq->r_command)
   {
     case C_INPUT:
-      mode = LBA_READ;
+      action = LBA_READ;
       break;
     case C_OUTPUT:
-      mode = LBA_WRITE;
+      action = LBA_WRITE;
       break;
     case C_OUTVFY:
-      mode = LBA_WRITE_VERIFY;
+      action = LBA_WRITE_VERIFY;
       break;
     default:
-      return failure(E_CMD);
+      return failure(E_FAILURE);
   }
 
-  if (rq->r_count == 0)
-    return S_DONE;
+  if (pddt->ddt_descflags & DF_NOACCESS)      /* drive inaccessible */
+    return failure(E_FAILURE);
 
-  start = (rq->r_start != HUGECOUNT) ? rq->r_start : rq->r_huge;
-  err = LBA_Transfer(cpu, pddt, mode, rq->r_trans,
-                     pddt->ddt_offset + start,
-                     rq->r_count, &transferred);
+  tmark(pddt);
+  start = (rq->r_start != HUGECOUNT ? rq->r_start : rq->r_huge);
+  pbpb = hd(pddt->ddt_descflags) ? &pddt->ddt_defbpb : &pddt->ddt_bpb;
+  size = (pbpb->bpb_nsize ? pbpb->bpb_nsize : pbpb->bpb_huge);
 
-  rq->r_count = transferred;
+  /* The request must stay inside the volume - without this check a bogus
+     r_start went straight into LBA_Transfer(). 0408h == S_ERROR|S_DONE|E_NOTFND
+     ("sector not found"), the value the original returns here. */
+  if (start >= size || start + rq->r_count > size)
+  {
+    return 0x0408;
+  }
+  start += pddt->ddt_offset;
 
-  return err ? (WORD)err : S_DONE;
+  ret = (WORD)LBA_Transfer(cpu, pddt, action, rq->r_trans,
+                           start, rq->r_count, &done);
+  rq->r_count = done;
+
+  if (ret != 0)
+    return ret;
+
+  return S_DONE;
 }
 
 /* ------------------------------------------------------------------------ */

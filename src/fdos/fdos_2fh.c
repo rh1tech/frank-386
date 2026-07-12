@@ -844,16 +844,23 @@ bool fdos_2fh(CPU* cpu) {
         CPU_AL = 0x00;
         cf = 0;
     } else
-    if (CPU_AX == 0x1100) {
+    if (CPU_AH == 0x11) {
         /*
-         * Network redirector installation check.
+         * Network redirector (INT 2Fh AH=11h).
          *
-         * There is no network redirector in the native DOS build.  DOS
-         * programs use AL=00h to distinguish this normal condition from a
-         * broken INT 2Fh service, so answer the probe explicitly.
+         * There is no redirector in the native DOS build, and no network
+         * hardware to hang one off.  AL=00h on the AX=1100h installation
+         * check is how DOS programs tell this normal condition from a broken
+         * INT 2Fh service; every other 11xxh subfunction is answered as an
+         * unhandled multiplex call (CF set, registers untouched) - which is
+         * what a chain with no redirector in it looks like.
          */
-        CPU_AL = 0x00;
-        cf = 0;
+        if (CPU_AL == 0x00) {
+            CPU_AL = 0x00;      /* not installed */
+            cf = 0;
+        } else {
+            cf = 1;
+        }
     } else
     if (CPU_AX == 0x122A) {
         /* FASTOPEN entry-point registration.  FreeDOS itself implements

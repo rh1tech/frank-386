@@ -25,8 +25,35 @@
  013A0H 019F3H 00654H _DATA              DATA
  019F4H 0240DH 00A1AH _BSS               BSS
 */
+/*
+ * DOS_PSP:0000..00FF is the kernel's own PSP.  Its second half doubles as the
+ * master environment - this is NOT an accident of the port, it is what
+ * kernel.asm does:
+ *
+ *      beyond_entry:   times 256-(beyond_entry-entry) db 0
+ *                                      ; scratch area for data (DOS_PSP)
+ *      _master_env equ $ - 128
+ *      global  _master_env
+ *
+ * i.e. master_env == DOS_PSP:0080, the same 128 bytes as the PSP command tail
+ * and the default DTA (main.c: set_DTA(MK_FP(DOS_PSP, 0x80))).
+ *
+ * It works because of the init order, which this port keeps identical to
+ * main.c:
+ *      set_DTA(DOS_PSP:0080) -> PSPInit() -> PreConfig() -> DoConfig(0/1/2)
+ *      -> PostConfig() -> "if (master_env[0] == 0) master_env = PATH=."
+ *
+ * PSPInit() writes the (empty) command tail at 0080h, and only afterwards do
+ * the SET= lines of CONFIG.SYS start filling the environment from 0080h up.
+ * The kernel's own DTA is never used for a FindFirst/FCB call - neither during
+ * init nor later, since every process gets its own PSP and DTA - so nothing
+ * ever writes 128 bytes of directory entry over the master environment.
+ *
+ * Do not "fix" this by moving one of them: any DOS program that walks the
+ * master environment MCB expects it exactly here.
+ */
 #define x86_DTA           MK_FP(DOS_PSP, 0x0080) // Disk Transfer Area
-#define x86_MASTER_ENV    MK_FP(DOS_PSP + 8, 0)  // original: 0068:0000
+#define x86_MASTER_ENV    MK_FP(DOS_PSP + 8, 0)  // == DOS_PSP:0080, see above
 
 #define x86_IO_FIXED_DATA MK_FP(DOS_PSP, 0x07A8) // _IO_FIXED_DATA -> con_dev
 #define x86_FIXED_DATA    MK_FP(DOS_PSP, 0x08F0) // _FIXED_DATA -> LoL
