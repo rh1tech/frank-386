@@ -419,6 +419,11 @@ uint8_t cmos_set(void *cmos, int addr, uint8_t val)
 	return val;
 }
 
+uint8_t cmos_get(void* cmos, int addr)
+{
+	return (addr >= 0 && addr < 128) ? ((CMOS*)cmos)->data[addr] : 0;
+}
+
 /* Пересчитать CMOS checksum (0x10..0x2D) и записать в 0x2E/0x2F.
  * Вызывать после любых изменений CMOS, до старта BIOS. */
 void cmos_update_checksum(void *cmos)

@@ -62,6 +62,8 @@ static BYTE *error_hRcsId =
 
 #define DE_INVLDPARM    -0x57   /* invalid parameter */
 
+#define DE_SHARE 0x20 /// TODO: ensure
+
 #define DE_DEADLOCK	-36
 #define DE_LOCK		-39
 
@@ -78,6 +80,7 @@ static BYTE *error_hRcsId =
 #define EFLG_RETRY      0x10    /* Handler can retry            */
 #define EFLG_IGNORE     0x20    /* Handler can ignore           */
 #define EFLG_CHAR       0x80    /* Error in char or FAT image   */
+#define EFLG_FAIL       0xFF /// TODO:
 
 /* error results returned after asking user                     */
 /* MS-DOS compatible -- returned by CriticalError               */

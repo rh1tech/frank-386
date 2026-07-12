@@ -947,7 +947,19 @@ extern uint8_t gfx_buffer[256ul << 10];
 static CMOS *_pc_cmos_for_floppy = NULL;
 static void cmos_floppy_update(uint8_t ta, uint8_t tb) {
     cmos_set_floppy_types(_pc_cmos_for_floppy, ta, tb);
-    cmos_set(_pc_cmos_for_floppy, 0x14, 0x41); // 0x14 <= 0x41 (2 fdds)
+    /* Здесь раньше безусловно писалось 0x41 и затирался equipment byte,
+     * который pc_new() собирает правильно (floppy | kbd | display | FPU |
+     * число FDD).  В POST-дампе это видно как CMOS 14=41 вместо 4D.
+     * Трогаем только биты 7-6 (кол-во FDD) и бит 0 (наличие FDD). */
+    {
+        CMOS *c = _pc_cmos_for_floppy;
+        uint8_t eq  = cmos_get(c, 0x14);
+        uint8_t nfd = (ta ? 1 : 0) + (tb ? 1 : 0);
+        eq &= (uint8_t)~0xC1;
+        if (nfd)
+            eq |= (uint8_t)(0x01 | ((nfd - 1) << 6));
+        cmos_set(c, 0x14, eq);
+    }
     cmos_update_checksum(_pc_cmos_for_floppy);
 }
 
@@ -1549,13 +1561,14 @@ void bios_post(PC *pc) {
 	point2iret(0x28); // Idle
 	point2iret(0x29);
 	point2iret(0x2f);
-// MS MOUSE
-	bios_33h_install(pc->mouse_enabled);
+// MS MOUSE: INT 33h + IRQ12 (INT 74h).
+// Драйвер в bios/bios_33h.c, данные берёт из 8042 по IRQ12
 	if (pc->mouse_enabled) {
-		pstore16(0x33*4,     0x0033);   /* маркер FFE0:0033 -> handlers[0x33] */
-		pstore16(0x33*4 + 2, 0xFFE0);
+		pstore16(0x33*4, 0x0033); pstore16(0x33*4 + 2, 0xFFE0);
+		pstore16(0x74*4, 0x0074); pstore16(0x74*4 + 2, 0xFFE0);
 	} else {
-		point2zero(0x33);               /* вектор 0 == "драйвера мыши нет" */
+		point2zero(0x33);          /* вектор 0 == "драйвера мыши нет" */
+		point2iret(0x74);
 	}
 // IRQ14 - HARD DISK CONTROLLER OPERATION COMPLETE (AT and later)
 	point2iret(0x76);
@@ -1576,6 +1589,10 @@ void bios_post(PC *pc) {
     pstore8(0xFFFFD, 0x00);                          /* checksum-заглушка    */
     pstore8(0xFFFFE, 0xFC);                          /* model byte: IBM AT   */
     pstore8(0xFFFFF, 0x01);                          /* submodel/revision    */
+
+   /* INT 33h: сброс состояния + инициализация 8042/мыши через порты.
+    * Делать ПОСЛЕ инициализации PIC (выше в bios_post), иначе IRQ12 замаскирован. */
+    bios_33h_install(pc->cpu, pc->mouse_enabled);
 
 #if NATIVE_POST_SELFTEST
     /* Печатается сразу после VGA-баннера. */

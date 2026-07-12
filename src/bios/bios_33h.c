@@ -1,22 +1,22 @@
 /*
- * INT 33h - Microsoft Mouse driver (native implementation)
+ * INT 33h - Microsoft Mouse driver (native BIOS implementation)
+ * INT 74h - IRQ12 (PS/2 aux device) handler
  *
- * В native-режиме в гостя не загружается никакой DOS-драйвер мыши, поэтому
- * INT 33h реализован прямо в эмуляторе поверх хостовой мыши (PS/2 / USB / NES).
+ * Никаких хуков в main.c: драйвер живёт целиком внутри BIOS и общается с
+ * мышью так же, как настоящий DOS-драйвер — через контроллер 8042 (порты
+ * 0x60/0x64) и прерывание IRQ12. Хостовые мыши (PS/2, USB, NES-эмуляция)
+ * уже кладут пакеты в i8042 через ps2_mouse_event(), поэтому все три
+ * источника работают автоматически.
  *
- * Что важно для детекторов (Norton SysInfo, CheckIt, MSD):
- *   - вектор INT 33h НЕ должен указывать на IRET и не должен быть нулевым,
- *     если драйвер есть (проверяется в pc.c / bios_post());
- *   - AX=0000h должен вернуть AX=FFFFh (драйвер установлен) и BX=число кнопок;
- *   - AX=0024h возвращает версию, тип (CH=04h => PS/2) и IRQ (CL=00h для PS/2).
+ * Активируется только при native BIOS: bios_33h_install() зовётся из
+ * bios_post(). При внешнем BIOS (SeaBIOS) handlers[] не задействованы,
+ * вектора не подменяются — поведение не меняется.
+ *
+ * Если гость загрузит свой драйвер мыши (CTMOUSE и т.п.), он перепишет
+ * вектора INT 33h/INT 74h в IVT, и наш код просто перестанет вызываться.
  *
  * Курсор: программный, только текстовые режимы (BDA 40:49 = 0..3, 7).
- * В графических режимах курсор не рисуется (позиция всё равно отслеживается,
- * функции 3/5/6/0Bh работают).
- *
- * Обработчики событий (AX=000Ch/0014h) сохраняются, но НЕ вызываются:
- * far-call в гостя из нативного хендлера здесь не делается. Подавляющее
- * большинство DOS-программ (включая SysInfo, NC, Norton) опрашивают функцию 3.
+ * Обработчики событий (AX=000Ch/0014h) сохраняются, но не вызываются.
  */
 
 #include <string.h>
@@ -29,46 +29,50 @@
 #define BDA_VIDEO_PAGE   0x462u
 #define BDA_VIDEO_PGSIZE 0x44Cu
 
-#define MOUSE_BUTTONS    2        /* сообщаем 2 кнопки (PS/2 стандарт) */
+#define MOUSE_BUTTONS    2
 
-/* Виртуальное разрешение MS Mouse: всегда 640x200 в текстовых режимах */
 #define VIRT_W  640
 #define VIRT_H  200
+
+/* 8042 */
+#define KBC_DATA         0x60
+#define KBC_STATUS       0x64
+#define KBC_CMD          0x64
+#define KBC_ST_OBF       0x01
+#define KBC_ST_IBF       0x02
+#define KBC_ST_AUX_OBF   0x20
 
 typedef struct {
     int      installed;
 
-    int      x, y;              /* виртуальные координаты (0..639 / 0..199) */
+    int      x, y;
     int      minx, maxx;
     int      miny, maxy;
 
-    uint8_t  buttons;           /* bit0=left, bit1=right, bit2=middle */
+    uint8_t  buttons;
 
-    /* счётчики нажатий/отпусканий (функции 5/6) */
-    uint16_t press_cnt[3];
-    uint16_t press_x[3], press_y[3];
-    uint16_t rel_cnt[3];
-    uint16_t rel_x[3], rel_y[3];
+    uint16_t press_cnt[3], press_x[3], press_y[3];
+    uint16_t rel_cnt[3],   rel_x[3],   rel_y[3];
 
-    int      mickey_x, mickey_y;  /* аккумулятор для функции 0Bh */
-    int      frac_x, frac_y;      /* остаток mickeys при пересчёте в пиксели */
+    int      mickey_x, mickey_y;
+    int      frac_x, frac_y;
 
-    int      hide_count;          /* MS-семантика: курсор виден только при ==0 */
+    int      hide_count;          /* курсор виден только при == 0 */
 
-    uint16_t scr_mask;            /* текстовый курсор: AND-маска */
-    uint16_t cur_mask;            /* текстовый курсор: XOR-маска */
+    uint16_t scr_mask, cur_mask;
 
-    int      mpp_x, mpp_y;        /* mickeys per 8 pixels (функция 0Fh) */
+    int      mpp_x, mpp_y;        /* mickeys per 8 pixels */
     uint8_t  sens_x, sens_y, sens_d;
 
-    /* сохранённая ячейка под курсором */
     int      drawn;
     uint32_t drawn_addr;
     uint16_t drawn_cell;
 
-    /* пользовательский обработчик (не вызывается, только хранится) */
-    uint16_t cb_mask;
-    uint16_t cb_seg, cb_off;
+    uint16_t cb_mask, cb_seg, cb_off;
+
+    /* сборка PS/2-пакета в INT 74h */
+    uint8_t  pkt[4];
+    uint8_t  pkt_idx;
 } MouseState;
 
 static MouseState m;
@@ -81,20 +85,15 @@ static int text_mode_base(uint32_t *base, int *cols, int *rows)
 {
     uint8_t mode = pload8(BDA_VIDEO_MODE);
 
-    if (mode == 0x07) {
-        *base = 0xB0000u;
-    } else if (mode <= 0x03) {
-        *base = 0xB8000u;
-    } else {
-        return 0;   /* графика — курсор не рисуем */
-    }
+    if (mode == 0x07)      *base = 0xB0000u;
+    else if (mode <= 0x03) *base = 0xB8000u;
+    else                   return 0;
 
     *cols = pload16(BDA_VIDEO_COLS);
     if (*cols <= 0 || *cols > 132) *cols = 80;
     *rows = pload8(BDA_VIDEO_ROWS) + 1;
     if (*rows <= 0 || *rows > 60) *rows = 25;
 
-    /* активная страница */
     uint16_t pgsize = pload16(BDA_VIDEO_PGSIZE);
     uint8_t  page   = pload8(BDA_VIDEO_PAGE);
     if (pgsize == 0) pgsize = 0x1000;
@@ -144,26 +143,23 @@ static void cursor_refresh(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Хук от хостовой мыши (вызывается из main.c рядом с ps2_mouse_event) */
-/* dx/dy — в экранных координатах: +x вправо, +y вниз                  */
-/* buttons — bit0=left, bit1=right, bit2=middle                        */
+/* Применение движения                                                 */
+/* dx/dy — экранные (+x вправо, +y вниз)                               */
 /* ------------------------------------------------------------------ */
-void bios_33h_mouse_event(int dx, int dy, int buttons)
+static void mouse_apply(int dx, int dy, uint8_t nb)
 {
-    if (!m.installed)
-        return;
-
     m.mickey_x += dx;
     m.mickey_y += dy;
 
-    /* mickeys -> пиксели: mpp_x mickeys на 8 пикселей */
     m.frac_x += dx * 8;
     m.frac_y += dy * 8;
 
-    int px = m.frac_x / (m.mpp_x ? m.mpp_x : 8);
-    int py = m.frac_y / (m.mpp_y ? m.mpp_y : 16);
-    m.frac_x -= px * (m.mpp_x ? m.mpp_x : 8);
-    m.frac_y -= py * (m.mpp_y ? m.mpp_y : 16);
+    int mx = m.mpp_x ? m.mpp_x : 8;
+    int my = m.mpp_y ? m.mpp_y : 16;
+    int px = m.frac_x / mx;
+    int py = m.frac_y / my;
+    m.frac_x -= px * mx;
+    m.frac_y -= py * my;
 
     if (px || py) {
         m.x += px;
@@ -175,7 +171,7 @@ void bios_33h_mouse_event(int dx, int dy, int buttons)
         cursor_refresh();
     }
 
-    uint8_t nb  = (uint8_t)(buttons & 7);
+    nb &= 7;
     uint8_t old = m.buttons;
     for (int b = 0; b < 3; b++) {
         uint8_t bit = (uint8_t)(1u << b);
@@ -193,34 +189,134 @@ void bios_33h_mouse_event(int dx, int dy, int buttons)
 }
 
 /* ------------------------------------------------------------------ */
-/* Сброс                                                               */
+/* INT 74h — IRQ12                                                     */
+/* ------------------------------------------------------------------ */
+bool bios_74h(CPU* cpu)
+{
+    uint8_t st = cpu_portin8(KBC_STATUS);
+
+    if ((st & (KBC_ST_OBF | KBC_ST_AUX_OBF)) == (KBC_ST_OBF | KBC_ST_AUX_OBF)) {
+        uint8_t b = cpu_portin8(KBC_DATA);
+
+        /* ресинхронизация: бит3 первого байта пакета всегда 1 */
+        if (m.pkt_idx == 0 && !(b & 0x08)) {
+            /* ACK (0xFA) / RESEND / мусор — игнорируем */
+        } else {
+            m.pkt[m.pkt_idx++] = b;
+
+            if (m.pkt_idx >= 3) {
+                m.pkt_idx = 0;
+
+                uint8_t f = m.pkt[0];
+                int dx = m.pkt[1];
+                int dy = m.pkt[2];
+                if (f & 0x10) dx |= ~0xFF;      /* знак X */
+                if (f & 0x20) dy |= ~0xFF;      /* знак Y */
+                if (f & 0xC0) { dx = 0; dy = 0; }   /* overflow */
+
+                /* PS/2: +Y = вверх; экран: +Y = вниз */
+                if (m.installed)
+                    mouse_apply(dx, -dy, (uint8_t)(f & 0x07));
+            }
+        }
+    }
+
+    /* EOI: сначала slave, потом master */
+    cpu_portout8(0xA0, 0x20);
+    cpu_portout8(0x20, 0x20);
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Инициализация 8042 + мыши (как это делает настоящий драйвер)         */
+/* ------------------------------------------------------------------ */
+static void kbc_wait_ibe(CPU* cpu)
+{
+    for (int i = 0; i < 10000; i++)
+        if (!(cpu_portin8(KBC_STATUS) & KBC_ST_IBF))
+            return;
+}
+
+static int kbc_wait_obf(CPU* cpu)
+{
+    for (int i = 0; i < 10000; i++)
+        if (cpu_portin8(KBC_STATUS) & KBC_ST_OBF)
+            return 1;
+    return 0;
+}
+
+static void kbc_cmd(CPU* cpu, uint8_t c)
+{
+    kbc_wait_ibe(cpu);
+    cpu_portout8(KBC_CMD, c);
+}
+
+static void kbc_data(CPU* cpu, uint8_t d)
+{
+    kbc_wait_ibe(cpu);
+    cpu_portout8(KBC_DATA, d);
+}
+
+/* послать байт мыши и съесть ACK */
+static void aux_send(CPU* cpu, uint8_t d)
+{
+    kbc_cmd(cpu, 0xD4);          /* следующий байт — в aux-порт */
+    kbc_data(cpu, d);
+    if (kbc_wait_obf(cpu))
+        (void)cpu_portin8(KBC_DATA);   /* ACK (0xFA) */
+}
+
+static void mouse_hw_init(CPU* cpu)
+{
+    /* включить aux-порт */
+    kbc_cmd(cpu, 0xA8);
+
+    /* command byte: разрешить IRQ12 (bit1) и снять disable-aux (bit5) */
+    kbc_cmd(cpu, 0x20);
+    uint8_t cb = kbc_wait_obf(cpu) ? cpu_portin8(KBC_DATA) : 0x45;
+    cb |=  0x02;    /* enable aux (IRQ12) interrupt */
+    cb &= ~0x20;    /* aux clock enable */
+    cb |=  0x01;    /* keep keyboard IRQ1 on */
+    kbc_cmd(cpu, 0x60);
+    kbc_data(cpu, cb);
+
+    aux_send(cpu, 0xF6);   /* set defaults */
+    aux_send(cpu, 0xF4);   /* enable data reporting (stream mode) */
+
+    m.pkt_idx = 0;
+}
+
 /* ------------------------------------------------------------------ */
 void bios_33h_reset(void)
 {
-    int was_installed = m.installed;
+    int was = m.installed;
     memset(&m, 0, sizeof(m));
-    m.installed = was_installed;
+    m.installed = was;
 
     m.minx = 0; m.maxx = VIRT_W - 1;
     m.miny = 0; m.maxy = VIRT_H - 1;
     m.x = VIRT_W / 2;
     m.y = VIRT_H / 2;
 
-    m.scr_mask = 0x77FF;    /* дефолтный текстовый курсор MS Mouse */
+    m.scr_mask = 0x77FF;
     m.cur_mask = 0x7700;
 
-    m.mpp_x = 8;            /* mickeys per 8 pixels */
+    m.mpp_x = 8;
     m.mpp_y = 16;
-    m.sens_x = 50; m.sens_y = 50; m.sens_d = 50;
+    m.sens_x = m.sens_y = m.sens_d = 50;
 
-    m.hide_count = -1;      /* -1 => курсор скрыт (стандарт MS Mouse) */
+    m.hide_count = -1;      /* скрыт */
     m.drawn = 0;
+    m.pkt_idx = 0;
 }
 
-void bios_33h_install(int enabled)
+/* Зовётся из bios_post(). enabled == pc->mouse_enabled */
+void bios_33h_install(CPU* cpu, int enabled)
 {
     bios_33h_reset();
     m.installed = enabled ? 1 : 0;
+    if (enabled)
+        mouse_hw_init(cpu);
 }
 
 /* ------------------------------------------------------------------ */
@@ -235,7 +331,8 @@ bool bios_33h(CPU* cpu)
         cursor_erase();
         bios_33h_reset();
         m.installed = 1;
-        CPU_AX = 0xFFFF;            /* драйвер установлен */
+        mouse_hw_init(cpu);
+        CPU_AX = 0xFFFF;
         CPU_BX = MOUSE_BUTTONS;
         break;
 
@@ -316,10 +413,10 @@ bool bios_33h(CPU* cpu)
 
     case 0x000A:    /* Define text cursor */
         cursor_erase();
-        if (CPU_BX == 0) {          /* software cursor */
+        if (CPU_BX == 0) {
             m.scr_mask = CPU_CX;
             m.cur_mask = CPU_DX;
-        } else {                    /* hardware cursor — эмулируем софтовым */
+        } else {
             m.scr_mask = 0x77FF;
             m.cur_mask = 0x7700;
         }
@@ -333,14 +430,14 @@ bool bios_33h(CPU* cpu)
         m.mickey_y = 0;
         break;
 
-    case 0x000C:    /* Define event handler (ES:DX, mask=CX) */
+    case 0x000C:    /* Define event handler */
         m.cb_mask = CPU_CX;
         m.cb_seg  = CPU_ES;
         m.cb_off  = CPU_DX;
         break;
 
-    case 0x000D:    /* Light pen emulation on */
-    case 0x000E:    /* Light pen emulation off */
+    case 0x000D:
+    case 0x000E:
         break;
 
     case 0x000F:    /* Set mickeys per 8 pixels */
@@ -349,47 +446,42 @@ bool bios_33h(CPU* cpu)
         break;
 
     case 0x0010:    /* Define exclusion area — игнорируем */
-        break;
-
     case 0x0013:    /* Set double-speed threshold */
         break;
 
-    case 0x0014:    /* Exchange event handler */
-        {
-            uint16_t om = m.cb_mask, os = m.cb_seg, oo = m.cb_off;
-            m.cb_mask = CPU_CX;
-            m.cb_seg  = CPU_ES;
-            m.cb_off  = CPU_DX;
-            CPU_CX = om;
-            SET_ES(os);
-            CPU_DX = oo;
-        }
+    case 0x0014: {  /* Exchange event handler */
+        uint16_t om = m.cb_mask, os = m.cb_seg, oo = m.cb_off;
+        m.cb_mask = CPU_CX;
+        m.cb_seg  = CPU_ES;
+        m.cb_off  = CPU_DX;
+        CPU_CX = om;
+        SET_ES(os);
+        CPU_DX = oo;
         break;
+    }
 
     case 0x0015:    /* Get driver state storage size */
         CPU_BX = sizeof(MouseState);
         break;
 
-    case 0x0016:    /* Save driver state -> ES:DX */
-        {
-            uint32_t p = ((uint32_t)CPU_ES << 4) + CPU_DX;
-            const uint8_t *s = (const uint8_t *)&m;
-            for (unsigned i = 0; i < sizeof(MouseState); i++)
-                pstore8(p + i, s[i]);
-        }
+    case 0x0016: {  /* Save driver state -> ES:DX */
+        uint32_t p = ((uint32_t)CPU_ES << 4) + CPU_DX;
+        const uint8_t *s = (const uint8_t *)&m;
+        for (unsigned i = 0; i < sizeof(MouseState); i++)
+            pstore8(p + i, s[i]);
         break;
+    }
 
-    case 0x0017:    /* Restore driver state <- ES:DX */
-        {
-            uint32_t p = ((uint32_t)CPU_ES << 4) + CPU_DX;
-            uint8_t *s = (uint8_t *)&m;
-            cursor_erase();
-            for (unsigned i = 0; i < sizeof(MouseState); i++)
-                s[i] = pload8(p + i);
-            m.drawn = 0;
-            cursor_draw();
-        }
+    case 0x0017: {  /* Restore driver state <- ES:DX */
+        uint32_t p = ((uint32_t)CPU_ES << 4) + CPU_DX;
+        uint8_t *s = (uint8_t *)&m;
+        cursor_erase();
+        for (unsigned i = 0; i < sizeof(MouseState); i++)
+            s[i] = pload8(p + i);
+        m.drawn = 0;
+        cursor_draw();
         break;
+    }
 
     case 0x001A:    /* Set mouse sensitivity */
         m.sens_x = (uint8_t)CPU_BX;
@@ -403,8 +495,8 @@ bool bios_33h(CPU* cpu)
         CPU_DX = m.sens_d;
         break;
 
-    case 0x001C:    /* Set interrupt rate */
-    case 0x001D:    /* Set CRT page */
+    case 0x001C:
+    case 0x001D:
         break;
 
     case 0x001E:    /* Get CRT page */
@@ -421,14 +513,14 @@ bool bios_33h(CPU* cpu)
     case 0x0020:    /* Enable driver */
         break;
 
-    case 0x0024:    /* ---- Get software version, mouse type and IRQ ---- */
-        CPU_BX = 0x0800;    /* версия 8.00 (BCD: BH=major, BL=minor)      */
-        CPU_CH = 0x04;      /* 04h = PS/2 mouse   <<< это читает SysInfo  */
-        CPU_CL = 0x00;      /* PS/2: IRQ не сообщается (0)                */
+    case 0x0024:    /* Get version / mouse type / IRQ  <<< это читает SysInfo */
+        CPU_BX = 0x0800;    /* версия 8.00 (BH=major, BL=minor) */
+        CPU_CH = 0x04;      /* 04h = PS/2 mouse */
+        CPU_CL = 0x00;      /* PS/2: IRQ не сообщается */
         break;
 
     case 0x0026:    /* Get maximum virtual coordinates */
-        CPU_BX = m.installed ? 0x0000 : 0xFFFF;   /* BX=0 => драйвер активен */
+        CPU_BX = m.installed ? 0x0000 : 0xFFFF;
         CPU_CX = (uint16_t)m.maxx;
         CPU_DX = (uint16_t)m.maxy;
         break;
@@ -441,7 +533,6 @@ bool bios_33h(CPU* cpu)
         break;
 
     default:
-        /* неизвестная функция — молча игнорируем, как реальный драйвер */
         break;
     }
 

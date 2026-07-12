@@ -1637,6 +1637,209 @@ static void builtin_vol(CPU *cpu, UWORD command_psp,
 }
 
 
+
+static int fcom_get_file_attr(CPU *cpu, UWORD command_psp,
+                              struct fcom_guest *g,
+                              const char *name, UWORD *attributes)
+{
+  size_t n = strlen(name);
+
+  if (n >= sizeof(g->path))
+    return -3;
+
+  memcpy(g->path, name, n + 1);
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+  CPU_AX = 0x4300;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM ATTRIB get");
+
+  if (int21_failed(cpu))
+    return -(int)CPU_AX;
+
+  *attributes = CPU_CX;
+  return 0;
+}
+
+static int fcom_set_file_attr(CPU *cpu, UWORD command_psp,
+                              struct fcom_guest *g,
+                              const char *name, UWORD attributes)
+{
+  size_t n = strlen(name);
+
+  if (n >= sizeof(g->path))
+    return -3;
+
+  memcpy(g->path, name, n + 1);
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+  CPU_CX = attributes;
+  CPU_AX = 0x4301;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM ATTRIB set");
+
+  return int21_failed(cpu) ? -(int)CPU_AX : 0;
+}
+
+static void fcom_print_attr_line(CPU *cpu, UWORD command_psp,
+                                 struct fcom_guest *g,
+                                 UWORD attributes, const char *name)
+{
+  int n = snprintf(g->text, sizeof(g->text),
+                   "%c %c %c %c     %s\r\n",
+                   (attributes & 0x20) ? 'A' : ' ',
+                   (attributes & 0x04) ? 'S' : ' ',
+                   (attributes & 0x02) ? 'H' : ' ',
+                   (attributes & 0x01) ? 'R' : ' ',
+                   name);
+
+  if (n > 0)
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+        (UWORD)n);
+}
+
+static int fcom_build_matched_path(struct fcom_guest *g,
+                                   const char *pattern,
+                                   const char *matched_name)
+{
+  const char *slash = strrchr(pattern, '\\');
+  const char *slash2 = strrchr(pattern, '/');
+  const char *colon = strrchr(pattern, ':');
+  const char *cut = slash;
+  size_t prefix;
+  size_t name_len = strlen(matched_name);
+
+  if (slash2 != NULL && (cut == NULL || slash2 > cut))
+    cut = slash2;
+  if (colon != NULL && (cut == NULL || colon > cut))
+    cut = colon;
+
+  prefix = cut != NULL ? (size_t)(cut - pattern + 1) : 0;
+  if (prefix + name_len >= sizeof(g->path2))
+    return 0;
+
+  if (prefix != 0)
+    memcpy(g->path2, pattern, prefix);
+  memcpy(g->path2 + prefix, matched_name, name_len + 1);
+  return 1;
+}
+
+static int fcom_parse_attrib_switch(const char *arg,
+                                    UWORD *set_mask, UWORD *clear_mask)
+{
+  UWORD bit;
+
+  if ((arg[0] != '+' && arg[0] != '-') ||
+      arg[1] == '\0' || arg[2] != '\0')
+    return 0;
+
+  switch (toupper((unsigned char)arg[1])) {
+  case 'R':
+    bit = 0x01;
+    break;
+  case 'H':
+    bit = 0x02;
+    break;
+  case 'S':
+    bit = 0x04;
+    break;
+  case 'A':
+    bit = 0x20;
+    break;
+  default:
+    return 0;
+  }
+
+  if (arg[0] == '+') {
+    *set_mask |= bit;
+    *clear_mask &= (UWORD)~bit;
+  } else {
+    *clear_mask |= bit;
+    *set_mask &= (UWORD)~bit;
+  }
+
+  return 1;
+}
+
+static void builtin_attrib(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g, char *args)
+{
+  char *cursor = args;
+  char *arg;
+  char *patterns[16];
+  unsigned pattern_count = 0;
+  UWORD set_mask = 0;
+  UWORD clear_mask = 0;
+  unsigned i;
+
+  while ((arg = next_argument(&cursor)) != NULL) {
+    if (arg[0] == '+' || arg[0] == '-') {
+      if (!fcom_parse_attrib_switch(arg, &set_mask, &clear_mask)) {
+        dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
+        return;
+      }
+    } else {
+      if (pattern_count >= sizeof(patterns) / sizeof(patterns[0])) {
+        dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
+        return;
+      }
+      patterns[pattern_count++] = arg;
+    }
+  }
+
+  if (pattern_count == 0)
+    patterns[pattern_count++] = "*.*";
+
+  for (i = 0; i < pattern_count; ++i) {
+    const char *pattern = patterns[i];
+    int rc;
+    int found = 0;
+
+    memset(&g->find, 0, sizeof(g->find));
+    if (set_find_dta(cpu, command_psp) < 0)
+      return;
+
+    rc = dos_find_first_attr(cpu, command_psp, g, pattern, 0x37);
+    while (rc == 0) {
+      UWORD attributes;
+      const char *name;
+
+      if (strcmp(g->find.dm_name, ".") != 0 &&
+          strcmp(g->find.dm_name, "..") != 0 &&
+          fcom_build_matched_path(g, pattern, g->find.dm_name)) {
+        name = g->path2;
+        attributes = g->find.dm_attr_fnd;
+        found = 1;
+
+        if (set_mask != 0 || clear_mask != 0) {
+          UWORD new_attributes =
+              (UWORD)((attributes | set_mask) & ~clear_mask);
+
+          if (fcom_set_file_attr(cpu, command_psp, g,
+                                 name, new_attributes) < 0) {
+            dos_puts(cpu, command_psp, g,
+                     "Unable to change attribute - ");
+            dos_puts(cpu, command_psp, g, name);
+            dos_puts(cpu, command_psp, g, "\r\n");
+          }
+        } else {
+          fcom_print_attr_line(cpu, command_psp, g, attributes, name);
+        }
+      }
+
+      rc = dos_find_next(cpu, command_psp);
+    }
+
+    restore_default_dta(cpu, command_psp);
+
+    if (!found) {
+      dos_puts(cpu, command_psp, g, "File not found - ");
+      dos_puts(cpu, command_psp, g, pattern);
+      dos_puts(cpu, command_psp, g, "\r\n");
+    }
+  }
+}
+
+
 static int run_builtin(CPU *cpu, UWORD command_psp,
                        struct fcom_guest *g, char *args)
 {
@@ -1767,6 +1970,11 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
   if (command_is(g->filename, "REN") ||
       command_is(g->filename, "RENAME")) {
     builtin_rename(cpu, command_psp, g, args);
+    return 1;
+  }
+
+  if (command_is(g->filename, "ATTRIB")) {
+    builtin_attrib(cpu, command_psp, g, args);
     return 1;
   }
 

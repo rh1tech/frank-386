@@ -13,6 +13,7 @@ void CaptureKeyboardInput();
 typedef struct CMOS CMOS;
 CMOS *cmos_init(long mem_size, int irq, void *pic, void (*set_irq)(void *pic, int irq, int level));
 void cmos_update_irq(CMOS *s);
+uint8_t cmos_get(void* cmos, int addr);
 uint8_t cmos_ioport_read(CMOS *cmos, int addr);
 void cmos_ioport_write(CMOS *cmos, int addr, uint8_t val);
 

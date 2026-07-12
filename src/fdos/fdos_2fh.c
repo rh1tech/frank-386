@@ -168,14 +168,14 @@ static umb_t umb_blocks[] = {
     {0xEE00, 0x0080, 0}, {0xEE80, 0x0080, 0}, {0xEF00, 0x0080, 0}, {0xEF80, 0x0080, 0},
 
     // 0xF0000–0xF7FFF (32 KB)
-    {0xF000, 0x0080, 0}, {0xF080, 0x0080, 0}, {0xF100, 0x0080, 0}, {0xF180, 0x0080, 0},
-    {0xF200, 0x0080, 0}, {0xF280, 0x0080, 0}, {0xF300, 0x0080, 0}, {0xF380, 0x0080, 0},
-    {0xF400, 0x0080, 0}, {0xF480, 0x0080, 0}, {0xF500, 0x0080, 0}, {0xF580, 0x0080, 0},
-    {0xF600, 0x0080, 0}, {0xF680, 0x0080, 0}, {0xF700, 0x0080, 0}, {0xF780, 0x0080, 0},
+//    {0xF000, 0x0080, 0}, {0xF080, 0x0080, 0}, {0xF100, 0x0080, 0}, {0xF180, 0x0080, 0},
+//    {0xF200, 0x0080, 0}, {0xF280, 0x0080, 0}, {0xF300, 0x0080, 0}, {0xF380, 0x0080, 0},
+//    {0xF400, 0x0080, 0}, {0xF480, 0x0080, 0}, {0xF500, 0x0080, 0}, {0xF580, 0x0080, 0},
+//    {0xF600, 0x0080, 0}, {0xF680, 0x0080, 0}, {0xF700, 0x0080, 0}, {0xF780, 0x0080, 0},
 
     // 0xF8000–0xFBFFF (16 KB)
-    {0xF800, 0x0080, 0}, {0xF880, 0x0080, 0}, {0xF900, 0x0080, 0}, {0xF980, 0x0080, 0},
-    {0xFA00, 0x0080, 0}, {0xFA80, 0x0080, 0}, {0xFB00, 0x0080, 0}, {0xFB80, 0x0080, 0},
+//    {0xF800, 0x0080, 0}, {0xF880, 0x0080, 0}, {0xF900, 0x0080, 0}, {0xF980, 0x0080, 0},
+//    {0xFA00, 0x0080, 0}, {0xFA80, 0x0080, 0}, {0xFB00, 0x0080, 0}, {0xFB80, 0x0080, 0},
 };
 #define UMB_BLOCKS_COUNT (sizeof(umb_blocks) / sizeof(umb_t))
 
@@ -951,6 +951,84 @@ bool fdos_2fh(CPU* cpu) {
         CPU_AX = entry->sft_count;
         if (--entry->sft_count == 0)
             --entry->sft_count;       /* 0xffff marks a free SFT */
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x120a) {
+        /*
+         * Invoke the critical-error path using the current drive.
+         * callerARG1 is the DOS error code pushed before INT 2Fh.
+         */
+        UWORD error = readw86(((uint32_t)CPU_SS << 4) +
+                              (UWORD)(CPU_SP + 6));
+        struct cds *cdsp = get_cds1(internal_data->default_drive);
+
+        if (cdsp == NULL || far_is_null(cdsp->cdsDpb)) {
+            CPU_AL = FAIL;
+            cf = 1;
+        } else {
+            struct dpb *dpbp = (struct dpb *)ARM_PTR(cdsp->cdsDpb);
+            struct dhdr *dev = far_is_null(dpbp->dpb_device)
+                             ? NULL
+                             : (struct dhdr *)ARM_PTR(dpbp->dpb_device);
+
+            CPU_AL = CriticalError(0x38, /* ignore/retry/fail */
+                                   internal_data->default_drive,
+                                   error, dev);
+            cf = (CPU_AL == RETRY) ? 0 : 1;
+        }
+    }
+    else
+    if (CPU_AX == 0x120b) {
+        /*
+         * Sharing-violation helper.  SHARE/network support is absent,
+         * but compatibility/FCB opens still receive the normal critical-
+         * error opportunity before DE_SHARE is returned.
+         */
+        sft *entry = (sft *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
+        UWORD error = readw86(((uint32_t)CPU_SS << 4) +
+                              (UWORD)(CPU_SP + 6));
+        UBYTE retry = FALSE;
+
+        if ((entry->sft_mode & O_FCB) ||
+            !(entry->sft_mode & (O_SHAREMASK | O_NOINHERIT))) {
+            struct cds *cdsp = get_cds1(internal_data->default_drive);
+            if (cdsp != NULL && !far_is_null(cdsp->cdsDpb)) {
+                struct dpb *dpbp = (struct dpb *)ARM_PTR(cdsp->cdsDpb);
+                struct dhdr *dev = far_is_null(dpbp->dpb_device)
+                                 ? NULL
+                                 : (struct dhdr *)ARM_PTR(dpbp->dpb_device);
+                retry = CriticalError(0x38, /* ignore/retry/fail */
+                                      internal_data->default_drive,
+                                      error, dev) == RETRY;
+            }
+        }
+        CPU_AX = DE_SHARE;
+        cf = retry ? 0 : 1;
+    }
+    else
+    if (CPU_AX == 0x120c) {
+        /* Notify a character device about OPEN and set SFT owner PSP. */
+        if (!far_is_null(internal_data->lpCurSft) &&
+            !far_is_end(internal_data->lpCurSft)) {
+            sft *entry = (sft *)ARM_PTR(internal_data->lpCurSft);
+
+            if (entry->sft_flags & SFT_FDEVICE) {
+                request rq;
+                memset(&rq, 0, sizeof(rq));
+                rq.r_length = sizeof(rq);
+                rq.r_command = C_OPEN;
+                execrh(linear_to_far(&rq), entry->sft_dev);
+            }
+            entry->sft_psp = internal_data->cu_psp;
+        }
+        cf = 0;
+    }
+    else
+    if (CPU_AX == 0x120d) {
+        /* Return current date/time in DOS packed directory format. */
+        CPU_AX = dos_getdate();
+        CPU_DX = dos_gettime();
         cf = 0;
     }
     else
