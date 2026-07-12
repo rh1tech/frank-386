@@ -861,6 +861,34 @@ bool fdos_2fh(CPU* cpu) {
         cf = 0;
     }
     else
+    if (CPU_AX == 0x122b) {
+        /*
+         * Internal Device I/O Control wrapper.
+         *
+         * Upstream accepts BP=4400h..44FFh, moves BP to AX and invokes
+         * DosDevIOctl().  The current port's DosDevIOctl() uses live
+         * CPU_* registers, so no synthetic register structure is needed.
+         */
+        COUNT rc;
+
+        if (CPU_BP < 0x4400 || CPU_BP > 0x44ff) {
+            CPU_AX = (UWORD)-DE_INVLDFUNC;
+            cf = 1;
+        } else {
+            CPU_AX = CPU_BP;
+            rc = DosDevIOctl();
+
+            if (rc < SUCCESS) {
+                CPU_AX = (UWORD)-rc;
+                if (rc != DE_DEVICE && rc != DE_ACCESS)
+                    internal_data->CritErrCode = CPU_AX;
+                cf = 1;
+            } else {
+                cf = 0;
+            }
+        }
+    }
+    else
     if (CPU_AX == 0x122C) {
         /* Return the second device in the chain, skipping NUL. */
         CPU_BX = FP_SEG(LoL->nul_dev.dh_next);

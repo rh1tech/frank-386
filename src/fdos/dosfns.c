@@ -1254,11 +1254,7 @@ COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
     dpbp = (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
     xfsp->xfs_secsize = dpbp->dpb_secsize;
     xfsp->xfs_totalclusters = (ISFAT32(dpbp) ? dpbp->dpb_xsize : dpbp->dpb_size) - 1;
-/// TODO:    xfsp->xfs_freeclusters = dos_free(dpbp); replacemnt:
-    xfsp->xfs_freeclusters = ISFAT32(dpbp)
-                            ? dpbp->dpb_xnfreeclst
-                            : (dpbp->dpb_nfreeclst == 0xFFFF
-                               ? 0 : dpbp->dpb_nfreeclst);
+    xfsp->xfs_freeclusters = dos_free(dpbp);
     xfsp->xfs_clussize = dpbp->dpb_clsmask + 1;
   }
 

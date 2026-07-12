@@ -59,13 +59,16 @@ struct fcom_guest {
   UBYTE exit_requested;
   UBYTE exit_batch_only;
   UWORD exit_code;
+  UWORD dir_stack_used;
 };
 #pragma pack(pop)
 
-#define FCOM_DATA_END       (FCOM_WORK_OFFSET + sizeof(struct fcom_guest))
-#define FCOM_GUARD_OFFSET   FCOM_ALIGN16(FCOM_DATA_END)
-#define FCOM_STACK_BOTTOM   (FCOM_GUARD_OFFSET + FCOM_STACK_GUARD)
-#define FCOM_STACK_BYTES    (0x10000u - FCOM_STACK_BOTTOM)
+#define FCOM_DATA_END          (FCOM_WORK_OFFSET + sizeof(struct fcom_guest))
+#define FCOM_DIR_STACK_BYTES   1024u
+#define FCOM_DIR_STACK_OFFSET  FCOM_ALIGN16(FCOM_DATA_END)
+#define FCOM_GUARD_OFFSET      (FCOM_DIR_STACK_OFFSET + FCOM_DIR_STACK_BYTES)
+#define FCOM_STACK_BOTTOM      (FCOM_GUARD_OFFSET + FCOM_STACK_GUARD)
+#define FCOM_STACK_BYTES       (0x10000u - FCOM_STACK_BOTTOM)
 
 _Static_assert(FCOM_STACK_BOTTOM < 0x10000u,
                "FCOM guest data leaves no room for guest stack");
@@ -80,6 +83,12 @@ static int int21_failed(CPU *cpu)
 static UBYTE *stack_guard(UWORD command_psp)
 {
   return (UBYTE *)ARM_PTR(MK_FP(command_psp, FCOM_GUARD_OFFSET));
+}
+
+
+static char *fcom_dir_stack_storage(UWORD command_psp)
+{
+  return (char *)ARM_PTR(MK_FP(command_psp, FCOM_DIR_STACK_OFFSET));
 }
 
 static void init_stack_guard(UWORD command_psp)
@@ -1071,6 +1080,196 @@ static void builtin_cdd(CPU *cpu, UWORD command_psp,
       (void)dos_set_drive(cpu, command_psp, old_drive);
     dos_puts(cpu, command_psp, g, "Invalid directory\r\n");
   }
+}
+
+
+static int fcom_get_current_directory(CPU *cpu, UWORD command_psp,
+                                      struct fcom_guest *g,
+                                      char *dst, size_t dst_size)
+{
+  unsigned drive = dos_get_drive(cpu, command_psp);
+  size_t used = 0;
+
+  if (dst_size < 4)
+    return 0;
+
+  dst[used++] = (char)('A' + drive);
+  dst[used++] = ':';
+  dst[used++] = '\\';
+
+  if (dos_get_cwd(cpu, command_psp, g, 0) < 0)
+    return 0;
+
+  if (g->path[0] != '\0') {
+    size_t n = strlen(g->path);
+
+    if (used + n >= dst_size)
+      return 0;
+
+    memcpy(dst + used, g->path, n);
+    used += n;
+  }
+
+  dst[used] = '\0';
+  return 1;
+}
+
+static void fcom_dir_stack_drop_oldest(UWORD command_psp,
+                                       struct fcom_guest *g)
+{
+  char *storage = fcom_dir_stack_storage(command_psp);
+  size_t oldest;
+
+  if (g->dir_stack_used == 0)
+    return;
+
+  oldest = strlen(storage) + 1;
+  if (oldest >= g->dir_stack_used) {
+    g->dir_stack_used = 0;
+    storage[0] = '\0';
+    return;
+  }
+
+  memmove(storage, storage + oldest, g->dir_stack_used - oldest);
+  g->dir_stack_used -= (UWORD)oldest;
+}
+
+static int fcom_dir_stack_push(UWORD command_psp,
+                               struct fcom_guest *g,
+                               const char *directory)
+{
+  char *storage = fcom_dir_stack_storage(command_psp);
+  size_t needed = strlen(directory) + 1;
+
+  if (needed > FCOM_DIR_STACK_BYTES)
+    return 0;
+
+  while ((size_t)g->dir_stack_used + needed > FCOM_DIR_STACK_BYTES)
+    fcom_dir_stack_drop_oldest(command_psp, g);
+
+  memcpy(storage + g->dir_stack_used, directory, needed);
+  g->dir_stack_used += (UWORD)needed;
+  return 1;
+}
+
+static char *fcom_dir_stack_last(UWORD command_psp,
+                                 struct fcom_guest *g)
+{
+  char *storage = fcom_dir_stack_storage(command_psp);
+  size_t pos = 0;
+  char *last = NULL;
+
+  while (pos < g->dir_stack_used) {
+    last = storage + pos;
+    pos += strlen(last) + 1;
+  }
+
+  return last;
+}
+
+static void fcom_dir_stack_pop_last(UWORD command_psp,
+                                    struct fcom_guest *g)
+{
+  char *storage = fcom_dir_stack_storage(command_psp);
+  char *last = fcom_dir_stack_last(command_psp, g);
+
+  if (last == NULL)
+    return;
+
+  g->dir_stack_used = (UWORD)(last - storage);
+  if (g->dir_stack_used < FCOM_DIR_STACK_BYTES)
+    storage[g->dir_stack_used] = '\0';
+}
+
+static void builtin_pushd(CPU *cpu, UWORD command_psp,
+                          struct fcom_guest *g, char *args)
+{
+  if (!fcom_get_current_directory(cpu, command_psp, g,
+                                  g->path2, sizeof(g->path2)) ||
+      !fcom_dir_stack_push(command_psp, g, g->path2)) {
+    dos_puts(cpu, command_psp, g, "Out of memory.\r\n");
+    return;
+  }
+
+  args = skip_space(args);
+  if (*args != '\0')
+    builtin_cdd(cpu, command_psp, g, args);
+}
+
+static void builtin_popd(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g, char *args)
+{
+  char *storage = fcom_dir_stack_storage(command_psp);
+  char *p = skip_space(args);
+  char *directory;
+
+  if (*p == '*') {
+    p = skip_space(p + 1);
+    if (*p != '\0') {
+      dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
+      return;
+    }
+
+    g->dir_stack_used = 0;
+    storage[0] = '\0';
+    return;
+  }
+
+  if (*p != '\0') {
+    dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
+    return;
+  }
+
+  directory = fcom_dir_stack_last(command_psp, g);
+  if (directory == NULL) {
+    dos_puts(cpu, command_psp, g, "Directory stack empty.\r\n");
+    return;
+  }
+
+  strncpy(g->path2, directory, sizeof(g->path2) - 1);
+  g->path2[sizeof(g->path2) - 1] = '\0';
+
+  builtin_cdd(cpu, command_psp, g, g->path2);
+
+  if (fcom_get_current_directory(cpu, command_psp, g,
+                                 g->path, sizeof(g->path)) &&
+      strcasecmp(g->path, g->path2) == 0)
+    fcom_dir_stack_pop_last(command_psp, g);
+}
+
+static void builtin_dirs(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g, char *args)
+{
+  char *storage = fcom_dir_stack_storage(command_psp);
+  size_t pos = 0;
+  unsigned count = 0;
+  int n;
+
+  if (*skip_space(args) != '\0') {
+    dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
+    return;
+  }
+
+  while (pos < g->dir_stack_used) {
+    const char *directory = storage + pos;
+
+    dos_puts(cpu, command_psp, g, directory);
+    dos_puts(cpu, command_psp, g, "\r\n");
+    pos += strlen(directory) + 1;
+    ++count;
+  }
+
+  if (count == 0) {
+    dos_puts(cpu, command_psp, g, "Directory stack empty.\r\n");
+    return;
+  }
+
+  n = snprintf(g->text, sizeof(g->text),
+               "%u items displayed.\r\n", count);
+  if (n > 0)
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+        (UWORD)n);
 }
 
 
@@ -2194,6 +2393,21 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
 
   if (command_is(g->filename, "CDD")) {
     builtin_cdd(cpu, command_psp, g, args);
+    return 1;
+  }
+
+  if (command_is(g->filename, "PUSHD")) {
+    builtin_pushd(cpu, command_psp, g, args);
+    return 1;
+  }
+
+  if (command_is(g->filename, "POPD")) {
+    builtin_popd(cpu, command_psp, g, args);
+    return 1;
+  }
+
+  if (command_is(g->filename, "DIRS")) {
+    builtin_dirs(cpu, command_psp, g, args);
     return 1;
   }
 
@@ -3830,6 +4044,7 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode)
 
   g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
   memset(g, 0, sizeof(*g));
+  memset(fcom_dir_stack_storage(command_psp), 0, FCOM_DIR_STACK_BYTES);
   g->echo_enabled = 1;
   init_stack_guard(command_psp);
 
