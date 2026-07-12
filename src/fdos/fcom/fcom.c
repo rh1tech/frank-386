@@ -1981,42 +1981,396 @@ static void report_file_error(CPU *cpu, UWORD command_psp,
   dos_puts(cpu, command_psp, g, "'\r\n");
 }
 
+#define FCOM_RMDIR_SLOTS      256u
+#define FCOM_RMDIR_PATH_BYTES 128u
+
+static void fcom_dirfct_error(CPU *cpu, UWORD command_psp,
+                              struct fcom_guest *g,
+                              const char *function_name,
+                              const char *directory)
+{
+  int n = snprintf(g->text, sizeof(g->text),
+                   "%s failed for '%s'.\r\n",
+                   function_name, directory);
+
+  if (n > 0)
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+        (UWORD)n);
+}
+
+static int fcom_md_rd_bool_option(const char *arg,
+                                  int letter, int *value)
+{
+  const char *p = arg;
+  int enabled = 1;
+
+  if (*p != '/' && *p != '-')
+    return 0;
+  ++p;
+
+  if (*p == '-') {
+    enabled = 0;
+    ++p;
+  }
+
+  if (toupper((unsigned char)p[0]) != letter || p[1] != '\0')
+    return 0;
+
+  *value = enabled;
+  return 1;
+}
+
+static int fcom_parse_md_rd(char *args, int mkdir_command,
+                            char **directory,
+                            int *recursive, int *quiet)
+{
+  char *cursor = args;
+  char *arg;
+
+  *directory = NULL;
+  *recursive = 0;
+  *quiet = 0;
+
+  while ((arg = next_argument(&cursor)) != NULL) {
+    if (fcom_md_rd_bool_option(
+            arg, mkdir_command ? 'P' : 'S', recursive))
+      continue;
+
+    if (fcom_md_rd_bool_option(arg, 'Q', quiet))
+      continue;
+
+    if ((arg[0] == '/' || arg[0] == '-') && arg[1] != '\0')
+      return 0;
+
+    if (*directory != NULL)
+      return 0;
+
+    *directory = arg;
+  }
+
+  return *directory != NULL;
+}
+
+static void fcom_cut_backslash(char *path)
+{
+  size_t n = strlen(path);
+
+  while (n > 0 &&
+         (path[n - 1] == '\\' || path[n - 1] == '/')) {
+    /*
+     * Preserve "X:\" and "\". FreeCOM's cutBackslash() removes only
+     * redundant trailing separators.
+     */
+    if (n == 1 ||
+        (n == 3 && path[1] == ':'))
+      break;
+
+    path[--n] = '\0';
+  }
+}
+static int fcom_get_file_attr(CPU *cpu, UWORD command_psp,
+                              struct fcom_guest *g,
+                              const char *name, UWORD *attributes);
+
+static int fcom_recursive_mkdir(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g,
+                                const char *directory)
+{
+  size_t n = strlen(directory);
+  size_t i;
+  size_t start;
+
+  if (n == 0 || n >= sizeof(g->path2))
+    return -3;
+
+  strcpy(g->path2, directory);
+  fcom_cut_backslash(g->path2);
+
+  n = strlen(g->path2);
+  start = (n >= 2 && g->path2[1] == ':') ? 2u : 0u;
+
+  /*
+   * cmd/mkdir.c walks every path component and creates it when absent.
+   * A drive prefix and the root separator are not passed to mkdir().
+   */
+  for (i = start; i <= n; ++i) {
+    char saved;
+    UWORD attributes;
+
+    if (i != n &&
+        g->path2[i] != '\\' &&
+        g->path2[i] != '/')
+      continue;
+
+    if (i == start ||
+        (i == start + 1 &&
+         (g->path2[start] == '\\' || g->path2[start] == '/')))
+      continue;
+
+    saved = g->path2[i];
+    g->path2[i] = '\0';
+
+    if (fcom_get_file_attr(cpu, command_psp, g,
+                           g->path2, &attributes) == 0) {
+      if (!(attributes & D_DIR)) {
+        g->path2[i] = saved;
+        return -1;
+      }
+    } else if (fcom_mkdir(cpu, command_psp, g, g->path2) < 0) {
+      g->path2[i] = saved;
+      return -1;
+    }
+
+    g->path2[i] = saved;
+  }
+
+  return 0;
+}
+
+static int fcom_rmdir_confirm(CPU *cpu, UWORD command_psp,
+                              struct fcom_guest *g,
+                              const char *directory)
+{
+  int ch;
+
+  dos_puts(cpu, command_psp, g, "All files in '");
+  dos_puts(cpu, command_psp, g, directory);
+  dos_puts(cpu, command_psp, g,
+           "' will be deleted!\r\nAre you sure (Y/N)? ");
+
+  for (;;) {
+    CPU_AH = 0x08;
+    fcom_intcall(cpu, command_psp, 0x21,
+                 "FCOM RMDIR confirmation");
+    ch = toupper((unsigned char)CPU_AL);
+
+    if (ch == 'Y' || ch == 'N' ||
+        ch == '\r' || ch == '\n' || ch == 0x03)
+      break;
+
+    g->io[0] = '\a';
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 1);
+  }
+
+  if (ch == '\r' || ch == '\n' || ch == 0x03)
+    ch = 'N';
+
+  g->io[0] = (UBYTE)ch;
+  g->io[1] = '\r';
+  g->io[2] = '\n';
+  (void)fcom_write(cpu, command_psp,
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 3);
+
+  return ch == 'Y';
+}
+
+static char *fcom_rmdir_slot(char *storage, unsigned index)
+{
+  return storage + (size_t)index * FCOM_RMDIR_PATH_BYTES;
+}
+
+static int fcom_rmdir_join(char *dst, size_t dst_size,
+                           const char *directory,
+                           const char *name)
+{
+  size_t dn = strlen(directory);
+  size_t nn = strlen(name);
+  int slash = dn != 0 &&
+              directory[dn - 1] != '\\' &&
+              directory[dn - 1] != '/';
+
+  if (dn + (size_t)slash + nn >= dst_size)
+    return 0;
+
+  memcpy(dst, directory, dn);
+  if (slash)
+    dst[dn++] = '\\';
+  memcpy(dst + dn, name, nn + 1);
+  return 1;
+}
+
+static int fcom_recursive_rmdir(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g,
+                                const char *directory,
+                                int quiet)
+{
+  UWORD attributes;
+  UWORD paras;
+  int segment;
+  char *storage;
+  unsigned used = 1;
+  unsigned scan_index;
+  int result = -1;
+
+  if (strlen(directory) >= FCOM_RMDIR_PATH_BYTES)
+    return -3;
+
+  if (fcom_get_file_attr(cpu, command_psp, g,
+                         directory, &attributes) < 0 ||
+      !(attributes & D_DIR))
+    return -1;
+
+  if (!quiet &&
+      !fcom_rmdir_confirm(cpu, command_psp, g, directory))
+    return -1;
+
+  paras = (UWORD)(((size_t)FCOM_RMDIR_SLOTS *
+                   FCOM_RMDIR_PATH_BYTES + 15u) >> 4);
+  segment = guest_alloc(cpu, command_psp, paras);
+  if (segment < 0)
+    return -8;
+
+  storage = (char *)ARM_PTR(MK_FP((UWORD)segment, 0));
+  memset(storage, 0, (size_t)paras << 4);
+  strcpy(fcom_rmdir_slot(storage, 0), directory);
+  fcom_cut_backslash(fcom_rmdir_slot(storage, 0));
+
+  /*
+   * Original rmdir_withfiles() recursively visits directories first,
+   * then files, then removes the directory. The native port keeps the
+   * same order but stores the recursion list in guest DOS memory.
+   */
+  for (scan_index = 0;
+       scan_index < used && scan_index < FCOM_RMDIR_SLOTS;
+       ++scan_index) {
+    char *current = fcom_rmdir_slot(storage, scan_index);
+    int rc;
+
+    if (!fcom_rmdir_join(g->batch_arg, sizeof(g->batch_arg),
+                         current, "*.*"))
+      goto done;
+
+    memset(&g->find, 0, sizeof(g->find));
+    if (set_find_dta(cpu, command_psp) < 0)
+      goto done;
+
+    rc = dos_find_first_attr(cpu, command_psp, g,
+                             g->batch_arg, D_DIR);
+    while (rc == 0) {
+      if ((g->find.dm_attr_fnd & D_DIR) &&
+          strcmp(g->find.dm_name, ".") != 0 &&
+          strcmp(g->find.dm_name, "..") != 0) {
+        char *next;
+
+        if (used >= FCOM_RMDIR_SLOTS) {
+          restore_default_dta(cpu, command_psp);
+          goto done;
+        }
+
+        next = fcom_rmdir_slot(storage, used);
+        if (!fcom_rmdir_join(next, FCOM_RMDIR_PATH_BYTES,
+                             current, g->find.dm_name)) {
+          restore_default_dta(cpu, command_psp);
+          goto done;
+        }
+        ++used;
+      }
+
+      rc = dos_find_next(cpu, command_psp);
+    }
+
+    restore_default_dta(cpu, command_psp);
+
+    if (!fcom_rmdir_join(g->batch_arg, sizeof(g->batch_arg),
+                         current, "*.*"))
+      goto done;
+
+    memset(&g->find, 0, sizeof(g->find));
+    if (set_find_dta(cpu, command_psp) < 0)
+      goto done;
+
+    /*
+     * FA_NORMAL in the original is zero. It therefore enumerates ordinary
+     * files but does not forcibly include hidden or system entries.
+     */
+    rc = dos_find_first_attr(cpu, command_psp, g,
+                             g->batch_arg, 0);
+    while (rc == 0) {
+      if (!(g->find.dm_attr_fnd & D_DIR) &&
+          fcom_rmdir_join(g->path2, sizeof(g->path2),
+                           current, g->find.dm_name)) {
+        (void)dos_unlink(cpu, command_psp, g, g->path2);
+
+        if (set_find_dta(cpu, command_psp) < 0) {
+          restore_default_dta(cpu, command_psp);
+          goto done;
+        }
+      }
+
+      rc = dos_find_next(cpu, command_psp);
+    }
+
+    restore_default_dta(cpu, command_psp);
+  }
+
+  if (scan_index != used)
+    goto done;
+
+  while (used != 0) {
+    char *current = fcom_rmdir_slot(storage, --used);
+
+    if (fcom_rmdir(cpu, command_psp, g, current) < 0)
+      goto done;
+  }
+
+  result = 0;
+
+done:
+  guest_free(cpu, command_psp, (UWORD)segment);
+  return result;
+}
+
 static void builtin_mkdir(CPU *cpu, UWORD command_psp,
                           struct fcom_guest *g, char *args)
 {
-  char *cursor = args;
-  char *name;
-  unsigned count = 0;
+  char *directory;
+  int recursive;
+  int quiet;
+  int rc;
 
-  while ((name = next_argument(&cursor)) != NULL) {
-    ++count;
-
-    if (fcom_mkdir(cpu, command_psp, g, name) < 0)
-      report_file_error(cpu, command_psp, g,
-                        "Unable to create directory. - '", name);
+  if (!fcom_parse_md_rd(args, 1,
+                        &directory, &recursive, &quiet)) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+    return;
   }
 
-  if (count == 0)
-    dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
+  fcom_cut_backslash(directory);
+
+  rc = recursive
+      ? fcom_recursive_mkdir(cpu, command_psp, g, directory)
+      : fcom_mkdir(cpu, command_psp, g, directory);
+
+  if (rc < 0 && !quiet)
+    fcom_dirfct_error(cpu, command_psp, g,
+                      "MKDIR", directory);
 }
 
 static void builtin_rmdir(CPU *cpu, UWORD command_psp,
                           struct fcom_guest *g, char *args)
 {
-  char *cursor = args;
-  char *name;
-  unsigned count = 0;
+  char *directory;
+  int recursive;
+  int quiet;
+  int rc;
 
-  while ((name = next_argument(&cursor)) != NULL) {
-    ++count;
-
-    if (fcom_rmdir(cpu, command_psp, g, name) < 0)
-      report_file_error(cpu, command_psp, g,
-                        "Unable to remove directory. - '", name);
+  if (!fcom_parse_md_rd(args, 0,
+                        &directory, &recursive, &quiet)) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+    return;
   }
 
-  if (count == 0)
-    dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
+  fcom_cut_backslash(directory);
+
+  rc = recursive
+      ? fcom_recursive_rmdir(cpu, command_psp, g,
+                             directory, quiet)
+      : fcom_rmdir(cpu, command_psp, g, directory);
+
+  if (rc < 0 && !quiet)
+    fcom_dirfct_error(cpu, command_psp, g,
+                      "RMDIR", directory);
 }
 
 static int make_delete_name(struct fcom_guest *g,

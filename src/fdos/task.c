@@ -439,6 +439,7 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   struct saved_cpu_ctx parent_ctx;
   UWORD saved_cu_psp = internal_data->cu_psp;
   dos_far_ptr saved_dta = internal_data->dta;
+  UBYTE saved_indos = internal_data->InDOS;
   bool saved_terminate_flag = terminate_flag;
 
   save_ctx(cpu, &parent_ctx);
@@ -467,6 +468,15 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
 
   terminate_flag = false;
   cpu->native_done = false;
+  /*
+   * Upstream load_transfer() decrements InDOS before transferring
+   * control to the child.  The child is ordinary user code, not a
+   * continuation of the parent's INT 21h service.  Its first DOS call
+   * must therefore observe InDOS changing 0 -> 1, not 1 -> 2.
+   */
+  if (internal_data->InDOS != 0)
+    --internal_data->InDOS;
+
   while (!terminate_flag)
     pc_step(pc, 4096);
   /* request_terminate() set native_done to abort the batch; clear it,
@@ -475,6 +485,7 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
      without executing a single instruction. */
   cpu->native_done = false;
   terminate_flag = saved_terminate_flag;
+  internal_data->InDOS = saved_indos;
 
   /* --- child terminated: return_user()'s equivalent --- */
   {

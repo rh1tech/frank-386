@@ -637,6 +637,7 @@ bool fdos_21h(CPU* _cpu) {
     uint16_t flags_on_stack = readw86(((uint32_t)entry_ss << 4) + entry_sp + 4);
     regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
     internal_data->Int21AX = R_AX;
+    ++internal_data->InDOS;
     dpb_watch_int21_checkpoint(cpu, "entry");
     /* STI: real DOS re-enables interrupts first thing in its INT 21h
        entry stub (FreeDOS entry.asm does "sti" right after the stack
@@ -2308,6 +2309,7 @@ exit_dispatch:
     dpb_watch_int21_checkpoint(cpu, "exit");
     writew86(((uint32_t)entry_ss << 4) + entry_sp + 4, flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
+    --internal_data->InDOS;
     return true;
 }
 
