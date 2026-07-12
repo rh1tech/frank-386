@@ -324,13 +324,25 @@ void bios_33h_install(CPU* cpu, int enabled)
 /* ------------------------------------------------------------------ */
 bool bios_33h(CPU* cpu)
 {
+    /*
+     * A disabled mouse driver still has a callable INT 33h entry point.
+     * The standard reset/status probe reports AX=0000h when no driver is
+     * installed.  Other functions are harmless no-ops in that state.
+     */
+    if (!m.installed) {
+        if (CPU_AX == 0x0000 || CPU_AX == 0x0021) {
+            CPU_AX = 0x0000;
+            CPU_BX = 0x0000;
+        }
+        return true;
+    }
+    
     switch (CPU_AX) {
 
     case 0x0000:    /* Reset driver and read status */
     case 0x0021:    /* Software reset */
         cursor_erase();
         bios_33h_reset();
-        m.installed = 1;
         mouse_hw_init(cpu);
         CPU_AX = 0xFFFF;
         CPU_BX = MOUSE_BUTTONS;

@@ -1561,11 +1561,18 @@ void bios_post(PC *pc) {
 	point2iret(0x2f);
 // MS MOUSE: INT 33h + IRQ12 (INT 74h).
 // Драйвер в bios/bios_33h.c, данные берёт из 8042 по IRQ12
+	/*
+     * Keep INT 33h pointing at a valid entry point even when mouse
+	 * support is disabled.  A null IVT entry is not a callable
+	 * "driver absent" stub: software which probes the vector and then
+	 * calls it starts executing at 0000:0000.
+	 *
+	 * bios_33h() reports AX=0000h for reset/status while disabled.
+	 */
+	pstore16(0x33*4, 0x0033); pstore16(0x33*4 + 2, 0xFFE0);
 	if (pc->mouse_enabled) {
-		pstore16(0x33*4, 0x0033); pstore16(0x33*4 + 2, 0xFFE0);
 		pstore16(0x74*4, 0x0074); pstore16(0x74*4 + 2, 0xFFE0);
 	} else {
-		point2zero(0x33);          /* вектор 0 == "драйвера мыши нет" */
 		point2iret(0x74);
 	}
 // IRQ14 - HARD DISK CONTROLLER OPERATION COMPLETE (AT and later)
