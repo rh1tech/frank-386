@@ -1120,12 +1120,22 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         unsigned old_hndl = R_BX;
         psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
         UBYTE *filetab = (UBYTE *)ARM_PTR(p->ps_filetab);
+        dos_far_ptr old_sft;
         unsigned new_hndl;
 
         if (old_hndl >= p->ps_maxfiles || filetab[old_hndl] == 0xff)
         {
           R_CF = 1;
           R_AX = (UWORD)(-DE_INVLDHNDL);
+          break;
+        }
+
+        old_sft = idx_to_sft(filetab[old_hndl]);
+        if (far_is_end(old_sft) ||
+            (((sft *)ARM_PTR(old_sft))->sft_mode & O_NOINHERIT))
+        {
+          cf = 1;
+          CPU_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
 
@@ -1143,7 +1153,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         }
 
         filetab[new_hndl] = filetab[old_hndl];
-        ((sft*) ARM_PTR (idx_to_sft(filetab[new_hndl]) ))->sft_count++;
+        ((sft *)ARM_PTR(old_sft))->sft_count++;
 
         R_AX = (UWORD)new_hndl;
         R_CF = 0;
@@ -1174,11 +1184,27 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         {
           /* close new handle if open */
           if (filetab[new_hndl] != 0xff)
-            DosClose(new_hndl);
-
+          {
+            COUNT close_rc = DosClose(new_hndl);
+            if (close_rc < SUCCESS)
+            {
+              cf = 1;
+              CPU_AX = (UWORD)(-close_rc);
+              break;
+            }
+          }
           /* copy SFT index and bump ref count */
           filetab[new_hndl] = filetab[old_hndl];
-          ((sft*) ARM_PTR (idx_to_sft(filetab[new_hndl]) ))->sft_count++;
+          {
+            dos_far_ptr old_sft = idx_to_sft(filetab[old_hndl]);
+            if (far_is_end(old_sft))
+            {
+              cf = 1;
+              CPU_AX = (UWORD)(-DE_INVLDHNDL);
+              break;
+            }
+            ((sft *)ARM_PTR(old_sft))->sft_count++;
+          }
         }
         R_CF = 0;
       }

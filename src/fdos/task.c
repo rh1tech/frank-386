@@ -189,19 +189,26 @@ void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h *
   memset(p->ps_files, 0xff, 20);
   p->ps_filetab = linear_to_far(p->ps_files);
 
-  /* Inherit all of the parent's open handles.
-
-     Simplification vs upstream: CloneHandle() (which checks a
-     per-handle "don't inherit across EXEC" bit, set via IOCTL) isn't
-     implemented, so every open handle is always inherited - the
-     common case; the "don't inherit" bit is a rarely-used opt-out
-     most programs never set. */
+  /*
+   * Inherit the parent's first 20 handles, matching upstream
+   * CloneHandle(): handles whose SFT has O_NOINHERIT are deliberately
+   * omitted from the child JFT and their SFT reference count is not
+   * incremented.
+   */
   for (i = 0; i < 20; i++)
   {
     if (q_filetab[i] != 0xff)
     {
-      p->ps_files[i] = q_filetab[i];
-      ((sft*)ARM_PTR(idx_to_sft(p->ps_files[i])))->sft_count++;
+      dos_far_ptr sft_ptr = idx_to_sft(q_filetab[i]);
+      if (!far_is_end(sft_ptr))
+      {
+        sft *entry = (sft *)ARM_PTR(sft_ptr);
+        if (!(entry->sft_mode & O_NOINHERIT))
+        {
+          p->ps_files[i] = q_filetab[i];
+          entry->sft_count++;
+        }
+      }
     }
   }
 
@@ -895,8 +902,9 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
      * One fcom_run() call represents one COMMAND process lifetime.
      * If it exits, recreate process 0 just as the original P_0 loop
      * recreated COMMAND.COM.
+     * Config->cfgP_0_startmode - ignored, try HMA/UMB anytime
      */
-    fcom_run(cpu_, (const char *)Config->cfgInitTail, Config->cfgP_0_startmode);
+    fcom_run(cpu_, (const char *)Config->cfgInitTail, 0x80);
 
     put_string("Native COMMAND.COM restarting as process #0 with parameters: ");
     put_string((BYTE *)Config->cfgInitTail);

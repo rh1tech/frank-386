@@ -337,42 +337,49 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   return sft_idx | ((long)result << 16);
 }
 
-
 /*
-    idx_to_sft_(SftIndex) - walk the SFT block list (LoL->sfthead) and
-    set DD->lpCurSft to the SFT entry at SftIndex, regardless of
-    whether that entry is currently open (sft_count == 0 is valid here).
+    idx_to_sft_(SftIndex) - walk the SFT block list starting at
+    LoL->sfthead and set internal_data->lpCurSft to the indexed entry,
+    regardless of whether that entry is currently open
+    (sft_count == 0 is valid here).
 
-    Returns SftIndex unchanged on success, -1 if SftIndex is out of
-    range. Migrated from dosfns.c (also called from INT 2Fh/AX=1216h
-    in the original; that entry point is not implemented here yet).
+    The list head in LoL is persistent DOS state and must never be
+    advanced while searching.  Only a local guest far pointer follows
+    sftt_next.
+
+    Returns the index relative to the containing SFT block on success,
+    or -1 when the system file number is outside the complete chain.
+    INT 2Fh/AX=1216h uses that relative index in BX.
 */
 int idx_to_sft_(int SftIndex)
 {
+  dos_far_ptr block;
   sfttbl *sp;
-  dos_far_ptr x86_sp;
 
-  internal_data->lpCurSft = MK_FP(0xffff, 0xffff);
+   internal_data->lpCurSft = MK_FP(0xffff, 0xffff);
   if (SftIndex < 0)
     return -1;
 
-  /* Get the SFT block that contains the SFT      */
-  for (x86_sp = LoL->sfthead; !far_is_end(x86_sp); x86_sp = sp->sftt_next)
+    /* Find the SFT block containing this system file number. */
+  for (block = LoL->sfthead; !far_is_end(block); block = sp->sftt_next)
   {
-    sp = (sfttbl *)ARM_PTR(x86_sp);
+    sp = (sfttbl *)ARM_PTR(block);
+
     if (SftIndex < sp->sftt_count)
     {
-      /* finally, point to the right entry            */
-      internal_data->lpCurSft = linear_to_far(&sp->sftt_table[SftIndex]);
+      internal_data->lpCurSft =
+          MK_FP(FP_SEG(block),
+                FP_OFF(block) + offsetof(sfttbl, sftt_table)
+                              + SftIndex * sizeof(sft));
       return SftIndex;
     }
+
     SftIndex -= sp->sftt_count;
   }
 
   /* If not found, return an error                */
   return -1;
 }
-
 
 /*
     get_sft_idx(hndl) - translate a DOS file handle (as seen by the
@@ -1270,18 +1277,29 @@ COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
 #endif
 
 /* declared in proto.h, called by INT 21h AH=47h
-   (GET CURRENT DIRECTORY - see fdos_21h.c), but never implemented in
-   this port. drive: 0 = default drive, 1 = A:, 2 = B:, ...
+   (GET CURRENT DIRECTORY - see fdos_21h.c)
+   drive: 0 = default drive, 1 = A:, 2 = B:, ...
    dst: destination buffer as a guest dos_far_ptr (ES:DI / DS:SI as
    passed by the caller - see MK_FP(CPU_DS, CPU_SI) at the call site). */
 COUNT DosGetCuDir(UBYTE drive, dos_far_ptr dst)
 {
-  struct cds FAR *cdsp = get_cds1(drive);
-  const BYTE *src;
-  if (cdsp == NULL)
+  /*
+   * Match upstream FreeDOS: canonicalize "X:" with
+   * CDS_MODE_SKIP_PHYSICAL, then return the path without "X:\".
+   * Directly copying cdsCurrentPath is not equivalent for SUBST/JOIN.
+   */
+  if (drive-- == 0)
+    drive = internal_data->default_drive;
+
+  SecPathName[0] = (BYTE)('A' + (drive & 0x1f));
+  SecPathName[1] = ':';
+  SecPathName[2] = '\0';
+
+  if (truename(x86_FAR_PTR(DOS_PSP, (void *)SecPathName),
+               PriPathName, CDS_MODE_SKIP_PHYSICAL) < SUCCESS)
     return DE_INVLDDRV;
-  src = cdsp->cdsCurrentPath + cdsp->cdsBackslashOffset + 1;
-  strcpy((char *)ARM_PTR(dst), (const char *)src);
+
+  strcpy((char *)ARM_PTR(dst), PriPathName + 3);
   return SUCCESS;
 }
 

@@ -15,11 +15,6 @@
 #include "mpu401.c.inl"
 void netredirect_init(CPU *cpu, int enable);
 
-/* 1 = печатать в POST дамп ключевых полей (проверка, что патч реально в прошивке) */
-#ifndef NATIVE_POST_SELFTEST
-#define NATIVE_POST_SELFTEST 1
-#endif
-
 unsigned long phys_mem_size = 8l << 20;
 void* g_pc;
 
@@ -1594,6 +1589,7 @@ void bios_post(PC *pc) {
     * Делать ПОСЛЕ инициализации PIC (выше в bios_post), иначе IRQ12 замаскирован. */
     bios_33h_install(pc->cpu, pc->mouse_enabled);
 
+/* 1 = печатать в POST дамп ключевых полей (проверка, что патч реально в прошивке) */
 #if NATIVE_POST_SELFTEST
     /* Печатается сразу после VGA-баннера. */
     {

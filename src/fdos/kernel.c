@@ -1696,30 +1696,18 @@ int close(int fd) {
 }
 
 /*
-    idx_to_sft(SftIndex) - same as idx_to_sft_(), but only for
-    internal callers: returns a pointer to the SFT entry, and treats
-    an entry with sft_count == 0 (not currently open) as not found,
-    same as the original.
+    idx_to_sft(SftIndex) - translate a system file number into the
+    corresponding open SFT entry.
 
-    NOTE: idx_to_sft_() above walks (and overwrites) LoL->sfthead as
-    it follows sftt_next, mirroring how the original walks its local
-    "sp" variable started from the *global* sfthead - in the original
-    sfthead itself is never modified by this walk (only the local
-    copy "sp" is advanced). Doing the same here without disturbing
-    LoL->sfthead would require a separate cursor; since LoL->sfthead
-    always points back to the first (built-in) SFT block before any
-    call into this function and idx_to_sft_() does not persist its
-    walk across calls, every walk restarts from the right place, but
-    plays it safe with a save/restore around the walk so LoL->sfthead
-    is never observably changed by callers.
+    idx_to_sft_() performs the complete chain walk and leaves
+    internal_data->lpCurSft pointing at the exact guest SFT entry.
+    An unused entry (sft_count == 0) is reported as not found.
 */
 dos_far_ptr /*sft*/ idx_to_sft(int SftIndex)
 {
-  dos_far_ptr saved_head = LoL->sfthead;
   dos_far_ptr result;
 
   SftIndex = idx_to_sft_(SftIndex);
-  LoL->sfthead = saved_head;
 
   /* if not opened, the SFT is useless            */
   if (SftIndex == -1)
@@ -1765,27 +1753,39 @@ int network_redirector_fp(unsigned cmd, void *s)
     -----------------------------------------------------------------
     DosUpChar/DosUpString/DosUpMem/DosUpFChar/DosUpFString/DosUpFMem
     -----------------------------------------------------------------
-
-    /// TODO: the original (nls.c) routes every one of these through
-    /// nlsInfo (struct nlsInfoBlock), a fully pluggable national
-    /// language support layer: COUNTRY.SYS-style codepage tables,
-    /// DBCS lead-byte awareness, and a "FUpMem" variant specifically
-    /// for filenames that differs from plain DosUpMem by codepage-
-    /// specific rules. None of that (nlsInfo, xUpMem(), nlsFUpMem(),
-    /// muxUpMem(), codepage switching, DBCS) is implemented in this
-    /// codebase. What's below is a plain US-ASCII 'a'-'z' -> 'A'-'Z'
-    /// uppercase, nothing else - correct only for unaccented ASCII
-    /// names. Any non-ASCII/extended/DBCS byte is passed through
-    /// unchanged rather than miscased, but true codepage-aware
-    /// upcasing (accented Latin-1 letters, etc, as a real COUNTRY.SYS
-    /// would do) is simply not there. Needed now because truename()
-    /// (below) uppercases every path component as part of canonicalizing
-    /// a path, same as the original.
 */
-STATIC unsigned char ascii_upchar(unsigned char ch)
+STATIC unsigned char nls_upchar(unsigned char ch, unsigned table_index)
 {
   if (ch >= 'a' && ch <= 'z')
     return (unsigned char)(ch - 'a' + 'A');
+
+  if (ch >= 0x80)
+  {
+    struct nlsInfoBlock *info =
+        (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+
+    if (info != NULL && !far_is_null(info->actPkg))
+    {
+      struct nlsPackage *pkg =
+          (struct nlsPackage *)ARM_PTR(info->actPkg);
+
+      if (table_index < pkg->numSubfct)
+      {
+        dos_far_ptr table_ptr = pkg->nlsPointers[table_index].pointer;
+
+        if (!far_is_null(table_ptr))
+        {
+          struct nlsCharTbl *table =
+              (struct nlsCharTbl *)ARM_PTR(table_ptr);
+          unsigned index = (unsigned)ch - 0x80;
+
+          if (index < table->numEntries)
+            return table->tbl[index];
+        }
+      }
+    }
+  }
+
   return ch;
 }
 
@@ -1794,14 +1794,14 @@ VOID DosUpMem(VOID *str, unsigned len)
   unsigned char *p = (unsigned char *)str;
   while (len--)
   {
-    *p = ascii_upchar(*p);
+    *p = nls_upchar(*p, 0); /* NLS subfunction 2: normal uppercase */
     p++;
   }
 }
 
 unsigned char DosUpChar(unsigned char ch)
 {
-  return ascii_upchar(ch);
+  return nls_upchar(ch, 0);
 }
 
 VOID DosUpString(char *str)
@@ -1811,12 +1811,17 @@ VOID DosUpString(char *str)
 
 VOID DosUpFMem(VOID *str, unsigned len)
 {
-  DosUpMem(str, len);
+  unsigned char *p = (unsigned char *)str;
+  while (len--)
+  {
+    *p = nls_upchar(*p, 1); /* NLS subfunction 4: filename uppercase */
+    p++;
+  }
 }
 
 unsigned char DosUpFChar(unsigned char ch)
 {
-  return ascii_upchar(ch);
+  return nls_upchar(ch, 1);
 }
 
 VOID DosUpFString(char *str)
