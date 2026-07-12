@@ -82,6 +82,9 @@ struct fcom_batch_context {
 };
 #pragma pack(pop)
 
+static int execute_command_line(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g, char *line);
+
 #define FCOM_BATCH_CONTEXTS    8u
 #define FCOM_BATCH_CONTEXT_BYTES \
   (FCOM_BATCH_CONTEXTS * sizeof(struct fcom_batch_context))
@@ -1187,62 +1190,348 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
   return 0;
 }
 
-static void builtin_set(CPU *cpu, UWORD command_psp,
-                        struct fcom_guest *g, const char *args)
+static int fcom_set_bool_option(const char *arg,
+                                int letter, int *value)
 {
-  char *env;
-  size_t key_len;
-  unsigned left;
-  int found = 0;
+  const char *p = arg;
+  int enabled = 1;
 
-  if (strchr(args, '=') != NULL) {
-    int rc = replace_environment_variable(cpu, command_psp, g, args);
+  if (*p != '/' && *p != '-')
+    return 0;
+  ++p;
 
-    if (rc < 0)
-      dos_puts(cpu, command_psp, g, "Unable to set environment variable\r\n");
-    return;
+  if (*p == '-') {
+    enabled = 0;
+    ++p;
   }
 
-  env = environment_start(command_psp);
-  key_len = strlen(args);
-  left = 0x8000u;
+  if (toupper((unsigned char)p[0]) != letter || p[1] != '\0')
+    return 0;
 
-  while (env && left && *env) {
+  *value = enabled;
+  return 1;
+}
+
+static unsigned fcom_environment_bytes(UWORD command_psp)
+{
+  const psp *process = (const psp *)ARM_PTR(MK_FP(command_psp, 0));
+  const UBYTE *mcb;
+
+  if (process->ps_environ == 0)
+    return 0;
+
+  mcb = (const UBYTE *)ARM_PTR(MK_FP(process->ps_environ - 1u, 0));
+  return (unsigned)(mcb[3] | ((UWORD)mcb[4] << 8)) << 4;
+}
+
+static unsigned fcom_environment_used(UWORD command_psp)
+{
+  const char *env = environment_start(command_psp);
+  unsigned used = 0;
+  unsigned left = 0xfff0u;
+
+  if (env == NULL)
+    return 0;
+
+  while (left != 0 && *env != '\0') {
     size_t n = strnlen(env, left);
 
     if (n == left)
-      break;
+      return used;
 
-    if (key_len == 0 ||
-        env_name_matches(env, n, args, key_len)) {
-      size_t done = 0;
-
-      while (done < n) {
-        size_t chunk = n - done;
-
-        if (chunk > sizeof(g->io))
-          chunk = sizeof(g->io);
-        memcpy(g->io, env + done, chunk);
-        if (fcom_write(cpu, command_psp,
-                       FCOM_WORK_OFFSET +
-                         (UWORD)offsetof(struct fcom_guest, io),
-                       (UWORD)chunk) < 0)
-          return;
-        done += chunk;
-      }
-
-      dos_puts(cpu, command_psp, g, "\r\n");
-      found = 1;
-    }
-
+    used += (unsigned)n + 1u;
     env += n + 1;
     left -= (unsigned)n + 1u;
   }
 
-  if (key_len != 0 && !found)
-    dos_puts(cpu, command_psp, g, "Environment variable not defined\r\n");
+  if (left != 0)
+    ++used;
+
+  return used;
 }
 
+static void fcom_uppercase(char *text)
+{
+  while (*text != '\0') {
+    *text = (char)toupper((unsigned char)*text);
+    ++text;
+  }
+}
+
+static int fcom_set_read_prompt(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g,
+                                const char *prompt,
+                                char **value)
+{
+  int count;
+
+  dos_puts(cpu, command_psp, g, prompt);
+
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io);
+  CPU_BX = 0;
+  CPU_CX = sizeof(g->io) - 1u;
+  CPU_AH = 0x3f;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM SET /P read");
+
+  if (int21_failed(cpu))
+    return 0;
+
+  count = CPU_AX;
+  while (count > 0 &&
+         (g->io[count - 1] == '\r' || g->io[count - 1] == '\n'))
+    --count;
+
+  g->io[count] = '\0';
+  *value = (char *)g->io;
+  return 1;
+}
+
+static int fcom_set_delete_temp(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g)
+{
+  size_t n = strlen(g->pipe_temp);
+
+  if (n >= sizeof(g->path))
+    return 0;
+
+  memcpy(g->path, g->pipe_temp, n + 1);
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+  CPU_AH = 0x41;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM SET /E unlink");
+  return !int21_failed(cpu);
+}
+
+static int fcom_set_execute(CPU *cpu, UWORD command_psp,
+                            struct fcom_guest *g,
+                            const char *command,
+                            char **value)
+{
+  int handle;
+  int count;
+  size_t command_len;
+
+  snprintf(g->pipe_temp, sizeof(g->pipe_temp),
+           "FC%04X.$$$", command_psp);
+  (void)fcom_set_delete_temp(cpu, command_psp, g);
+
+  command_len = strlen(command);
+  if (command_len + 1u + strlen(g->pipe_temp) >= sizeof(g->for_command))
+    return 0;
+
+  memcpy(g->for_command, command, command_len);
+  g->for_command[command_len++] = '>';
+  strcpy(g->for_command + command_len, g->pipe_temp);
+
+  if (execute_command_line(cpu, command_psp, g, g->for_command) < 0) {
+    (void)fcom_set_delete_temp(cpu, command_psp, g);
+    return 0;
+  }
+
+  if (strlen(g->pipe_temp) >= sizeof(g->path))
+    return 0;
+  strcpy(g->path, g->pipe_temp);
+
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+  CPU_AX = 0x3d00;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM SET /E open");
+  if (int21_failed(cpu)) {
+    (void)fcom_set_delete_temp(cpu, command_psp, g);
+    return 0;
+  }
+
+  handle = CPU_AX;
+
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io);
+  CPU_BX = (UWORD)handle;
+  CPU_CX = sizeof(g->io) - 1u;
+  CPU_AH = 0x3f;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM SET /E read");
+
+  if (int21_failed(cpu))
+    count = -1;
+  else
+    count = CPU_AX;
+
+  CPU_BX = (UWORD)handle;
+  CPU_AH = 0x3e;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM SET /E close");
+  (void)fcom_set_delete_temp(cpu, command_psp, g);
+
+  if (count < 0)
+    return 0;
+
+  {
+    int i;
+
+    for (i = 0; i < count; ++i) {
+      if (g->io[i] == '\r' || g->io[i] == '\n')
+        break;
+    }
+    count = i;
+  }
+
+  g->io[count] = '\0';
+  *value = (char *)g->io;
+  return 1;
+}
+
+static int fcom_value_is_empty(const char *value)
+{
+  while (*value != '\0') {
+    if (*value != ' ' && *value != '\t')
+      return 0;
+    ++value;
+  }
+
+  return 1;
+}
+
+static void fcom_set_error(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g,
+                           const char *name)
+{
+  dos_puts(cpu, command_psp, g,
+           "Can not set environment variable '");
+  dos_puts(cpu, command_psp, g, name);
+  dos_puts(cpu, command_psp, g,
+           "'.\r\nEnvironment full?\r\n");
+}
+
+static void builtin_set(CPU *cpu, UWORD command_psp,
+                        struct fcom_guest *g, char *args)
+{
+  char *cursor = skip_space(args);
+  char *assignment;
+  char *equal;
+  char *value;
+  int opt_case = 0;
+  int opt_prompt = 0;
+  int opt_upper = 0;
+  int opt_execute = 0;
+  int opt_info = 0;
+
+  while ((*cursor == '/' || *cursor == '-') && cursor[1] != '\0') {
+    char *end = cursor;
+    char saved;
+    int recognized;
+
+    while (*end != '\0' && *end != ' ' && *end != '\t')
+      ++end;
+
+    saved = *end;
+    *end = '\0';
+
+    recognized =
+        fcom_set_bool_option(cursor, 'C', &opt_case) ||
+        fcom_set_bool_option(cursor, 'P', &opt_prompt) ||
+        fcom_set_bool_option(cursor, 'U', &opt_upper) ||
+        fcom_set_bool_option(cursor, 'E', &opt_execute) ||
+        fcom_set_bool_option(cursor, 'I', &opt_info);
+
+    *end = saved;
+
+    if (!recognized) {
+      dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
+      return;
+    }
+
+    cursor = skip_space(end);
+  }
+
+  assignment = cursor;
+
+  if (opt_info) {
+    unsigned bytes = fcom_environment_bytes(command_psp);
+    unsigned used = fcom_environment_used(command_psp);
+    int n = snprintf(g->text, sizeof(g->text),
+                     "Size of environment segment: %u bytes; unused: %u\r\n",
+                     bytes, bytes > used ? bytes - used : 0u);
+
+    if (n > 0)
+      (void)fcom_write(cpu, command_psp,
+          FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+          (UWORD)n);
+  }
+
+  if (*assignment == '\0') {
+    char *env = environment_start(command_psp);
+    unsigned left = 0xfff0u;
+
+    while (env != NULL && left != 0 && *env != '\0') {
+      size_t n = strnlen(env, left);
+
+      if (n == left)
+        break;
+
+      if ((unsigned char)env[0] > ' ') {
+        size_t done = 0;
+
+        while (done < n) {
+          size_t chunk = n - done;
+
+          if (chunk > sizeof(g->io))
+            chunk = sizeof(g->io);
+          memcpy(g->io, env + done, chunk);
+          if (fcom_write(cpu, command_psp,
+                         FCOM_WORK_OFFSET +
+                           (UWORD)offsetof(struct fcom_guest, io),
+                         (UWORD)chunk) < 0)
+            return;
+          done += chunk;
+        }
+        dos_puts(cpu, command_psp, g, "\r\n");
+      }
+
+      env += n + 1;
+      left -= (unsigned)n + 1u;
+    }
+    return;
+  }
+
+  equal = strchr(assignment, '=');
+  if (equal == NULL || equal == assignment) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+    return;
+  }
+
+  *equal = '\0';
+  value = equal + 1;
+
+  if (!opt_case)
+    fcom_uppercase(assignment);
+
+  if (opt_prompt) {
+    if (!fcom_set_read_prompt(cpu, command_psp, g, value, &value))
+      return;
+  }
+
+  if (opt_execute) {
+    if (!fcom_set_execute(cpu, command_psp, g, value, &value))
+      return;
+  }
+
+  if (opt_upper)
+    fcom_uppercase(value);
+
+  if (fcom_value_is_empty(value))
+    value = "";
+
+  if (strlen(assignment) + 1u + strlen(value) >= sizeof(g->text)) {
+    fcom_set_error(cpu, command_psp, g, assignment);
+    return;
+  }
+
+  strcpy(g->text, assignment);
+  strcat(g->text, "=");
+  strcat(g->text, value);
+
+  if (replace_environment_variable(cpu, command_psp, g, g->text) < 0)
+    fcom_set_error(cpu, command_psp, g, assignment);
+}
 
 static void builtin_path(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, char *args)
@@ -1251,21 +1540,9 @@ static void builtin_path(CPU *cpu, UWORD command_psp,
   char *env;
   size_t n;
 
-  while (*p != '\0') {
-    n = strlen(p);
-    if (n == 0 || (p[n - 1] != ' ' && p[n - 1] != '\t'))
-      break;
-    p[n - 1] = '\0';
-  }
-
-  /*
-   * FreeCOM cmd/path.c:
-   *   PATH with no argument displays PATH or "No search path defined."
-   *   PATH ; is not treated as the display form.
-   */
   if (*p == '\0' && strchr(args, ';') == NULL) {
     env = environment_start(command_psp);
-    while (env && *env) {
+    while (env != NULL && *env != '\0') {
       n = strlen(env);
       if (n >= 5 && strncasecmp(env, "PATH=", 5) == 0) {
         dos_puts(cpu, command_psp, g, "PATH=");
@@ -1280,41 +1557,43 @@ static void builtin_path(CPU *cpu, UWORD command_psp,
     return;
   }
 
-  if (strlen(p) + 5 >= sizeof(g->text)) {
-    dos_puts(cpu, command_psp, g,
-             "Unable to set environment variable\r\n");
+  n = strlen(p);
+  while (n != 0 && (p[n - 1] == ' ' || p[n - 1] == '\t'))
+    p[--n] = '\0';
+
+  if (strcmp(p, ";") == 0)
+    p = "";
+
+  if (strlen(p) + 5u >= sizeof(g->text)) {
+    fcom_set_error(cpu, command_psp, g, "PATH");
     return;
   }
 
-  memcpy(g->text, "PATH=", 5);
-  strcpy(g->text + 5, p);
-  if (replace_environment_variable(cpu, command_psp,
-                                   g, g->text) < 0)
-    dos_puts(cpu, command_psp, g,
-             "Unable to set environment variable\r\n");
+  strcpy(g->text, "PATH=");
+  strcat(g->text, p);
+
+  if (replace_environment_variable(cpu, command_psp, g, g->text) < 0)
+    fcom_set_error(cpu, command_psp, g, "PATH");
 }
-
-
 
 static void builtin_prompt(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, char *args)
 {
   char *p = skip_space(args);
-  size_t n = strlen(p);
 
-  if (n + 7 >= sizeof(g->text)) {
-    dos_puts(cpu, command_psp, g,
-             "Unable to set environment variable\r\n");
+  if (*p == '=')
+    p = skip_space(p + 1);
+
+  if (strlen(p) + 7u >= sizeof(g->text)) {
+    fcom_set_error(cpu, command_psp, g, "PROMPT");
     return;
   }
 
-  memcpy(g->text, "PROMPT=", 7);
-  memcpy(g->text + 7, p, n + 1);
+  strcpy(g->text, "PROMPT=");
+  strcat(g->text, p);
 
-  if (replace_environment_variable(cpu, command_psp,
-                                   g, g->text) < 0)
-    dos_puts(cpu, command_psp, g,
-             "Unable to set environment variable\r\n");
+  if (replace_environment_variable(cpu, command_psp, g, g->text) < 0)
+    fcom_set_error(cpu, command_psp, g, "PROMPT");
 }
 
 
@@ -1630,42 +1909,6 @@ static void builtin_truename(CPU *cpu, UWORD command_psp,
   dos_puts(cpu, command_psp, g, "\r\n");
 }
 
-static void builtin_cdd(CPU *cpu, UWORD command_psp,
-                        struct fcom_guest *g, char *args)
-{
-  char *p = skip_space(args);
-  unsigned old_drive;
-  unsigned new_drive;
-  int has_drive;
-
-  if (*p == '\0') {
-    dos_puts(cpu, command_psp, g, "Required parameter missing\r\n");
-    return;
-  }
-
-  old_drive = dos_get_drive(cpu, command_psp);
-  has_drive = isalpha((unsigned char)p[0]) && p[1] == ':';
-  new_drive = has_drive
-      ? (unsigned)(toupper((unsigned char)p[0]) - 'A')
-      : old_drive;
-
-  if (has_drive && !dos_set_drive(cpu, command_psp, new_drive)) {
-    dos_puts(cpu, command_psp, g, "Invalid drive\r\n");
-    return;
-  }
-
-  if (has_drive)
-    p += 2;
-  p = skip_space(p);
-
-  if (*p != '\0' && dos_change_dir(cpu, command_psp, g, p) < 0) {
-    if (has_drive)
-      (void)dos_set_drive(cpu, command_psp, old_drive);
-    dos_puts(cpu, command_psp, g, "Invalid directory\r\n");
-  }
-}
-
-
 static int fcom_get_current_directory(CPU *cpu, UWORD command_psp,
                                       struct fcom_guest *g,
                                       char *dst, size_t dst_size)
@@ -1697,6 +1940,96 @@ static int fcom_get_current_directory(CPU *cpu, UWORD command_psp,
   return 1;
 }
 
+static int fcom_cdd(CPU *cpu, UWORD command_psp,
+                    struct fcom_guest *g, char *args)
+{
+  char *p = skip_space(args);
+  char *end;
+  unsigned drive;
+  int has_drive;
+
+  /*
+   * lib/cd_dir.c: CDD with no arguments displays the current directory.
+   */
+  if (*p == '\0') {
+    if (!fcom_get_current_directory(cpu, command_psp, g,
+                                    g->path2, sizeof(g->path2)))
+      return 1;
+
+    dos_puts(cpu, command_psp, g, g->path2);
+    dos_puts(cpu, command_psp, g, "\r\n");
+    return 0;
+  }
+
+  /*
+   * scanCmdline() accepts exactly one argument. Quoted paths are unquoted;
+   * any second argument is a syntax error.
+   */
+  if (*p == '"') {
+    char *start = ++p;
+
+    while (*p != '\0' && *p != '"')
+      ++p;
+
+    if (*p == '"')
+      *p++ = '\0';
+
+    args = start;
+    p = skip_space(p);
+  } else {
+    args = p;
+    while (*p != '\0' && *p != ' ' && *p != '\t')
+      ++p;
+
+    end = p;
+    if (*end != '\0')
+      *end++ = '\0';
+
+    p = skip_space(end);
+  }
+
+  if (*p != '\0') {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+    return 1;
+  }
+
+  /*
+   * Remove redundant trailing backslashes, except for "\" and "X:\".
+   */
+  end = args + strlen(args);
+  while (end > args + 1 &&
+         end[-1] == '\\' &&
+         end[-2] != ':')
+    *--end = '\0';
+
+  has_drive = isalpha((unsigned char)args[0]) && args[1] == ':';
+
+  if (has_drive) {
+    drive = (unsigned)(toupper((unsigned char)args[0]) - 'A');
+
+    if (!dos_set_drive(cpu, command_psp, drive))
+      return 1;
+
+    if (args[2] == '\0')
+      return 0;
+  }
+
+  if (dos_change_dir(cpu, command_psp, g, args) < 0) {
+    dos_puts(cpu, command_psp, g, "CDD failed for '");
+    dos_puts(cpu, command_psp, g, args);
+    dos_puts(cpu, command_psp, g, "'.\r\n");
+    return 1;
+  }
+
+  return 0;
+}
+
+static void builtin_cdd(CPU *cpu, UWORD command_psp,
+                        struct fcom_guest *g, char *args)
+{
+  (void)fcom_cdd(cpu, command_psp, g, args);
+}
+
 static void fcom_dir_stack_drop_oldest(UWORD command_psp,
                                        struct fcom_guest *g)
 {
@@ -1713,7 +2046,8 @@ static void fcom_dir_stack_drop_oldest(UWORD command_psp,
     return;
   }
 
-  memmove(storage, storage + oldest, g->dir_stack_used - oldest);
+  memmove(storage, storage + oldest,
+          g->dir_stack_used - oldest);
   g->dir_stack_used -= (UWORD)oldest;
 }
 
@@ -1727,7 +2061,12 @@ static int fcom_dir_stack_push(UWORD command_psp,
   if (needed > FCOM_DIR_STACK_BYTES)
     return 0;
 
-  while ((size_t)g->dir_stack_used + needed > FCOM_DIR_STACK_BYTES)
+  /*
+   * chgCtxt() discards the oldest directory-stack entries when the
+   * configured stack size is exceeded.
+   */
+  while ((size_t)g->dir_stack_used + needed >
+         FCOM_DIR_STACK_BYTES)
     fcom_dir_stack_drop_oldest(command_psp, g);
 
   memcpy(storage + g->dir_stack_used, directory, needed);
@@ -1760,64 +2099,75 @@ static void fcom_dir_stack_pop_last(UWORD command_psp,
     return;
 
   g->dir_stack_used = (UWORD)(last - storage);
-  if (g->dir_stack_used < FCOM_DIR_STACK_BYTES)
-    storage[g->dir_stack_used] = '\0';
+  storage[g->dir_stack_used] = '\0';
+}
+
+static void fcom_dir_stack_clear(UWORD command_psp,
+                                 struct fcom_guest *g)
+{
+  char *storage = fcom_dir_stack_storage(command_psp);
+
+  g->dir_stack_used = 0;
+  storage[0] = '\0';
 }
 
 static void builtin_pushd(CPU *cpu, UWORD command_psp,
                           struct fcom_guest *g, char *args)
 {
+  int rc;
+
   if (!fcom_get_current_directory(cpu, command_psp, g,
-                                  g->path2, sizeof(g->path2)) ||
-      !fcom_dir_stack_push(command_psp, g, g->path2)) {
+                                  g->path2, sizeof(g->path2)))
+    return;
+
+  if (!fcom_dir_stack_push(command_psp, g, g->path2)) {
     dos_puts(cpu, command_psp, g, "Out of memory.\r\n");
     return;
   }
 
+  /*
+   * cmd/pushd.c pushes first, then optionally calls CDD. A failed CDD does
+   * not remove the newly pushed entry.
+   */
   args = skip_space(args);
-  if (*args != '\0')
-    builtin_cdd(cpu, command_psp, g, args);
+  rc = *args != '\0'
+      ? fcom_cdd(cpu, command_psp, g, args)
+      : 0;
+  (void)rc;
 }
 
 static void builtin_popd(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, char *args)
 {
-  char *storage = fcom_dir_stack_storage(command_psp);
   char *p = skip_space(args);
   char *directory;
 
+  /*
+   * cmd/popd.c tests only the first character. "*" clears the stack;
+   * any other parameter is ignored and a normal pop is performed.
+   */
   if (*p == '*') {
-    p = skip_space(p + 1);
-    if (*p != '\0') {
-      dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
-      return;
-    }
-
-    g->dir_stack_used = 0;
-    storage[0] = '\0';
-    return;
-  }
-
-  if (*p != '\0') {
-    dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
+    fcom_dir_stack_clear(command_psp, g);
     return;
   }
 
   directory = fcom_dir_stack_last(command_psp, g);
   if (directory == NULL) {
-    dos_puts(cpu, command_psp, g, "Directory stack empty.\r\n");
+    dos_puts(cpu, command_psp, g,
+             "Directory stack empty.\r\n");
+    fcom_dir_stack_clear(command_psp, g);
     return;
   }
 
   strncpy(g->path2, directory, sizeof(g->path2) - 1);
   g->path2[sizeof(g->path2) - 1] = '\0';
 
-  builtin_cdd(cpu, command_psp, g, g->path2);
-
-  if (fcom_get_current_directory(cpu, command_psp, g,
-                                 g->path, sizeof(g->path)) &&
-      strcasecmp(g->path, g->path2) == 0)
-    fcom_dir_stack_pop_last(command_psp, g);
+  /*
+   * ctxtPop() removes the item before cmd_cdd() is called, so a failed
+   * directory change still consumes the stack entry.
+   */
+  fcom_dir_stack_pop_last(command_psp, g);
+  (void)fcom_cdd(cpu, command_psp, g, g->path2);
 }
 
 static void builtin_dirs(CPU *cpu, UWORD command_psp,
@@ -1828,10 +2178,10 @@ static void builtin_dirs(CPU *cpu, UWORD command_psp,
   unsigned count = 0;
   int n;
 
-  if (*skip_space(args) != '\0') {
-    dos_puts(cpu, command_psp, g, "Too many parameters.\r\n");
-    return;
-  }
+  /*
+   * cmd/dirs.c deliberately ignores its parameter.
+   */
+  (void)args;
 
   while (pos < g->dir_stack_used) {
     const char *directory = storage + pos;
@@ -1843,7 +2193,8 @@ static void builtin_dirs(CPU *cpu, UWORD command_psp,
   }
 
   if (count == 0) {
-    dos_puts(cpu, command_psp, g, "Directory stack empty.\r\n");
+    dos_puts(cpu, command_psp, g,
+             "Directory stack empty.\r\n");
     return;
   }
 
@@ -2941,102 +3292,231 @@ static void builtin_rename(CPU *cpu, UWORD command_psp,
 }
 
 
-static int parse_uint_field(const char **cursor, unsigned *value)
+static int fcom_parse_numbers(const char *text, unsigned maximum,
+                              unsigned *items, unsigned *values,
+                              const char **tail)
 {
-  const char *p = *cursor;
-  unsigned result = 0;
+  const char *p = skip_space((char *)text);
+  unsigned count = 0;
 
-  if (!isdigit((unsigned char)*p))
-    return 0;
+  while (*p != '\0' && count < maximum) {
+    unsigned value = 0;
 
-  while (isdigit((unsigned char)*p)) {
-    result = result * 10u + (unsigned)(*p - '0');
+    if (!isdigit((unsigned char)*p))
+      break;
+
+    do {
+      value = value * 10u + (unsigned)(*p - '0');
+      ++p;
+    } while (isdigit((unsigned char)*p));
+
+    values[count++] = value;
+
+    p = skip_space((char *)p);
+    if (*p == '\0' || isalpha((unsigned char)*p))
+      break;
+
+    if ((unsigned char)*p < 0x20u ||
+        (unsigned char)*p >= 0x7fu)
+      return 0;
+
     ++p;
+    p = skip_space((char *)p);
   }
 
-  *cursor = p;
-  *value = result;
+  *items = count;
+  *tail = p;
   return 1;
 }
 
-static int parse_date_value(const char *text,
-                            unsigned *month, unsigned *day, unsigned *year)
+static int fcom_leap_year(unsigned year)
 {
-  const char *p = text;
-
-  if (!parse_uint_field(&p, month))
-    return 0;
-  if (*p != '-' && *p != '/' && *p != '.')
-    return 0;
-  ++p;
-
-  if (!parse_uint_field(&p, day))
-    return 0;
-  if (*p != '-' && *p != '/' && *p != '.')
-    return 0;
-  ++p;
-
-  if (!parse_uint_field(&p, year))
-    return 0;
-
-  p = skip_space((char *)p);
-  if (*p != '\0')
-    return 0;
-
-  if (*year < 100u)
-    *year += *year >= 80u ? 1900u : 2000u;
-
-  return *month >= 1u && *month <= 12u &&
-         *day >= 1u && *day <= 31u &&
-         *year >= 1980u && *year <= 2099u;
+  return (!(year % 4u) && (year % 100u)) || !(year % 400u);
 }
 
-static int parse_time_value(const char *text,
-                            unsigned *hour, unsigned *minute,
-                            unsigned *second, unsigned *hundredth)
+static int fcom_parse_date(CPU *cpu, UWORD command_psp,
+                           const char *text,
+                           unsigned *month, unsigned *day,
+                           unsigned *year)
 {
-  const char *p = text;
+  static const UBYTE month_days[2][13] = {
+    {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31},
+    {0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31}
+  };
+  unsigned values[3] = {0, 0, 0};
+  unsigned items;
+  const char *tail;
 
-  *second = 0;
-  *hundredth = 0;
-
-  if (!parse_uint_field(&p, hour) || *p != ':')
+  if (!fcom_parse_numbers(text, 3, &items, values, &tail))
     return 0;
-  ++p;
 
-  if (!parse_uint_field(&p, minute))
+  tail = skip_space((char *)tail);
+  if (*tail != '\0')
     return 0;
 
-  if (*p == ':') {
-    ++p;
-    if (!parse_uint_field(&p, second))
-      return 0;
+  CPU_AH = 0x2a;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM DATE get");
+
+  *year = CPU_CX;
+  *month = CPU_DH;
+  *day = CPU_DL;
+
+  switch (items) {
+  case 0:
+    return 2; /* E_Empty */
+  case 1:
+    *day = values[0];
+    break;
+  case 2:
+    *month = values[0];
+    *day = values[1];
+    break;
+  case 3:
+    *month = values[0];
+    *day = values[1];
+    *year = values[2];
+    break;
+  default:
+    return 0;
   }
 
-  if (*p == '.' || *p == ',') {
-    ++p;
-    if (!parse_uint_field(&p, hundredth))
-      return 0;
-  }
+  if (*year < 80u)
+    *year += 2000u;
+  else if (*year < 200u)
+    *year += 1900u;
 
-  p = skip_space((char *)p);
-  if (*p != '\0')
+  if (*month < 1u || *month > 12u ||
+      *year < 1980u || *year > 2099u ||
+      *day < 1u ||
+      *day > month_days[fcom_leap_year(*year)][*month])
     return 0;
 
-  return *hour <= 23u && *minute <= 59u &&
-         *second <= 59u && *hundredth <= 99u;
+  return 1;
+}
+
+static int fcom_parse_time(const char *text,
+                           unsigned *hour, unsigned *minute,
+                           unsigned *second, unsigned *hundredth)
+{
+  unsigned values[4] = {0, 0, 0, 0};
+  unsigned items;
+  const char *tail;
+  int meridian = 0;
+
+  if (!fcom_parse_numbers(text, 4, &items, values, &tail))
+    return 0;
+
+  if (toupper((unsigned char)*tail) == 'P') {
+    meridian = 2;
+    ++tail;
+  } else if (toupper((unsigned char)*tail) == 'A') {
+    meridian = 1;
+    ++tail;
+  }
+
+  if (meridian != 0) {
+    if (toupper((unsigned char)tail[0]) == 'M') {
+      ++tail;
+    } else if (tail[0] == '.' &&
+               toupper((unsigned char)tail[1]) == 'M' &&
+               tail[2] == '.') {
+      tail += 3;
+    }
+  }
+
+  tail = skip_space((char *)tail);
+  if (*tail != '\0' || items == 1 || items > 4)
+    return 0;
+  if (items == 0)
+    return 2; /* E_Empty */
+
+  *hour = values[0];
+  *minute = values[1];
+  *second = values[2];
+  *hundredth = values[3];
+
+  if (meridian == 2 && *hour != 12u)
+    *hour += 12u;
+  else if (meridian == 1 && *hour == 12u)
+    *hour = 0u;
+
+  if (*hour >= 24u || *minute >= 60u ||
+      *second >= 60u || *hundredth > 99u)
+    return 0;
+
+  return 1;
+}
+
+static int fcom_datetime_no_prompt(char **args)
+{
+  char *p = skip_space(*args);
+  char *end;
+  int result = 0;
+
+  if ((*p != '/' && *p != '-') || p[1] == '\0')
+    return 0;
+
+  end = p;
+  while (*end != '\0' && *end != ' ' && *end != '\t')
+    ++end;
+
+  if ((toupper((unsigned char)p[1]) != 'D' &&
+       toupper((unsigned char)p[1]) != 'T') ||
+      p[2] != '\0' && p + 2 != end)
+    return -1;
+
+  result = 1;
+  *args = skip_space(end);
+  return result;
+}
+
+static int fcom_read_stdin_line(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g, char **line)
+{
+  int count;
+
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io);
+  CPU_BX = 0;
+  CPU_CX = sizeof(g->io) - 1u;
+  CPU_AH = 0x3f;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM date/time input");
+
+  if (int21_failed(cpu))
+    return 0;
+
+  count = CPU_AX;
+  while (count > 0 &&
+         (g->io[count - 1] == '\r' || g->io[count - 1] == '\n'))
+    --count;
+
+  g->io[count] = '\0';
+  *line = (char *)g->io;
+  return 1;
 }
 
 static void builtin_date(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, char *args)
 {
-  char *p = skip_space(args);
+  char *p = args;
+  char *value;
   unsigned month;
   unsigned day;
   unsigned year;
+  int no_prompt;
+  int parsed;
   int n;
 
-  if (*p == '\0') {
+  no_prompt = fcom_datetime_no_prompt(&p);
+  if (no_prompt < 0) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+    return;
+  }
+
+  p = skip_space(p);
+  value = *p != '\0' ? p : NULL;
+
+  if (value == NULL) {
     CPU_AH = 0x2a;
     fcom_intcall(cpu, command_psp, 0x21, "FCOM DATE get");
 
@@ -3048,35 +3528,73 @@ static void builtin_date(CPU *cpu, UWORD command_psp,
       (void)fcom_write(cpu, command_psp,
           FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
           (UWORD)n);
-    return;
+
+    if (no_prompt)
+      return;
   }
 
-  if (!parse_date_value(p, &month, &day, &year)) {
+  for (;;) {
+    if (value == NULL) {
+      dos_puts(cpu, command_psp, g,
+               "Enter new date (mm-dd-[cc]yy): ");
+      if (!fcom_read_stdin_line(cpu, command_psp, g, &value))
+        return;
+    }
+
+    parsed = fcom_parse_date(cpu, command_psp, value,
+                             &month, &day, &year);
+    if (parsed == 2)
+      return;
+
+    if (parsed == 1) {
+      CPU_CX = (UWORD)year;
+      CPU_DH = (UBYTE)month;
+      CPU_DL = (UBYTE)day;
+      CPU_AH = 0x2b;
+      fcom_intcall(cpu, command_psp, 0x21, "FCOM DATE set");
+
+      if (CPU_AL == 0) {
+        /*
+         * FreeCOM calls _dos_setdate() twice because WinNT may otherwise
+         * move the date by one day.
+         */
+        CPU_CX = (UWORD)year;
+        CPU_DH = (UBYTE)month;
+        CPU_DL = (UBYTE)day;
+        CPU_AH = 0x2b;
+        fcom_intcall(cpu, command_psp, 0x21, "FCOM DATE set again");
+        return;
+      }
+    }
+
     dos_puts(cpu, command_psp, g, "Invalid date.\r\n");
-    return;
+    value = NULL;
   }
-
-  CPU_CX = (UWORD)year;
-  CPU_DH = (UBYTE)month;
-  CPU_DL = (UBYTE)day;
-  CPU_AH = 0x2b;
-  fcom_intcall(cpu, command_psp, 0x21, "FCOM DATE set");
-
-  if (CPU_AL != 0)
-    dos_puts(cpu, command_psp, g, "Invalid date.\r\n");
 }
 
 static void builtin_time(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, char *args)
 {
-  char *p = skip_space(args);
+  char *p = args;
+  char *value;
   unsigned hour;
   unsigned minute;
   unsigned second;
   unsigned hundredth;
+  int no_prompt;
+  int parsed;
   int n;
 
-  if (*p == '\0') {
+  no_prompt = fcom_datetime_no_prompt(&p);
+  if (no_prompt < 0) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+    return;
+  }
+
+  p = skip_space(p);
+  value = *p != '\0' ? p : NULL;
+
+  if (value == NULL) {
     CPU_AH = 0x2c;
     fcom_intcall(cpu, command_psp, 0x21, "FCOM TIME get");
 
@@ -3088,82 +3606,67 @@ static void builtin_time(CPU *cpu, UWORD command_psp,
       (void)fcom_write(cpu, command_psp,
           FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
           (UWORD)n);
-    return;
+
+    if (no_prompt)
+      return;
   }
 
-  if (!parse_time_value(p, &hour, &minute, &second, &hundredth)) {
-    dos_puts(cpu, command_psp, g, "Invalid time.\r\n");
-    return;
-  }
-
-  CPU_CH = (UBYTE)hour;
-  CPU_CL = (UBYTE)minute;
-  CPU_DH = (UBYTE)second;
-  CPU_DL = (UBYTE)hundredth;
-  CPU_AH = 0x2d;
-  fcom_intcall(cpu, command_psp, 0x21, "FCOM TIME set");
-
-  if (CPU_AL != 0)
-    dos_puts(cpu, command_psp, g, "Invalid time.\r\n");
-}
-
-
-
-static int parse_exit_code(char *args, int *batch_only, UWORD *code)
-{
-  char *p = skip_space(args);
-  unsigned value = 0;
-  int have_value = 0;
-
-  *batch_only = 0;
-  *code = 0;
-
-  if (*p == '/') {
-    if ((p[1] == 'B' || p[1] == 'b') &&
-        (p[2] == '\0' || p[2] == ' ' || p[2] == '\t')) {
-      *batch_only = 1;
-      p = skip_space(p + 2);
-    } else {
-      return 0;
+  for (;;) {
+    if (value == NULL) {
+      dos_puts(cpu, command_psp, g, "Enter new time: ");
+      if (!fcom_read_stdin_line(cpu, command_psp, g, &value))
+        return;
     }
+
+    parsed = fcom_parse_time(value, &hour, &minute,
+                             &second, &hundredth);
+    if (parsed == 2)
+      return;
+
+    if (parsed == 1) {
+      CPU_CH = (UBYTE)hour;
+      CPU_CL = (UBYTE)minute;
+      CPU_DH = (UBYTE)second;
+      CPU_DL = (UBYTE)hundredth;
+      CPU_AH = 0x2d;
+      fcom_intcall(cpu, command_psp, 0x21, "FCOM TIME set");
+
+      if (CPU_AL == 0)
+        return;
+    }
+
+    dos_puts(cpu, command_psp, g, "Invalid time.\r\n");
+    value = NULL;
   }
-
-  while (isdigit((unsigned char)*p)) {
-    have_value = 1;
-    value = value * 10u + (unsigned)(*p - '0');
-    ++p;
-  }
-
-  p = skip_space(p);
-  if (*p != '\0')
-    return 0;
-
-  if (have_value)
-    *code = (UWORD)value;
-
-  return 1;
 }
-
-
 
 static void builtin_chcp(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, char *args)
 {
   char *p = skip_space(args);
+  unsigned current;
+  unsigned system;
   unsigned codepage = 0;
   int n;
 
+  CPU_AX = 0x6601;
+  CPU_BX = 0xffffu;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM CHCP get");
+
+  current = CPU_BX;
+  system = CPU_DX;
+
+  if (int21_failed(cpu) || current == 0xffffu) {
+    dos_puts(cpu, command_psp, g,
+             "Failed to acquire current code page from system.\r\n");
+    return;
+  }
+
   if (*p == '\0') {
-    CPU_AX = 0x6601;
-    fcom_intcall(cpu, command_psp, 0x21, "FCOM CHCP get");
-
-    if (int21_failed(cpu)) {
-      dos_puts(cpu, command_psp, g, "Code page operation not supported.\r\n");
-      return;
-    }
-
     n = snprintf(g->text, sizeof(g->text),
-                 "Active code page: %u\r\n", (unsigned)CPU_BX);
+                 "The current codepage is %u.\r\n"
+                 "The system codepage (properly) is: %u.\r\n",
+                 current, system);
     if (n > 0)
       (void)fcom_write(cpu, command_psp,
           FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
@@ -3171,34 +3674,31 @@ static void builtin_chcp(CPU *cpu, UWORD command_psp,
     return;
   }
 
-  while (isdigit((unsigned char)*p)) {
-    codepage = codepage * 10u + (unsigned)(*p - '0');
-    ++p;
-  }
-
-  p = skip_space(p);
-  if (codepage == 0 || codepage > 0xffffu || *p != '\0') {
-    dos_puts(cpu, command_psp, g, "Invalid code page.\r\n");
+  if (!isdigit((unsigned char)*p)) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
     return;
   }
 
+  do {
+    codepage = codepage * 10u + (unsigned)(*p - '0');
+  } while (isdigit((unsigned char)*++p));
+
+  p = skip_space(p);
+  if (*p != '\0' || codepage > 0xffffu) {
+    dos_puts(cpu, command_psp, g, "Syntax error.\r\n");
+    return;
+  }
+
+  CPU_DX = (UWORD)system;
   CPU_BX = (UWORD)codepage;
-  CPU_DX = (UWORD)codepage;
   CPU_AX = 0x6602;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM CHCP set");
 
-  if (int21_failed(cpu)) {
-    dos_puts(cpu, command_psp, g, "Invalid code page.\r\n");
-    return;
-  }
-
-  n = snprintf(g->text, sizeof(g->text),
-               "Active code page: %u\r\n", codepage);
-  if (n > 0)
-    (void)fcom_write(cpu, command_psp,
-        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
-        (UWORD)n);
+  if (int21_failed(cpu))
+    dos_puts(cpu, command_psp, g,
+             "Failed to change current code page.\r\n");
 }
+
 
 static void builtin_vol(CPU *cpu, UWORD command_psp,
                         struct fcom_guest *g, char *args)
@@ -5012,6 +5512,130 @@ static void fcom_output_resource(CPU *cpu, UWORD command_psp,
         (UWORD)used);
 }
 
+static const char fcom_ver_warranty[] =
+  "Copyright (C) 1994-2005 Tim Norman and others.\n"
+  "\n"
+  "This program is distributed in the hope that it will be useful, but\n"
+  "WITHOUT ANY WARRANTY; without even the implied warranty of\n"
+  "MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU\n"
+  "General Public License for more details.\n"
+  "\n"
+  "Send bug reports to freedos-devel@lists.sourceforge.net.\n"
+  "Updates are available from http://freedos.sourceforge.net/freecom\n";
+
+static const char fcom_ver_redistribution[] =
+  "Copyright (C) 1994-2005 Tim Norman and others.\n"
+  "\n"
+  "This program is free software; you can redistribute it and/or modify\n"
+  "it under the terms of the GNU General Public License as published by\n"
+  "the Free Software Foundation; either version 2 of the License, or (at\n"
+  "your option) any later version.\n"
+  "\n"
+  "Send bug reports to freedos-devel@lists.sourceforge.net.\n"
+  "Updates are available from http://freedos.sourceforge.net/freecom\n";
+
+static const char fcom_ver_developers[] =
+  "\n"
+  "The FreeDOS Command Shell developed by many developers, please refer\n"
+  "to the enclosed HISTORY.TXT file.\n"
+  "\n"
+  "Send bug reports to freedos-devel@lists.sourceforge.net.\n"
+  "Updates are available from http://freedos.sourceforge.net/freecom\n";
+
+static int fcom_ver_option(const char *arg, int letter, int *value)
+{
+  const char *p = arg;
+  int enabled = 1;
+
+  if (*p != '/' && *p != '-')
+    return 0;
+  ++p;
+
+  if (*p == '-') {
+    enabled = 0;
+    ++p;
+  }
+
+  if (toupper((unsigned char)p[0]) != letter || p[1] != '\0')
+    return 0;
+
+  *value = enabled;
+  return 1;
+}
+
+static void builtin_ver(CPU *cpu, UWORD command_psp,
+                        struct fcom_guest *g, char *args)
+{
+  char *cursor = args;
+  char *arg;
+  int opt_r = 0;
+  int opt_w = 0;
+  int opt_d = 0;
+  int opt_c = 0;
+  int n;
+
+  n = snprintf(g->text, sizeof(g->text),
+               "\r\nFreeCom version 0.86 - GNUC [%s %s]\r\n",
+               __DATE__, __TIME__);
+  if (n > 0)
+    (void)fcom_write(cpu, command_psp,
+        FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+        (UWORD)n);
+
+  while ((arg = next_argument(&cursor)) != NULL) {
+    if (fcom_ver_option(arg, 'R', &opt_r) ||
+        fcom_ver_option(arg, 'W', &opt_w) ||
+        fcom_ver_option(arg, 'D', &opt_d) ||
+        fcom_ver_option(arg, 'C', &opt_c))
+      continue;
+
+    /* Original VER silently ignores non-option arguments. */
+    if ((arg[0] == '/' || arg[0] == '-') && arg[1] != '\0') {
+      dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
+      return;
+    }
+  }
+
+  if (opt_r) {
+    CPU_AX = 0x3000;
+    fcom_intcall(cpu, command_psp, 0x21, "FCOM VER DOS version");
+
+    n = snprintf(g->text, sizeof(g->text),
+                 "DOS version %u.%u\r\n",
+                 (unsigned)CPU_AL, (unsigned)CPU_AH);
+    if (n > 0)
+      (void)fcom_write(cpu, command_psp,
+          FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+          (UWORD)n);
+
+    if (CPU_BH == 0xfdu) {
+      if (CPU_BL == 0xffu) {
+        dos_puts(cpu, command_psp, g,
+                 "FreeDOS kernel (build 1933 or prior)\r\n");
+      } else {
+        CPU_AX = 0x33ff;
+        fcom_intcall(cpu, command_psp, 0x21,
+                     "FCOM VER FreeDOS version");
+        if (!int21_failed(cpu)) {
+          const char *version =
+              (const char *)ARM_PTR(MK_FP(CPU_DX, CPU_AX));
+          fcom_output_resource(cpu, command_psp, g, version);
+        }
+      }
+    }
+  }
+
+  if (opt_w)
+    fcom_output_resource(cpu, command_psp, g, fcom_ver_warranty);
+  if (opt_d)
+    fcom_output_resource(cpu, command_psp, g,
+                         fcom_ver_redistribution);
+  if (opt_c)
+    fcom_output_resource(cpu, command_psp, g,
+                         fcom_ver_developers);
+}
+
+
 static const char *fcom_command_help(const char *name)
 {
   const struct fcom_help_entry *entry;
@@ -5215,6 +5839,39 @@ static int execute_command_line(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g, char *line);
 static int execute_command_line_body(CPU *cpu, UWORD command_psp,
                                      struct fcom_guest *g, char *line);
+                                     
+static int parse_exit_code(char *args, int *batch_only, UWORD *code)
+{
+  char *p = skip_space(args);
+  unsigned value = 0;
+
+  *batch_only = 0;
+  *code = 0;
+
+  if (strncasecmp(p, "/B", 2) == 0 &&
+      (p[2] == '\0' || p[2] == ' ' || p[2] == '\t')) {
+    *batch_only = 1;
+    p = skip_space(p + 2);
+  }
+
+  if (*p == '\0')
+    return 1;
+
+  if (!isdigit((unsigned char)*p))
+    return 0;
+
+  do {
+    value = value * 10u + (unsigned)(*p - '0');
+    ++p;
+  } while (isdigit((unsigned char)*p));
+
+  p = skip_space(p);
+  if (*p != '\0')
+    return 0;
+
+  *code = (UWORD)value;
+  return 1;
+}
 
 static int builtin_loadfix(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, char *args)
@@ -5488,7 +6145,7 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
   }
 
   if (command_is(g->filename, "VER")) {
-    dos_puts(cpu, command_psp, g, "\r\nFreeDOS native command processor 0.86 port\r\n");
+    builtin_ver(cpu, command_psp, g, args);
     return 1;
   }
 
