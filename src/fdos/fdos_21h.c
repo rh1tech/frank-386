@@ -264,11 +264,15 @@ dos_far_ptr/*struct cds*/ get_cds(unsigned drive)
 
 UBYTE DosSelectDrv(UBYTE drv)
 {
-  internal_data->current_ldt = get_cds(drv);
-
-  if (FP_OFF(internal_data->current_ldt) != 0xFFFF)
+  dos_far_ptr new_ldt = get_cds(drv);
+  /*
+   * An invalid drive must not become the default drive.
+   * get_cds() returns 0000:0000 when the drive is unavailable.
+   */
+  if (!far_is_null(new_ldt)) {
+    internal_data->current_ldt = new_ldt;
     internal_data->default_drive = drv;
-  
+  }
   return LoL->lastdrive;
 }
 

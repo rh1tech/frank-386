@@ -1459,6 +1459,7 @@ err:printf("%s has invalid format\n", filename);
        || read(fd, x86_subf_data_, 10) != 10
        || memcmp(subf_data->signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
        || memcmp(subf_data->signature, table[2].sig, 8))  /* UCASE for FUCASE ^*/
+       || subf_data->length > sizeof(subf_data->buffer)
        || read(fd, x86_subf_data_buffer, subf_data->length) != subf_data->length)
         goto err;
       if (hdr[i].id == 1)
@@ -1477,6 +1478,8 @@ err:printf("%s has invalid format\n", filename);
       }
       if (hdr[i].id == 35)
       {
+        if (subf_data->length < 4)
+          goto err;
         memcpy(&nlsPackageHardcoded->yeschar, subf_data->buffer, 2);
         memcpy(&nlsPackageHardcoded->nochar, subf_data->buffer + 2, 2);
         continue;
