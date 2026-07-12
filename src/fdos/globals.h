@@ -28,6 +28,7 @@
 /****************************************************************/
 extern struct lol* LoL;
 extern struct dos_data* internal_data;
+extern struct dhdr* blk_dev;    /* built-in block device driver header */
 COUNT ASMCFUNC
     CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
                            struct dhdr FAR * lpDevice);

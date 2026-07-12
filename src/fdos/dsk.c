@@ -166,10 +166,8 @@ STATIC WORD getbpb(CPU *cpu, ddt *pddt)
   return 0;
 }
 
-STATIC void block_media_check(CPU *cpu, request FAR *rq)
+STATIC WORD blk_mediachk(CPU *cpu, request FAR *rq, ddt *pddt)
 {
-  ddt *pddt = getddt(rq->r_unit);
-
   if (pddt->ddt_descflags & DF_REFORMAT) {
     pddt->ddt_descflags &= ~DF_REFORMAT;
     rq->r_mcretcode = M_CHANGED;
@@ -185,31 +183,25 @@ STATIC void block_media_check(CPU *cpu, request FAR *rq)
       WORD result = getbpb(cpu, pddt);
 
       if (result != 0)
-      {
-        rq->r_status = result;
-        return;
-      }
+        return result;
 
       if (serialno != pddt->ddt_serialno)
         rq->r_mcretcode = M_CHANGED;
     }
   }
 
-  rq_done(rq);
+  return S_DONE;
 }
 
-STATIC void block_build_bpb(CPU *cpu, request FAR *rq)
+STATIC WORD blk_bldbpb(CPU *cpu, request FAR *rq, ddt *pddt)
 {
-  ddt *pddt = getddt(rq->r_unit);
   WORD ret = getbpb(cpu, pddt);
 
-  if (ret != 0) {
-    rq->r_status = ret;
-    return;
-  }
+  if (ret != 0)
+    return ret;
 
   rq->r_bpptr = linear_to_far(&pddt->ddt_bpb);
-  rq_done(rq);
+  return S_DONE;
 }
 
 /*
@@ -466,28 +458,17 @@ STATIC int LBA_Transfer(CPU* cpu,
 }
 
 /*
-    block device request dispatcher: services C_INPUT/C_OUTPUT/C_OUTVFY
-    requests coming from the file system layer (via execrh()/dskxfer())
-    by driving LBA_Transfer() against the ddt entry for rq->r_unit.
-
-    Migrated from blockio() in dsk.c, adapted to the request-packet
-    helpers already used elsewhere in this file (rq_done()/rq_error()).
+    C_INPUT / C_OUTPUT / C_OUTVFY - migrated from blockio() in dsk.c.
 */
-void blockio(CPU* cpu, request FAR *rq)
+STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
 {
-  ddt *pddt = getddt(rq->r_unit);
   UWORD mode;
   UWORD transferred;
+  ULONG start;
   int err;
 
   switch (rq->r_command)
   {
-    case C_MEDIACHK:
-      block_media_check(cpu, rq);
-      return;
-    case C_BLDBPB:
-      block_build_bpb(cpu, rq);
-      return;
     case C_INPUT:
       mode = LBA_READ;
       break;
@@ -498,31 +479,219 @@ void blockio(CPU* cpu, request FAR *rq)
       mode = LBA_WRITE_VERIFY;
       break;
     default:
-      rq_error(rq, E_CMD);
-      return;
+      return failure(E_CMD);
   }
 
   if (rq->r_count == 0)
-  {
-    rq->r_count = 0;
-    rq_done(rq);
-    return;
-  }
-  ULONG start = (rq->r_start != HUGECOUNT) ? rq->r_start : rq->r_huge;
+    return S_DONE;
+
+  start = (rq->r_start != HUGECOUNT) ? rq->r_start : rq->r_huge;
   err = LBA_Transfer(cpu, pddt, mode, rq->r_trans,
-                      pddt->ddt_offset + start,
-                      rq->r_count, &transferred);
+                     pddt->ddt_offset + start,
+                     rq->r_count, &transferred);
 
   rq->r_count = transferred;
 
-  if (err)
-  {
-    rq->r_status = (UWORD)err;
-  }
+  return err ? (WORD)err : S_DONE;
+}
+
+/* ------------------------------------------------------------------------ */
+/* The remaining dispatch entries, ported from dsk.c                         */
+/* ------------------------------------------------------------------------ */
+
+STATIC WORD blk_error(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(pddt);
+
+  rq->r_count = 0;
+  return failure(E_FAILURE);    /* general failure */
+}
+
+STATIC WORD blk_noerr(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(rq);
+  UNREFERENCED_PARAMETER(pddt);
+
+  return S_DONE;
+}
+
+STATIC WORD blk_nondr(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(rq);
+  UNREFERENCED_PARAMETER(pddt);
+
+  return S_BUSY | S_DONE;
+}
+
+STATIC WORD blk_Open(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(rq);
+
+  pddt->ddt_FileOC++;
+  return S_DONE;
+}
+
+STATIC WORD blk_Close(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(rq);
+
+  pddt->ddt_FileOC--;
+  return S_DONE;
+}
+
+STATIC WORD blk_Media(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(rq);
+
+  if (hd(pddt->ddt_descflags))
+    return S_BUSY | S_DONE;     /* Hard Drive: not removable */
   else
-  {
-    rq_done(rq);
+    return S_DONE;              /* Floppy: removable         */
+}
+
+/*
+   0 if not set, 1 = a, 2 = b, etc, assume set.
+   page 424 MS Programmer's Ref.
+ */
+STATIC WORD Getlogdev(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  int i;
+  ddt *pddt2;
+
+  UNREFERENCED_PARAMETER(cpu);
+
+  if (!(pddt->ddt_descflags & DF_MULTLOG)) {
+    rq->r_unit = 0;
+    return S_DONE;
   }
+
+  for (i = 0; i < blk_dev->dh_name[0]; i++)
+  {
+    pddt2 = getddt(i);
+    if (pddt->ddt_driveno == pddt2->ddt_driveno &&
+        (pddt2->ddt_descflags & (DF_MULTLOG | DF_CURLOG)) ==
+        (DF_MULTLOG | DF_CURLOG))
+        break;
+  }
+
+  rq->r_unit = i + 1;
+  return S_DONE;
+}
+
+STATIC WORD Setlogdev(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  unsigned char unit = rq->r_unit;
+
+  Getlogdev(cpu, rq, pddt);
+  if (rq->r_unit == 0)
+    return S_DONE;
+
+  getddt(rq->r_unit - 1)->ddt_descflags &= ~DF_CURLOG;
+  pddt->ddt_descflags |= DF_CURLOG;
+  rq->r_unit = unit + 1;
+  return S_DONE;
+}
+
+STATIC WORD IoctlQueblk(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(pddt);
+
+#ifdef WITHFAT32
+  if (rq->r_cat == 8 || rq->r_cat == 0x48)
+#else
+  if (rq->r_cat == 8)
+#endif
+  {
+    switch (rq->r_fun)
+    {
+    case 0x46:
+    case 0x47:
+    case 0x60:
+    case 0x66:
+    case 0x67:
+      return S_DONE;
+    }
+  }
+  return failure(E_CMD);
+}
+
+/* C_GENIOCTL is not ported yet - see Genblkdev() in the original dsk.c.
+   Report "unknown command" rather than "general failure", exactly like the
+   undefined dispatch slots do, so callers can fall back cleanly. */
+STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
+{
+  UNREFERENCED_PARAMETER(cpu);
+  UNREFERENCED_PARAMETER(pddt);
+  UNREFERENCED_PARAMETER(rq);
+
+  return failure(E_CMD);
+}
+
+/*                                                                      */
+/* the function dispatch table                                          */
+/*                                                                      */
+typedef WORD blk_proc(CPU* cpu, request FAR *rq, ddt *pddt);
+
+STATIC blk_proc * const dispatch[NENTRY] =
+{
+      /* disk init is done in initdisk.c, so this should never be called */
+      blk_error,                /* 00 Initialize                */
+      blk_mediachk,             /* 01 Media Check               */
+      blk_bldbpb,               /* 02 Build BPB                 */
+      blk_error,                /* 03 Ioctl In                  */
+      blk_rw,                   /* 04 Input (Read)              */
+      blk_nondr,                /* 05 Non-destructive Read      */
+      blk_noerr,                /* 06 Input Status              */
+      blk_noerr,                /* 07 Input Flush               */
+      blk_rw,                   /* 08 Output (Write)            */
+      blk_rw,                   /* 09 Output with verify        */
+      blk_noerr,                /* 0A Output Status             */
+      blk_noerr,                /* 0B Output Flush              */
+      blk_error,                /* 0C Ioctl Out                 */
+      blk_Open,                 /* 0D Device Open               */
+      blk_Close,                /* 0E Device Close              */
+      blk_Media,                /* 0F Removable Media           */
+      blk_noerr,                /* 10 Output till busy          */
+      blk_error,                /* 11 undefined                 */
+      blk_error,                /* 12 undefined                 */
+      Genblkdev,                /* 13 Generic Ioctl Call        */
+      blk_error,                /* 14 undefined                 */
+      blk_error,                /* 15 undefined                 */
+      blk_error,                /* 16 undefined                 */
+      Getlogdev,                /* 17 Get Logical Device        */
+      Setlogdev,                /* 18 Set Logical Device        */
+      IoctlQueblk               /* 19 Ioctl Query               */
+};
+
+/*
+    Block device driver entry point - blk_driver() in dsk.c.
+
+    Called from BlkEntry() (the ATTR_NATIVE dh_interrupt of the built-in
+    block device) for every request the file system layer builds through
+    execrh()/dskxfer().
+*/
+void blk_driver(CPU* cpu, request FAR *rq)
+{
+  if (rq->r_unit >= blk_dev->dh_name[0] && rq->r_command != C_INIT)
+  {
+    rq->r_status = failure(E_UNIT);
+    return;
+  }
+
+  if (rq->r_command >= NENTRY)
+  {
+    rq->r_status = failure(E_FAILURE);   /* general failure */
+    return;
+  }
+
+  rq->r_status = (*dispatch[rq->r_command])(cpu, rq, getddt(rq->r_unit));
 }
 
 /*

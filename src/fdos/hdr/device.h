@@ -521,7 +521,9 @@ typedef struct dhdr FAR *dhdrptr;
 #define CharReqHdr (internal_data->ClkReqHdr)
 
 /* dsk.c */
-COUNT ASMCFUNC FAR blk_driver(rqptr rp);
+/* blk_driver() is declared in init-mod.h: the native implementation takes
+   the CPU* it needs for the BIOS INT 13h calls, so it cannot use rqptr-only
+   ASM prototype of the original. */
 ddt * getddt(int dev);
 
 /* error.c */

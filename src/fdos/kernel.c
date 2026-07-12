@@ -568,28 +568,12 @@ static void BlkEntry(request FAR *rq) {
     /*
      * Internal block-device interrupt entry.
      *
-     * Handles block reads/writes/ioctl/media checks for DOS logical drives.
-     * C_INPUT/C_OUTPUT/C_OUTVFY are serviced by blockio() (migrated from
-     * dsk.c), which drives bios_13h() directly through LBA_Transfer().
+     * The whole dispatch (media check, build BPB, read/write, open/close,
+     * removable media, get/set logical device, ioctl query, ...) lives in
+     * dsk.c:blk_driver(), which mirrors the dispatch[] table of the original
+     * kernel. It also does the unit-range check and sets r_status.
      */
-    switch (rq->r_command) {
-    case C_INPUT:
-    case C_OUTPUT:
-    case C_OUTVFY:
-    case C_MEDIACHK:
-    case C_BLDBPB:
-        blockio(cpu, rq);
-        break;
-    default:
-        printf("WARN: BlkEntry unimplemented cmd=%02X unit=%u status_before=%04X\n",  rq->r_command, rq->r_unit, rq->r_status);
-        /// TODO: C_IOCTLIN / C_IOCTLOUT / C_GENIOCTL
-        /// are not implemented yet - not required for DosOpen() on a fixed,
-        /// never-removed disk image.
-    case C_INIT:
-        /* disk init is done, so this should never be called */
-        rq_error(rq, E_CMD);
-        break;
-    }
+    blk_driver(cpu, rq);
 }
 
 static void NulIntr(request FAR *rq) {
