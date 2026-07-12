@@ -1510,12 +1510,18 @@ COUNT DosGetFtime(COUNT hndl, ddate * dp, dtime * tp)
   return SUCCESS;
 }
 
+/*
+ * Set date/time on an SFT entry.
+ *
+ * sft_idx is already a system-file-table index.  Do not pass it through
+ * get_sft(), which accepts a process handle and performs a JFT lookup.
+ */
 COUNT DosSetFtimeSft(int sft_idx, ddate dp, dtime tp)
 {
-  dos_far_ptr _s = get_sft(sft_idx);
-  if ( far_is_end (_s) )
+  dos_far_ptr _s = idx_to_sft(sft_idx);
+  if (far_is_end(_s))
     return DE_INVLDHNDL;
-  sft* s = (sft*) ARM_PTR (_s);
+  sft *s = (sft *)ARM_PTR(_s);
 
   /* If SFT entry refers to a device, do nothing */
   if (s->sft_flags & SFT_FDEVICE)

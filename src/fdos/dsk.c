@@ -63,12 +63,40 @@ struct FS_info {
 };
 #pragma pack(pop)
 
-STATIC WORD diskchange(ddt *pddt)
+/*
+ * Check removable-media change state.
+ *
+ * Fixed disks never change.  For floppy drives with a change line,
+ * use the already implemented BIOS INT 13h/AH=16h service.  Drives
+ * without a usable change line return M_DONT_KNOW so mediachk() can
+ * fall back to rereading the BPB/serial number, as upstream FreeDOS
+ * does.
+ */
+STATIC WORD diskchange(CPU *cpu, ddt *pddt)
 {
+  CPU_regs saved;
+  WORD result;
+
   if (hd(pddt->ddt_descflags))
     return M_NOT_CHANGED;
 
-  return M_NOT_CHANGED; /* removable-change line TODO */
+  if (!(pddt->ddt_descflags & DF_CHANGELINE))
+    return M_DONT_KNOW;
+
+  cpu_save_regs(cpu, &saved);
+  CPU_AH = 0x16;
+  CPU_DL = pddt->ddt_driveno;
+  bios_13h(cpu);
+
+  if (!cf && CPU_AH == 0x00)
+    result = M_NOT_CHANGED;
+  else if (cf && CPU_AH == 0x06)
+    result = M_CHANGED;
+  else
+    result = M_DONT_KNOW;
+
+  cpu_restore_regs(cpu, &saved);
+  return result;
 }
 
 STATIC int LBA_Transfer(CPU* cpu,
@@ -90,7 +118,7 @@ STATIC WORD getbpb(CPU *cpu, ddt *pddt)
   unsigned secs_per_cyl;
   WORD ret;
 
-  if (diskchange(pddt) != M_NOT_CHANGED)
+  if (diskchange(cpu, pddt) != M_NOT_CHANGED)
     pddt->ddt_descflags |= DF_DISKCHANGE;
 
   ret = RWzero(cpu, pddt, LBA_READ);
@@ -142,8 +170,6 @@ STATIC void block_media_check(CPU *cpu, request FAR *rq)
 {
   ddt *pddt = getddt(rq->r_unit);
 
-  (void)cpu;
-
   if (pddt->ddt_descflags & DF_REFORMAT) {
     pddt->ddt_descflags &= ~DF_REFORMAT;
     rq->r_mcretcode = M_CHANGED;
@@ -151,7 +177,22 @@ STATIC void block_media_check(CPU *cpu, request FAR *rq)
     pddt->ddt_descflags &= ~DF_DISKCHANGE;
     rq->r_mcretcode = M_DONT_KNOW;
   } else {
-    rq->r_mcretcode = diskchange(pddt);
+    rq->r_mcretcode = diskchange(cpu, pddt);
+
+    if (rq->r_mcretcode == M_DONT_KNOW)
+    {
+      ULONG serialno = pddt->ddt_serialno;
+      WORD result = getbpb(cpu, pddt);
+
+      if (result != 0)
+      {
+        rq->r_status = result;
+        return;
+      }
+
+      if (serialno != pddt->ddt_serialno)
+        rq->r_mcretcode = M_CHANGED;
+    }
   }
 
   rq_done(rq);
@@ -266,8 +307,8 @@ STATIC WORD dskerr(COUNT code)
       - play_dj() (floppy A:/B: drive-swap "door jingle") and the INT 1Eh
         diskette-parameter-table poke are floppy-only concerns; they are
         left as a TODO since this iteration targets a fixed disk image.
-      - LBA_FORMAT (low-level track format) is left as a TODO; it is not
-        needed for DosOpen().
+      - LBA_FORMAT uses the already implemented INT 13h/AH=05h backend
+        directly instead of upstream's fl_format() assembly wrapper.
 */
 STATIC int LBA_Transfer(CPU* cpu,
     ddt *pddt, UWORD mode, dos_far_ptr buffer,
@@ -286,8 +327,8 @@ STATIC int LBA_Transfer(CPU* cpu,
 
   *transferred = 0;
 
-  /// TODO: low-level track format (LBA_FORMAT) is not implemented yet.
-  if (mode == LBA_FORMAT)
+  /* Upstream treats low-level formatting of fixed disks as a no-op. */
+  if (mode == LBA_FORMAT && hd(pddt->ddt_descflags))
     return 0;
 
   /// TODO: play_dj(pddt) (floppy A:/B: swap) and INT 1Eh diskette
@@ -368,8 +409,10 @@ STATIC int LBA_Transfer(CPU* cpu,
         }
 
         CPU_AL = (UBYTE)count;
-        CPU_AH = (mode == LBA_READ) ? 0x02 :
-                 (mode == LBA_VERIFY) ? 0x04 : 0x03; /* write or write+verify */
+        CPU_AH = (mode == LBA_READ)   ? 0x02 :
+                 (mode == LBA_VERIFY) ? 0x04 :
+                 (mode == LBA_FORMAT) ? 0x05 :
+                                        0x03; /* write or write+verify */
         CPU_BX = FP_OFF(transfer_far);
         CPU_CX = ((chs.Cylinder & 0xff) << 8) +
                  ((chs.Cylinder & 0x300) >> 2) + chs.Sector;

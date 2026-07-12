@@ -80,15 +80,61 @@ struct cds *get_cds1(unsigned dsk)
 }
 
 /*
+ * Compare two SETVER filename fields case-insensitively.
+ *
+ * This is the original FreeDOS helper adapted only for native pointers:
+ * both strings have already been mapped from guest memory by the caller.
+ */
+STATIC WORD SetverCompareFilename(const BYTE *m1, const BYTE *m2, COUNT count)
+{
+  while (count--)
+  {
+    if (toupper((unsigned char)*m1) != toupper((unsigned char)*m2))
+      return (WORD)((unsigned char)*m1 - (unsigned char)*m2);
+
+    ++m1;
+    ++m2;
+  }
+
+  return 0;
+}
+
+/*
+ * Look up a program basename in the guest SETVER table.
+ *
+ * Table records are encoded exactly as in FreeDOS:
+ *   length byte, filename bytes, minor byte, major byte
+ * and the list ends with a zero length byte.
+ */
+STATIC UWORD SetverGetVersion(dos_far_ptr table_ptr, const BYTE *name)
+{
+  BYTE *table;
+  COUNT name_len;
+
+  if (far_is_null(table_ptr) || name == NULL)
+    return 0;
+
+  table = (BYTE *)ARM_PTR(table_ptr);
+  name_len = (COUNT)strlen((const char *)name);
+
+  while (*table != 0)
+  {
+    BYTE len = *table;
+
+    if (len == name_len &&
+        SetverCompareFilename(name, table + 1, len) == 0)
+      return *(UWORD *)(table + len + 1);
+
+    table += len + 3;
+  }
+
+  return 0;
+}
+
+/*
    allocate memory for and copy the current process's env to a new
    child environment. Returns the segment of the env's *MCB* (not the
    env block itself) in *pChildEnvSeg.
-
-   Simplification vs upstream: no SETVER database support (upstream's
-   SetverGetVersion()/SetverCompareFilename(), consulted from
-   patchPSP() below) - faking a DOS version for specific program names
-   is a rarely-needed compatibility knob, not something programs need
-   in order to run at all, so it's left out of this pass entirely.
 */
 STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
 {
@@ -157,9 +203,14 @@ STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
   return SUCCESS;
 }
 
-/* base PSP setup shared by every child: copy the parent PSP wholesale
-   (matching upstream's new_psp()), then fix up the fields that must
-   differ. */
+/*
+ * Base PSP setup shared by every child: copy the parent PSP wholesale,
+ * then replace the fields that must not be inherited.
+ *
+ * In particular, ps_retdosver starts from the current global DOS version.
+ * A SETVER match for the child may override it later in patchPSP(); the
+ * parent's own per-program fake version must not leak into the child.
+ */
 void new_psp(seg para, seg cur_psp)   /* exported: INT 21h AH=26h */
 {
   psp *p = (psp *) ARM_PTR(MK_FP(para, 0));
@@ -169,6 +220,8 @@ void new_psp(seg para, seg cur_psp)   /* exported: INT 21h AH=26h */
   p->ps_isv22 = getvec(0x22);
   p->ps_isv23 = getvec(0x23);
   p->ps_isv24 = getvec(0x24);
+  p->ps_retdosver =
+      ((UWORD)LoL->os_setver_minor << 8) | LoL->os_setver_major;
 }
 
 void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h */

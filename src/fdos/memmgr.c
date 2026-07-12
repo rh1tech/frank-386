@@ -374,6 +374,35 @@ COUNT DosMemChange(UWORD para, UWORD size, UWORD * maxSize)
 }
 
 /*
+ * Check the conventional MCB chain for structural corruption.
+ *
+ * This is the upstream DosMemCheck() algorithm adapted to segment-based
+ * guest addressing.  Every non-final entry must be a valid 'M' MCB; the
+ * final entry must be a valid 'Z' MCB.  Diagnostic dumping from the
+ * real-mode original is intentionally not part of the API result.
+ */
+COUNT DosMemCheck(void)
+{
+  seg pseg = LoL->first_mcb;
+
+  for (;;)
+  {
+    mcb *p = para2far(pseg);
+
+    if (!mcbValid(p))
+      return DE_MCBDESTRY;
+
+    if (p->m_type == MCB_LAST)
+      return SUCCESS;
+
+    if (p->m_type != MCB_NORMAL)
+      return DE_MCBDESTRY;
+
+    pseg = nxtMCBseg(pseg, p);
+  }
+}
+
+/*
  * Free every memory block owned by process "ps" (its PSP segment).
  * Used when a process terminates.
  */
