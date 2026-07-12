@@ -305,8 +305,19 @@ int VA_CDECL sprintf(char * buff, CONST char * fmt, ...);
 #endif
 VOID hexd(char *title, VOID FAR * p, COUNT numBytes);
 void put_unsigned(unsigned n, int base, int width);
-/// TODO: void put_string(const char *s);
-#define put_string(x)  do { dos_printf(x); dos_printf("\n"); } while(0)
+/* SHARE hooks (dosfns.c, INT 2Fh AX=10xxh - int2f.asm in the original) */
+int  share_open_check(dos_far_ptr filename, unsigned short pspseg,
+                      int openmode, int sharemode);
+void share_close_file(int fileno);
+int  share_access_check(unsigned short pspseg, int fileno, unsigned long ofs,
+                        unsigned long len, int allowcriter);
+int  share_lock_unlock(unsigned short pspseg, int fileno, unsigned long ofs,
+                       unsigned long len, int unlock);
+
+/* prf.c */
+void put_console(int c);
+void put_string(const char *s);
+void put_unsigned(unsigned n, int base, int width);
 void put_console(int);
 
 /* strings.c */
@@ -386,11 +397,15 @@ long ASMPASCAL network_redirector_mx(unsigned cmd, void far *s, void *arg);
 #define remote_printredir(dx,ax) (int)network_redirector_mx(REM_PRINTREDIR, MK_FP(0,dx),(void *)ax)
 #define QRemote_Fn(d,s) (int)network_redirector_mx(REM_FILENAME, d, (void *)&s)
 */
-/* Live declaration for the always-fail redirector stub implemented in
+/* Live declarations for the always-fail redirector stubs implemented in
    kernel.c (no NIC on this platform, no redirector will ever load).
    Signature matches kernel.c: the register-frame argument of the
-   original (an lregs*) has no equivalent here, callers pass NULL. */
+   original (an lregs*) has no equivalent here, callers pass NULL.
+   All three report -DE_INVLDFUNC, i.e. INT 21h AH=5Eh/5Fh come back as
+   CF=1 / AX=0001h, exactly as on DOS with no redirector loaded. */
 long network_redirector_mx(unsigned cmd, void *s, void *arg);
+int  network_redirector_fp(unsigned cmd, void *s);
+int  network_redirector(unsigned cmd);
 /* port note: netname is the caller's DS:DX buffer, so it travels as a
    guest pointer (see dosfns.c). */
 UWORD get_machine_name(dos_far_ptr netname);

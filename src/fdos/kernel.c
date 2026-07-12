@@ -26,6 +26,47 @@ static bios_callback_params_t params = {
 int	vsnprintf (char *__restrict, size_t, const char *__restrict, __gnuc_va_list)
                _ATTRIBUTE ((__format__ (__printf__, 3, 0)));
 
+/*
+    put_console()/put_string()/put_unsigned() - the prf.c primitives.
+
+    The original writes single characters through INT 29h (fast console
+    output); here the console is driven natively, so bios_teletype() takes its
+    place. Semantics are kept: put_console() expands '\n' to CR+LF, put_string()
+    does NOT append a newline of its own - callers such as play_dj() and
+    task.c's "Bad or missing Command Interpreter: " build one line out of
+    several put_string() calls, and the old put_string(x) macro (which appended
+    "\n" to every call) broke them apart.
+*/
+void put_console(int c)
+{
+    if (c == '\n')
+        put_console('\r');
+    bios_teletype(cpu, (uint8_t)c, 0);
+}
+
+void put_string(const char *s)
+{
+    while (*s != '\0')
+        put_console((unsigned char)*s++);
+}
+
+void put_unsigned(unsigned n, int base, int width)
+{
+    char s[6];
+    int i;
+
+    for (i = 0; i < width && i < (int)sizeof(s); i++)
+    {                             /* generate digits in reverse order */
+        s[i] = "0123456789abcdef"[n % (unsigned)base];
+        n /= (unsigned)base;
+    }
+
+    while (i != 0)
+    {                             /* print digits in reverse order */
+        put_console(s[--i]);
+    }
+}
+
 void dos_printf(const char *fmt, ...) {
     char buf[256];
     va_list ap;

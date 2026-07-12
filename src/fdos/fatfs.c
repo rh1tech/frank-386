@@ -828,12 +828,9 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
 /* /// Added for SHARE *** CURLY BRACES ADDED ALSO!!! ***.  - Ron Cemer */
   if (sftp->sft_count == 1 && IsShareInstalled(TRUE))
   {
-    /// unreachable: IsShareInstalled() always returns FALSE in this
-    /// codebase. share_close_file() is not implemented, so this is
-    /// left as a deliberate panic rather than silently doing nothing,
-    /// in case that assumption ever stops holding.
-    printf("PANIC: DosCloseSft reached share_close_file unexpectedly\n");
-    return DE_ACCESS;
+    if (sftp->sft_shroff >= 0)
+      share_close_file(sftp->sft_shroff);
+    sftp->sft_shroff = -1;
   }
 /* /// End of additions for SHARE.  - Ron Cemer */
   sftp->sft_count -= 1;

@@ -1008,6 +1008,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 #endif
 	phys_mem_size = conf->mem_size;
 	pc->cpu = cpu_new(conf->cpu_gen, &cb);
+	pc->fpu_enabled = conf->fpu ? 1 : 0;
 	if (conf->fpu)
 		enable_fpu(pc->cpu);
 	pc->bios = conf->bios;
@@ -1354,6 +1355,8 @@ void bios_post(PC *pc) {
 
 	uint16_t equipment = (uint16_t)(lpt_count & 3) << 14; /* биты 15-14 LPT */
 	equipment |= 0x0001;                                  /* diskette subsystem present */
+	if (pc->fpu_enabled)
+		equipment |= 0x0002;                          /* math coprocessor installed */
 	equipment |= 0x0020;                                  /* initial video: 80x25 color */
 	if (pc->enable_serial)
 		equipment |= 0x0200;                              /* one serial port */

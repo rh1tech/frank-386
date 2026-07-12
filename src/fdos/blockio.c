@@ -441,8 +441,9 @@ BOOL flush(void) {
   }
   while (FP_OFF(_bp) != firstbp);
 
-  /// TODO: network_redirector(REM_FLUSHALL) - no network redirector
-  /// in this codebase yet.
+  /* No redirector is loaded, so this always reports "not supported"
+     (-DE_INVLDFUNC) - the original ignores the return value too. */
+  network_redirector(REM_FLUSHALL);
 
   return ok;
 }

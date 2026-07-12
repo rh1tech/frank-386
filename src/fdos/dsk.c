@@ -117,13 +117,14 @@ STATIC UWORD floppy_change(CPU *cpu, UWORD dx)
   return ret;
 }
 
+STATIC char template_string[] = "Remove diskette in drive X:\n";
+#define DRIVE_POS (sizeof(template_string) - 4)
+
 /*
     play_dj() - the "DJ mechanism": A: and B: are the same physical drive
     (DF_MULTLOG). Whenever the logical drive changes, the user has to swap the
     diskette. Ported from dsk.c.
 
-    put_string() in this port appends a newline, so the three lines the
-    original assembles out of template_string are printed directly instead.
 */
 STATIC WORD play_dj(CPU *cpu, ddt *pddt)
 {
@@ -143,7 +144,7 @@ STATIC WORD play_dj(CPU *cpu, ddt *pddt)
 
     if (i == blk_dev->dh_name[0])
     {
-      put_string("Error in the DJ mechanism!");   /* should not happen! */
+      put_string("Error in the DJ mechanism!\n");   /* should not happen! */
     }
     else
     {
@@ -155,11 +156,12 @@ STATIC WORD play_dj(CPU *cpu, ddt *pddt)
       if (floppy_change(cpu, dx.x) != 0xffff)
       {
         /* if someone else does not make a nice dialog... */
-        dos_printf("Remove diskette in drive %c:\n",
-                   'A' + pddt2->ddt_logdriveno);
-        dos_printf("Insert diskette in drive %c:\n",
-                   'A' + pddt->ddt_logdriveno);
-        dos_printf("Press any key to continue ... \n");
+        template_string[DRIVE_POS] = 'A' + pddt2->ddt_logdriveno;
+        put_string(template_string);
+        put_string("Insert");
+        template_string[DRIVE_POS] = 'A' + pddt->ddt_logdriveno;
+        put_string(template_string + 6);
+        put_string("Press any key to continue ... \n");
         fl_readkey(cpu);
       }
 

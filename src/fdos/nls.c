@@ -469,7 +469,7 @@ STATIC COUNT muxLoadPkg(int subfct, UWORD cp, UWORD cntry)
 VOID nlsCPchange(UWORD cp)
 {
   UNREFERENCED_PARAMETER(cp);
-  put_string("\7\nchange codepage not yet done ska");
+  put_string("\7\nchange codepage not yet done ska\n");
 }
 
 /*

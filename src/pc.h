@@ -92,6 +92,7 @@ typedef struct PC {
 	int paused;  // Emulation paused (e.g., for disk UI)
 
 	int enable_serial;
+	int fpu_enabled;       /* conf->fpu, needed by bios_post() */
 	int full_update;
 
 	uint8_t lpt_data[2];   /* защёлки data-регистров LPT1(0x378)/LPT2(0x278) */

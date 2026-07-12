@@ -61,11 +61,13 @@
 
 STATIC void clusterMessage(const char *msg, CLUSTER clussec)
 {
-  /// TODO: the original calls put_string()/put_unsigned()/put_console()
-  /// here, none of which are implemented in this codebase yet; printf()
-  /// is used instead since this is purely a diagnostic for a corrupt
-  /// FAT, not something guest-visible.
-  printf("Run chkdsk: Bad FAT %s%lx\n", msg, (ULONG)clussec);
+  put_string("Run chkdsk: Bad FAT ");
+  put_string(msg);
+#ifdef WITHFAT32
+  put_unsigned((unsigned)(clussec >> 16), 16, 4);
+#endif
+  put_unsigned((unsigned)(clussec & 0xffffu), 16, 4);
+  put_console('\n');
 }
 
 /*

@@ -39,6 +39,49 @@ void share_close_file(int fileno) {  /* file_table entry number */
     cpu_restore_regs(cpu, &saved);
 }
 
+/* SHARE_CHECK (int2f.asm): INT 2Fh AX=1000h, AL=FFh means installed. */
+STATIC unsigned char share_check(void) {
+    CPU_regs saved;
+    unsigned char res;
+    cpu_save_regs(cpu, &saved);
+    CPU_AX = 0x1000;
+    bios_intcall(cpu, 0x2F, "SHARE CHECK 2F");
+    res = (unsigned char)CPU_AL;
+    cpu_restore_regs(cpu, &saved);
+    return res;
+}
+
+/* SHARE_ACCESS_CHECK / SHARE_LOCK_UNLOCK share one register frame in
+   int2f.asm (share_common): BX=pspseg, CX=fileno, SI:DI=ofs (SI high),
+   ES:DX=len (ES high), AX = base | allowcriter (resp. | unlock). */
+STATIC int share_common(UWORD base, unsigned short pspseg, int fileno,
+                        unsigned long ofs, unsigned long len, int flag) {
+    CPU_regs saved;
+    int res;
+    cpu_save_regs(cpu, &saved);
+    CPU_BX = pspseg;
+    CPU_CX = (UWORD)fileno;
+    CPU_SI = (UWORD)(ofs >> 16);
+    CPU_DI = (UWORD)(ofs & 0xFFFF);
+    SET_ES((UWORD)(len >> 16));
+    CPU_DX = (UWORD)(len & 0xFFFF);
+    CPU_AX = (UWORD)(base | (UWORD)flag);
+    bios_intcall(cpu, 0x2F, "SHARE COMMON 2F");
+    res = (int)(int16_t)CPU_AX;
+    cpu_restore_regs(cpu, &saved);
+    return res;
+}
+
+int share_access_check(unsigned short pspseg, int fileno, unsigned long ofs,
+                       unsigned long len, int allowcriter) {
+    return share_common(0x10A2, pspseg, fileno, ofs, len, allowcriter);
+}
+
+int share_lock_unlock(unsigned short pspseg, int fileno, unsigned long ofs,
+                      unsigned long len, int unlock) {
+    return share_common(0x10A4, pspseg, fileno, ofs, len, unlock);
+}
+
 
 /*    ConvertPathNameToFCBName/set_fcbname - convert PriPathName's final
     component into FCB (8.3, space-padded) form, stashed in
@@ -303,12 +346,10 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 /* /// Added for SHARE.  - Ron Cemer */
   if (IsShareInstalled(TRUE))
   {
-    /*
-     * SHARE is not implemented by this port.  Should the installation
-     * probe ever report it present, fail this open normally instead of
-     * entering a diagnostic panic path.
-     */
-    return DE_ACCESS;
+    if ((sftp->sft_shroff =
+         share_open_check(linear_to_far(PriPathName), internal_data->cu_psp,
+                          flags & 0x03, (flags >> 4) & 0x07)) < 0)
+      return sftp->sft_shroff;
   }
 
 /* /// End of additions for SHARE.  - Ron Cemer */
@@ -323,12 +364,8 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     /* if we allocated a share slot above, but open failed, free slot */
     if (sftp->sft_shroff >= 0)  /* SHARE installed status can't change since check above */
     {
-      /*
-       * No SHARE backend is available to release this slot.  Restore
-       * the local SFT reference count and return a normal DOS error.
-       */
-      sftp->sft_count--;
-      return DE_ACCESS;
+      share_close_file(sftp->sft_shroff);
+      sftp->sft_shroff = -1;
     }
 /* /// End of additions for SHARE.  - Ron Cemer */
     sftp->sft_count--;
@@ -414,23 +451,26 @@ dos_far_ptr /*sft*/ get_sft(UCOUNT hndl) {
   return idx_to_sft(get_sft_idx(hndl));
 }
 
+BYTE share_installed = 0;
+
 /*
     IsShareInstalled(recheck) - report whether SHARE.EXE is loaded.
 
-    /// TODO: stub for this iteration. The original calls share_check()
-    /// (an INT 2Fh AX=1000h multiplex check, implemented in asm) and
-    /// caches the result in share_installed; neither exists in this
-    /// codebase, and there is no SHARE.EXE-equivalent driver to load
-    /// here yet, so this honestly always reports "not installed" -
-    /// which is the truth for this system right now, not a shortcut
-    /// around missing functionality.
-
-    Migrated from dosfns.c (signature only; body replaced as above).
+    Migrated from dosfns.c. The kernel's own INT 2Fh handler answers AX=1000h
+    with AL=00h ("not installed"), so this stays FALSE on a bare system - but
+    a guest SHARE.EXE hooks INT 2Fh ahead of us, and then AL comes back FFh and
+    the kernel starts routing opens/locks through it. All the hooks it needs
+    (AX=10A0h/10A1h/10A2h/10A4h) are real INT 2Fh calls, see above.
 */
 BOOL IsShareInstalled(BOOL recheck)
 {
-  UNREFERENCED_PARAMETER(recheck);
-  return FALSE;
+  if (recheck == FALSE)
+    return share_installed;
+  if (share_check() == 0xff)
+    share_installed = TRUE;
+  else
+    share_installed = FALSE;
+  return share_installed;
 }
 
 
@@ -615,11 +655,11 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
   /* /// Added for SHARE - Ron Cemer */
   if (IsShareInstalled(FALSE) && (s->sft_shroff >= 0))
   {
-    /*
-     * SHARE access checks cannot be performed without a SHARE backend.
-     * Report access denied rather than entering an API-level panic path.
-     */
-    return DE_ACCESS;
+    /* sft_shroff is file_table index in share */
+    int rc = share_access_check(internal_data->cu_psp, s->sft_shroff,
+                                s->sft_posit, (unsigned long)n, 1);
+    if (rc != SUCCESS)
+      return rc;
   }
   /* /// End of additions for SHARE - Ron Cemer */
   return rwblock(sft_idx, bp, n, mode);
@@ -1159,11 +1199,7 @@ COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock)
     return DE_LOCK;
 
   /* Let SHARE do the work. */
-  /* original: share_lock_unlock(cu_psp, s->sft_shroff, pos, len,
-     unlock). The SHARE module is not ported; IsShareInstalled() always
-     returns FALSE in this port, so this point is unreachable - kept
-     for structural fidelity with the original. */
-  return DE_INVLDFUNC;
+  return share_lock_unlock(internal_data->cu_psp, s->sft_shroff, pos, len, unlock);
 }
 
 #ifdef WITHFAT32
