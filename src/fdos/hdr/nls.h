@@ -643,7 +643,26 @@ struct subf_hdr { /* subfunction header */
 struct subf_tbl {
   char sig[8];    /* signature for each subfunction data */
   int idx;        /* index of pointer in nls_hc.asm to be copied to */
+  UWORD max;      /* max payload accepted from COUNTRY.SYS, in bytes;
+                     0 == subfunction not supported */
 };
+
+/*
+ * Sizes of the hardcoded NLS tables (init_nls_hardcoded() in kernel.c).
+ * They are FIXED slots in guest memory, laid out back to back, with the NLS
+ * scratch area right behind them - so a COUNTRY.SYS table larger than its
+ * slot does not just corrupt the neighbouring table, it walks into
+ * x86_nlsScratch. Upstream has the same fixed slots in nls_hc.asm and the
+ * same missing bounds check; here it is cheap to close.
+ *
+ * Each table is a "length word + payload", so the payload capacity is
+ * SIZE - 2.
+ */
+#define NLS_HC_TBL2_SIZE  130u  /* subfct 2: upcase          2 + 128 */
+#define NLS_HC_TBL4_SIZE  130u  /* subfct 4: filename upcase 2 + 128 */
+#define NLS_HC_TBL5_SIZE   24u  /* subfct 5: fname term      2 +  22 */
+#define NLS_HC_TBL6_SIZE  258u  /* subfct 6: collate         2 + 256 */
+#define NLS_HC_TBL7_SIZE   10u  /* subfct 7: DBCS            2 +   8 */
 
 struct subf_data {   /* subfunction data */
   char signature[8];  /* \377CTYINFO|UCASE|LCASE|FUCASE|FCHAR|COLLATE|DBCS|YESNO */

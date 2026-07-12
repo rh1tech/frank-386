@@ -1357,16 +1357,22 @@ STATIC int LoadCountryInfoHardCoded(COUNT ctryCode)
  */
 STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
 {
+  /* .max is the biggest payload we may copy out of COUNTRY.SYS for this
+     subfunction; it is the capacity of the fixed hardcoded slot the data
+     lands in (see NLS_HC_TBL*_SIZE / init_nls_hardcoded()).
+     CTYINFO is the exception: MS-DOS ships up to 38 bytes there and the
+     code below clamps it to sizeof(struct CountrySpecificInfo) instead of
+     rejecting the file, so accept up to 38. */
   static struct subf_tbl table[9] = {
-    {"\377       ", -1},  /* 0, unused */
-    {"\377CTYINFO", 5},   /* 1 */
-    {"\377UCASE  ", 0},   /* 2 */
-    {"\377LCASE  ", -1},  /* 3, not supported [yet] */
-    {"\377FUCASE ", 1},   /* 4 */
-    {"\377FCHAR  ", 2},   /* 5 */
-    {"\377COLLATE", 3},   /* 6 */
-    {"\377DBCS   ", 4},   /* 7, not supported [yet] */
-    {"\377YESNO  ", -1}   /* 35 */
+    {"\377       ", -1, 0},                     /* 0, unused */
+    {"\377CTYINFO", 5,  38},                    /* 1 */
+    {"\377UCASE  ", 0,  NLS_HC_TBL2_SIZE - 2},  /* 2 */
+    {"\377LCASE  ", -1, 0},                     /* 3, not supported [yet] */
+    {"\377FUCASE ", 1,  NLS_HC_TBL4_SIZE - 2},  /* 4 */
+    {"\377FCHAR  ", 2,  NLS_HC_TBL5_SIZE - 2},  /* 5 */
+    {"\377COLLATE", 3,  NLS_HC_TBL6_SIZE - 2},  /* 6 */
+    {"\377DBCS   ", 4,  NLS_HC_TBL7_SIZE - 2},  /* 7, not supported [yet] */
+    {"\377YESNO  ", -1, 4}                      /* 35 */
   };
   int fd, i, subf_tbl_ndx;
   char *filename = filenam == NULL ? "\\COUNTRY.SYS" : filenam;
@@ -1460,6 +1466,7 @@ err:printf("%s has invalid format\n", filename);
        || memcmp(subf_data->signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
        || memcmp(subf_data->signature, table[2].sig, 8))  /* UCASE for FUCASE ^*/
        || subf_data->length > sizeof(subf_data->buffer)
+       || subf_data->length > table[subf_tbl_ndx].max
        || read(fd, x86_subf_data_buffer, subf_data->length) != subf_data->length)
         goto err;
       if (hdr[i].id == 1)

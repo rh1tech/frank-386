@@ -264,15 +264,26 @@ dos_far_ptr/*struct cds*/ get_cds(unsigned drive)
 
 UBYTE DosSelectDrv(UBYTE drv)
 {
-  dos_far_ptr new_ldt = get_cds(drv);
-  /*
-   * An invalid drive must not become the default drive.
-   * get_cds() returns 0000:0000 when the drive is unavailable.
+  /* dosfns.c:
+   *     current_ldt = get_cds(drv);
+   *     if (current_ldt != NULL)
+   *       default_drive = drv;
+   *     return lastdrive;
+   *
+   * current_ldt IS updated unconditionally - a failed select leaves "no
+   * current CDS" behind, it must not leave a stale CDS of another drive.
+   * Only the default drive is protected.
+   *
+   * The old port checked FP_OFF() != 0xFFFF here, which is the *other*
+   * sentinel (FFFF:FFFF, set by truename() for device/network paths);
+   * get_cds() signals "drive unavailable" with 0000:0000, so the test never
+   * fired and an invalid drive became the default one.
    */
-  if (!far_is_null(new_ldt)) {
-    internal_data->current_ldt = new_ldt;
+  internal_data->current_ldt = get_cds(drv);
+
+  if (!far_is_null(internal_data->current_ldt))
     internal_data->default_drive = drv;
-  }
+
   return LoL->lastdrive;
 }
 

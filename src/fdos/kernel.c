@@ -151,6 +151,17 @@ static const UBYTE nls_dbcs_hardcoded_init[] = {
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
  
+_Static_assert(sizeof(nls_upcase_hardcoded_init)     == NLS_HC_TBL2_SIZE,
+               "hardcoded upcase table must match NLS_HC_TBL2_SIZE");
+_Static_assert(sizeof(nls_fupcase_hardcoded_init)    == NLS_HC_TBL4_SIZE,
+               "hardcoded file-upcase table must match NLS_HC_TBL4_SIZE");
+_Static_assert(sizeof(nls_fname_term_hardcoded_init) == NLS_HC_TBL5_SIZE,
+               "hardcoded fname-terminator table must match NLS_HC_TBL5_SIZE");
+_Static_assert(sizeof(nls_coll_hardcoded_init)       == NLS_HC_TBL6_SIZE,
+               "hardcoded collate table must match NLS_HC_TBL6_SIZE");
+_Static_assert(sizeof(nls_dbcs_hardcoded_init)       == NLS_HC_TBL7_SIZE,
+               "hardcoded DBCS table must match NLS_HC_TBL7_SIZE");
+
 static dos_far_ptr nls_hc_ptr(UWORD off)
 {
     return MK_FP(FP_SEG(x86_nlsPackageHardcoded), FP_OFF(x86_nlsPackageHardcoded) + off);

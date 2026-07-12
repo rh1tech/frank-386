@@ -92,3 +92,16 @@ struct cds {
 #define CDS_MODE_SKIP_PHYSICAL 0x01    /* don't resolve SUBST, JOIN, NETW */
 #define CDS_MODE_CHECK_DEV_PATH 0x02  /* check for existence of device path */
 #define CDS_MODE_ALLOW_WILDCARDS 0x04  /* allow wildcards in "truename" */
+
+/*
+ * internal_data->current_ldt carries two sentinels:
+ *   0000:0000  no CDS at all - get_cds() failed (drive out of range, CDS
+ *              entry invalid, JOINed drive, or no DPB)
+ *   FFFF:FFFF  device / network path - truename() (newstuff.c) puts this in
+ *              when the name does not belong to a local CDS
+ * Neither of them may be dereferenced or written to.  Note that in this port
+ * 0000:0000 resolves to the guest IVT, so a missing NULL test corrupts the
+ * guest silently; upstream gets away with it because there NULL is just an
+ * unmapped far pointer.
+ */
+#define CDS_WRITABLE(p) (!far_is_null(p) && FP_OFF(p) != 0xFFFF)

@@ -59,8 +59,10 @@
 #define X86_NLS_INFO_OFF        (X86_DATA_OFF + 4u)
 #define x86_nlsInfo             MK_FP(DOS_PSP, X86_NLS_INFO_OFF) // _DATA struct nlsInfoBlock
 #define x86_nlsPackageHardcoded MK_FP(DOS_PSP, X86_NLS_INFO_OFF + sizeof(struct nlsInfoBlock)) // struct nlsPackage
-/* hardcoded NLS tables: upcase(130)+fupcase(130)+fname(24)+collate(258)+dbcs(10) */
-#define X86_NLS_HC_TABLE_BYTES  (130u + 130u + 24u + 258u + 10u)
+/* hardcoded NLS tables: upcase+fupcase+fname+collate+dbcs (sizes in nls.h) */
+#define X86_NLS_HC_TABLE_BYTES  (NLS_HC_TBL2_SIZE + NLS_HC_TBL4_SIZE \
+                                 + NLS_HC_TBL5_SIZE + NLS_HC_TBL6_SIZE \
+                                 + NLS_HC_TBL7_SIZE)
 #define X86_NLS_SCRATCH_OFF     (X86_NLS_INFO_OFF + sizeof(struct nlsInfoBlock) + sizeof(struct nlsPackage) + X86_NLS_HC_TABLE_BYTES)
 #define x86_nlsScratch          MK_FP(DOS_PSP, X86_NLS_SCRATCH_OFF)
 #define x86_nlsEntries          ADD_OFF(x86_nlsScratch, 0) // UWORD

@@ -1319,7 +1319,7 @@ COUNT DosChangeDir(dos_far_ptr s)
 
   set_fcbname();
 
-  if ((FP_OFF(internal_data->current_ldt) != 0xFFFF) && (strlen(PriPathName) >= MAX_CDSPATH))
+  if (CDS_WRITABLE(internal_data->current_ldt) && (strlen(PriPathName) >= MAX_CDSPATH))
     return DE_PATHNOTFND;
 
   /// TODO:
@@ -1333,7 +1333,7 @@ COUNT DosChangeDir(dos_far_ptr s)
   /* Copy the path to the current directory structure. Some redirectors
      do not write back to the CDS - not applicable here (no redirector),
      kept for parity with upstream. */
-  if (FP_OFF(internal_data->current_ldt) != 0xFFFF)
+  if (CDS_WRITABLE(internal_data->current_ldt))
   {
     struct cds *cdsp = (struct cds *)ARM_PTR(internal_data->current_ldt);
     fstrcpy(cdsp->cdsCurrentPath, PriPathName);
