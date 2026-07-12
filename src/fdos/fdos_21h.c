@@ -21,9 +21,21 @@ while(1); // remove it
 }
 #endif
 
-COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError, struct dhdr FAR * lpDevice) {
-/// TODO: entry.asm
-  CPU_AL = FAIL;
+/*
+ * Minimal critical-error backend until the original INT 24h/user-stack
+ * trampoline from entry.asm is ported.
+ *
+ * Return FAIL to the caller without modifying the live CPU register
+ * frame.  INT 21h dispatch uses a separate local register frame, while
+ * INT 2Fh callers that require AL explicitly store this return value.
+ */
+COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
+                             struct dhdr FAR *lpDevice)
+{
+  UNREFERENCED_PARAMETER(nFlag);
+  UNREFERENCED_PARAMETER(nDrive);
+  UNREFERENCED_PARAMETER(nError);
+  UNREFERENCED_PARAMETER(lpDevice);
   return FAIL;
 }
 
@@ -2220,14 +2232,10 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0xDD: // Novell NetWare - WORKSTATION - SET NetWare ERROR MODE
         goto error_invalid;
 
-      /* CP/M compatibility functions: genuine no-ops in the original
-         kernel (return AL=0, carry untouched). Kept OUT of default: so
-         they don't trip the unimplemented-function trap below.
-         NOTE (porting plan): the original kernel routes unknown AH here
-         too (default falls through to this group with AL=0). That final
-         switch-over is deliberately postponed to the LAST porting
-         iteration - until then default: stays a hard trap to surface
-         anything still missing. */
+      /*
+       * CP/M compatibility functions: genuine no-ops in the original
+       * kernel.  These explicitly return AL=0 and leave carry unchanged.
+       */
       case 0x18:
       case 0x1d:
       case 0x1e:
@@ -2241,7 +2249,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 #ifdef NO_HANDLER_DETECTOR
         no_handler(_cpu);
 #endif
-        goto error_invalid;
+        break;
     }
     goto exit_dispatch;
 

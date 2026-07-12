@@ -303,12 +303,11 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 /* /// Added for SHARE.  - Ron Cemer */
   if (IsShareInstalled(TRUE))
   {
-    /// unreachable: IsShareInstalled() always returns FALSE in this
-    /// codebase (see its definition above) - share_open_check() is
-    /// not implemented, so this branch is left as a deliberate
-    /// "not implemented" failure rather than silently doing nothing,
-    /// in case that assumption ever stops holding.
-    printf("PANIC: DosOpenSft reached the SHARE-installed branch unexpectedly\n");
+    /*
+     * SHARE is not implemented by this port.  Should the installation
+     * probe ever report it present, fail this open normally instead of
+     * entering a diagnostic panic path.
+     */
     return DE_ACCESS;
   }
 
@@ -324,8 +323,10 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     /* if we allocated a share slot above, but open failed, free slot */
     if (sftp->sft_shroff >= 0)  /* SHARE installed status can't change since check above */
     {
-      /// unreachable alongside the IsShareInstalled() branch above.
-      printf("PANIC: DosOpenSft reached share_close_file unexpectedly\n");
+      /*
+       * No SHARE backend is available to release this slot.  Restore
+       * the local SFT reference count and return a normal DOS error.
+       */
       sftp->sft_count--;
       return DE_ACCESS;
     }
@@ -614,11 +615,10 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
   /* /// Added for SHARE - Ron Cemer */
   if (IsShareInstalled(FALSE) && (s->sft_shroff >= 0))
   {
-    /// unreachable: IsShareInstalled() always returns FALSE in this
-    /// codebase. share_access_check() is not implemented, so this is
-    /// left as a deliberate panic rather than silently doing nothing,
-    /// in case that assumption ever stops holding.
-    printf("PANIC: DosRWSft reached share_access_check unexpectedly\n");
+    /*
+     * SHARE access checks cannot be performed without a SHARE backend.
+     * Report access denied rather than entering an API-level panic path.
+     */
     return DE_ACCESS;
   }
   /* /// End of additions for SHARE - Ron Cemer */

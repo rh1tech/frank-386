@@ -66,13 +66,16 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
   struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp); 
   struct dhdr* dpb_device = (struct dhdr *)ARM_PTR(dpbp->dpb_device);
 
+  /*
+   * The current native block backend transfers 512-byte sectors only.
+   * Upstream FreeDOS has no panic here: sector size is supplied by the
+   * DPB and handled by the installed block driver.  Until this port's
+   * backend supports other sector sizes, reject such a request with the
+   * same request-status value used above for an unusable drive instead
+   * of halting the whole DOS kernel.
+   */
   if (dpbp->dpb_secsize != 512)
-  {
-    printf("PANIC: bad dpb_secsize dsk=%d dpbp=%p secsize=%u blk=%lu cnt=%u\n",
-           dsk, dpbp, dpbp->dpb_secsize,
-           (unsigned long)blkno, numblocks);
-    while (1);
-  }
+    return 0x0201;              /* error + illegal command */
 
   for (;;)
   {

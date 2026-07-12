@@ -366,14 +366,18 @@ void request_terminate(UBYTE exit_code, UBYTE exit_type)
   cpu->native_done = true;
 }
 
-/* Returns AX-packed AL=last exit code, AH=exit type, matching INT 21h
-   AH=4Dh. Simplification vs upstream: not "consumed" on read (real
-   DOS clears it after one read) - harmless, since callers only ever
-   read it once, right after EXEC returns, before starting anything
-   else. */
+/*
+ * Return AX-packed AL=last exit code, AH=exit type for INT 21h/AH=4Dh.
+ *
+ * The status is consumed by the read, matching upstream FreeDOS:
+ * a second AH=4Dh call returns 0000h until another child terminates.
+ */
 UWORD DosGetRetCode(void)
 {
-  return term_exit_code | ((UWORD) term_exit_type << 8);
+  UWORD result = term_exit_code | ((UWORD)term_exit_type << 8);
+  term_exit_code = 0;
+  term_exit_type = 0;
+  return result;
 }
 
 static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,

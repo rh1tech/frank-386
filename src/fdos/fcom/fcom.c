@@ -11,12 +11,11 @@ int snprintf(char *s, size_t n, const char *fmt, ...);
 #include "bios/bios.h"
 #include "fdos/fcom/fcom.h"
 
-#define FCOM_LINE_MAX       126u
-#define FCOM_PROCESS_PARAS  0x1000u
-#define FCOM_WORK_OFFSET    0x0100u
-#define FCOM_STACK_TOP      0x0000u
-#define FCOM_STACK_GUARD    16u
-#define FCOM_ALIGN16(v)     (((v) + 15u) & ~15u)
+#define FCOM_LINE_MAX          126u
+#define FCOM_WORK_OFFSET       0x0100u
+#define FCOM_STACK_GUARD       16u
+#define FCOM_STACK_RESERVE     0x2000u
+#define FCOM_ALIGN16(v)        (((v) + 15u) & ~15u)
 
 static int fcom_write(CPU *cpu, UWORD command_psp, UWORD offset, UWORD count);
 
@@ -62,6 +61,11 @@ struct fcom_guest {
   UWORD dir_stack_used;
   UWORD alias_used;
   UWORD history_used;
+  UBYTE lfnfor_enabled;
+  UBYTE lfncomplete_enabled;
+  UBYTE fddebug_enabled;
+  UWORD fddebug_handle;
+  char fddebug_name[128];
 };
 #pragma pack(pop)
 
@@ -69,15 +73,23 @@ struct fcom_guest {
 #define FCOM_DIR_STACK_BYTES   1024u
 #define FCOM_ALIAS_BYTES       1024u
 #define FCOM_HISTORY_BYTES     2048u
+#define FCOM_LOADFIX_SLOTS     256u
+#define FCOM_LOADFIX_BYTES     (FCOM_LOADFIX_SLOTS * sizeof(UWORD))
 #define FCOM_DIR_STACK_OFFSET  FCOM_ALIGN16(FCOM_DATA_END)
 #define FCOM_ALIAS_OFFSET      (FCOM_DIR_STACK_OFFSET + FCOM_DIR_STACK_BYTES)
 #define FCOM_HISTORY_OFFSET    (FCOM_ALIAS_OFFSET + FCOM_ALIAS_BYTES)
-#define FCOM_GUARD_OFFSET      (FCOM_HISTORY_OFFSET + FCOM_HISTORY_BYTES)
+#define FCOM_LOADFIX_OFFSET    (FCOM_HISTORY_OFFSET + FCOM_HISTORY_BYTES)
+#define FCOM_GUARD_OFFSET      (FCOM_LOADFIX_OFFSET + FCOM_LOADFIX_BYTES)
 #define FCOM_STACK_BOTTOM      (FCOM_GUARD_OFFSET + FCOM_STACK_GUARD)
-#define FCOM_STACK_BYTES       (0x10000u - FCOM_STACK_BOTTOM)
+#define FCOM_PROCESS_BYTES     FCOM_ALIGN16(FCOM_STACK_BOTTOM + FCOM_STACK_RESERVE)
+#define FCOM_PROCESS_PARAS     (FCOM_PROCESS_BYTES >> 4)
+#define FCOM_STACK_TOP         FCOM_PROCESS_BYTES
+#define FCOM_STACK_BYTES       (FCOM_STACK_TOP - FCOM_STACK_BOTTOM)
 
-_Static_assert(FCOM_STACK_BOTTOM < 0x10000u,
-               "FCOM guest data leaves no room for guest stack");
+_Static_assert(FCOM_PROCESS_BYTES <= 0xfff0u,
+               "FCOM compact process exceeds a 16-bit segment");
+_Static_assert(FCOM_STACK_BYTES >= FCOM_STACK_RESERVE,
+               "FCOM guest stack reserve is too small");
 _Static_assert((FCOM_GUARD_OFFSET & 15u) == 0,
                "FCOM stack guard is not paragraph-aligned");
 
@@ -109,6 +121,12 @@ static char *fcom_history_storage(UWORD command_psp)
   return (char *)ARM_PTR(MK_FP(command_psp, FCOM_HISTORY_OFFSET));
 }
 
+
+static UWORD *fcom_loadfix_storage(UWORD command_psp)
+{
+  return (UWORD *)ARM_PTR(MK_FP(command_psp, FCOM_LOADFIX_OFFSET));
+}
+
 static void init_stack_guard(UWORD command_psp)
 {
   memset(stack_guard(command_psp), 0xa5, FCOM_STACK_GUARD);
@@ -132,9 +150,12 @@ static void fcom_intcall(CPU *cpu, UWORD command_psp, UBYTE intno,
   UWORD old_ss = CPU_SS;
   UWORD old_sp = CPU_SP;
 
-  /* SP=0000h is the canonical top of a 64-KiB 16-bit stack: the first
-     PUSH wraps to FFFEh.  Static data occupies the low part of this
-     segment; the guard below it detects a stack collision. */
+  /*
+   * The native shell owns only a compact guest block.  Its guest stack
+   * starts at the paragraph-aligned end of that block and grows down
+   * toward the guard; it must never address the released tail of the
+   * segment.
+   */
   SET_SS(command_psp);
   CPU_SP = FCOM_STACK_TOP;
   bios_intcall(cpu, intno, owner);
@@ -485,15 +506,21 @@ static void pause_command(CPU *cpu, UWORD command_psp,
 }
 
 
-static int fcom_write(CPU *cpu, UWORD command_psp, UWORD offset, UWORD count)
+static int fcom_write_handle(CPU *cpu, UWORD command_psp,
+                             UWORD handle, UWORD offset, UWORD count)
 {
   SET_DS(command_psp);
   CPU_DX = offset;
-  CPU_BX = 1;
+  CPU_BX = handle;
   CPU_CX = count;
   CPU_AH = 0x40;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM write");
   return int21_failed(cpu) ? -(int)CPU_AX : (int)CPU_AX;
+}
+
+static int fcom_write(CPU *cpu, UWORD command_psp, UWORD offset, UWORD count)
+{
+  return fcom_write_handle(cpu, command_psp, 1, offset, count);
 }
 
 
@@ -562,11 +589,203 @@ static int dos_find_next(CPU *cpu, UWORD command_psp)
   return int21_failed(cpu) ? -(int)CPU_AX : 0;
 }
 
-static void dir_line(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
+struct fcom_dir_options {
+  UBYTE bare;
+  UBYTE wide;
+  UBYTE pause;
+  UBYTE required_attr;
+  UBYTE excluded_attr;
+  char *pattern;
+};
+
+static char *fcom_dir_next_argument(char **cursor)
+{
+  char *p = skip_space(*cursor);
+  char *start;
+
+  if (*p == '\0') {
+    *cursor = p;
+    return NULL;
+  }
+
+  if (*p == '"') {
+    start = ++p;
+    while (*p != '\0' && *p != '"')
+      ++p;
+    if (*p == '"')
+      *p++ = '\0';
+  } else {
+    start = p;
+    while (*p != '\0' && *p != ' ' && *p != '\t')
+      ++p;
+    if (*p != '\0')
+      *p++ = '\0';
+  }
+
+  *cursor = p;
+  return start;
+}
+
+static int fcom_dir_attr_bit(int ch, UBYTE *bit)
+{
+  switch (toupper((unsigned char)ch)) {
+  case 'R':
+    *bit = 0x01;
+    return 1;
+  case 'H':
+    *bit = 0x02;
+    return 1;
+  case 'S':
+    *bit = 0x04;
+    return 1;
+  case 'D':
+    *bit = 0x10;
+    return 1;
+  case 'A':
+    *bit = 0x20;
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+static int fcom_parse_dir_attr(char *p, struct fcom_dir_options *options)
+{
+  int exclude = 0;
+
+  if (*p == ':')
+    ++p;
+
+  if (*p == '\0')
+    return 1;
+
+  while (*p != '\0') {
+    UBYTE bit;
+
+    if (*p == '-') {
+      exclude = 1;
+      ++p;
+      continue;
+    }
+
+    if (!fcom_dir_attr_bit((unsigned char)*p++, &bit))
+      return 0;
+
+    if (exclude) {
+      options->excluded_attr |= bit;
+      options->required_attr &= (UBYTE)~bit;
+    } else {
+      options->required_attr |= bit;
+      options->excluded_attr &= (UBYTE)~bit;
+    }
+  }
+
+  return 1;
+}
+
+static int fcom_parse_dir_options(struct fcom_guest *g, const char *args,
+                                  struct fcom_dir_options *options)
+{
+  char *cursor;
+  char *arg;
+
+  memset(options, 0, sizeof(*options));
+
+  if (strlen(args) >= sizeof(g->redirect_command))
+    return 0;
+
+  strcpy(g->redirect_command, args);
+  cursor = g->redirect_command;
+
+  while ((arg = fcom_dir_next_argument(&cursor)) != NULL) {
+    if ((arg[0] == '/' || arg[0] == '-') && arg[1] != '\0') {
+      char *p = arg + 1;
+
+      switch (toupper((unsigned char)*p++)) {
+      case 'B':
+        if (*p != '\0')
+          return 0;
+        options->bare = 1;
+        break;
+
+      case 'W':
+        if (*p != '\0')
+          return 0;
+        options->wide = 1;
+        break;
+
+      case 'P':
+        if (*p != '\0')
+          return 0;
+        options->pause = 1;
+        break;
+
+      case 'A':
+        if (!fcom_parse_dir_attr(p, options))
+          return 0;
+        break;
+
+      default:
+        return 0;
+      }
+    } else {
+      if (options->pattern != NULL)
+        return 0;
+      options->pattern = arg;
+    }
+  }
+
+  if (options->pattern == NULL)
+    options->pattern = "*.*";
+
+  if (options->bare)
+    options->wide = 0;
+
+  return 1;
+}
+
+static int fcom_dir_attr_matches(const struct fcom_dir_options *options,
+                                 UBYTE attributes)
+{
+  if ((attributes & options->required_attr) != options->required_attr)
+    return 0;
+  if ((attributes & options->excluded_attr) != 0)
+    return 0;
+  return 1;
+}
+
+static unsigned fcom_dir_write_entry(CPU *cpu, UWORD command_psp,
+                                     struct fcom_guest *g,
+                                     const struct fcom_dir_options *options,
+                                     unsigned wide_column)
 {
   int n;
 
-  if (g->find.dm_attr_fnd & D_DIR) {
+  if (options->bare) {
+    n = snprintf(g->text, sizeof(g->text), "%s\r\n",
+                 g->find.dm_name);
+  } else if (options->wide) {
+    if (g->find.dm_attr_fnd & D_DIR)
+      n = snprintf(g->text, sizeof(g->text), "[%-12s]",
+                   g->find.dm_name);
+    else
+      n = snprintf(g->text, sizeof(g->text), "%-14s",
+                   g->find.dm_name);
+
+    if (n > 0) {
+      fcom_write(cpu, command_psp,
+                 FCOM_WORK_OFFSET +
+                   (UWORD)offsetof(struct fcom_guest, text),
+                 (UWORD)n);
+    }
+
+    ++wide_column;
+    if (wide_column >= 5) {
+      dos_puts(cpu, command_psp, g, "\r\n");
+      wide_column = 0;
+    }
+    return wide_column;
+  } else if (g->find.dm_attr_fnd & D_DIR) {
     n = snprintf(g->text, sizeof(g->text), "%-13s <DIR>\r\n",
                  g->find.dm_name);
   } else {
@@ -574,20 +793,30 @@ static void dir_line(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
                  g->find.dm_name, (unsigned long)g->find.dm_size);
   }
 
-  if (n < 0)
-    return;
-  if ((size_t)n >= sizeof(g->text))
-    n = sizeof(g->text) - 1;
-  fcom_write(cpu, command_psp,
-            FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
-            (UWORD)n);
+  if (n > 0) {
+    if ((size_t)n >= sizeof(g->text))
+      n = (int)sizeof(g->text) - 1;
+    fcom_write(cpu, command_psp,
+               FCOM_WORK_OFFSET +
+                 (UWORD)offsetof(struct fcom_guest, text),
+               (UWORD)n);
+  }
+
+  return wide_column;
 }
 
 static void builtin_dir(CPU *cpu, UWORD command_psp,
                         struct fcom_guest *g, const char *args)
 {
-  const char *pattern = *args ? args : "*.*";
+  struct fcom_dir_options options;
+  unsigned displayed_lines = 0;
+  unsigned wide_column = 0;
   int rc;
+
+  if (!fcom_parse_dir_options(g, args, &options)) {
+    dos_puts(cpu, command_psp, g, "Invalid DIR parameter.\r\n");
+    return;
+  }
 
   memset(&g->find, 0, sizeof(g->find));
   if (set_find_dta(cpu, command_psp) < 0) {
@@ -595,7 +824,7 @@ static void builtin_dir(CPU *cpu, UWORD command_psp,
     return;
   }
 
-  rc = dos_find_first(cpu, command_psp, g, pattern);
+  rc = dos_find_first(cpu, command_psp, g, options.pattern);
   if (rc < 0) {
     restore_default_dta(cpu, command_psp);
     dos_puts(cpu, command_psp, g, "File not found\r\n");
@@ -604,13 +833,33 @@ static void builtin_dir(CPU *cpu, UWORD command_psp,
 
   do {
     if (strcmp(g->find.dm_name, ".") != 0 &&
-        strcmp(g->find.dm_name, "..") != 0)
-      dir_line(cpu, command_psp, g);
+        strcmp(g->find.dm_name, "..") != 0 &&
+        fcom_dir_attr_matches(&options, g->find.dm_attr_fnd)) {
+      wide_column = fcom_dir_write_entry(
+          cpu, command_psp, g, &options, wide_column);
+
+      if (!options.wide || wide_column == 0)
+        ++displayed_lines;
+
+      if (options.pause && displayed_lines >= 23) {
+        if (options.wide && wide_column != 0) {
+          dos_puts(cpu, command_psp, g, "\r\n");
+          wide_column = 0;
+        }
+        pause_command(cpu, command_psp, g);
+        displayed_lines = 0;
+      }
+    }
+
     rc = dos_find_next(cpu, command_psp);
   } while (rc == 0);
 
+  if (options.wide && wide_column != 0)
+    dos_puts(cpu, command_psp, g, "\r\n");
+
   restore_default_dta(cpu, command_psp);
 }
+
 
 static int dos_open_read(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g, const char *name)
@@ -975,6 +1224,206 @@ static enum onoff_value parse_onoff(char *args)
   if (strcasecmp(p, "ON") == 0)
     return FCOM_ONOFF_ON;
   return FCOM_ONOFF_INVALID;
+}
+
+
+
+static void fcom_fddebug_close(CPU *cpu, UWORD command_psp,
+                               struct fcom_guest *g)
+{
+  if (g->fddebug_handle > 2)
+    fcom_close(cpu, command_psp, g->fddebug_handle);
+
+  g->fddebug_handle = 1;
+  strcpy(g->fddebug_name, "stdout");
+}
+
+static int fcom_fddebug_open_append(CPU *cpu, UWORD command_psp,
+                                    struct fcom_guest *g,
+                                    const char *name)
+{
+  size_t n = strlen(name);
+  int handle;
+
+  if (n == 0 || n >= sizeof(g->path) ||
+      n >= sizeof(g->fddebug_name))
+    return 0;
+
+  memcpy(g->path, name, n + 1);
+
+  SET_DS(command_psp);
+  CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+  CPU_AX = 0x3d01;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM FDDEBUG open");
+
+  if (int21_failed(cpu)) {
+    SET_DS(command_psp);
+    CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+    CPU_CX = 0;
+    CPU_AH = 0x3c;
+    fcom_intcall(cpu, command_psp, 0x21, "FCOM FDDEBUG create");
+    if (int21_failed(cpu))
+      return 0;
+  }
+
+  handle = CPU_AX;
+
+  CPU_BX = (UWORD)handle;
+  CPU_CX = 0;
+  CPU_DX = 0;
+  CPU_AX = 0x4202;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM FDDEBUG seek end");
+  if (int21_failed(cpu)) {
+    fcom_close(cpu, command_psp, (UWORD)handle);
+    return 0;
+  }
+
+  fcom_fddebug_close(cpu, command_psp, g);
+  g->fddebug_handle = (UWORD)handle;
+  memcpy(g->fddebug_name, name, n + 1);
+  return 1;
+}
+
+static void fcom_fddebug_write(CPU *cpu, UWORD command_psp,
+                               struct fcom_guest *g,
+                               const char *prefix,
+                               const char *text)
+{
+  int n;
+
+  if (!g->fddebug_enabled)
+    return;
+
+  n = snprintf(g->text, sizeof(g->text), "%s%s\r\n",
+               prefix != NULL ? prefix : "",
+               text != NULL ? text : "");
+  if (n <= 0)
+    return;
+
+  if ((size_t)n >= sizeof(g->text))
+    n = (int)sizeof(g->text) - 1;
+
+  (void)fcom_write_handle(
+      cpu, command_psp, g->fddebug_handle,
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+      (UWORD)n);
+}
+
+static void builtin_fddebug(CPU *cpu, UWORD command_psp,
+                            struct fcom_guest *g, char *args)
+{
+  char *p = skip_space(args);
+  char *end;
+  enum onoff_value value = parse_onoff(p);
+
+  switch (value) {
+  case FCOM_ONOFF_EMPTY:
+    dos_puts(cpu, command_psp, g,
+             g->fddebug_enabled
+                 ? "DEBUG output is ON.\r\n"
+                 : "DEBUG output is OFF.\r\n");
+    dos_puts(cpu, command_psp, g, "DEBUG output is printed to '");
+    dos_puts(cpu, command_psp, g,
+             g->fddebug_name[0] != '\0'
+                 ? g->fddebug_name : "stdout");
+    dos_puts(cpu, command_psp, g, "'.\r\n");
+    return;
+
+  case FCOM_ONOFF_ON:
+    g->fddebug_enabled = 1;
+    return;
+
+  case FCOM_ONOFF_OFF:
+    g->fddebug_enabled = 0;
+    return;
+
+  default:
+    break;
+  }
+
+  end = p + strlen(p);
+  while (end > p && (end[-1] == ' ' || end[-1] == '\t'))
+    *--end = '\0';
+
+  if (*p == '\0') {
+    dos_puts(cpu, command_psp, g, "Invalid syntax.\r\n");
+    return;
+  }
+
+  if (strcasecmp(p, "stdout") == 0 ||
+      strcasecmp(p, "stderr") == 0) {
+    UWORD handle = strcasecmp(p, "stderr") == 0 ? 2 : 1;
+
+    fcom_fddebug_close(cpu, command_psp, g);
+    g->fddebug_handle = handle;
+    strcpy(g->fddebug_name, handle == 2 ? "stderr" : "stdout");
+    g->fddebug_enabled = 1;
+    return;
+  }
+
+  if (!fcom_fddebug_open_append(cpu, command_psp, g, p)) {
+    dos_puts(cpu, command_psp, g, "Unable to open - ");
+    dos_puts(cpu, command_psp, g, p);
+    dos_puts(cpu, command_psp, g, "\r\n");
+    return;
+  }
+
+  g->fddebug_enabled = 1;
+}
+
+static void builtin_lfnfor(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g, char *args)
+{
+  char *p = skip_space(args);
+  enum onoff_value value;
+
+  if (strncasecmp(p, "COMPLETE", 8) == 0 &&
+      (p[8] == '\0' || p[8] == ' ' || p[8] == '\t')) {
+    value = parse_onoff(p + 8);
+
+    switch (value) {
+    case FCOM_ONOFF_EMPTY:
+      dos_puts(cpu, command_psp, g,
+               g->lfncomplete_enabled
+                   ? "LFNFOR COMPLETE is ON\r\n"
+                   : "LFNFOR COMPLETE is OFF\r\n");
+      return;
+
+    case FCOM_ONOFF_OFF:
+      g->lfncomplete_enabled = 0;
+      return;
+
+    case FCOM_ONOFF_ON:
+      g->lfncomplete_enabled = 1;
+      return;
+
+    default:
+      dos_puts(cpu, command_psp, g, "Must specify ON or OFF.\r\n");
+      return;
+    }
+  }
+
+  value = parse_onoff(p);
+  switch (value) {
+  case FCOM_ONOFF_EMPTY:
+    dos_puts(cpu, command_psp, g,
+             g->lfnfor_enabled
+                 ? "LFNFOR is ON\r\n"
+                 : "LFNFOR is OFF\r\n");
+    return;
+
+  case FCOM_ONOFF_OFF:
+    g->lfnfor_enabled = 0;
+    return;
+
+  case FCOM_ONOFF_ON:
+    g->lfnfor_enabled = 1;
+    return;
+
+  default:
+    dos_puts(cpu, command_psp, g, "Must specify ON or OFF.\r\n");
+    return;
+  }
 }
 
 static void builtin_verify(CPU *cpu, UWORD command_psp,
@@ -2875,13 +3324,13 @@ static void builtin_question(CPU *cpu, UWORD command_psp,
   dos_puts(cpu, command_psp, g,
            "ALIAS ATTRIB BEEP BREAK CALL CD CDD CHCP CHDIR CLS COPY CTTY\r\n");
   dos_puts(cpu, command_psp, g,
-           "DATE DEL DIR DIRS DOSKEY ECHO ERASE EXIT FOR GOTO HISTORY IF LH\r\n");
+           "DATE DEL DIR DIRS DOSKEY ECHO ERASE EXIT FDDEBUG FOR GOTO HISTORY\r\n");
   dos_puts(cpu, command_psp, g,
-           "LOADHIGH MD MEMORY MKDIR PATH PAUSE POPD PROMPT PUSHD RD REM REN\r\n");
+           "IF LFNFOR LH LOADFIX LOADHIGH MD MEMORY MKDIR PATH PAUSE POPD\r\n");
   dos_puts(cpu, command_psp, g,
-           "RENAME RMDIR SET SHIFT TIME TITLE TRUENAME TYPE VER VERIFY\r\n");
+           "PROMPT PUSHD RD REM REN RENAME RMDIR SET SHIFT TIME TITLE\r\n");
   dos_puts(cpu, command_psp, g,
-           "VOL WHICH ?\r\n");
+           "TRUENAME TYPE VER VERIFY VOL WHICH ?\r\n");
 }
 
 
@@ -2959,6 +3408,93 @@ static void builtin_memory(CPU *cpu, UWORD command_psp,
     (void)fcom_write(cpu, command_psp,
         FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
         (UWORD)n);
+}
+
+
+
+static void fcom_loadfix_release(UWORD command_psp, unsigned count)
+{
+  UWORD *blocks = fcom_loadfix_storage(command_psp);
+
+  while (count != 0) {
+    UWORD mcb_seg = blocks[--count];
+
+    if (mcb_seg != 0)
+      (void)DosMemFree(mcb_seg);
+  }
+}
+
+static int fcom_loadfix_prepare(UWORD command_psp, unsigned *count)
+{
+  UWORD *blocks = fcom_loadfix_storage(command_psp);
+
+  *count = 0;
+
+  for (;;) {
+    seg mcb_seg = 0;
+    UWORD largest = 0;
+    UWORD data_seg;
+    UWORD wanted;
+    UWORD maximum = 0;
+    COUNT rc;
+
+    /*
+     * The original FreeCOM LOADFIX consumes every free conventional-memory
+     * fragment below linear address 10000h.  A subsequently EXECed program
+     * therefore cannot be loaded into the first 64 KiB.
+     */
+    rc = DosMemAlloc(1, FIRST_FIT, &mcb_seg, &largest);
+    if (rc < SUCCESS)
+      return SUCCESS;
+
+    data_seg = (UWORD)(mcb_seg + 1u);
+    if (data_seg >= 0x1000u) {
+      (void)DosMemFree(mcb_seg);
+      return SUCCESS;
+    }
+
+    if (*count >= FCOM_LOADFIX_SLOTS) {
+      (void)DosMemFree(mcb_seg);
+      return DE_NOMEM;
+    }
+
+    wanted = (UWORD)(0x1000u - data_seg);
+    rc = DosMemChange(data_seg, wanted, &maximum);
+    if (rc < SUCCESS) {
+      (void)DosMemFree(mcb_seg);
+      return rc;
+    }
+
+    blocks[(*count)++] = mcb_seg;
+  }
+}
+
+static int execute_command_line(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g, char *line);
+
+static int builtin_loadfix(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g, char *args)
+{
+  unsigned block_count = 0;
+  int rc;
+
+  args = skip_space(args);
+  if (*args == '\0') {
+    dos_puts(cpu, command_psp, g, "Required parameter missing.\r\n");
+    return 0;
+  }
+
+  rc = fcom_loadfix_prepare(command_psp, &block_count);
+  if (rc < SUCCESS) {
+    fcom_loadfix_release(command_psp, block_count);
+    dos_puts(cpu, command_psp, g,
+             "Unable to reserve the first 64K of memory.\r\n");
+    return 0;
+  }
+
+  rc = execute_command_line(cpu, command_psp, g, args);
+  fcom_loadfix_release(command_psp, block_count);
+  return rc;
 }
 
 
@@ -3058,6 +3594,16 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
 
   if (command_is(g->filename, "HISTORY")) {
     builtin_history(cpu, command_psp, g, args);
+    return 1;
+  }
+
+  if (command_is(g->filename, "LFNFOR")) {
+    builtin_lfnfor(cpu, command_psp, g, args);
+    return 1;
+  }
+
+  if (command_is(g->filename, "FDDEBUG")) {
+    builtin_fddebug(cpu, command_psp, g, args);
     return 1;
   }
 
@@ -3347,8 +3893,6 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
   return rc;
 }
 
-static int execute_command_line(CPU *cpu, UWORD command_psp,
-                                struct fcom_guest *g, char *line);
 
 static int name_has_extension_ci(const char *name, const char *extension)
 {
@@ -4355,6 +4899,9 @@ static int execute_command_core(CPU *cpu, UWORD command_psp,
     return execute_command_line(cpu, command_psp, g, args);
   }
 
+  if (command_is(g->filename, "LOADFIX"))
+    return builtin_loadfix(cpu, command_psp, g, args);
+
   if (g->batch_active && command_is(g->filename, "GOTO")) {
     args = skip_space(args);
 
@@ -4597,6 +5144,7 @@ static int execute_command_line(CPU *cpu, UWORD command_psp,
   int pipe_state;
   int rc;
 
+  fcom_fddebug_write(cpu, command_psp, g, "COMMAND: ", line);
   fcom_expand_aliases(command_psp, g, line, FCOM_LINE_MAX + 1);
 
   pipe_state = split_pipe_command(g, line);
@@ -4626,6 +5174,13 @@ static int execute_command_line(CPU *cpu, UWORD command_psp,
                             g->redirect_command);
   restore_redirections(cpu, command_psp,
                        saved_stdin, saved_stdout);
+
+  {
+    int n = snprintf(g->path, sizeof(g->path), "%d", rc);
+    if (n > 0)
+      fcom_fddebug_write(cpu, command_psp, g, "RESULT: ", g->path);
+  }
+
   return rc;
 }
 
@@ -4738,14 +5293,30 @@ static UWORD create_command_process(const char *init_tail, UBYTE start_mode,
 
   {
     UBYTE old_umb_link = LoL->uppermem_link;
-    COUNT alloc_mode = (start_mode & FIRST_FIT_U) ? FIRST_FIT_U : FIRST_FIT;
     COUNT rc;
 
-    if (alloc_mode == FIRST_FIT_U)
+    if (start_mode & FIRST_FIT_U) {
+      /*
+       * FIRST_FIT_U means UMB first, then conventional fallback in the
+       * current memory manager.  Use UO here so we can report and control
+       * the fallback explicitly.
+       */
       DosUmbLink(1);
-    rc = DosMemAlloc(FCOM_PROCESS_PARAS, alloc_mode, &mcb_seg, &largest);
-    if (alloc_mode == FIRST_FIT_U)
+      rc = DosMemAlloc(FCOM_PROCESS_PARAS, FIRST_FIT_UO,
+                       &mcb_seg, &largest);
       DosUmbLink(old_umb_link);
+
+      if (rc < SUCCESS) {
+        dos_printf("FCOM: no UMB block of %u paragraphs; trying low memory\n",
+                   (unsigned)FCOM_PROCESS_PARAS);
+        rc = DosMemAlloc(FCOM_PROCESS_PARAS, FIRST_FIT,
+                         &mcb_seg, &largest);
+      }
+    } else {
+      rc = DosMemAlloc(FCOM_PROCESS_PARAS, FIRST_FIT,
+                       &mcb_seg, &largest);
+    }
+
     if (rc < SUCCESS)
       return 0;
   }
@@ -4794,17 +5365,24 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode)
   memset(fcom_dir_stack_storage(command_psp), 0, FCOM_DIR_STACK_BYTES);
   memset(fcom_alias_storage(command_psp), 0, FCOM_ALIAS_BYTES);
   memset(fcom_history_storage(command_psp), 0, FCOM_HISTORY_BYTES);
+  memset(fcom_loadfix_storage(command_psp), 0, FCOM_LOADFIX_BYTES);
+  g->fddebug_handle = 1;
+  strcpy(g->fddebug_name, "stdout");
   g->echo_enabled = 1;
   init_stack_guard(command_psp);
 
-  dos_printf("FCOM: PSP=%04x parent=%04x data=%04x..%04x "
-             "stack=%04x..ffff (%u bytes)\n",
+  dos_printf("FCOM: PSP=%04x parent=%04x block=%u paras (%u bytes) "
+             "data=%04x..%04x stack=%04x..%04x (%u bytes) %s\n",
              command_psp,
              parent_psp,
+             (unsigned)FCOM_PROCESS_PARAS,
+             (unsigned)FCOM_PROCESS_BYTES,
              FCOM_WORK_OFFSET,
              (unsigned)(FCOM_DATA_END - 1u),
              (unsigned)FCOM_STACK_BOTTOM,
-             (unsigned)FCOM_STACK_BYTES);
+             (unsigned)(FCOM_STACK_TOP - 1u),
+             (unsigned)FCOM_STACK_BYTES,
+             command_psp >= 0xa000u ? "HIGH" : "LOW");
 
   if (init_tail) {
     strncpy(g->init_tail, init_tail, sizeof(g->init_tail) - 1);
@@ -4862,5 +5440,6 @@ done:
   if (g->owned_env_seg != 0)
     DosMemFree(g->owned_env_seg - 1);
 
+  fcom_fddebug_close(cpu, command_psp, g);
   DosMemFree(command_psp - 1);
 }
