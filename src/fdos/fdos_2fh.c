@@ -145,9 +145,36 @@ typedef struct umb {
     int allocated_paragraphs; // -1 for a chain
 } umb_t;
 
-static umb_t umb_blocks[] = {
+/* ==========================================================================
+ * UMB maps. Really occupied above A0000h:
+ *   A0000-BFFFF  VGA RAM (VGA_WINDOW in mem.h) - controller window, never UMB
+ *   C0000-C7FFF  Video BIOS ROM - loaded only together with an external BIOS
+ *                (see load_bios_and_reset); never present in native mode
+ *   C8000-CFFFF  free
+ *   D0000-DFFFF  free; EMS window when EMULATE_LTEMS (0xD0000..0xE0000)
+ *   E0000-EFFFF  free in native mode; an external 128K BIOS image lives here,
+ *                and SeaBIOS also puts its tables / option ROM copies there
+ *   F0000-FFFFF  BIOS ROM (fake one in native mode) - never UMB.
+ *                Fake BIOS layout: F0000 strings, FA000-FC5FF ROM fonts,
+ *                FC600/FE000 strings, FEFC7 DPT, FFE00-FFEFF INT trap markers
+ *                (any CS:IP with (lin>>8)==0xFFE is trapped in i286_step),
+ *                FFF06 IRET, FFF10 INT15/C0h table, FFF30-FFF6F DPT/DPTE,
+ *                FFF70-FFF82 executable stubs, FFFF0/FFFF5-FFFFF reset+date.
+ *
+ * native BIOS : C0000-EFFFF = 192 KB (128 KB with EMULATE_LTEMS)
+ * external    : C0000-DFFFF = 128 KB ( 64 KB with EMULATE_LTEMS), minus the
+ *               Video BIOS and minus whatever the BIOS image overlaps
+ * ========================================================================== */
+static umb_t umb_native[] = {
+    {0xC000, 0x0080, 0}, {0xC080, 0x0080, 0}, {0xC100, 0x0080, 0}, {0xC180, 0x0080, 0},
+    {0xC200, 0x0080, 0}, {0xC280, 0x0080, 0}, {0xC300, 0x0080, 0}, {0xC380, 0x0080, 0},
+    {0xC400, 0x0080, 0}, {0xC480, 0x0080, 0}, {0xC500, 0x0080, 0}, {0xC580, 0x0080, 0},
+    {0xC600, 0x0080, 0}, {0xC680, 0x0080, 0}, {0xC700, 0x0080, 0}, {0xC780, 0x0080, 0},
+    {0xC800, 0x0080, 0}, {0xC880, 0x0080, 0}, {0xC900, 0x0080, 0}, {0xC980, 0x0080, 0},
+    {0xCA00, 0x0080, 0}, {0xCA80, 0x0080, 0}, {0xCB00, 0x0080, 0}, {0xCB80, 0x0080, 0},
+    {0xCC00, 0x0080, 0}, {0xCC80, 0x0080, 0}, {0xCD00, 0x0080, 0}, {0xCD80, 0x0080, 0},
+    {0xCE00, 0x0080, 0}, {0xCE80, 0x0080, 0}, {0xCF00, 0x0080, 0}, {0xCF80, 0x0080, 0},
 #ifndef EMULATE_LTEMS
-    // 0xD0000–0xDFFFF (64 KB)
     {0xD000, 0x0080, 0}, {0xD080, 0x0080, 0}, {0xD100, 0x0080, 0}, {0xD180, 0x0080, 0},
     {0xD200, 0x0080, 0}, {0xD280, 0x0080, 0}, {0xD300, 0x0080, 0}, {0xD380, 0x0080, 0},
     {0xD400, 0x0080, 0}, {0xD480, 0x0080, 0}, {0xD500, 0x0080, 0}, {0xD580, 0x0080, 0},
@@ -157,7 +184,6 @@ static umb_t umb_blocks[] = {
     {0xDC00, 0x0080, 0}, {0xDC80, 0x0080, 0}, {0xDD00, 0x0080, 0}, {0xDD80, 0x0080, 0},
     {0xDE00, 0x0080, 0}, {0xDE80, 0x0080, 0}, {0xDF00, 0x0080, 0}, {0xDF80, 0x0080, 0},
 #endif
-    // 0xE0000–0xEFFFF (64 KB)
     {0xE000, 0x0080, 0}, {0xE080, 0x0080, 0}, {0xE100, 0x0080, 0}, {0xE180, 0x0080, 0},
     {0xE200, 0x0080, 0}, {0xE280, 0x0080, 0}, {0xE300, 0x0080, 0}, {0xE380, 0x0080, 0},
     {0xE400, 0x0080, 0}, {0xE480, 0x0080, 0}, {0xE500, 0x0080, 0}, {0xE580, 0x0080, 0},
@@ -177,7 +203,29 @@ static umb_t umb_blocks[] = {
 //    {0xF800, 0x0080, 0}, {0xF880, 0x0080, 0}, {0xF900, 0x0080, 0}, {0xF980, 0x0080, 0},
 //    {0xFA00, 0x0080, 0}, {0xFA80, 0x0080, 0}, {0xFB00, 0x0080, 0}, {0xFB80, 0x0080, 0},
 };
-#define UMB_BLOCKS_COUNT (sizeof(umb_blocks) / sizeof(umb_t))
+static umb_t umb_guest[] = {
+    {0xC000, 0x0080, 0}, {0xC080, 0x0080, 0}, {0xC100, 0x0080, 0}, {0xC180, 0x0080, 0},
+    {0xC200, 0x0080, 0}, {0xC280, 0x0080, 0}, {0xC300, 0x0080, 0}, {0xC380, 0x0080, 0},
+    {0xC400, 0x0080, 0}, {0xC480, 0x0080, 0}, {0xC500, 0x0080, 0}, {0xC580, 0x0080, 0},
+    {0xC600, 0x0080, 0}, {0xC680, 0x0080, 0}, {0xC700, 0x0080, 0}, {0xC780, 0x0080, 0},
+    {0xC800, 0x0080, 0}, {0xC880, 0x0080, 0}, {0xC900, 0x0080, 0}, {0xC980, 0x0080, 0},
+    {0xCA00, 0x0080, 0}, {0xCA80, 0x0080, 0}, {0xCB00, 0x0080, 0}, {0xCB80, 0x0080, 0},
+    {0xCC00, 0x0080, 0}, {0xCC80, 0x0080, 0}, {0xCD00, 0x0080, 0}, {0xCD80, 0x0080, 0},
+    {0xCE00, 0x0080, 0}, {0xCE80, 0x0080, 0}, {0xCF00, 0x0080, 0}, {0xCF80, 0x0080, 0},
+#ifndef EMULATE_LTEMS
+    {0xD000, 0x0080, 0}, {0xD080, 0x0080, 0}, {0xD100, 0x0080, 0}, {0xD180, 0x0080, 0},
+    {0xD200, 0x0080, 0}, {0xD280, 0x0080, 0}, {0xD300, 0x0080, 0}, {0xD380, 0x0080, 0},
+    {0xD400, 0x0080, 0}, {0xD480, 0x0080, 0}, {0xD500, 0x0080, 0}, {0xD580, 0x0080, 0},
+    {0xD600, 0x0080, 0}, {0xD680, 0x0080, 0}, {0xD700, 0x0080, 0}, {0xD780, 0x0080, 0},
+    {0xD800, 0x0080, 0}, {0xD880, 0x0080, 0}, {0xD900, 0x0080, 0}, {0xD980, 0x0080, 0},
+    {0xDA00, 0x0080, 0}, {0xDA80, 0x0080, 0}, {0xDB00, 0x0080, 0}, {0xDB80, 0x0080, 0},
+    {0xDC00, 0x0080, 0}, {0xDC80, 0x0080, 0}, {0xDD00, 0x0080, 0}, {0xDD80, 0x0080, 0},
+    {0xDE00, 0x0080, 0}, {0xDE80, 0x0080, 0}, {0xDF00, 0x0080, 0}, {0xDF80, 0x0080, 0},
+#endif
+};
+static umb_t *umb_blocks       = umb_native;
+static int    umb_blocks_count = (int)(sizeof(umb_native) / sizeof(umb_t));
+#define UMB_BLOCKS_COUNT umb_blocks_count
 
 static int umb_blocks_allocated = 0;
 
@@ -194,6 +242,51 @@ void reset_umb() {
         emb_handles[i].base = emb_handles[i].size = 0;
     }
     xms_handles = 0;
+}
+
+/*
+ * Select the UMB map. Called from load_bios_and_reset() before bios_post().
+ *   native_bios     - 1 if the BIOS is generated by bios_post()
+ *   rom_start       - physical start of the external BIOS image
+ *                     (0x100000 - bios_size); ignored when native_bios
+ *   vga_bios_loaded - 1 if vgabios.bin was really loaded at 0xC0000
+ *
+ * Both tables are sorted ascending and the excluded parts always sit at the
+ * edges (Video BIOS at the bottom, BIOS image at the top), so the window is
+ * only narrowed; the tables themselves are never mutated (idempotent).
+ */
+void umb_select_map(int native_bios, uint32_t rom_start, int vga_bios_loaded)
+{
+    umb_t *src;
+    int n, first, last;
+
+    if (native_bios) {
+        src = umb_native;
+        n = (int)(sizeof(umb_native) / sizeof(umb_t));
+        rom_start = 0xF0000u;
+        vga_bios_loaded = 0;
+    } else {
+        src = umb_guest;
+        n = (int)(sizeof(umb_guest) / sizeof(umb_t));
+    }
+
+    first = 0;
+    while (first < n && vga_bios_loaded &&
+           ((uint32_t)src[first].segment << 4) < 0xC8000u)
+        ++first;
+
+    last = n;
+    while (last > first) {
+        uint32_t end = ((uint32_t)src[last - 1].segment << 4) +
+                       ((uint32_t)src[last - 1].size << 4);
+        if (end <= rom_start)
+            break;
+        --last;
+    }
+
+    umb_blocks = src + first;
+    umb_blocks_count = last - first;
+    reset_umb();
 }
 
 int UMB_get_largest(dos_far_ptr driverAddress, UCOUNT *seg, UCOUNT *size)

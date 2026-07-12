@@ -31,6 +31,8 @@ void iomem_write32(void *iomem, uint32_t addr, uint32_t val);
 bool iomem_write_string(void *iomem, uint32_t addr, uint32_t buf, int len);
 bool iomem_write_string_ptr(void *iomem, uint32_t addr, const uint8_t *buf, int len);
 void reset_umb();
+/* fdos_2fh.c: pick the UMB map matching the selected BIOS */
+void umb_select_map(int native_bios, uint32_t rom_start, int vga_bios_loaded);
 
 static inline uint8_t __attribute__((always_inline)) pload8(uint32_t addr)
 {

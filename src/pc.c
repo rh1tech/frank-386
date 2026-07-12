@@ -1622,6 +1622,7 @@ void bios_post(PC *pc) {
 void load_bios_and_reset(PC *pc)
 {
 	int bios_size = 0;
+	int vga_loaded = 0;
 	if (pc->bios && pc->bios[0]) {
 			bios_size = load_rom(PC_RAM, pc->bios, 0x100000, 1);
 
@@ -1630,10 +1631,13 @@ void load_bios_and_reset(PC *pc)
 		int bios_start = 0x100000 - bios_size;
 		if (pc->vga_bios && pc->vga_bios[0] && bios_start >= 0xC8000) {
 			load_rom(PC_RAM, pc->vga_bios, 0xc0000, 0);
+			vga_loaded = 1;
 		} else if (pc->vga_bios && pc->vga_bios[0]) {
 			printf("Skipping VGA BIOS - main BIOS overlaps at 0x%x\n", bios_start);
 		}
+		umb_select_map(0, (uint32_t)bios_start, vga_loaded);
 	} else {
+		umb_select_map(1, 0x100000u, 0);
 		bios_post(pc);
 	}
 	sn76489_reset();
