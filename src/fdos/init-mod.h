@@ -207,7 +207,33 @@ static inline uint32_t stk_lin(uint16_t ss, uint16_t sp, int n) {
     return ((uint32_t)ss << 4) + (uint16_t)(sp + n);
 }
 
-static inline bool far_is_null(dos_far_ptr p) {
+/*
+    guest_stack_alloc(cpu, n) - carve n bytes of scratch off the guest stack
+    and return a far pointer to it.
+
+    Several CONFIG.SYS-time helpers borrow guest stack space instead of SRAM
+    (which is scarce on this target) to stage data that must live in guest RAM
+    - COUNTRY.SYS headers, a device driver's request packet, a synthesised
+    command tail. They all did "CPU_SP -= n; ptr = MK_FP(CPU_SS, CPU_SP)" by
+    hand, which is fine, but the follow-up "MK_FP(CPU_SS, CPU_SP + k)" to point
+    at a sub-field is a raw 16-bit-unmasked add: if SP+k crosses 0xFFFF the
+    offset handed to MK_FP is truncated and points somewhere other than the
+    bytes just reserved.
+
+    Centralising it: SP decrements as a genuine 16-bit register (wraps in
+    hardware fashion, matching a real PUSH), and the returned pointer is built
+    from the post-decrement SP so it is always consistent with it. Callers that
+    need a sub-field should offset with stk_lin()/MK_FP off the RETURNED
+    pointer's segment, or just call this once per field.
+
+    Caller restores SP (the existing "CPU_SP = saved_sp" on the way out).
+*/
+static inline dos_far_ptr guest_stack_alloc(CPU *cpu, uint16_t n) {
+    CPU_SP = (uint16_t)(CPU_SP - n);
+    return MK_FP(CPU_SS, CPU_SP);
+}
+
+static inline bool far_is_null(dos_far_ptr p) {
     return FP_SEG(p) == 0 && FP_OFF(p) == 0;
 }
 static inline bool far_is_end(dos_far_ptr p) {

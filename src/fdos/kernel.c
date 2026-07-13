@@ -1393,12 +1393,16 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
      convention for passing DEVICE=/DEVICEHIGH= switches through to
      the driver) - so it can't point at cmdLine/"\n" directly, which
      are native (ARM) memory the driver has no way to address. */
-  CPU_SP -= sizeof(request) + cmdlen;
-  x86_cmdline = MK_FP(CPU_SS, CPU_SP);
-  x86_rq = MK_FP(CPU_SS, CPU_SP + cmdlen);
+  x86_cmdline = guest_stack_alloc(cpu, (uint16_t)(sizeof(request) + cmdlen));
+  /* rq sits just above the command-line copy; wrap the offset (see
+     guest_stack_alloc()). */
+  x86_rq = MK_FP(FP_SEG(x86_cmdline),
+                 (uint16_t)(FP_OFF(x86_cmdline) + cmdlen));
   rq = (request*)ARM_PTR(x86_rq);
   memset(rq, 0, sizeof(request));
-  strcpy((char *) ARM_PTR(x86_cmdline), cmdstr);
+  /* cmdstr copy goes into guest stack space, which can straddle a segment
+     end, so use the wrapping copy rather than a linear strcpy. */
+  guest_strcpy(x86_cmdline, cmdstr);
 
   if (cmdLine) {
     char *p, *q, ch;

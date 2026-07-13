@@ -579,7 +579,18 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 else
                     move_data.source_offset += emb_handles[h].base;
             } else {
+                /* Real-mode side (handle 0) is a seg:off far pointer into
+                   conventional memory. Nothing rebases or bounds it, so a
+                   client can point it just under 1 MB with a large length and
+                   have the move run straight through the HMA and into the EMB
+                   pool (or, for a write, over another handle's data). Real
+                   HIMEM confines handle-0 transfers to the low 1 MB; do the
+                   same. phys + length must not cross the 1 MB line. */
                 move_data.source_offset = to_physical_offset(move_data.source_offset);
+                if (move_data.source_offset > 0x100000ul ||
+                    move_data.source_offset + move_data.length > 0x100000ul ||
+                    move_data.source_offset + move_data.length < move_data.source_offset)
+                    err = 0xA4; /* invalid source offset */
             }
             if (!err && move_data.destination_handle) {
                 const uint16_t h = move_data.destination_handle;
@@ -591,7 +602,12 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 else
                     move_data.destination_offset += emb_handles[h].base;
             } else if (!err) {
+                /* Same bound as the source side above. */
                 move_data.destination_offset = to_physical_offset(move_data.destination_offset);
+                if (move_data.destination_offset > 0x100000ul ||
+                    move_data.destination_offset + move_data.length > 0x100000ul ||
+                    move_data.destination_offset + move_data.length < move_data.destination_offset)
+                    err = 0xA6; /* invalid destination offset */
             }
             #if XMS_DEBUG
             printf("XMS MOVE: len=%lu sh=%04x so=%08lx dh=%04x do=%08lx phys_dst=%06lx%s\n",

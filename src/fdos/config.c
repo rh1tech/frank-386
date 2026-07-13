@@ -1397,8 +1397,7 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
     ULONG offset;       /* offset of first entry in file */
   };
   u16 sp = CPU_SP;
-  CPU_SP -= sizeof(struct header);
-  dos_far_ptr x86_header = MK_FP (CPU_SS, CPU_SP);
+  dos_far_ptr x86_header = guest_stack_alloc(cpu, sizeof(struct header));
   struct header* header = (struct header*)ARM_PTR(x86_header);
   if (read(fd, x86_header, sizeof(struct header)) != sizeof(struct header))
   {
@@ -1424,8 +1423,7 @@ err:printf("%s has invalid format\n", filename);
     UWORD reserved[2];
     ULONG offset;       /* offset of country-subfunction-header in file */
   };
-  CPU_SP -= sizeof(struct entry);
-  dos_far_ptr x86_entry = MK_FP(CPU_SS, CPU_SP);
+  dos_far_ptr x86_entry = guest_stack_alloc(cpu, sizeof(struct entry));
   struct entry* entry = (struct entry*)ARM_PTR(x86_entry);
 
   dos_far_ptr x86_count = x86_nlsCount;
@@ -2511,9 +2509,13 @@ STATIC VOID InstallExec(struct instCmds *icmd)
      guest-RAM copy of the filename and the CommandTail - same
      technique init_device() (kernel.c) uses for its request packet,
      and MakeFATChain()/etc. already use elsewhere in this file. */
-  CPU_SP -= (namelen + 1) + (taillen + 3);
-  x86_filename = MK_FP(CPU_SS, CPU_SP);
-  x86_tail = MK_FP(CPU_SS, CPU_SP + namelen + 1);
+  /* Carve one block for both, then locate the tail inside it with a wrapped
+     offset. The previous "MK_FP(CPU_SS, CPU_SP + namelen + 1)" added without
+     masking to 16 bits, so a stack pointer near the top of its segment would
+     produce a truncated offset pointing away from the bytes just reserved. */
+  x86_filename = guest_stack_alloc(cpu, (uint16_t)((namelen + 1) + (taillen + 3)));
+  x86_tail = MK_FP(FP_SEG(x86_filename),
+                   (uint16_t)(FP_OFF(x86_filename) + namelen + 1));
   filename = (BYTE *) ARM_PTR(x86_filename);
   tail = (BYTE *) ARM_PTR(x86_tail);
 
