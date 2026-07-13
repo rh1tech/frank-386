@@ -439,6 +439,7 @@ struct exec_child_context
   UWORD cu_psp;
   dos_far_ptr dta;
   UBYTE indos;
+  UBYTE error_mode;
   bool terminate;
 };
 
@@ -448,12 +449,17 @@ static void exec_enter_child(struct exec_child_context *saved,
 {
   save_ctx(cpu,&saved->cpu);
   saved->cu_psp=internal_data->cu_psp; saved->dta=internal_data->dta;
-  saved->indos=internal_data->InDOS; saved->terminate=terminate_flag;
+  saved->indos=internal_data->InDOS;
+  saved->error_mode=internal_data->ErrorMode;
+  saved->terminate=terminate_flag;
   internal_data->cu_psp=child_psp_seg;
   internal_data->dta=MK_FP(child_psp_seg,offsetof(psp,ps_cmd));
   SET_SS(FP_SEG(stack)); CPU_SP=FP_OFF(stack);
   SET_DS(dses); SET_ES(dses);
-  terminate_flag=false; cpu->native_done=false;
+  terminate_flag=false;
+  term_exit_code=0;
+  term_exit_type=0;
+  cpu->native_done=false;
   if (internal_data->InDOS != 0) --internal_data->InDOS;
 }
 
@@ -480,7 +486,8 @@ static void exec_leave_child(struct exec_child_context *saved,
   internal_data->cu_psp = saved->cu_psp;
   internal_data->dta = saved->dta;
   internal_data->abort_progress = 0;
-  restore_ctx(cpu,&saved->cpu);
+  internal_data->ErrorMode = saved->error_mode;
+  restore_ctx(cpu, &saved->cpu);
 }
 
 static COUNT exec_run_native_child(UWORD child_psp_seg,const char *tail)
@@ -495,7 +502,7 @@ static COUNT exec_run_native_child(UWORD child_psp_seg,const char *tail)
   CPU_SI=0; CPU_DI=FP_OFF(stack); CPU_BP=0x091e;
   cpu_setflags(cpu,0x0200,(uword)~0x0200u);
   exit_code=fcom_process_main(cpu,child_psp_seg,tail);
-  term_exit_code=exit_code; term_exit_type=0;
+  request_terminate(exit_code,0);
   exec_leave_child(&saved,child_psp_seg);
   return SUCCESS;
 }

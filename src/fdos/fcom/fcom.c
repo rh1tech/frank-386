@@ -117,13 +117,20 @@ int fcom_is_command_com(const char *name)
 #define FCOM_HISTORY_OFFSET    (FCOM_ALIAS_OFFSET + FCOM_ALIAS_BYTES)
 #define FCOM_LOADFIX_OFFSET    (FCOM_HISTORY_OFFSET + FCOM_HISTORY_BYTES)
 #define FCOM_BATCH_CONTEXT_OFFSET   FCOM_ALIGN16(FCOM_LOADFIX_OFFSET + FCOM_LOADFIX_BYTES)
-#define FCOM_GUARD_OFFSET   FCOM_ALIGN16(FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES)
+
+/*
+ * Reserve a real two-byte guest entry point after all persistent FCOM data.
+ * It must not overlap FCOM_WORK_OFFSET: fcom_process_main() clears the whole
+ * struct fcom_guest at startup.
+ */
+#define FCOM_ENTRY_OFFSET      FCOM_ALIGN16(FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES)
+#define FCOM_ENTRY_BYTES       2u
+#define FCOM_GUARD_OFFSET      FCOM_ALIGN16(FCOM_ENTRY_OFFSET + FCOM_ENTRY_BYTES)
 #define FCOM_STACK_BOTTOM      (FCOM_GUARD_OFFSET + FCOM_STACK_GUARD)
 #define FCOM_PROCESS_BYTES     FCOM_ALIGN16(FCOM_STACK_BOTTOM + FCOM_STACK_RESERVE)
 #define FCOM_PROCESS_PARAS     (FCOM_PROCESS_BYTES >> 4)
 #define FCOM_STACK_TOP         FCOM_PROCESS_BYTES
 #define FCOM_STACK_BYTES       (FCOM_STACK_TOP - FCOM_STACK_BOTTOM)
-#define FCOM_ENTRY_OFFSET      0x0100u
 
 _Static_assert(FCOM_PROCESS_BYTES <= 0xfff0u,
                "FCOM compact process exceeds a 16-bit segment");
@@ -131,6 +138,13 @@ _Static_assert(FCOM_STACK_BYTES >= FCOM_STACK_RESERVE,
                "FCOM guest stack reserve is too small");
 _Static_assert((FCOM_GUARD_OFFSET & 15u) == 0,
                "FCOM stack guard is not paragraph-aligned");
+_Static_assert(FCOM_ENTRY_OFFSET >= FCOM_DATA_END,
+               "FCOM guest entry overlaps struct fcom_guest");
+_Static_assert(FCOM_ENTRY_OFFSET >=
+                   FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES,
+               "FCOM guest entry overlaps persistent context storage");
+_Static_assert(FCOM_ENTRY_OFFSET + FCOM_ENTRY_BYTES <= FCOM_GUARD_OFFSET,
+               "FCOM guest entry overlaps stack guard");
 
 static int int21_failed(CPU *cpu)
 {

@@ -158,7 +158,12 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
   {
     if (internal_data->abort_progress)
       return FAIL;
-
+    /*
+     * Original entry.asm leaves ErrorMode set while the process-abort
+     * path runs.  This prevents a second device error during handle/FCB/
+     * memory cleanup from entering INT 24h recursively.
+     */
+    internal_data->ErrorMode = 1;
     request_terminate(0, 2);   /* critical-error abort */
     return FAIL;
   }
@@ -772,6 +777,8 @@ bool fdos_21h(CPU* _cpu) {
     UWORD entry_ip, entry_cs;
     UWORD frame_sp;
     dos_far_ptr old_ps_stack;
+    dos_far_ptr old_user_r;
+    dos_far_ptr old_prev_user_r;
     psp *current_psp;
 
     cpu = _cpu;
@@ -796,7 +803,13 @@ bool fdos_21h(CPU* _cpu) {
     CPU_SP = frame_sp;
     current_psp = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
     old_ps_stack = current_psp->ps_stack;
+    old_user_r = internal_data->user_r;
+    old_prev_user_r = internal_data->prev_user_r;
+
     current_psp->ps_stack = MK_FP(entry_ss, frame_sp);
+    internal_data->prev_user_r = old_user_r;
+    internal_data->user_r = current_psp->ps_stack;
+
     int21_store_guest_frame(current_psp->ps_stack, regs,
                             entry_ip, entry_cs, flags_on_stack);
 
@@ -2482,6 +2495,8 @@ exit_dispatch:
     writew86(((uint32_t)entry_ss << 4) + entry_sp + 4, flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
     current_psp->ps_stack = old_ps_stack;
+    internal_data->user_r = old_user_r;
+    internal_data->prev_user_r = old_prev_user_r;
     CPU_SP = entry_sp;
     --internal_data->InDOS;
     return true;
