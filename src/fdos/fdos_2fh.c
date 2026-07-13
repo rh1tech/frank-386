@@ -979,7 +979,7 @@ bool fdos_2fh(CPU* cpu) {
          * Output: ES:DI -> SDA TempCDS, CX = sizeof(struct cds), CF clear.
          */
         const uint32_t caller_arg_addr =
-            ((uint32_t)CPU_SS << 4) + (uint16_t)(CPU_SP + 6u);
+            stk_lin(CPU_SS, CPU_SP, 6);
         const UBYTE drive_letter = (UBYTE)readw86(caller_arg_addr);
         const int drive = (drive_letter & 0x1f) - 1;
         struct cds FAR *source = get_cds_unvalidated((unsigned)drive);
@@ -1062,8 +1062,7 @@ bool fdos_2fh(CPU* cpu) {
          * callerARG1 is the word pushed by the caller before INT 2Fh and
          * therefore lives at SS:[SP+6] in this native interrupt frame.
          */
-        UWORD arg = readw86(((uint32_t)CPU_SS << 4) +
-                            (UWORD)(CPU_SP + 6));
+        UWORD arg = readw86(stk_lin(CPU_SS, CPU_SP, 6));
         UWORD flags = arg >> 8;
         UWORD drive = (flags & EFLG_CHAR) ? 0 : (arg & 0xff);
         struct dhdr *dev = (struct dhdr *)ARM_PTR(MK_FP(CPU_BP, CPU_SI));
@@ -1087,8 +1086,7 @@ bool fdos_2fh(CPU* cpu) {
          * Invoke the critical-error path using the current drive.
          * callerARG1 is the DOS error code pushed before INT 2Fh.
          */
-        UWORD error = readw86(((uint32_t)CPU_SS << 4) +
-                              (UWORD)(CPU_SP + 6));
+        UWORD error = readw86(stk_lin(CPU_SS, CPU_SP, 6));
         struct cds *cdsp = get_cds1(internal_data->default_drive);
 
         if (cdsp == NULL || far_is_null(cdsp->cdsDpb)) {
@@ -1114,8 +1112,7 @@ bool fdos_2fh(CPU* cpu) {
          * error opportunity before DE_SHARE is returned.
          */
         sft *entry = (sft *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
-        UWORD error = readw86(((uint32_t)CPU_SS << 4) +
-                              (UWORD)(CPU_SP + 6));
+        UWORD error = readw86(stk_lin(CPU_SS, CPU_SP, 6));
         UBYTE retry = FALSE;
 
         if ((entry->sft_mode & O_FCB) ||
@@ -1255,7 +1252,7 @@ bool fdos_2fh(CPU* cpu) {
          * IP,CS,FLAGS, so callerARG1 is the word at SS:[SP+6].
          */
         const uint32_t caller_arg_addr =
-            ((uint32_t)CPU_SS << 4) + (uint16_t)(CPU_SP + 6u);
+            stk_lin(CPU_SS, CPU_SP, 6);
         UBYTE ch = (UBYTE)readw86(caller_arg_addr);
 
         if (ch >= 'a' && ch <= 'z')
@@ -1286,7 +1283,7 @@ bool fdos_2fh(CPU* cpu) {
          *   SS:SP+6  callerARG1 (drive: 0=A:, 1=B:, ...)
          */
         const uint32_t caller_arg_addr =
-            ((uint32_t)CPU_SS << 4) + (uint16_t)(CPU_SP + 6u);
+            stk_lin(CPU_SS, CPU_SP, 6);
         const UBYTE drive = (UBYTE)readw86(caller_arg_addr);
         struct cds FAR *cdsp = get_cds_unvalidated(drive);
 

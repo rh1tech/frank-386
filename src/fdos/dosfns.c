@@ -1567,8 +1567,14 @@ COUNT DosFindNext(void)
   memcpy(&sda_tmp_dmD, ARM_PTR(dta_far), 21);
 
   /* findnext will always fail on a volume id search or device name */
+  /* Upstream guards the dm_entry sentinel with "!(dm_drive & 0x80)": bit 7
+     of dm_drive marks a redirector search, where FFFFh is a legitimate
+     handle value rather than the "no more files" marker. The port dropped
+     the guard. It is unreachable today (no redirector can create such a
+     search), but the DTA is guest-writable, so restore upstream's exact
+     condition rather than rely on that. */
   if ((sda_tmp_dmD.dm_attr_srch & ~(D_RDONLY | D_ARCHIVE | D_DEVICE)) == D_VOLID
-      || sda_tmp_dmD.dm_entry == 0xffff)
+      || (!(sda_tmp_dmD.dm_drive & 0x80) && sda_tmp_dmD.dm_entry == 0xffff))
     return DE_NFILES;
 
   memset(&SearchDirD, 0, sizeof(struct dirent));

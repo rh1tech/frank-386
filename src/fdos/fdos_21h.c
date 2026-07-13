@@ -20,15 +20,6 @@ static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
  * AX, BX, CX, DX, SI, DI, BP, DS, ES, followed by the hardware
  * interrupt frame IP, CS, FLAGS.
  */
-struct int21_guest_iregs {
-  UWORD ax, bx, cx, dx;
-  UWORD si, di, bp, ds, es;
-  UWORD ip, cs, flags;
-} __attribute__((packed));
-
-_Static_assert(sizeof(struct int21_guest_iregs) == 24,
-               "INT 21h guest iregs ABI must be 24 bytes");
-
 static void int21_store_guest_frame(dos_far_ptr frame,
                                     const CPU_regs *regs,
                                     UWORD ip, UWORD cs, UWORD flags)
@@ -815,10 +806,10 @@ bool fdos_21h(CPU* _cpu) {
     cpu = _cpu;
     entry_ss = CPU_SS;
     entry_sp = CPU_SP;
-    entry_ip = readw86(((uint32_t)entry_ss << 4) + entry_sp);
-    entry_cs = readw86(((uint32_t)entry_ss << 4) + entry_sp + 2);
+    entry_ip = readw86(stk_lin(entry_ss, entry_sp, 0));
+    entry_cs = readw86(stk_lin(entry_ss, entry_sp, 2));
     cpu_save_regs(_cpu, regs);
-    uint16_t flags_on_stack = readw86(((uint32_t)entry_ss << 4) + entry_sp + 4);
+    uint16_t flags_on_stack = readw86(stk_lin(entry_ss, entry_sp, 4));
     regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
 
     /*
@@ -1609,8 +1600,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           rc = DosMemAlloc(R_BX, internal_data->mem_access_mode, &para, &asize);
 #ifdef INT21_DIAG
           printf("MEM 48 by %04x:%04x bx=%04x -> rc=%d seg=%04x max=%04x\n",
-                 readw86((CPU_SS << 4) + CPU_SP + 2),
-                 readw86((CPU_SS << 4) + CPU_SP),
+                 readw86(stk_lin(CPU_SS, CPU_SP, 2)),
+                 readw86(stk_lin(CPU_SS, CPU_SP, 0)),
                  R_BX, rc, (UWORD)(para + 1), asize);
 #endif
           if (rc < SUCCESS)
@@ -1632,8 +1623,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         rc = DosMemFree(R_ES - 1);
 #ifdef INT21_DIAG
         printf("MEM 49 by %04x:%04x es=%04x -> rc=%d\n",
-               readw86((CPU_SS << 4) + CPU_SP + 2),
-               readw86((CPU_SS << 4) + CPU_SP), R_ES, rc);
+               readw86(stk_lin(CPU_SS, CPU_SP, 2)),
+               readw86(stk_lin(CPU_SS, CPU_SP, 0)), R_ES, rc);
 #endif
         if (rc < SUCCESS)
         {
@@ -1672,8 +1663,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           rc = DosMemChange(R_ES, R_BX, &maxsize);
 #ifdef INT21_DIAG
           printf("MEM 4A by %04x:%04x es=%04x bx=%04x -> rc=%d max=%04x\n",
-                 readw86((CPU_SS << 4) + CPU_SP + 2),
-                 readw86((CPU_SS << 4) + CPU_SP),
+                 readw86(stk_lin(CPU_SS, CPU_SP, 2)),
+                 readw86(stk_lin(CPU_SS, CPU_SP, 0)),
                  R_ES, R_BX, rc, maxsize);
 #endif
           if (rc < SUCCESS)
@@ -1714,8 +1705,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x01:            /* set allocation strategy */
 #ifdef INT21_DIAG
             printf("STRAT 5801 bl=%02x by %04x:%04x\n", R_BL,
-                   readw86((CPU_SS << 4) + CPU_SP + 2),
-                   readw86((CPU_SS << 4) + CPU_SP));
+                   readw86(stk_lin(CPU_SS, CPU_SP, 2)),
+                   readw86(stk_lin(CPU_SS, CPU_SP, 0)));
 #endif
             if (R_BL != FIRST_FIT && R_BL != BEST_FIT && R_BL != LAST_FIT &&
                 R_BL != FIRST_FIT_UO && R_BL != BEST_FIT_UO && R_BL != LAST_FIT_UO &&
@@ -1739,8 +1730,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 #ifdef INT21_DIAG
             printf("LINK 5803 bx=%04x (was %u, root=%04x) by %04x:%04x\n",
                    R_BX, LoL->uppermem_link & 1, LoL->uppermem_root,
-                   readw86((CPU_SS << 4) + CPU_SP + 2),
-                   readw86((CPU_SS << 4) + CPU_SP));
+                   readw86(stk_lin(CPU_SS, CPU_SP, 2)),
+                   readw86(stk_lin(CPU_SS, CPU_SP, 0)));
 #endif
             /*
              * FreeDOS accepts only BX=0 (unlink) and BX=1 (link).
@@ -2381,7 +2372,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          as in the original (new_psp(lr.DX, r->CS)). The caller's CS
          sits on the INT frame: SS:SP -> IP, CS, FLAGS.               */
       case 0x26:
-        new_psp(R_DX, readw86((CPU_SS << 4) + CPU_SP + 2));
+        /* Caller's return CS, off the INT 21h frame the CPU pushed. */
+        new_psp(R_DX, readw86(stk_lin(CPU_SS, CPU_SP, 2)));
         break;
 
       /* Set Verify Flag                                              */
@@ -2542,7 +2534,7 @@ exit_dispatch:
      * Do the same here, then patch CF/ZF in the caller's IRET frame. */
     cpu_restore_regs(_cpu, regs);
     dpb_watch_int21_checkpoint(cpu, "exit");
-    writew86(((uint32_t)entry_ss << 4) + entry_sp + 4, flags_on_stack);
+    writew86(stk_lin(entry_ss, entry_sp, 4), flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
     current_psp->ps_stack = old_ps_stack;
     internal_data->user_r = old_user_r;

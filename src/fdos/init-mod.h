@@ -188,6 +188,25 @@ inline static void rq_error(request FAR *rq, UBYTE err) {
     rq->r_status = S_ERROR | S_DONE | err;
 }
 
+/*
+    stk_lin(ss, sp, n) - linear address of the word at ss:(sp + n).
+
+    Real-mode PUSH/POP wrap SP inside the stack segment: SP is a 16-bit
+    register and 0xFFFE + 2 is 0x0000 of the SAME segment, not the first
+    byte of the next one. Written straight out in C,
+
+        ((uint32_t)ss << 4) + sp + n
+
+    the addition promotes to int and does NOT wrap, so for a guest whose SP
+    sits near the top of its stack segment DOS would read the wrong word, a
+    whole segment away. Masking the offset back to 16 bits reproduces the
+    hardware. (fdos_2fh.c already spells this out by hand as
+    "(UWORD)(CPU_SP + 6)"; this is that idiom, named.)
+*/
+static inline uint32_t stk_lin(uint16_t ss, uint16_t sp, int n) {
+    return ((uint32_t)ss << 4) + (uint16_t)(sp + n);
+}
+
 static inline bool far_is_null(dos_far_ptr p) {
     return FP_SEG(p) == 0 && FP_OFF(p) == 0;
 }

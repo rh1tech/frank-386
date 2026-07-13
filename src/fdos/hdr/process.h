@@ -132,3 +132,26 @@ _Static_assert(offsetof(psp, ps_maxfiles) == 0x32, "ps_maxfiles must stay at PSP
 _Static_assert(offsetof(psp, ps_filetab)  == 0x34, "ps_filetab must stay at PSP+34h");
 _Static_assert(offsetof(psp, ps_cmd)      == 0x80, "command tail must stay at PSP+80h");
 _Static_assert(sizeof(exec_blk) == 22, "exec_blk must match the INT 21h AH=4Bh parameter block size");
+
+/*
+    The guest-visible INT 21h register frame.
+
+    fdos_21h() builds this on the guest stack on every DOS call and publishes
+    it at PSP:2Eh (ps_stack), which is also what internal_data->user_r points
+    at - the port's equivalent of upstream's "user_r". It is the frame the
+    original entry.asm creates with PUSH$ALL, so the field order is ABI, not
+    an implementation detail: INT 24h handlers and anything walking ps_stack
+    read it directly.
+
+    Declared here rather than inside fdos_21h.c because task.c needs the
+    caller's return CS:IP out of it when it installs a child's terminate
+    vector (INT 22h).
+*/
+struct int21_guest_iregs {
+  UWORD ax, bx, cx, dx;
+  UWORD si, di, bp, ds, es;
+  UWORD ip, cs, flags;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct int21_guest_iregs) == 24,
+               "INT 21h guest iregs ABI must be 24 bytes");

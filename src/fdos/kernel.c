@@ -1578,7 +1578,13 @@ STATIC void PSPInit(void)
   memset(p->ps_files, 0xff, 20);
 
   /* open file table pointer                              */
-  p->ps_filetab = linear_to_far(p->ps_files);
+  /* Canonical far pair <psp_seg>:0018h. NOT linear_to_far(p->ps_files):
+     that normalises to (lin>>4):(lin&0xF), i.e. (psp_seg+1):0008h - the same
+     LINEAR address, but a different seg:off pair. Programs and TSRs test the
+     pair itself to decide whether the JFT is still the default one inside the
+     PSP (that is what SetJFTSize() moves), so the normalised form reads to
+     them as "JFT already relocated". Build it from the segment we know. */
+  p->ps_filetab = MK_FP(FP_SEG(x86_PSP), offsetof(psp, ps_files));
 
   /* default system version for int21/ah=30               */
   p->ps_retdosver = (LoL->os_setver_minor << 8) + LoL->os_setver_major;

@@ -244,7 +244,13 @@ void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h *
 
   p->ps_maxfiles = 20;
   memset(p->ps_files, 0xff, 20);
-  p->ps_filetab = linear_to_far(p->ps_files);
+  /* Canonical far pair <psp_seg>:0018h. NOT linear_to_far(p->ps_files):
+     that normalises to (lin>>4):(lin&0xF), i.e. (psp_seg+1):0008h - the same
+     LINEAR address, but a different seg:off pair. Programs and TSRs test the
+     pair itself to decide whether the JFT is still the default one inside the
+     PSP (that is what SetJFTSize() moves), so the normalised form reads to
+     them as "JFT already relocated". Build it from the segment we know. */
+  p->ps_filetab = MK_FP(para, offsetof(psp, ps_files));
 
   /*
    * Inherit the parent's first 20 handles, matching upstream
@@ -278,6 +284,36 @@ void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h *
   p->ps_cmd.ctBuffer[0] = 0xd;
 }
 
+/*
+    exec_caller_return_addr() - the address the current INT 21h call will
+    return to, i.e. upstream's user_r->CS:IP.
+
+    DosComLoader()/DosExeLoader() publish this as the child's terminate
+    vector (INT 22h, mirrored into the child PSP at +0Ah). Upstream reads it
+    from the saved INT 21h register frame; the port was reading the LIVE
+    CPU_CS:CPU_IP instead, which is not the same thing - by the time a loader
+    runs, CS:IP no longer point at the caller's return site.
+
+    internal_data->user_r already holds exactly the frame we need: fdos_21h()
+    publishes the guest-visible iregs at PSP:2Eh on every INT 21h and points
+    user_r at it (see fdos_21h.c). Read cs/ip back out of it.
+
+    Falls back to the live CS:IP if there is no frame (a loader invoked from
+    kernel init rather than from a guest INT 21h).
+*/
+static dos_far_ptr /* -> caller's return address */ exec_caller_return_addr(void)
+{
+  dos_far_ptr /* -> struct int21_guest_iregs */ fr = internal_data->user_r;
+
+  if (!far_is_null(fr) && !far_is_end(fr))
+  {
+    const struct int21_guest_iregs *r =
+        (const struct int21_guest_iregs *)ARM_PTR(fr);
+    return MK_FP(r->cs, r->ip);
+  }
+  return MK_FP(CPU_CS, CPU_IP);
+}
+
 STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
 {
   psp *p;
@@ -290,7 +326,13 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
   p = (psp *) ARM_PTR(MK_FP(pspseg, 0));
 
   memcpy(&p->ps_cmd, ARM_PTR(exb->exec.cmd_line), sizeof(CommandTail));
-  if (!far_is_end(exb->exec.fcb_1))
+  /* "No FCBs" is signalled by an OFFSET of FFFFh - the segment is not part
+     of the sentinel. Upstream tests exactly that (task.c: "if
+     (FP_OFF(exb->exec.fcb_1) != 0xffff)"), and a guest is entitled to pass
+     e.g. DS:FFFF. Testing the full FFFF:FFFF pair instead (far_is_end())
+     would miss those and memcpy() 32 bytes of whatever ARM_PTR(DS:FFFF)
+     lands on straight into the child's PSP FCBs. */
+  if (FP_OFF(exb->exec.fcb_1) != 0xFFFF)
   {
     memcpy(&p->ps_fcb1, ARM_PTR(exb->exec.fcb_1), 16);
     memcpy(&p->ps_fcb2, ARM_PTR(exb->exec.fcb_2), 16);
@@ -323,6 +365,21 @@ set_name:
     pspmcb->m_name[i] = toupper((unsigned char) np[i]);
   if (i < 8)
     pspmcb->m_name[i] = '\0';
+
+  /* Per-program DOS version faking (SETVER). Upstream does this here and
+     new_psp()/DosExec() both already claim we do too - but the block was
+     dropped in the port, leaving SetverGetVersion() with no caller at all
+     (-Wunused-function flags it). Restore it.
+
+     LoL->setverPtr is still 0000:0000 until something publishes a SETVER
+     table, and SetverGetVersion() returns 0 for a null table, so this is a
+     no-op today - but the code path is live again and the comments are no
+     longer lying. */
+  {
+    UWORD fakever = SetverGetVersion(LoL->setverPtr, np);
+    if (fakever != 0)
+      p->ps_retdosver = fakever;
+  }
 
   /* AX value to be passed to the child, based on FCB drive validity -
      matches upstream's INT21/4B return convention (some old programs
@@ -720,7 +777,7 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
     UWORD fcbcode;
     psp *p;
     // termination vector (not used by the kernel, but may be used by gues process)
-    setvec(0x22, MK_FP(CPU_CS, CPU_IP));
+    setvec(0x22, exec_caller_return_addr());
     child_psp(mem, internal_data->cu_psp, mem + asize);
     fcbcode = patchPSP(mem - 1, env, exp, namep);
 
@@ -885,7 +942,7 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
   {
     UWORD fcbcode;
 
-    setvec(0x22, MK_FP(CPU_CS, CPU_IP));
+    setvec(0x22, exec_caller_return_addr());
     // termination vector (not used by the kernel, but may be used by gues process)
     child_psp(mem, internal_data->cu_psp, mem + asize);
     fcbcode = patchPSP(mem - 1, env, exp, namep);
