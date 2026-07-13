@@ -324,8 +324,7 @@ CLUSTER link_fat(struct dpb *dpbp, CLUSTER Cluster1, REG CLUSTER Cluster2)
       /* update the free space count for returned     */
       /* cluster                                      */
       dpbp->dpb_xnfreeclst += adjust;
-      /// TODO: write_fsinfo(dpbp) - FAT32 FSInfo sector update, not
-      /// migrated yet (only matters once something writes the FAT).
+      write_fsinfo(dpbp);
     }
     else
 #endif
