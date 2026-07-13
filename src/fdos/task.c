@@ -325,7 +325,10 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
   ++pspseg;
   p = (psp *) ARM_PTR(MK_FP(pspseg, 0));
 
-  memcpy(&p->ps_cmd, ARM_PTR(exb->exec.cmd_line), sizeof(CommandTail));
+  /* cmd_line/fcb_1/fcb_2 are guest far pointers out of the exec block, so a
+     128-byte command tail placed near a segment end must wrap rather than
+     read on past it. */
+  guest_read(&p->ps_cmd, exb->exec.cmd_line, sizeof(CommandTail));
   /* "No FCBs" is signalled by an OFFSET of FFFFh - the segment is not part
      of the sentinel. Upstream tests exactly that (task.c: "if
      (FP_OFF(exb->exec.fcb_1) != 0xffff)"), and a guest is entitled to pass
@@ -334,8 +337,8 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
      lands on straight into the child's PSP FCBs. */
   if (FP_OFF(exb->exec.fcb_1) != 0xFFFF)
   {
-    memcpy(&p->ps_fcb1, ARM_PTR(exb->exec.fcb_1), 16);
-    memcpy(&p->ps_fcb2, ARM_PTR(exb->exec.fcb_2), 16);
+    guest_read(&p->ps_fcb1, exb->exec.fcb_1, 16);
+    guest_read(&p->ps_fcb2, exb->exec.fcb_2, 16);
   }
 
   pspmcb->m_psp = pspseg;

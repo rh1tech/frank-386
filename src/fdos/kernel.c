@@ -1599,14 +1599,106 @@ STATIC void PSPInit(void)
   /* do not modify command line tail, used as environment */
 }
 
+/*
+    Guest memory primitives that honour 16-bit offset wrap.
+    ==========================================================
+
+    A real-mode string move wraps the OFFSET inside the segment: writing past
+    seg:FFFF continues at seg:0000 of the SAME segment. It does not spill into
+    the next one. Upstream gets this for free - fmemcpy()/fmemset() are
+    rep movsb/stosb over ES:DI, and DI is a 16-bit register.
+
+    ARM_PTR() + memcpy() does not wrap. It just keeps walking, which is worse
+    than the guest's own bug in two distinct ways:
+
+      1. A guest that overruns its own buffer corrupts SOMEONE ELSE's segment
+         instead of its own. On real DOS the damage is confined to the
+         offending program; here it is not.
+      2. Near the top of guest RAM it walks straight out of the mapped window
+         (a 512-byte transfer to FFFF:FFE0 reaches 0x1101DF, past the
+         0x10FFEF the guest can even name).
+
+    Splitting each copy at the segment boundary fixes both at once, and the
+    result is provably in range: the highest byte any of these can touch is
+    (seg << 4) + 0xFFFF, which for seg == 0xFFFF is exactly X86_MAX_LINEAR.
+
+    Cost is a compare and a branch on the common (non-wrapping) path, and
+    zero bytes of SRAM - the split is pointer arithmetic, not a bounce buffer.
+*/
+
+/* Bytes from off to the end of its 64K segment. off == 0 gives a full 64K. */
+static inline size_t seg_room(uint16_t off) { return (size_t)0x10000u - off; }
+
 void* fmemset(dos_far_ptr p, int v, unsigned int sz) {
     void* res = ARM_PTR(p);
-    memset(res, v, sz);
+    uint16_t seg = FP_SEG(p), off = FP_OFF(p);
+    size_t n = sz;
+
+    while (n) {
+        size_t chunk = n, room = seg_room(off);
+        if (chunk > room) chunk = room;
+        memset(ARM_PTR(MK_FP(seg, off)), v, chunk);
+        n -= chunk;
+        off = (uint16_t)(off + chunk);   /* wraps to 0 at the segment end */
+    }
     return res;
 }
 
 void fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n) {
-    memcpy(ARM_PTR(d), ARM_PTR(s), n);
+    uint16_t dseg = FP_SEG(d), doff = FP_OFF(d);
+    uint16_t sseg = FP_SEG(s), soff = FP_OFF(s);
+
+    /* Source and destination wrap independently, so each pass is limited by
+       whichever of the two hits its segment end first. */
+    while (n) {
+        size_t chunk = n;
+        size_t droom = seg_room(doff);
+        size_t sroom = seg_room(soff);
+
+        if (chunk > droom) chunk = droom;
+        if (chunk > sroom) chunk = sroom;
+
+        memcpy(ARM_PTR(MK_FP(dseg, doff)), ARM_PTR(MK_FP(sseg, soff)), chunk);
+        n -= chunk;
+        doff = (uint16_t)(doff + chunk);
+        soff = (uint16_t)(soff + chunk);
+    }
+}
+
+/* Native buffer -> guest, wrapping. For the many sites that hold a native
+   pointer on one side and a guest far pointer on the other. */
+void guest_write(dos_far_ptr d, const void *src, size_t n) {
+    const UBYTE *p = (const UBYTE *)src;
+    uint16_t seg = FP_SEG(d), off = FP_OFF(d);
+
+    while (n) {
+        size_t chunk = n, room = seg_room(off);
+        if (chunk > room) chunk = room;
+        memcpy(ARM_PTR(MK_FP(seg, off)), p, chunk);
+        p += chunk;
+        n -= chunk;
+        off = (uint16_t)(off + chunk);
+    }
+}
+
+/* Guest -> native buffer, wrapping. */
+void guest_read(void *dst, dos_far_ptr s, size_t n) {
+    UBYTE *p = (UBYTE *)dst;
+    uint16_t seg = FP_SEG(s), off = FP_OFF(s);
+
+    while (n) {
+        size_t chunk = n, room = seg_room(off);
+        if (chunk > room) chunk = room;
+        memcpy(p, ARM_PTR(MK_FP(seg, off)), chunk);
+        p += chunk;
+        n -= chunk;
+        off = (uint16_t)(off + chunk);
+    }
+}
+
+/* strcpy() into guest memory, NUL included, wrapping. */
+void guest_strcpy(dos_far_ptr d, const char *s) {
+    guest_write(d, s, strlen(s) + 1);
 }
 
 /*

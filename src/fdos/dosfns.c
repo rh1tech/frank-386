@@ -1005,7 +1005,10 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
   COUNT rc = truename(src, PriPathName, CDS_MODE_ALLOW_WILDCARDS);
   dpb_watch_check_chain("DosTruename");
   if (rc >= SUCCESS) {
-    strcpy((char *)ARM_PTR(dest), PriPathName);
+    /* dest is the guest's ES:DI. A truename can be 128 bytes, so a guest
+       that points DI near the end of its segment must have the tail wrap
+       back to ES:0000, not run on into the next segment. */
+    guest_strcpy(dest, PriPathName);
     set_fcbname();
   }
   return rc;
@@ -1203,16 +1206,16 @@ long DosMkTmp(dos_far_ptr pathname, UWORD attr)
    NetBios number in the List of Lists, so they are ported for real
    rather than stubbed)
  */
-UWORD get_machine_name(dos_far_ptr netname)
+UWORD get_machine_name(dos_far_ptr /* -> char[16] */ netname)
 {
-  memcpy(ARM_PTR(netname), internal_data->net_name, 16);
+  guest_write(netname, internal_data->net_name, 16);
   return (LoL->NetBios);
 }
 
 VOID set_machine_name(dos_far_ptr netname, UWORD name_num)
 {
   LoL->NetBios = name_num;
-  memcpy(internal_data->net_name, ARM_PTR(netname), 15);
+  guest_read(internal_data->net_name, netname, 15);
   internal_data->net_set_count++;
 }
 
@@ -1378,7 +1381,8 @@ COUNT DosGetCuDir(UBYTE drive, dos_far_ptr dst)
                PriPathName, CDS_MODE_SKIP_PHYSICAL) < SUCCESS)
     return DE_INVLDDRV;
 
-  strcpy((char *)ARM_PTR(dst), PriPathName + 3);
+  /* dst is the guest's DS:SI (AH=47h); same wrap reasoning as DosTruename. */
+  guest_strcpy(dst, PriPathName + 3);
   return SUCCESS;
 }
 
@@ -1503,13 +1507,23 @@ STATIC int pop_dmp(int rc, dos_far_ptr dta_far)
   internal_data->dta = dta_far;
   if (rc == SUCCESS)
   {
-    dmatch *dmp = (dmatch *)ARM_PTR(dta_far);
-    memcpy(dmp, &sda_tmp_dmD, 21);
-    dmp->dm_attr_fnd = (BYTE) SearchDirD.dir_attrib;
-    dmp->dm_time = SearchDirD.dir_time;
-    dmp->dm_date = SearchDirD.dir_date;
-    dmp->dm_size = (LONG) SearchDirD.dir_size;
-    ConvertName83ToNameSZ((BYTE FAR *)dmp->dm_name, (BYTE FAR *)SearchDirD.dir_name);
+    /* The DTA is whatever the guest set with AH=1Ah, and a dmatch is 43
+       bytes, so it can straddle the end of the guest's segment. Do the
+       update as read-modify-write through a native scratch: reading the
+       current contents first means the bytes the original never touches
+       (dm_name past its NUL, say) stay byte-identical, and the wrapping
+       write puts the tail back at seg:0000 instead of into the next
+       segment. The scratch is a 43-byte auto - no SRAM cost. */
+    dmatch dm;
+
+    guest_read(&dm, dta_far, sizeof(dm));
+    memcpy(&dm, &sda_tmp_dmD, 21);
+    dm.dm_attr_fnd = (BYTE) SearchDirD.dir_attrib;
+    dm.dm_time = SearchDirD.dir_time;
+    dm.dm_date = SearchDirD.dir_date;
+    dm.dm_size = (LONG) SearchDirD.dir_size;
+    ConvertName83ToNameSZ((BYTE FAR *)dm.dm_name, (BYTE FAR *)SearchDirD.dir_name);
+    guest_write(dta_far, &dm, sizeof(dm));
   }
   return rc;
 }
@@ -1564,7 +1578,8 @@ COUNT DosFindNext(void)
   COUNT rc;
   dos_far_ptr dta_far = internal_data->dta;
 
-  memcpy(&sda_tmp_dmD, ARM_PTR(dta_far), 21);
+  /* DTA is guest-supplied; 21 bytes from it can cross the segment end. */
+  guest_read(&sda_tmp_dmD, dta_far, 21);
 
   /* findnext will always fail on a volume id search or device name */
   /* Upstream guards the dm_entry sentinel with "!(dm_drive & 0x80)": bit 7

@@ -91,7 +91,7 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * such as INT 2Fh helpers invoked outside INT 21h.
    */
   if (have_frame)
-    memcpy(&saved_frame, ARM_PTR(user_stack), sizeof(saved_frame));
+    guest_read(&saved_frame, user_stack, sizeof(saved_frame));
   else
     user_stack = MK_FP(CPU_SS, CPU_SP);
 
@@ -136,7 +136,7 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * interrupted INT 21h dispatcher.
    */
   if (have_frame)
-    memcpy(ARM_PTR(user_stack), &saved_frame, sizeof(saved_frame));
+    guest_write(user_stack, &saved_frame, sizeof(saved_frame));
 
   cpu_restore_regs(cpu, &saved_regs);
   SET_SS(saved_ss);
@@ -680,7 +680,8 @@ static COUNT int21_fat32_regs(CPU_regs *regs)
         case 0x01:
         {
           ddt *pddt = getddt(R_DL);
-          memcpy(&pddt->ddt_bpb, ARM_PTR(xdffp->xdff_f.rebuilddpb.bpbp), sizeof(bpb));
+          /* bpbp is a guest far pointer out of the IOCTL packet. */
+          guest_read(&pddt->ddt_bpb, xdffp->xdff_f.rebuilddpb.bpbp, sizeof(bpb));
         }
         /* fall through */
         case 0x02:
