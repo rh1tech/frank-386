@@ -23,6 +23,13 @@ ULONG call_nls(UWORD bp,
     SET_DS ( FP_SEG (x86_ptr) );
     CPU_SI = FP_OFF (x86_ptr);
     if (buf) {
+        /* TODO(stage4-unify): buf is a native pointer reconstructed from
+           the guest ES:DI in fdos_nls_2fh() (or a native NLS string from
+           muxUpMem). linear_to_far() only works because those all currently
+           fall inside the guest window; the correct fix is to thread the
+           original dos_far_ptr through call_nls()/muxGo()/muxBufGo() instead
+           of round-tripping through a native pointer. Left as-is until that
+           signature change so this patch introduces no behavioural change. */
         x86_ptr = linear_to_far(buf);
         SET_ES ( FP_SEG (x86_ptr) );
         CPU_DI = FP_OFF (x86_ptr);

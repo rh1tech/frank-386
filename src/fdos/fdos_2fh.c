@@ -1004,7 +1004,8 @@ bool fdos_2fh(CPU* cpu) {
             cf = 1;
         } else {
             struct cds *tmp = (struct cds *)internal_data->TempCDS;
-            const dos_far_ptr tmp_fp = linear_to_far(tmp);
+            const dos_far_ptr /* -> struct cds */ tmp_fp =
+                x86_FAR_PTR(DOS_PSP, tmp);
 
             memset(tmp, 0, sizeof(*tmp));
             strcpy(tmp->cdsCurrentPath, "?:\\");
@@ -1155,11 +1156,16 @@ bool fdos_2fh(CPU* cpu) {
             sft *entry = (sft *)ARM_PTR(internal_data->lpCurSft);
 
             if (entry->sft_flags & SFT_FDEVICE) {
-                request rq;
-                memset(&rq, 0, sizeof(rq));
-                rq.r_length = sizeof(rq);
-                rq.r_command = C_OPEN;
-                execrh(linear_to_far(&rq), entry->sft_dev);
+                /* The request packet is handed to the driver as a GUEST
+                   ES:BX (see x86_execrh), so it must live in guest RAM. A
+                   native "request rq;" local does not - linear_to_far() on it
+                   yielded a bogus guest pointer. Use the shared IoReqHdr slot
+                   in internal_data (guest RAM), like every other execrh() caller. */
+                request *rq = &IoReqHdrD;
+                memset(rq, 0, sizeof(*rq));
+                rq->r_length = sizeof(*rq);
+                rq->r_command = C_OPEN;
+                execrh(x86_FAR_PTR(DOS_PSP, rq) /* -> request */, entry->sft_dev);
             }
             entry->sft_psp = internal_data->cu_psp;
         }

@@ -347,7 +347,8 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   if (IsShareInstalled(TRUE))
   {
     if ((sftp->sft_shroff =
-         share_open_check(linear_to_far(PriPathName), internal_data->cu_psp,
+         share_open_check(x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
+                          internal_data->cu_psp,
                           flags & 0x03, (flags >> 4) & 0x07)) < 0)
       return sftp->sft_shroff;
   }
@@ -622,7 +623,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
     dos_far_ptr save_dta;
 
     save_dta = internal_data->dta;
-    internal_data->lpCurSft = linear_to_far(s);
+    internal_data->lpCurSft = _s;  /* _s is already the SFT's dos_far_ptr */
     internal_data->current_filepos = s->sft_posit;     /* needed for MSCDEX * /
     internal_data->dta = bp;
     XferCount = remote_rw(mode == XFR_READ ? REM_READ : REM_WRITE, s, n);
@@ -922,7 +923,8 @@ COUNT DosSetFattr(dos_far_ptr name, UWORD attrp)
     /* SHARE closes the file if it is opened in
      * compatibility mode, else generate a critical error.
      * Here generate a critical error by opening in "rw compat" mode */
-    if ((result = share_open_check(linear_to_far(PriPathName), DOS_PSP, O_RDWR, 0)) < 0)
+    if ((result = share_open_check(x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
+                                   DOS_PSP, O_RDWR, 0)) < 0)
       return result;
     /* else dos_setfattr will close the file */
     share_close_file(result);

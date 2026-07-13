@@ -2073,7 +2073,10 @@ VOID DoConfig(int nPass)
     BYTE *pLine;
     for (pLine = szLine;;)
     {
-      if (read(nFileDesc, linear_to_far(pLine), 1) == 0)
+      /* pLine walks the szLine buffer, whose guest pointer is x86_szLine.
+         Re-anchor on that segment instead of normalising a native address. */
+      if (read(nFileDesc,
+               x86_FAR_PTR(FP_SEG(x86_szLine), pLine) /* -> char[] */, 1) == 0)
       {
         bEof = TRUE;
         break;

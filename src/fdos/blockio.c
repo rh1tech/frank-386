@@ -125,7 +125,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
       if (mode == DSKWRITE || mode == DSKWRITEINT26)
         fmemcpy(LoL->deblock_buf, buf, dpbp->dpb_secsize);
 
-      execrh(linear_to_far( &IoReqHdrD ), dpbp->dpb_device);
+      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpbp->dpb_device);
 
       if (mode == DSKREAD || mode == DSKREADINT25)
         fmemcpy(buf, LoL->deblock_buf, dpbp->dpb_secsize);
@@ -133,7 +133,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     else
     {
       IoReqHdrD.r_trans = buf;
-      execrh(linear_to_far( &IoReqHdrD ), dpbp->dpb_device);
+      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpbp->dpb_device);
     }
     if ((IoReqHdrD.r_status & (S_ERROR | S_DONE)) == S_DONE)
       break;

@@ -993,7 +993,7 @@ STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
   drv_watch_set_dpb_context(_dpbp, command, dpbp->dpb_unit, dpbp->dpb_subunit, media_check_source);
 
   dpb_watch_check("rqblockio-before-execrh", _dpbp);
-  execrh(linear_to_far( &MediaReqHdrD ), dpbp->dpb_device);
+  execrh(x86_FAR_PTR(DOS_PSP, &MediaReqHdrD) /* -> request */, dpbp->dpb_device);
   dpb_watch_check("rqblockio-after-execrh", _dpbp);
   if ((MediaReqHdrD.r_status & S_ERROR) || !(MediaReqHdrD.r_status & S_DONE))
   {

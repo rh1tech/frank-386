@@ -96,6 +96,12 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
     user_stack = MK_FP(CPU_SS, CPU_SP);
 
   if (lpDevice != NULL && is_guest_ptr(lpDevice))
+    /* One of the few defensible native->guest conversions: is_guest_ptr()
+       has just proven lpDevice is inside the guest window, and the device
+       header's true seg:off is not available here (only the native pointer
+       is passed in). The normalised pair is only published as CritErrDev in
+       the SDA for the guest INT 24h handler to read as ES:DI, which does not
+       require the driver's canonical segment. Kept on linear_to_far(). */
     device = linear_to_far((const BYTE *)lpDevice);
 
   /*
@@ -195,7 +201,9 @@ COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice,
 /* common - call the clock driver */
 void ExecuteClockDriverRequest(BYTE command)
 {
-  BinaryCharIO(&LoL->clock, sizeof(struct ClockRecord), linear_to_far(&internal_data->ClkRecord), command);
+  BinaryCharIO(&LoL->clock, sizeof(struct ClockRecord),
+               x86_FAR_PTR(DOS_PSP, &internal_data->ClkRecord) /* -> struct ClockRecord */,
+               command);
 }
 
 const UWORD days[2][13] = {

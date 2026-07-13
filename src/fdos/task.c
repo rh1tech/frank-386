@@ -192,7 +192,17 @@ STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
   pDest += sizeof(UWORD);
 
   /* copy the fully-qualified program name */
-  if ((RetCode = truename(linear_to_far((const BYTE *) pathname), PriPathName, CDS_MODE_SKIP_PHYSICAL)) < SUCCESS) {
+  /* pathname is DosExec()'s "lp": a NATIVE pointer that INT 21h/AH=4Bh built
+     as ARM_PTR(guest DS:DX). That guest pointer belongs to the CALLER's
+     segment (e.g. FreeCOM's PSP), NOT DOS_PSP - so it must be turned back
+     into a far pointer by its true linear address, not re-anchored on
+     DOS_PSP. Using x86_FAR_PTR(DOS_PSP, ...) here computes a wrong offset,
+     truename() then fails to find the file, and every external command dies
+     with "Bad command or filename". This is the one native->far conversion in
+     the EXEC path that genuinely needs linear_to_far() until DosExec()/
+     ChildEnv() are changed to carry a dos_far_ptr end to end. */
+  if ((RetCode = truename(linear_to_far((const BYTE *) pathname),
+                          PriPathName, CDS_MODE_SKIP_PHYSICAL)) < SUCCESS) {
     dpb_watch_check_chain("ChildEnv 1");
     return RetCode;
   }
@@ -914,7 +924,7 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
     {
       UWORD *spot;
 
-      if (DosRWSft(fd, sizeof(UWORD) * 2, linear_to_far((BYTE *) reloc),
+      if (DosRWSft(fd, sizeof(UWORD) * 2, x86_FAR_PTR(DOS_PSP, reloc) /* -> UWORD[] */,
                    XFR_READ) != sizeof(UWORD) * 2)
       {
         if (mode != EXEC_OVERLAY)
@@ -1049,6 +1059,10 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 
   memcpy(&TempExeBlock, ep, sizeof(exec_blk));
 
+  /* Same as ChildEnv()/truename() above: "lp" is ARM_PTR(guest DS:DX) from
+     INT 21h/AH=4Bh, so it lives in the CALLER's segment (FreeCOM's PSP for an
+     external command), not DOS_PSP. Re-anchoring it on DOS_PSP produces a
+     bogus offset and DosOpenSft() below then fails to open the executable. */
   x86_lp = linear_to_far((const BYTE *) lp);
   dos_far_ptr x86_dhp = IsDevice(lp);
   if (EFFECTIVE(x86_dhp) ||           /* don't try to "execute" e.g. C:\NUL */
@@ -1059,7 +1073,8 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   dpb_watch_check_chain("DosExec");
   fd = (COUNT) (openresult & 0xffff);
 
-  rc = (int) DosRWSft(fd, sizeof(exe_header), linear_to_far((BYTE *) &ExeHeader),
+  rc = (int) DosRWSft(fd, sizeof(exe_header),
+                      x86_FAR_PTR(DOS_PSP, &ExeHeader) /* -> exe_header */,
                       XFR_READ);
 
   if (rc == sizeof(exe_header) &&
@@ -1127,7 +1142,7 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
     {
       CommandTail *ct = (CommandTail *)(tailp + 1);
       ct->ctCount = endp - tailp - 2;
-      exb.exec.cmd_line = linear_to_far(ct);
+      exb.exec.cmd_line = x86_FAR_PTR(DOS_PSP, ct) /* -> CommandTail */;
     }
     CfgDbgPrintf(("EXEC file='%s' tail='%s'\n", Shell, tailp + 2));
     res_DosExec(mode, &exb, Shell);
@@ -1139,7 +1154,7 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
     put_string(Shell);
     put_string(tailp + 2);
     put_string(" Enter the full shell command line: ");
-    endp = Shell + res_read(cpu_, STDIN, linear_to_far(Shell), NAMEMAX);
+    endp = Shell + res_read(cpu_, STDIN, x86_FAR_PTR(DOS_PSP, Shell) /* -> char[] */, NAMEMAX);
     *endp = '\0';                             /* terminate string for strchr */
 #else
     /*

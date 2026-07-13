@@ -98,7 +98,7 @@ STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
   CharReqHdr.r_unit = 0;
   CharReqHdr.r_status = 0;
   CharReqHdr.r_length = sizeof(request);
-  execrh(linear_to_far( &CharReqHdr ), *pdev);
+  execrh(x86_FAR_PTR(DOS_PSP, &CharReqHdr) /* -> request */, *pdev);
   if (CharReqHdr.r_status & S_ERROR)
   {
     for (;;) {
@@ -371,7 +371,7 @@ unsigned char check_handle_break(dos_far_ptr *pdev)
 
 void handle_break(dos_far_ptr *pdev, int sft_out)
 {
-  static char ctrl_c_text[] = "^C\r\n";
+  static const char ctrl_c_text[] = "^C\r\n";
 
   /* Reset the BIOS Ctrl-Break latch before invoking user code. */
   pstore8(CTRL_BREAK_FLAG_ADDR,
@@ -383,8 +383,17 @@ void handle_break(dos_far_ptr *pdev, int sft_out)
   if (sft_out == -1)
     cooked_write(pdev, sizeof(ctrl_c_text) - 1, ctrl_c_text);
   else
-    DosRWSft(sft_out, sizeof(ctrl_c_text) - 1,
-             linear_to_far(ctrl_c_text), XFR_FORCE_WRITE);
+    {
+      /* ctrl_c_text is a native (ARM) string constant, so it has no guest
+         seg:off at all - linear_to_far() on it produced a bogus guest
+         pointer. Stage the few bytes into guest stack scratch, which the
+         device write path can address. */
+      dos_far_ptr /* -> char[] */ x86_cc =
+          guest_stack_alloc(cpu, sizeof(ctrl_c_text) - 1);
+      guest_write(x86_cc, ctrl_c_text, sizeof(ctrl_c_text) - 1);
+      DosRWSft(sft_out, sizeof(ctrl_c_text) - 1, x86_cc, XFR_FORCE_WRITE);
+      CPU_SP = (uint16_t)(CPU_SP + (sizeof(ctrl_c_text) - 1));
+    }
 
   /* Upstream spawn_int23() switches to the user stack, invokes the
      process' INT 23h handler, and does not return to the interrupted
