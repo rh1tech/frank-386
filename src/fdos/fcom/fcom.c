@@ -8187,11 +8187,12 @@ UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
     entry[1] = 0xfe;
   }
 
-  if (environment_seg != 0) {
-    mcb *env_mcb = (mcb *)ARM_PTR(MK_FP(environment_seg - 1u, 0));
-    env_mcb->m_psp = command_psp;
-  }
-
+  /*
+   * Do not transfer ownership of environment_seg here.  For normal EXEC,
+   * patchPSP() owns that operation because ChildEnv() created a private MCB.
+   * Process 0 instead points at DOS_PSP's permanent environment and must not
+   * make it part of COMMAND's FreeProcessMem() ownership chain.
+   */
   return command_psp;
 }
 
@@ -8205,8 +8206,7 @@ UWORD fcom_process_entry_offset(void)
   return FCOM_ENTRY_OFFSET;
 }
 
-UBYTE fcom_process_main(CPU *cpu, UWORD command_psp,
-                        const char *init_tail)
+UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
 {
   psp *process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
   UWORD parent_psp = process->ps_parent;
@@ -8245,9 +8245,15 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp,
   dos_printf("FreeCom v.0.86 (for RP2350) @ %04Xh [%s]\n",
     command_psp, command_psp >= 0xa000u ? "UMB" : "LOW");
 #endif
-  if (init_tail) {
-    strncpy(g->init_tail, init_tail, sizeof(g->init_tail) - 1);
-    g->init_tail[sizeof(g->init_tail) - 1] = '\0';
+  /* The process command line has one canonical home: PSP:80h. */
+  {
+    unsigned count = process->ps_cmd.ctCount;
+
+    if (count >= sizeof(g->init_tail))
+      count = sizeof(g->init_tail) - 1u;
+    if (count != 0)
+      memcpy(g->init_tail, process->ps_cmd.ctBuffer, count);
+    g->init_tail[count] = '\0';
   }
 
   start_action = parse_init_tail(g, &start_command);
@@ -8293,44 +8299,22 @@ done:
 void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode,
               UWORD environment_seg, UBYTE own_environment)
 {
-  struct saved_fcom_cpu {
-    UWORD ax, bx, cx, dx, si, di, bp, sp;
-    UWORD cs, ds, es, ss, ip, flags;
-  } saved;
   UWORD parent_psp = internal_data->cu_psp;
-  dos_far_ptr parent_dta = internal_data->dta;
-  UBYTE saved_indos = internal_data->InDOS;
-  UWORD command_psp = fcom_create_process(init_tail, start_mode,
-                                           parent_psp, environment_seg);
+  UWORD command_psp =
+      fcom_create_process(init_tail, start_mode, parent_psp, environment_seg);
 
+  (void)cpu;
   (void)own_environment;
+
   if (command_psp == 0) {
     dos_printf("FCOM: cannot allocate COMMAND process\n");
     return;
   }
 
-  saved.ax=CPU_AX; saved.bx=CPU_BX; saved.cx=CPU_CX; saved.dx=CPU_DX;
-  saved.si=CPU_SI; saved.di=CPU_DI; saved.bp=CPU_BP; saved.sp=CPU_SP;
-  saved.cs=CPU_CS; saved.ds=CPU_DS; saved.es=CPU_ES; saved.ss=CPU_SS;
-  saved.ip=CPU_IP; saved.flags=cpu_getflags(cpu);
-
-  internal_data->cu_psp=command_psp;
-  internal_data->dta=MK_FP(command_psp, offsetof(psp, ps_cmd));
-  SET_SS(command_psp); CPU_SP=FCOM_STACK_TOP;
-  SET_CS(command_psp); SET_IP(FCOM_ENTRY_OFFSET);
-  SET_DS(command_psp); SET_ES(command_psp);
-  CPU_AX=CPU_BX=0; CPU_CX=0x00ff; CPU_DX=command_psp;
-  CPU_SI=0; CPU_DI=FCOM_STACK_TOP; CPU_BP=0x091e;
-  cpu_setflags(cpu,0x0200,(uword)~0x0200u);
-
-  (void)fcom_process_main(cpu,command_psp,init_tail);
-
-  internal_data->InDOS=saved_indos;
-  internal_data->cu_psp=parent_psp; internal_data->dta=parent_dta;
-  SET_SS(saved.ss); CPU_SP=saved.sp; SET_CS(saved.cs); SET_IP(saved.ip);
-  SET_DS(saved.ds); SET_ES(saved.es);
-  CPU_AX=saved.ax; CPU_BX=saved.bx; CPU_CX=saved.cx; CPU_DX=saved.dx;
-  CPU_SI=saved.si; CPU_DI=saved.di; CPU_BP=saved.bp;
-  cpu_setflags(cpu,saved.flags,(uword)~saved.flags);
-  FreeProcessMem(command_psp);
+  /*
+   * Process 0 now uses the same enter/run/leave path as a nested native
+   * COMMAND.  Its only special property is that its environment is borrowed
+   * from DOS_PSP and therefore was not transferred to the child MCB chain.
+   */
+  (void)exec_run_native_command(command_psp, 0);
 }

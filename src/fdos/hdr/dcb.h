@@ -92,3 +92,16 @@ struct dpb {
 #define XUNKNCLSTFREE    0xffffffffl    /* unknown for DOS */
 #define UNKNCLSTFREE     0xffff /* unknown for DOS */
 
+
+/*
+    The DPB is published to guests through the List of Lists (LoL+00h)
+    and chained by dpb_next; update_dcb() (kernel.c) additionally
+    allocates the per-driver DPBs as one contiguous array and steps
+    through it with this exact stride, so the size is load-bearing in
+    two independent places.
+*/
+#ifdef WITHFAT32
+_Static_assert(sizeof(struct dpb) == 61, "FAT32 DPB size changed - re-check update_dcb()'s array stride and the LoL ABI");
+#else
+_Static_assert(sizeof(struct dpb) == 33, "FAT16 DPB size changed - re-check update_dcb()'s array stride and the LoL ABI");
+#endif

@@ -116,6 +116,9 @@ COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock);
 int idx_to_sft_(int SftIndex);
 dos_far_ptr /*sft*/ idx_to_sft(int SftIndex);
 int get_sft_idx(UCOUNT hndl);
+/* Native view of a process's job file table (the ps_maxfiles bytes that
+   ps_filetab points at), or NULL if ps_filetab is unusable. See dosfns.c. */
+UBYTE *jft_of(psp *p);
 struct cds FAR *get_cds_unvalidated(unsigned dsk);
 /*struct cds*/ dos_far_ptr get_cds(unsigned drive);
 struct cds FAR *get_cds1(unsigned dsk);
@@ -375,6 +378,7 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
 COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
 ULONG SftGetFsize(int sft_idx);
 void request_terminate(UBYTE exit_code, UBYTE exit_type);
+COUNT exec_run_native_command(UWORD child_psp_seg, UWORD fcbcode);
 UWORD DosGetRetCode(void);
 
 /* newstuff.c */

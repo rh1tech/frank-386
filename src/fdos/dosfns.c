@@ -427,15 +427,43 @@ int idx_to_sft_(int SftIndex)
 
     Migrated from dosfns.c.
 */
+/*
+    jft_of(p) - native view of process p's job file table.
+
+    ps_filetab lives in the PSP, so it is entirely under guest control: a
+    program is free to point it anywhere, including at the 0000:0000
+    sentinel. In this port that is NOT an unmapped far pointer the way it
+    is upstream - ARM_PTR(0000:0000) resolves to X86_RAM_BASE + 0, i.e.
+    the guest's own interrupt vector table. Writing a handle through an
+    unchecked ps_filetab (DosOpen()/DosClose()/AH=45h/46h all do) would
+    therefore not break just the offending process, the way it does
+    upstream - it would silently corrupt the IVT and take the whole
+    system down with it.
+
+    Every ps_filetab dereference goes through here. Returns NULL for both
+    sentinels; callers turn that into the ordinary "bad handle"/"no free
+    handle" error the guest already knows how to handle.
+*/
+UBYTE *jft_of(psp *p)
+{
+  if (far_is_null(p->ps_filetab) || far_is_end(p->ps_filetab))
+    return NULL;
+  return (UBYTE *)ARM_PTR(p->ps_filetab);
+}
+
 int get_sft_idx(unsigned hndl)
 {
   psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  UBYTE *jft;
   int idx;
 
   if (hndl >= p->ps_maxfiles)
     return DE_INVLDHNDL;
 
-  idx = ((UBYTE *) ARM_PTR(p->ps_filetab))[hndl];
+  if ((jft = jft_of(p)) == NULL)
+    return DE_INVLDHNDL;
+
+  idx = jft[hndl];
   return idx == 0xff ? DE_INVLDHNDL : idx;
 }
 
@@ -790,8 +818,10 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
 STATIC long get_free_hndl(void)
 {
   psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  UBYTE *q = (UBYTE *) ARM_PTR(p->ps_filetab);
-  UBYTE *r = (UBYTE *)memchr(q, 0xff, p->ps_maxfiles);
+  UBYTE *q = jft_of(p);
+  UBYTE *r;
+  if (q == NULL) return DE_TOOMANY;
+  r = (UBYTE *)memchr(q, 0xff, p->ps_maxfiles);
   if (r == NULL) return DE_TOOMANY;
   return (unsigned)(r - q);
 }
@@ -824,7 +854,13 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
     return result;
 
   p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  ((UBYTE *) ARM_PTR(p->ps_filetab))[hndl] = (UBYTE)result;
+  {
+    UBYTE *jft = jft_of(p);
+    if (jft == NULL)          /* unreachable: get_free_hndl() above already
+                                 rejected an unusable JFT */
+      return DE_TOOMANY;
+    jft[hndl] = (UBYTE)result;
+  }
   return hndl | (result & 0xffff0000l);
 }
 
@@ -1103,8 +1139,15 @@ int SetJFTSize(UWORD nHandles)
   newtab = MK_FP(block, 0);
 
   i = ppsp->ps_maxfiles;
-  /* copy existing part and fill up new part by "no open file" */
-  fmemcpy(newtab, ppsp->ps_filetab, i);
+  /* Copy the existing part, then fill the rest with "no open file".
+     If the guest left ps_filetab pointing at a sentinel, there is nothing
+     to carry over: copying would seed the new table with bytes read out of
+     the IVT and hand them back as SFT indices. Inherit nothing instead -
+     the fmemset() below then marks every handle closed. See jft_of(). */
+  if (far_is_null(ppsp->ps_filetab) || far_is_end(ppsp->ps_filetab))
+    i = 0;
+  else
+    fmemcpy(newtab, ppsp->ps_filetab, i);
   fmemset(MK_FP(block, i), 0xff, nHandles - i);
 
   ppsp->ps_maxfiles = nHandles;

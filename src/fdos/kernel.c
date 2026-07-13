@@ -1345,7 +1345,11 @@ STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
     dpb->dpb_device = x86_dhp;
     dpb->dpb_flags = M_CHANGED;
     // LoL->CDSp: Current Directory Structure
-    if ((FP_SEG(LoL->CDSp) != 0) && (LoL->nblkdev < LoL->lastdrive))
+    /* Upstream tests the whole far pointer ("LoL->CDSp != 0"); testing only
+       FP_SEG() would wrongly discard a CDS array that happens to live at
+       offset 0 of segment 0. far_is_null() is the port's spelling of that
+       same 32-bit test. */
+    if (!far_is_null(LoL->CDSp) && (LoL->nblkdev < LoL->lastdrive))
     {
       struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp);
       CDSp[LoL->nblkdev].cdsDpb = ADD_OFF(x86_dpb, Index * sizeof(struct dpb));
@@ -1510,9 +1514,16 @@ static void set_DTA(dos_far_ptr p) {
     bios_intcall(cpu, 0x21, "DTA");
 }
 
-dos_far_ptr getvec(uint8_t intno) {
+dos_far_ptr /* -> interrupt handler entry */ getvec(uint8_t intno) {
     uint32_t res = pload32(4ul * intno);
-    return *(dos_far_ptr*)&res;
+    /* An IVT slot is <offset word><segment word>, little-endian, which is
+       byte-for-byte the layout of dos_far_ptr - but reading it back as
+       *(dos_far_ptr *)&res is a strict-aliasing violation (GCC flags it
+       under -Wstrict-aliasing), and this file is compiled at -O3, where the
+       optimiser is entitled to act on that. Build the pair explicitly
+       instead: same code, no aliasing assumption, and the IVT layout is
+       now stated rather than implied. */
+    return MK_FP((uint16_t)(res >> 16), (uint16_t)(res & 0xFFFFu));
 }
 
 void setvec(uint8_t intno, dos_far_ptr vec) {
@@ -1664,6 +1675,10 @@ dos_far_ptr linear_to_far(const void *p)
     for (;;) ;
   }
   uint32_t lin = (uint32_t)(p - (intptr_t)X86_RAM_BASE);
+  /* is_guest_ptr() above has already established lin <= X86_MAX_LINEAR
+     (0x10FFEF), so the HMA branch's offset (lin - 0xFFFF0) is <= 0xFFFF
+     and the cast below cannot truncate. See is_guest_ptr() in portab.h
+     for why the window stops exactly there. */
   if (lin >= 0x100000)
     return MK_FP(0xFFFF, (UWORD)(lin - 0xFFFF0));
   return MK_FP((UWORD)(lin >> 4), (UWORD)(lin & 0xF));

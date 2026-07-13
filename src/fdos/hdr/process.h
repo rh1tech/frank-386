@@ -116,3 +116,19 @@ typedef struct {
 #define ps_fcb2 _u._u2._ps_fcb2
 #define ps_cmd  _u._u3._ps_cmd
 
+
+/*
+    The PSP is the single most ABI-visible structure in DOS: guest
+    programs, TSRs and debuggers index it by documented offset.
+
+    ps_files at +0x18 is load-bearing beyond mere layout: the default JFT
+    lives there, and ps_filetab (+0x34) must point at it as the canonical
+    far pair <psp_seg>:0018h. Programs test exactly that pair to decide
+    whether the JFT has been relocated away from the PSP (SetJFTSize).
+*/
+_Static_assert(sizeof(psp) == 256, "psp must stay exactly 256 bytes (one paragraph-aligned PSP)");
+_Static_assert(offsetof(psp, ps_files)    == 0x18, "default JFT must stay at PSP+18h");
+_Static_assert(offsetof(psp, ps_maxfiles) == 0x32, "ps_maxfiles must stay at PSP+32h");
+_Static_assert(offsetof(psp, ps_filetab)  == 0x34, "ps_filetab must stay at PSP+34h");
+_Static_assert(offsetof(psp, ps_cmd)      == 0x80, "command tail must stay at PSP+80h");
+_Static_assert(sizeof(exec_blk) == 22, "exec_blk must match the INT 21h AH=4Bh parameter block size");

@@ -440,6 +440,59 @@ target_compile_options(${BUILD_NAME} PRIVATE
     -fdata-sections
 )
 
+# --- FreeDOS kernel port (src/fdos): stricter diagnostics -------------
+#
+# The port models guest far pointers as `dos_far_ptr`, a *struct*
+# { uint16_t offset; uint16_t segment; }.  Two GCC warnings are
+# load-bearing for that design and are BOTH off by default:
+#
+#   -Wmissing-braces   `.some_far_ptr = 0` is brace elision: it
+#                      initialises only the first member (.offset) and
+#                      zero-fills the rest.  That happens to be correct
+#                      for a 0000:0000 sentinel, but the identical
+#                      spelling `.some_far_ptr = 0xFFFF` would silently
+#                      yield 0000:FFFF instead of FFFF:FFFF.
+#   -Wunused-function  catches helpers that were ported over but never
+#                      wired up to a call site.
+#
+# Scoped to src/fdos (+ fcom) only: the emulator/BIOS/peripheral sources
+# are third-party derived and would bury the signal.
+#
+# -Wno-unused-parameter / -Wno-sign-compare: inherited wholesale from
+# upstream FreeDOS' own style; they are pure noise here and hide nothing
+# relevant to the guest-pointer model.  Re-enable once the port is clean.
+set(FDOS_WARN_SOURCES
+    src/fdos/boot.c
+    src/fdos/intr.c
+    src/fdos/initclk.c
+    src/fdos/initdisk.c
+    src/fdos/dyninit.c
+    src/fdos/config.c
+    src/fdos/memmgr.c
+    src/fdos/inithma.c
+    src/fdos/dsk.c
+    src/fdos/dosfns.c
+    src/fdos/fcbfns.c
+    src/fdos/lfnapi.c
+    src/fdos/fatfs.c
+    src/fdos/fattab.c
+    src/fdos/fatdir.c
+    src/fdos/blockio.c
+    src/fdos/chario.c
+    src/fdos/kernel.c
+    src/fdos/task.c
+    src/fdos/fcom/fcom.c
+    src/fdos/nls.c
+    src/fdos/ioctl.c
+    src/fdos/fdos_21h.c
+    src/fdos/fdos_2528.c
+    src/fdos/fdos_29h.c
+    src/fdos/fdos_2fh.c
+)
+set_source_files_properties(${FDOS_WARN_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "-Wall;-Wextra;-Wno-unused-parameter;-Wno-sign-compare"
+)
+
 # ARM assembly flags for Cortex-M33
 set_source_files_properties(src/i386_arm.S PROPERTIES
     COMPILE_FLAGS "-mcpu=cortex-m33 -mthumb"

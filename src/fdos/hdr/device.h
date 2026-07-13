@@ -539,3 +539,25 @@ WORD execrh(/*request*/ dos_far_ptr rq, /*struct dhdr*/ dos_far_ptr dhp);
  */
 
 #pragma pack(pop)
+
+/*
+    ABI locks for the two structures that are read/written as raw bytes
+    by code outside this kernel.
+
+    struct dhdr IS the literal on-disk layout of a .SYS device driver
+    header - DosExec() loads real, unmodified driver files straight into
+    guest RAM and config.c walks them in place (see the long comment on
+    struct dhdr above). 18 bytes, dh_name at +0x0A: if the arm/x86 union
+    ever grew past 4 bytes, every real driver's name would be read from
+    the wrong offset.
+
+    request is copied verbatim into the SDA's fixed-size ClkReqHdr slot
+    (dos_data +0x3A, 30 bytes wide - see lol.h, where clk_driver follows
+    at +0x58). Growing it silently overruns the next SDA field.
+*/
+_Static_assert(sizeof(struct dhdr) == 18,
+               "struct dhdr must stay 18 bytes: it is the on-disk .SYS device header layout");
+_Static_assert(offsetof(struct dhdr, dh_name) == 0x0A,
+               "dh_name must stay at +0x0A: real .SYS files put the 8-char name there");
+_Static_assert(sizeof(request) == 30,
+               "request must stay 30 bytes: it is copied into the SDA ClkReqHdr slot (dos_data +3Ah..+58h)");

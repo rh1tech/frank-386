@@ -849,13 +849,19 @@ COUNT DosClose(COUNT hndl)
 {
   psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
   int sft_idx = get_sft_idx(hndl);
-  dos_far_ptr s = idx_to_sft(sft_idx);
+  dos_far_ptr /* -> sft */ s = idx_to_sft(sft_idx);
+  UBYTE *jft;
   if (far_is_end(s))
+    return DE_INVLDHNDL;
+  /* get_sft_idx() above already validated the JFT, so this cannot fail;
+     go through jft_of() anyway rather than re-deriving the pointer by
+     hand - an unchecked ps_filetab here writes 0xff into the guest IVT. */
+  if ((jft = jft_of(p)) == NULL)
     return DE_INVLDHNDL;
   /* We must close the (valid) file handle before any critical error */
   /* may occur, else e.g. ABORT will try to close the file twice,    */
   /* the second time after stdout is already closed */
-  ((UBYTE *) ARM_PTR(p->ps_filetab))[hndl] = 0xff;
+  jft[hndl] = 0xff;
   /* Get the SFT block that contains the SFT      */
   return DosCloseSft(sft_idx, FALSE);
 }
@@ -927,8 +933,25 @@ int dos_cd(char *PathName)
 
   /* problem: RBIL table 01643 does not give a FAT32 field for the
      CDS start cluster. But we are not using this field ourselves */
-  cdsp = (struct cds *)ARM_PTR(get_cds(PathName[0] - 'A'));
-  cdsp->cdsStrtClst = (UWORD)fnp->f_dmp->dm_dircluster;
+  {
+    dos_far_ptr /* -> struct cds */ x86_cdsp = get_cds(PathName[0] - 'A');
+
+    /* get_cds() reports "no such drive" as the 0000:0000 sentinel, and
+       ARM_PTR() resolves that to X86_RAM_BASE + 0 - the guest's interrupt
+       vector table (see the note in cds.h). Upstream gets away with the
+       unchecked write because there a NULL far pointer is simply unmapped;
+       here it would silently rewrite an interrupt vector. truename() has
+       already validated the drive letter by the time dos_cd() is reached,
+       so this is belt-and-braces - but it is the difference between a
+       broken precondition being harmless and it taking down the system. */
+    if (!far_is_null(x86_cdsp))
+      cdsp = (struct cds *)ARM_PTR(x86_cdsp);
+    else
+      cdsp = NULL;
+
+    if (cdsp != NULL)
+      cdsp->cdsStrtClst = (UWORD)fnp->f_dmp->dm_dircluster;
+  }
   return SUCCESS;
 }
 
@@ -1559,9 +1582,12 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
   char *fcbname;
 
   /* prevent renaming of the current directory of that drive */
-  dos_far_ptr _cds = get_cds(path1[0] - 'A');
-  struct cds* cdsp = (struct cds*)ARM_PTR( _cds );
-  if (!fstrcmp(path1, cdsp->cdsCurrentPath))
+  dos_far_ptr /* -> struct cds */ _cds = get_cds(path1[0] - 'A');
+  /* No CDS (0000:0000) => ARM_PTR() would point cdsCurrentPath at the guest
+     IVT and we would compare the path against interrupt vectors. Skip the
+     "is this the current directory" test rather than test against garbage. */
+  if (!far_is_null(_cds) &&
+      !fstrcmp(path1, ((struct cds *)ARM_PTR(_cds))->cdsCurrentPath))
     return DE_RMVCUDIR;
 
   /* first check if the source file exists                        */
@@ -1953,9 +1979,10 @@ COUNT dos_rmdir(BYTE * path)
   REG f_node_ptr fnp;
 
   /* prevent removal of the current directory of that drive */
-  dos_far_ptr _cds = get_cds(path[0] - 'A');
-  struct cds* cdsp = (struct cds*)ARM_PTR(_cds);
-  if (!fstrcmp(path, cdsp->cdsCurrentPath))
+  dos_far_ptr /* -> struct cds */ _cds = get_cds(path[0] - 'A');
+  /* Same as dos_rename() above: no CDS => do not compare against the IVT. */
+  if (!far_is_null(_cds) &&
+      !fstrcmp(path, ((struct cds *)ARM_PTR(_cds))->cdsCurrentPath))
     return DE_RMVCUDIR;
 
   /* Check that we're not trying to remove the root!      */

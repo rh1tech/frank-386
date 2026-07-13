@@ -228,7 +228,11 @@ void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h *
 {
   psp *p = (psp *) ARM_PTR(MK_FP(para, 0));
   psp *q = (psp *) ARM_PTR(MK_FP(cur_psp, 0));
-  UBYTE *q_filetab = (UBYTE *) ARM_PTR(q->ps_filetab);
+  /* Parent's JFT. NULL if the parent corrupted its own ps_filetab: the
+     child then simply inherits no handles (its own table is already
+     filled with 0xff below) instead of us reading 20 bytes out of the
+     guest IVT and treating them as SFT indices. */
+  UBYTE *q_filetab = jft_of(q);
   int i;
 
   new_psp(para, cur_psp);
@@ -248,7 +252,7 @@ void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h *
    * omitted from the child JFT and their SFT reference count is not
    * incremented.
    */
-  for (i = 0; i < 20; i++)
+  for (i = 0; q_filetab != NULL && i < 20; i++)
   {
     if (q_filetab[i] != 0xff)
     {
@@ -490,35 +494,85 @@ static void exec_leave_child(struct exec_child_context *saved,
   restore_ctx(cpu, &saved->cpu);
 }
 
-static COUNT exec_run_native_child(UWORD child_psp_seg,const char *tail)
+enum exec_process_kind
+{
+  EXEC_PROCESS_GUEST,
+  EXEC_PROCESS_NATIVE_COMMAND
+};
+
+struct exec_process_start
+{
+  dos_far_ptr entry;
+  dos_far_ptr stack;
+  UWORD dses;
+  UWORD ax_bx;
+  UWORD child_psp;
+  enum exec_process_kind kind;
+};
+
+static void exec_set_initial_registers(const struct exec_process_start *start)
+{
+  SET_CS(FP_SEG(start->entry));
+  SET_IP(FP_OFF(start->entry));
+  CPU_AX = CPU_BX = start->ax_bx;
+  CPU_CX = 0x00ff;
+  CPU_DX = start->dses;
+  CPU_SI = FP_OFF(start->entry);
+  CPU_DI = FP_OFF(start->stack);
+  CPU_BP = 0x091e;
+  cpu_setflags(cpu, 0x0200, (uword)~0x0200u);
+}
+
+static COUNT exec_run_process(const struct exec_process_start *start)
 {
   struct exec_child_context saved;
-  dos_far_ptr stack=MK_FP(child_psp_seg,fcom_process_stack_top());
-  UBYTE exit_code;
-  exec_enter_child(&saved,child_psp_seg,stack,child_psp_seg);
-  SET_CS(child_psp_seg);
-  SET_IP(fcom_process_entry_offset());
-  CPU_AX=CPU_BX=0; CPU_CX=0x00ff; CPU_DX=child_psp_seg;
-  CPU_SI=0; CPU_DI=FP_OFF(stack); CPU_BP=0x091e;
-  cpu_setflags(cpu,0x0200,(uword)~0x0200u);
-  exit_code=fcom_process_main(cpu,child_psp_seg,tail);
-  request_terminate(exit_code,0);
-  exec_leave_child(&saved,child_psp_seg);
+
+  exec_enter_child(&saved, start->child_psp,
+                   start->stack, start->dses);
+  exec_set_initial_registers(start);
+
+  if (start->kind == EXEC_PROCESS_NATIVE_COMMAND)
+  {
+    UBYTE exit_code = fcom_process_main(cpu, start->child_psp);
+    request_terminate(exit_code, 0);
+  }
+  else
+  {
+    while (!terminate_flag)
+      pc_step(pc, 4096);
+  }
+
+  exec_leave_child(&saved, start->child_psp);
   return SUCCESS;
+}
+
+COUNT exec_run_native_command(UWORD child_psp_seg, UWORD fcbcode)
+{
+  struct exec_process_start start;
+
+  start.entry = MK_FP(child_psp_seg, fcom_process_entry_offset());
+  start.stack = MK_FP(child_psp_seg, fcom_process_stack_top());
+  start.dses = child_psp_seg;
+  start.ax_bx = fcbcode;
+  start.child_psp = child_psp_seg;
+  start.kind = EXEC_PROCESS_NATIVE_COMMAND;
+
+  return exec_run_process(&start);
 }
 
 static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
                             UWORD dses, UWORD ax_bx, UWORD child_psp_seg)
 {
-  struct exec_child_context saved;
-  exec_enter_child(&saved,child_psp_seg,stack,dses);
-  SET_CS(FP_SEG(entry)); SET_IP(FP_OFF(entry));
-  CPU_AX=CPU_BX=ax_bx; CPU_CX=0x00ff; CPU_DX=dses;
-  CPU_SI=FP_OFF(entry); CPU_DI=FP_OFF(stack); CPU_BP=0x091e;
-  cpu_setflags(cpu,0x0200,(uword)~0x0200u);
-  while(!terminate_flag) pc_step(pc,4096);
-  exec_leave_child(&saved,child_psp_seg);
-  return SUCCESS;
+  struct exec_process_start start;
+
+  start.entry = entry;
+  start.stack = stack;
+  start.dses = dses;
+  start.ax_bx = ax_bx;
+  start.child_psp = child_psp_seg;
+  start.kind = EXEC_PROCESS_GUEST;
+
+  return exec_run_process(&start);
 }
 
 STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
@@ -925,9 +979,8 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
        * loader stage.
        */
       fcbcode=patchPSP(command_psp - 1,child_env_mcb,ep,lp);
-      (void)fcbcode;
 
-      return exec_run_native_child(command_psp,tail);
+      return exec_run_native_command(command_psp,fcbcode);
     }
   }
   

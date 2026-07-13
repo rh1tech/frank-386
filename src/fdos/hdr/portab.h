@@ -190,12 +190,84 @@ extern char DosDataSeg[];
 #endif
 #define X86_RAM_BASE ((uint8_t*)PSRAM_BASE_ADDR)
 
+/* Highest linear address any real-mode seg:off pair can name: FFFF:FFFF
+   -> (0xFFFF << 4) + 0xFFFF == 0x10FFEF. Everything from 0x100000 up to
+   here is the HMA and IS reachable (as FFFF:xxxx). */
+#define X86_MAX_LINEAR 0x10FFEFul
+
+/* Is p a native pointer to somewhere the guest can actually address?
+
+   The bound is X86_MAX_LINEAR, not the nominal 1MB+64KB of the HMA
+   aperture. The final 16 bytes of that aperture (0x10FFF0..0x10FFFF) are
+   nameable by no seg:off pair at all, and linear_to_far() cannot encode
+   them: its HMA branch would compute an offset above 0xFFFF and the
+   (uint16_t) cast would silently truncate it, wrapping the pointer back
+   to the START of the HMA. Cutting the window at exactly the set of
+   representable addresses makes ARM_PTR() and linear_to_far() true
+   inverses over the whole range, instead of almost-inverses with a
+   16-byte hole that fails silently. */
 static inline bool is_guest_ptr(const void *p) {
     uintptr_t a = (uintptr_t)p;
     return a >= (uintptr_t)X86_RAM_BASE &&
-           a <  (uintptr_t)X86_RAM_BASE + (1ul << 20) + (64ul << 10);
+           a <= (uintptr_t)X86_RAM_BASE + X86_MAX_LINEAR;
 }
 
+/*
+    ================================================================
+    GUEST POINTER MODEL - read this before touching anything below
+    ================================================================
+
+    There are exactly TWO kinds of pointer in this port, and they must
+    never be confused:
+
+      dos_far_ptr   a GUEST pointer: a { offset, segment } pair, exactly
+                    as an x86 program sees it. This is what every field
+                    that a guest can read or write must be declared as
+                    (device chains, DPB/CDS/SFT/PSP links, the LoL, the
+                    SDA). It is a struct - not an integer, not a native
+                    pointer - so that it cannot be silently mixed with
+                    either.
+
+      T *           a NATIVE ARM pointer, obtained from a dos_far_ptr by
+                    ARM_PTR(). Valid only for the duration of the call
+                    that produced it. Note that FAR/far expand to nothing
+                    here, so "struct dpb FAR *" is a NATIVE pointer -
+                    despite how it reads.
+
+    Direction of travel is one-way: ARM_PTR() converts guest -> native.
+    Going the other way is NOT generally possible: a native pointer has
+    no unique seg:off pre-image (only a unique linear address), so
+    reconstructing one silently picks a *different* seg:off pair with the
+    same linear address. Where a guest pointer is needed, build it from
+    the segment the caller already knows (x86_FAR_PTR(DOS_PSP, &x),
+    MK_FP(psp_seg, offsetof(psp, ps_files)), ...) - never by normalising
+    a native address.
+
+    SENTINELS. Guest pointers carry two of them, and after ARM_PTR()
+    NEITHER looks special any more - both become ordinary, *mapped*,
+    dereferenceable ARM addresses:
+
+        0000:0000  "none"      ARM_PTR() -> X86_RAM_BASE + 0, i.e. the
+                               guest's INTERRUPT VECTOR TABLE. A missing
+                               NULL check does not fault here - it
+                               silently corrupts the guest's IVT.
+        FFFF:FFFF  "end/error" ARM_PTR() -> X86_RAM_BASE + 0x10FFEF,
+                               i.e. somewhere inside the HMA.
+
+    Therefore: ALWAYS test a dos_far_ptr with far_is_null() / far_is_end()
+    (init-mod.h) BEFORE handing it to ARM_PTR(). Never test the result of
+    ARM_PTR() against NULL - it is never NULL.
+
+    DECLARATION RULE. Every dos_far_ptr - field, parameter, local or
+    return value - states what it points AT, because the type itself no
+    longer says:
+
+        dos_far_ptr / * -> struct dpb * /  dpb_next;
+
+    The one exception is arrays of bytes/characters (char[], UBYTE[]):
+    they are indivisible primitives of known size and the comment would
+    add nothing.
+*/
 #pragma pack(push, 1)
 typedef struct dos_far_ptr {
     uint16_t offset;

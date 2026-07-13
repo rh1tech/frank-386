@@ -68,3 +68,12 @@ typedef struct {
   BYTE m_name[8];               /* owner name limited to 8 bytes        */
 } mcb;
 #pragma pack(pop)
+
+/*
+    The MCB is walked in place by every DOS memory tool (MEM, LOADHIGH,
+    debuggers) using the documented 16-byte stride: m_type/m_psp/m_size
+    then the 8-char owner name at +8. nxtMCBseg() in memmgr.c likewise
+    assumes exactly one paragraph of header.
+*/
+_Static_assert(sizeof(mcb) == 16, "mcb must stay exactly one paragraph (16 bytes)");
+_Static_assert(offsetof(mcb, m_name) == 8, "mcb owner name must stay at +8 (documented MCB ABI)");

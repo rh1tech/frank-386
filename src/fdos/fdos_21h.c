@@ -272,8 +272,20 @@ static unsigned char DosGetDateRegs(UWORD *out_year, UBYTE *out_month, UBYTE *ou
 
 unsigned char DosGetDate(CPU *cpu)
 {
-  UWORD year;
-  UBYTE month, day;
+  /* Seed the locals from the register frame BEFORE calling down.
+
+     DosGetDateRegs() returns early, storing nothing, when the clock
+     driver reports S_ERROR. Upstream is immune to that because it hands
+     the register frame itself to the worker (inthndlr.c does
+     DosGetDate((struct dosdate *)&lr.CX)), so an error simply leaves the
+     guest's CX/DH/DL holding whatever it passed in. This port uses stack
+     locals instead, so leaving them uninitialised meant the error path
+     copied indeterminate stack bytes into the guest as the current date.
+     Pre-seeding reproduces upstream's "frame unchanged on error"
+     semantics exactly. */
+  UWORD year  = CPU_CX;
+  UBYTE month = CPU_DH;
+  UBYTE day   = CPU_DL;
   unsigned char dow = DosGetDateRegs(&year, &month, &day);
 
   CPU_CX = year;
@@ -334,7 +346,14 @@ static void DosGetTimeRegs(UBYTE *out_hour, UBYTE *out_minute, UBYTE *out_second
 
 void DosGetTime(CPU *cpu)
 {
-  UBYTE hour, minute, second, hundredth;
+  /* Same reasoning as DosGetDate() above: DosGetTimeRegs() stores
+     nothing when the clock driver reports S_ERROR, so the locals must
+     already hold the guest's own register values or the error path
+     reports indeterminate stack bytes as the current time. */
+  UBYTE hour      = CPU_CH;
+  UBYTE minute    = CPU_CL;
+  UBYTE second    = CPU_DH;
+  UBYTE hundredth = CPU_DL;
 
   DosGetTimeRegs(&hour, &minute, &second, &hundredth);
   CPU_CH = hour;
@@ -1336,11 +1355,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       {
         unsigned old_hndl = R_BX;
         psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-        UBYTE *filetab = (UBYTE *)ARM_PTR(p->ps_filetab);
+        UBYTE *filetab = jft_of(p);   /* NULL => guest broke its own ps_filetab */
         dos_far_ptr old_sft;
         unsigned new_hndl;
 
-        if (old_hndl >= p->ps_maxfiles || filetab[old_hndl] == 0xff)
+        if (filetab == NULL || old_hndl >= p->ps_maxfiles ||
+            filetab[old_hndl] == 0xff)
         {
           R_CF = 1;
           R_AX = (UWORD)(-DE_INVLDHNDL);
@@ -1383,9 +1403,10 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         unsigned old_hndl = R_BX;
         unsigned new_hndl = R_CX;
         psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-        UBYTE *filetab = (UBYTE *) ARM_PTR(p->ps_filetab);
+        UBYTE *filetab = jft_of(p);   /* NULL => guest broke its own ps_filetab */
 
-        if (old_hndl >= p->ps_maxfiles || filetab[old_hndl] == 0xff)
+        if (filetab == NULL || old_hndl >= p->ps_maxfiles ||
+            filetab[old_hndl] == 0xff)
         {
           R_CF = 1;
           R_AX = (UWORD)(-DE_INVLDHNDL);
@@ -2090,7 +2111,10 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           {
             struct cds *cdsp =
                 (struct cds *)ARM_PTR(LoL->CDSp) + R_DL;
-            if (FP_OFF(cdsp->cdsDpb))   /* letter of physical drive?  */
+            /* Upstream tests the whole far pointer ("if (cdsp->cdsDpb)");
+               an offset-only test misreads a DPB that sits at offset 0 of
+               its segment as "absent". */
+            if (!far_is_null(cdsp->cdsDpb))  /* letter of physical drive?  */
             {
               cdsp->cdsFlags &= ~CDSPHYSDRV;
               if (R_AL == 7)

@@ -320,8 +320,26 @@ STATIC BOOL flush1(dos_far_ptr/*struct buffer*/ _bp)
       b_copies = bp->b_copies;
       b_offset = bp->b_offset;
 #ifdef WITHFAT32
+      /* b_offset == 0 means FAT32 (dpb_fatsize is a 16-bit field and FAT32
+         keeps the real size in the 32-bit dpb_xfatsize instead), so we have
+         to go back to the DPB for it.
+
+         Reaching that DPB relies on an invariant that spans two files:
+         BFR_FAT is set in exactly one place (getFATblock(), fattab.c), which
+         sets b_dpbp on the very next line - every other site only ever
+         CLEARS BFR_FAT. So b_dpbp is always valid here. The check below
+         costs nothing and makes the invariant enforced rather than merely
+         true: if it were ever broken, ARM_PTR(0000:0000) would read a bogus
+         "xfatsize" out of the guest IVT and the loop underneath would write
+         FAT copies to sectors computed from it. Degrade to "one copy, no
+         stride" instead of writing to a garbage sector. */
       if (b_offset == 0) /* FAT32 FS */
-        b_offset = ((struct dpb *)ARM_PTR(bp->b_dpbp))->dpb_xfatsize;
+      {
+        if (far_is_null(bp->b_dpbp) || far_is_end(bp->b_dpbp))
+          b_copies = 1;                 /* invariant broken: write once, in place */
+        else
+          b_offset = ((struct dpb *)ARM_PTR(bp->b_dpbp))->dpb_xfatsize;
+      }
 #endif
     }
     while (b_copies--)
