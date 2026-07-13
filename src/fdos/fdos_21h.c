@@ -107,6 +107,18 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
   if (lpDevice != NULL && is_guest_ptr(lpDevice))
     device = linear_to_far((const BYTE *)lpDevice);
 
+  /*
+   * Publish the failing drive and device in the SDA before calling the
+   * user handler.  INT 21h/AH=59h returns CritErrDev as ES:DI, and DOS
+   * internal users inspect CritErrDrive directly.
+   *
+   * Do not synthesize class/action/locus here: their values are selected
+   * by the higher-level DOS error path, not derivable from the device
+   * request status alone.
+   */
+  internal_data->CritErrDrive = (UBYTE)nDrive;
+  internal_data->CritErrDev = device;
+
   cpu_save_regs(cpu, &saved_regs);
   saved_ss = CPU_SS;
   saved_error_mode = internal_data->ErrorMode;
@@ -816,6 +828,20 @@ bool fdos_21h(CPU* _cpu) {
 
     internal_data->Int21AX = R_AX;
     ++internal_data->InDOS;
+
+    /*
+     * A user INT 24h handler is allowed to abandon the DOS critical-error
+     * frame and return directly to its application instead of IRETing back
+     * to CriticalError().  In that case ErrorMode remains set.
+     *
+     * Match upstream int21_service(): clear such a stale ErrorMode on the
+     * next ordinary DOS call.  AH=30h and AH=59h are queries which must not
+     * disturb the pending version/extended-error state; old character I/O
+     * functions 00h..0Ch are excluded by the original condition as well.
+     */
+    if (R_AH > 0x0c && R_AH != 0x30 && R_AH != 0x59)
+      internal_data->ErrorMode = 0;
+
     dpb_watch_int21_checkpoint(cpu, "entry");
     /* STI: real DOS re-enables interrupts first thing in its INT 21h
        entry stub (FreeDOS entry.asm does "sti" right after the stack
