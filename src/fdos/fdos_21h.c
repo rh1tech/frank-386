@@ -13,6 +13,43 @@ static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
     dpb_watch_check_chain(tag);
 }
 
+/*
+ * Guest-visible INT 21h register frame.
+ *
+ * The field order is the original FreeDOS iregs/PUSH$ALL ABI:
+ * AX, BX, CX, DX, SI, DI, BP, DS, ES, followed by the hardware
+ * interrupt frame IP, CS, FLAGS.
+ */
+struct int21_guest_iregs {
+  UWORD ax, bx, cx, dx;
+  UWORD si, di, bp, ds, es;
+  UWORD ip, cs, flags;
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct int21_guest_iregs) == 24,
+               "INT 21h guest iregs ABI must be 24 bytes");
+
+static void int21_store_guest_frame(dos_far_ptr frame,
+                                    const CPU_regs *regs,
+                                    UWORD ip, UWORD cs, UWORD flags)
+{
+  struct int21_guest_iregs *r =
+      (struct int21_guest_iregs *)ARM_PTR(frame);
+
+  r->ax = regs->gprx[regax].r16;
+  r->bx = regs->gprx[regbx].r16;
+  r->cx = regs->gprx[regcx].r16;
+  r->dx = regs->gprx[regdx].r16;
+  r->si = regs->gprx[regsi].r16;
+  r->di = regs->gprx[regdi].r16;
+  r->bp = regs->gprx[regbp].r16;
+  r->ds = regs->ds;
+  r->es = regs->es;
+  r->ip = ip;
+  r->cs = cs;
+  r->flags = flags;
+}
+
 #ifdef NO_HANDLER_DETECTOR
 static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "DOS 21H - ERROR: no handler defined ");
@@ -22,27 +59,116 @@ while(1); // remove it
 #endif
 
 /*
- * Minimal critical-error backend until the original INT 24h/user-stack
- * trampoline from entry.asm is ported.
+ * Invoke the current process' INT 24h critical-error handler.
  *
- * Return FAIL to the caller without modifying the live CPU register
- * frame.  INT 21h dispatch uses a separate local register frame, while
- * INT 2Fh callers that require AL explicitly store this return value.
+ * The guest-visible INT 21h frame published at PSP:2Eh is used as the
+ * user stack, matching entry.asm.  INT 24h receives:
+ *
+ *   AH    critical-error flags
+ *   AL    drive number
+ *   DI    device error code
+ *   BP:SI device-header pointer
+ *
+ * The live CPU context and the published INT 21h frame are restored
+ * after the handler returns.  A nested critical error cannot recurse:
+ * it is converted directly to FAIL, as in the original kernel.
  */
 COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
                              struct dhdr FAR *lpDevice)
 {
-  UNREFERENCED_PARAMETER(nFlag);
-  UNREFERENCED_PARAMETER(nDrive);
-  UNREFERENCED_PARAMETER(nError);
-  UNREFERENCED_PARAMETER(lpDevice);
-  return FAIL;
+  CPU_regs saved_regs;
+  struct int21_guest_iregs saved_frame;
+  psp *p;
+  dos_far_ptr user_stack;
+  dos_far_ptr device = MK_FP(0, 0);
+  UWORD saved_ss;
+  UBYTE saved_error_mode;
+  UBYTE saved_indos;
+  COUNT action;
+  BOOL have_frame;
+
+  if (internal_data->ErrorMode != 0)
+    return FAIL;
+
+  p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  user_stack = p->ps_stack;
+  have_frame = !far_is_null(user_stack) && !far_is_end(user_stack);
+
+  /*
+   * INT 24h is normally reached from an active INT 21h and therefore
+   * has a PSP:2Eh frame.  Keep a safe fallback for internal callers
+   * such as INT 2Fh helpers invoked outside INT 21h.
+   */
+  if (have_frame)
+    memcpy(&saved_frame, ARM_PTR(user_stack), sizeof(saved_frame));
+  else
+    user_stack = MK_FP(CPU_SS, CPU_SP);
+
+  if (lpDevice != NULL && is_guest_ptr(lpDevice))
+    device = linear_to_far((const BYTE *)lpDevice);
+
+  cpu_save_regs(cpu, &saved_regs);
+  saved_ss = CPU_SS;
+  saved_error_mode = internal_data->ErrorMode;
+  saved_indos = internal_data->InDOS;
+
+  ++internal_data->ErrorMode;
+  if (internal_data->InDOS != 0)
+    --internal_data->InDOS;
+
+  SET_SS(FP_SEG(user_stack));
+  CPU_SP = FP_OFF(user_stack);
+  CPU_AH = (UBYTE)nFlag;
+  CPU_AL = (UBYTE)nDrive;
+  CPU_DI = (UWORD)nError;
+  CPU_BP = FP_SEG(device);
+  CPU_SI = FP_OFF(device);
+
+  bios_intcall(cpu, 0x24, "DOS Critical Error INT24");
+  action = CPU_AL;
+
+  /*
+   * The INT instruction and a user handler are allowed to use the user
+   * stack.  Restore the published DOS frame before returning to the
+   * interrupted INT 21h dispatcher.
+   */
+  if (have_frame)
+    memcpy(ARM_PTR(user_stack), &saved_frame, sizeof(saved_frame));
+
+  cpu_restore_regs(cpu, &saved_regs);
+  SET_SS(saved_ss);
+  internal_data->ErrorMode = saved_error_mode;
+  internal_data->InDOS = saved_indos;
+
+  /* Force disallowed responses through the same sequence as entry.asm. */
+  if (action == CONTINUE && !(nFlag & EFLG_IGNORE))
+    action = FAIL;
+
+  if (action == RETRY && !(nFlag & EFLG_RETRY))
+    action = FAIL;
+
+  /*
+   * Bit 3 is named EFLG_ABORT in the C headers, but entry.asm uses the
+   * same bit as OK_FAIL when validating an INT 24h FAIL response.
+   */
+  if (action == FAIL && !(nFlag & EFLG_ABORT))
+    action = ABORT;
+
+  if (action == ABORT)
+  {
+    if (internal_data->abort_progress)
+      return FAIL;
+
+    request_terminate(0, 2);   /* critical-error abort */
+    return FAIL;
+  }
+
+  return action;
 }
 
 /* Abort, retry or fail for character devices                   */
 COUNT char_error(request * rq, struct dhdr FAR * lpDevice)
 {
-  /// TODO:
   internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
   return CriticalError(EFLG_CHAR | EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE,
                        0, rq->r_status & S_MASK, lpDevice);
@@ -52,7 +178,6 @@ COUNT char_error(request * rq, struct dhdr FAR * lpDevice)
 COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice,
                   int mode)
 {
-  /// TODO:
   internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
   return CriticalError(EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE |
                        (mode == DSKWRITE ? EFLG_WRITE : 0),
@@ -644,13 +769,38 @@ bool fdos_21h(CPU* _cpu) {
     CPU_regs lr;
     CPU_regs *regs = &lr;
     UWORD entry_ss, entry_sp;
+    UWORD entry_ip, entry_cs;
+    UWORD frame_sp;
+    dos_far_ptr old_ps_stack;
+    psp *current_psp;
 
     cpu = _cpu;
     entry_ss = CPU_SS;
     entry_sp = CPU_SP;
+    entry_ip = readw86(((uint32_t)entry_ss << 4) + entry_sp);
+    entry_cs = readw86(((uint32_t)entry_ss << 4) + entry_sp + 2);
     cpu_save_regs(_cpu, regs);
     uint16_t flags_on_stack = readw86(((uint32_t)entry_ss << 4) + entry_sp + 4);
     regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
+
+    /*
+     * Native C code uses the host stack, so the guest user stack is still
+     * available.  Build the same guest-visible iregs frame that the
+     * original entry.asm creates with PUSH$ALL and publish it at PSP:2Eh.
+     *
+     * Nested INT 21h calls get their own frame below the outer one.  Save
+     * and restore ps_stack so the outer invocation becomes current again
+     * when the nested call returns.
+     */
+    frame_sp = (UWORD)(entry_sp - sizeof(struct int21_guest_iregs));
+    CPU_SP = frame_sp;
+    current_psp = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+    old_ps_stack = current_psp->ps_stack;
+    current_psp->ps_stack = MK_FP(entry_ss, frame_sp);
+    int21_store_guest_frame(current_psp->ps_stack, regs,
+                            entry_ip, entry_cs, flags_on_stack);
+
+
     internal_data->Int21AX = R_AX;
     ++internal_data->InDOS;
     dpb_watch_int21_checkpoint(cpu, "entry");
@@ -2317,6 +2467,13 @@ error_carry:
 exit_dispatch:
     flags_on_stack = (flags_on_stack & ~0x0041u)
                    | (regs->flags.value & 0x0041u);
+    /*
+     * Keep the published frame coherent through the end of dispatch.
+     * Critical-error handling and DOS extenders may inspect PSP:2Eh
+     * while this invocation is active.
+     */
+    int21_store_guest_frame(current_psp->ps_stack, regs,
+                            entry_ip, entry_cs, flags_on_stack);
 
     /* Upstream copies its local lregs frame back only after dispatch.
      * Do the same here, then patch CF/ZF in the caller's IRET frame. */
@@ -2324,6 +2481,8 @@ exit_dispatch:
     dpb_watch_int21_checkpoint(cpu, "exit");
     writew86(((uint32_t)entry_ss << 4) + entry_sp + 4, flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
+    current_psp->ps_stack = old_ps_stack;
+    CPU_SP = entry_sp;
     --internal_data->InDOS;
     return true;
 }

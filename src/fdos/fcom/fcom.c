@@ -123,6 +123,7 @@ int fcom_is_command_com(const char *name)
 #define FCOM_PROCESS_PARAS     (FCOM_PROCESS_BYTES >> 4)
 #define FCOM_STACK_TOP         FCOM_PROCESS_BYTES
 #define FCOM_STACK_BYTES       (FCOM_STACK_TOP - FCOM_STACK_BOTTOM)
+#define FCOM_ENTRY_OFFSET      0x0100u
 
 _Static_assert(FCOM_PROCESS_BYTES <= 0xfff0u,
                "FCOM compact process exceeds a 16-bit segment");
@@ -8101,8 +8102,8 @@ static enum fcom_start_action parse_init_tail(struct fcom_guest *g,
 }
 
 
-static UWORD create_command_process(const char *init_tail, UBYTE start_mode,
-                                    UWORD parent_psp, UWORD environment_seg)
+UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
+                          UWORD parent_psp, UWORD environment_seg)
 {
   seg mcb_seg;
   UWORD largest = 0;
@@ -8159,31 +8160,50 @@ static UWORD create_command_process(const char *init_tail, UBYTE start_mode,
     memcpy(process->ps_cmd.ctBuffer, init_tail, n);
   process->ps_cmd.ctBuffer[n] = '\r';
 
-  internal_data->cu_psp = command_psp;
-  internal_data->dta = MK_FP(command_psp, offsetof(psp, ps_cmd));
+  /*
+   * Native COMMAND still has an ordinary guest execution identity.
+   * Nothing normally executes this code, but CS:IP must not continue to
+   * identify the suspended parent process.  A tight JMP loop is harmless
+   * if the CPU core is stepped accidentally outside bios_intcall().
+   */
+  {
+    UBYTE *entry = (UBYTE *)ARM_PTR(
+        MK_FP(command_psp, FCOM_ENTRY_OFFSET));
+    entry[0] = 0xeb; /* JMP SHORT -2 */
+    entry[1] = 0xfe;
+  }
+
+  if (environment_seg != 0) {
+    mcb *env_mcb = (mcb *)ARM_PTR(MK_FP(environment_seg - 1u, 0));
+    env_mcb->m_psp = command_psp;
+  }
+
   return command_psp;
 }
 
-void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode, UWORD environment_seg, UBYTE own_environment)
+UWORD fcom_process_stack_top(void)
 {
-  UWORD parent_psp = internal_data->cu_psp;
-  dos_far_ptr parent_dta = internal_data->dta;
-  UWORD command_psp = create_command_process(init_tail, start_mode, parent_psp, environment_seg);
+  return FCOM_STACK_TOP;
+}
+
+UWORD fcom_process_entry_offset(void)
+{
+  return FCOM_ENTRY_OFFSET;
+}
+
+UBYTE fcom_process_main(CPU *cpu, UWORD command_psp,
+                        const char *init_tail)
+{
+  psp *process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
+  UWORD parent_psp = process->ps_parent;
   struct fcom_guest *g;
   enum fcom_start_action start_action;
   char *start_command = NULL;
-
-  if (command_psp == 0) {
-    dos_printf("FCOM: cannot allocate COMMAND process\n");
-    return;
-  }
 
   g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
   memset(g, 0, sizeof(*g));
   g->active_saved_stdin = 0xffffu;
   g->active_saved_stdout = 0xffffu;
-  if (own_environment)
-    g->owned_env_seg = environment_seg;
   memset(fcom_dir_stack_storage(command_psp), 0, FCOM_DIR_STACK_BYTES);
   memset(fcom_alias_storage(command_psp), 0, FCOM_ALIAS_BYTES);
   memset(fcom_history_storage(command_psp), 0, FCOM_HISTORY_BYTES);
@@ -8252,21 +8272,51 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode, UWORD environme
   }
 
 done:
-  /*
-   * TODO(kernel): publish g->exit_code through the same DOS return-code
-   * path used when an ordinary guest process terminates.
-   */
-
-  /*
-   * Restore the parent before releasing the child process block.  A nested
-   * COMMAND therefore behaves like a normal synchronous DOS child.
-   */
-  internal_data->cu_psp = parent_psp;
-  internal_data->dta = parent_dta;
-
-  if (g->owned_env_seg != 0)
-    DosMemFree(g->owned_env_seg - 1);
-
   fcom_fddebug_close(cpu, command_psp, g);
-  DosMemFree(command_psp - 1);
+  return g->exit_code;
+}
+
+void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode,
+              UWORD environment_seg, UBYTE own_environment)
+{
+  struct saved_fcom_cpu {
+    UWORD ax, bx, cx, dx, si, di, bp, sp;
+    UWORD cs, ds, es, ss, ip, flags;
+  } saved;
+  UWORD parent_psp = internal_data->cu_psp;
+  dos_far_ptr parent_dta = internal_data->dta;
+  UBYTE saved_indos = internal_data->InDOS;
+  UWORD command_psp = fcom_create_process(init_tail, start_mode,
+                                           parent_psp, environment_seg);
+
+  (void)own_environment;
+  if (command_psp == 0) {
+    dos_printf("FCOM: cannot allocate COMMAND process\n");
+    return;
+  }
+
+  saved.ax=CPU_AX; saved.bx=CPU_BX; saved.cx=CPU_CX; saved.dx=CPU_DX;
+  saved.si=CPU_SI; saved.di=CPU_DI; saved.bp=CPU_BP; saved.sp=CPU_SP;
+  saved.cs=CPU_CS; saved.ds=CPU_DS; saved.es=CPU_ES; saved.ss=CPU_SS;
+  saved.ip=CPU_IP; saved.flags=cpu_getflags(cpu);
+
+  internal_data->cu_psp=command_psp;
+  internal_data->dta=MK_FP(command_psp, offsetof(psp, ps_cmd));
+  SET_SS(command_psp); CPU_SP=FCOM_STACK_TOP;
+  SET_CS(command_psp); SET_IP(FCOM_ENTRY_OFFSET);
+  SET_DS(command_psp); SET_ES(command_psp);
+  CPU_AX=CPU_BX=0; CPU_CX=0x00ff; CPU_DX=command_psp;
+  CPU_SI=0; CPU_DI=FCOM_STACK_TOP; CPU_BP=0x091e;
+  cpu_setflags(cpu,0x0200,(uword)~0x0200u);
+
+  (void)fcom_process_main(cpu,command_psp,init_tail);
+
+  internal_data->InDOS=saved_indos;
+  internal_data->cu_psp=parent_psp; internal_data->dta=parent_dta;
+  SET_SS(saved.ss); CPU_SP=saved.sp; SET_CS(saved.cs); SET_IP(saved.ip);
+  SET_DS(saved.ds); SET_ES(saved.es);
+  CPU_AX=saved.ax; CPU_BX=saved.bx; CPU_CX=saved.cx; CPU_DX=saved.dx;
+  CPU_SI=saved.si; CPU_DI=saved.di; CPU_BP=saved.bp;
+  cpu_setflags(cpu,saved.flags,(uword)~saved.flags);
+  FreeProcessMem(command_psp);
 }

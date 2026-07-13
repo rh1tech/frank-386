@@ -433,96 +433,84 @@ UWORD DosGetRetCode(void)
   return result;
 }
 
+struct exec_child_context
+{
+  struct saved_cpu_ctx cpu;
+  UWORD cu_psp;
+  dos_far_ptr dta;
+  UBYTE indos;
+  bool terminate;
+};
+
+static void exec_enter_child(struct exec_child_context *saved,
+                             UWORD child_psp_seg, dos_far_ptr stack,
+                             UWORD dses)
+{
+  save_ctx(cpu,&saved->cpu);
+  saved->cu_psp=internal_data->cu_psp; saved->dta=internal_data->dta;
+  saved->indos=internal_data->InDOS; saved->terminate=terminate_flag;
+  internal_data->cu_psp=child_psp_seg;
+  internal_data->dta=MK_FP(child_psp_seg,offsetof(psp,ps_cmd));
+  SET_SS(FP_SEG(stack)); CPU_SP=FP_OFF(stack);
+  SET_DS(dses); SET_ES(dses);
+  terminate_flag=false; cpu->native_done=false;
+  if (internal_data->InDOS != 0) --internal_data->InDOS;
+}
+
+static void exec_release_child(UWORD child_psp_seg)
+{
+  psp *p=(psp *)ARM_PTR(MK_FP(child_psp_seg,0));
+  setvec(0x22,p->ps_isv22); setvec(0x23,p->ps_isv23); setvec(0x24,p->ps_isv24);
+  if (term_exit_type != 3) {
+    int i; for(i=0;i<p->ps_maxfiles;i++) DosClose(i);
+    FcbCloseAll(); FreeProcessMem(child_psp_seg);
+  }
+}
+
+static void exec_leave_child(struct exec_child_context *saved,
+                             UWORD child_psp_seg)
+{
+  cpu->native_done = false;
+  terminate_flag = saved->terminate;
+  internal_data->InDOS = saved->indos;
+  /* Match return_user(): suppress recursive critical-error aborts
+     while vectors, handles, FCBs and process memory are released. */
+  internal_data->abort_progress = (UBYTE)-1;
+  exec_release_child(child_psp_seg);
+  internal_data->cu_psp = saved->cu_psp;
+  internal_data->dta = saved->dta;
+  internal_data->abort_progress = 0;
+  restore_ctx(cpu,&saved->cpu);
+}
+
+static COUNT exec_run_native_child(UWORD child_psp_seg,const char *tail)
+{
+  struct exec_child_context saved;
+  dos_far_ptr stack=MK_FP(child_psp_seg,fcom_process_stack_top());
+  UBYTE exit_code;
+  exec_enter_child(&saved,child_psp_seg,stack,child_psp_seg);
+  SET_CS(child_psp_seg);
+  SET_IP(fcom_process_entry_offset());
+  CPU_AX=CPU_BX=0; CPU_CX=0x00ff; CPU_DX=child_psp_seg;
+  CPU_SI=0; CPU_DI=FP_OFF(stack); CPU_BP=0x091e;
+  cpu_setflags(cpu,0x0200,(uword)~0x0200u);
+  exit_code=fcom_process_main(cpu,child_psp_seg,tail);
+  term_exit_code=exit_code; term_exit_type=0;
+  exec_leave_child(&saved,child_psp_seg);
+  return SUCCESS;
+}
+
 static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
                             UWORD dses, UWORD ax_bx, UWORD child_psp_seg)
 {
-  struct saved_cpu_ctx parent_ctx;
-  UWORD saved_cu_psp = internal_data->cu_psp;
-  dos_far_ptr saved_dta = internal_data->dta;
-  UBYTE saved_indos = internal_data->InDOS;
-  bool saved_terminate_flag = terminate_flag;
-
-  save_ctx(cpu, &parent_ctx);
-
-  internal_data->cu_psp = child_psp_seg;
-  internal_data->dta = MK_FP(child_psp_seg, offsetof(psp, ps_cmd));
-
-  SET_SS(FP_SEG(stack));  CPU_SP = FP_OFF(stack);
-  SET_CS(FP_SEG(entry));  SET_IP(FP_OFF(entry));
-  SET_DS(dses);           SET_ES(dses);
-  CPU_AX = CPU_BX = ax_bx;
-  CPU_CX = 0x00ff;
-  CPU_DX = dses;
-  CPU_SI = FP_OFF(entry);
-  CPU_DI = FP_OFF(stack);
-  CPU_BP = 0x091e;               /* matches upstream: some programs
-                                     expect 0x09 in BP's high byte */
-  /* Child entry FLAGS := 0200h exactly (IF set, everything else clear,
-     matching upstream's irp->FLAGS = 0x200). NOTE the argument order in
-     both cores' set_flags() is SET first, then CLEAR - so a clear_mask
-     of 0xffff would wipe the IF bit we just set and start the child
-     with interrupts disabled (timer tick frozen and keyboard IRQ dead
-     outside of INT 21h calls, where fdos_21h's STI-at-entry re-enables
-     them). The clear mask must exclude the bits being set. */
-  cpu_setflags(cpu, 0x0200, (uword)~0x0200u);
-
-  terminate_flag = false;
-  cpu->native_done = false;
-  /*
-   * Upstream load_transfer() decrements InDOS before transferring
-   * control to the child.  The child is ordinary user code, not a
-   * continuation of the parent's INT 21h service.  Its first DOS call
-   * must therefore observe InDOS changing 0 -> 1, not 1 -> 2.
-   */
-  if (internal_data->InDOS != 0)
-    --internal_data->InDOS;
-
-  while (!terminate_flag)
-    pc_step(pc, 4096);
-  /* request_terminate() set native_done to abort the batch; clear it,
-     or every subsequent pc_step() (the parent's own stepping, or an
-     outer exec_run_child() loop) would keep breaking out instantly
-     without executing a single instruction. */
-  cpu->native_done = false;
-  terminate_flag = saved_terminate_flag;
-  internal_data->InDOS = saved_indos;
-
-  /* --- child terminated: return_user()'s equivalent --- */
-  {
-    psp *p = (psp *) ARM_PTR(MK_FP(child_psp_seg, 0));
-
-    /* When process returns - restore the isv (upstream return_user()
-       does this unconditionally, BEFORE the TSR check: the parent's
-       INT 22h/23h/24h handlers, saved into the child PSP at load time
-       by new_psp(), come back even for a TSR. Programs routinely hook
-       INT 23h/24h and exit without unhooking; skipping this restore
-       leaves the vectors dangling into freed (or, for a TSR, private)
-       memory. */
-    setvec(0x22, p->ps_isv22);
-    setvec(0x23, p->ps_isv23);
-    setvec(0x24, p->ps_isv24);
-
-    /* And free all process memory if not a TSR return (INT 21h
-       AH=31h, term_exit_type 3): a TSR keeps its (already resized)
-       memory block, its environment and its open file handles, per
-       upstream return_user(). */
-    if (term_exit_type != 3)
-    {
-      int i;
-
-      for (i = 0; i < p->ps_maxfiles; i++)
-        DosClose(i);
-      FcbCloseAll();            /* upstream return_user() order:
-                                   handles, then FCB-opened files,
-                                   then the memory */
-      FreeProcessMem(child_psp_seg);
-    }
-  }
-
-  internal_data->cu_psp = saved_cu_psp;
-  internal_data->dta = saved_dta;
-  restore_ctx(cpu, &parent_ctx);
-
+  struct exec_child_context saved;
+  exec_enter_child(&saved,child_psp_seg,stack,dses);
+  SET_CS(FP_SEG(entry)); SET_IP(FP_OFF(entry));
+  CPU_AX=CPU_BX=ax_bx; CPU_CX=0x00ff; CPU_DX=dses;
+  CPU_SI=FP_OFF(entry); CPU_DI=FP_OFF(stack); CPU_BP=0x091e;
+  cpu_setflags(cpu,0x0200,(uword)~0x0200u);
+  while(!terminate_flag) pc_step(pc,4096);
+  exec_leave_child(&saved,child_psp_seg);
   return SUCCESS;
 }
 
@@ -909,9 +897,31 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
     if (env_rc < SUCCESS)
       return env_rc;
 
-    fcom_copy_exec_tail(tail, sizeof(tail), command_tail);
-    fcom_run(cpu, tail, mode & LOAD_HIGH, child_env_mcb + 1, 1);
-    return SUCCESS;
+    {
+      UWORD command_psp;
+      fcom_copy_exec_tail(tail,sizeof(tail),command_tail);
+      UWORD fcbcode;
+
+      command_psp=fcom_create_process(tail,mode & LOAD_HIGH,
+                                      internal_data->cu_psp,
+                                      child_env_mcb + 1);
+      if (command_psp == 0) {
+        DosMemFree(child_env_mcb);
+        return DE_NOMEM;
+      }
+
+      /*
+       * A native COMMAND is still an ordinary EXEC child.  patchPSP()
+       * installs the exact caller-supplied command tail and FCBs, transfers
+       * environment ownership, applies SETVER, and sets the canonical MCB
+       * process name.  The first process-model pass skipped this entire
+       * loader stage.
+       */
+      fcbcode=patchPSP(command_psp - 1,child_env_mcb,ep,lp);
+      (void)fcbcode;
+
+      return exec_run_native_child(command_psp,tail);
+    }
   }
   
   if ((mode & 0x7f) > EXEC_OVERLAY || (mode & 0x7f) == 2)
