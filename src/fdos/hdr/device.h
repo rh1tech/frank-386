@@ -131,7 +131,16 @@ struct request;
  * bytes past where every real driver file actually puts it.
  */
 struct dhdr {
-    /*struct dhdr*/ dos_far_ptr dh_next; // for x86 drivers only
+    /* dh_next chains device headers. For an x86 driver it is a guest
+       seg:off; the built-in native drivers are still linked with guest
+       pointers today (their headers live in guest RAM - only the
+       dh_interrupt arm below is native), so this is a genuine guest
+       pointer in every current path. Typed mixed_ptr to flag that a
+       future genuinely-native external driver (see the ATTR_NATIVE
+       TODO) could make it carry a packed native pointer instead, at
+       which point every walk of the chain must gate on ATTR_NATIVE
+       before choosing ARM_PTR vs NATIVE_ARM_PTR. */
+    /*struct dhdr*/ mixed_ptr dh_next;
     UWORD dh_attr;
     union {
       struct {
@@ -525,10 +534,12 @@ typedef struct dhdr FAR *dhdrptr;
    the CPU* it needs for the BIOS INT 13h calls, so it cannot use rqptr-only
    ASM prototype of the original. */
 ddt * getddt(int dev);
+/* Same ddt as getddt(), but as its guest far pointer (see dsk.c). */
+dos_far_ptr getddt_far(int dev);
 
 /* error.c */
-COUNT char_error(request * rq, struct dhdr FAR * lpDevice);
-COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice, int mode);
+COUNT char_error(request * rq, dos_far_ptr /* -> struct dhdr */ x86_lpDevice);
+COUNT block_error(request * rq, COUNT nDrive, dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode);
 /* sysclk.c */
 WORD ASMCFUNC FAR clk_driver(rqptr rp);
 

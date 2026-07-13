@@ -79,8 +79,10 @@ STATIC void clusterMessage(const char *msg, CLUSTER clussec)
 
     Migrated from fattab.c.
 */
-STATIC struct buffer *getFATblock(struct dpb *dpbp, CLUSTER clussec)
+STATIC struct buffer *getFATblock(dos_far_ptr /* -> struct dpb */ x86_dpbp,
+                                  CLUSTER clussec)
 {
+  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   /* *** why dpbp->dpb_unit? only useful to know in context of the dpbp...? *** */
   struct buffer *bp = getblock(clussec, dpbp->dpb_unit);
 
@@ -88,7 +90,7 @@ STATIC struct buffer *getFATblock(struct dpb *dpbp, CLUSTER clussec)
   {
     bp->b_flag &= ~(BFR_DATA | BFR_DIR);
     bp->b_flag |= BFR_FAT | BFR_VALID;
-    bp->b_dpbp = linear_to_far(dpbp);
+    bp->b_dpbp = x86_dpbp;   /* the caller's genuine guest DPB pointer */
     bp->b_copies = dpbp->dpb_fats;
     bp->b_offset = dpbp->dpb_fatsize; /* 0 for FAT32 but blockio.c knows that */
 #ifdef WITHFAT32
@@ -116,8 +118,10 @@ STATIC struct buffer *getFATblock(struct dpb *dpbp, CLUSTER clussec)
     Migrated from fattab.c verbatim (aside from native-pointer
     adjustments noted throughout this file).
 */
-CLUSTER link_fat(struct dpb *dpbp, CLUSTER Cluster1, REG CLUSTER Cluster2)
+CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
+                 REG CLUSTER Cluster2)
 {
+  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   struct buffer *bp;
   unsigned idx;
   unsigned secdiv; /* FAT entries per sector; nibbles for FAT12! */
@@ -175,7 +179,7 @@ CLUSTER link_fat(struct dpb *dpbp, CLUSTER Cluster1, REG CLUSTER Cluster2)
 #endif
 
   /* Get the block that this cluster is in                */
-  bp = getFATblock(dpbp, clussec);
+  bp = getFATblock(x86_dpbp, clussec);
 
   if (bp == NULL)
   {
@@ -205,7 +209,7 @@ CLUSTER link_fat(struct dpb *dpbp, CLUSTER Cluster1, REG CLUSTER Cluster2)
     if (idx >= (unsigned)dpbp->dpb_secsize - 1)
     {
       /* blockio.c LRU logic ensures that bp != bp1 */
-      bp1 = getFATblock(dpbp, (unsigned)clussec + 1);
+      bp1 = getFATblock(x86_dpbp, (unsigned)clussec + 1);
       if (bp1 == 0)
         return 1; /* the only error code possible here */
 
@@ -341,10 +345,11 @@ CLUSTER link_fat(struct dpb *dpbp, CLUSTER Cluster1, REG CLUSTER Cluster2)
 /*
     Migrated from fattab.c verbatim.
 */
-CLUSTER next_cluster(struct dpb *dpbp, CLUSTER ClusterNum)
+CLUSTER next_cluster(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER ClusterNum)
 {
+  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   CLUSTER candidate, following, max_cluster;
-  candidate = link_fat(dpbp, ClusterNum, READ_CLUSTER);
+  candidate = link_fat(x86_dpbp, ClusterNum, READ_CLUSTER);
   /* empty (0) error (1) bad (LONG_BAD) last (>LONG_BAD) need no checks */
   if (candidate < 2 || candidate >= LONG_BAD)
     return candidate;
@@ -354,7 +359,7 @@ CLUSTER next_cluster(struct dpb *dpbp, CLUSTER ClusterNum)
     max_cluster = dpbp->dpb_xsize;
 #endif
   /* FAT entry points to a possibly invalid next cluster */
-  following = link_fat(dpbp, candidate, READ_CLUSTER);
+  following = link_fat(x86_dpbp, candidate, READ_CLUSTER);
   if (following < 2 || (following < LONG_BAD && following > max_cluster))
   {
     /* chain must not contain free or out of range clusters */
@@ -367,9 +372,10 @@ CLUSTER next_cluster(struct dpb *dpbp, CLUSTER ClusterNum)
 }
 
 /* check if the selected cluster is free (faster than next_cluster) */
-BOOL is_free_cluster(struct dpb *dpbp, CLUSTER ClusterNum)
+BOOL is_free_cluster(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER ClusterNum)
 {
-  return (link_fat(dpbp, ClusterNum, READ_CLUSTER) == FREE);
+  /* link_fat() now takes the far pointer directly, so no native view needed. */
+  return (link_fat(x86_dpbp, ClusterNum, READ_CLUSTER) == FREE);
 }
 
 #ifdef WITHFAT32

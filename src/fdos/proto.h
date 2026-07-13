@@ -178,7 +178,7 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode);
 long rwblock(COUNT fd, dos_far_ptr buffer, UCOUNT count, int mode);
 COUNT dos_read(COUNT fd, VOID FAR * buffer, UCOUNT count);
 COUNT dos_write(COUNT fd, const VOID FAR * buffer, UCOUNT count);
-CLUSTER dos_free(struct dpb FAR * dpbp);
+CLUSTER dos_free(dos_far_ptr /* -> struct dpb */ x86_dpbp);
 BOOL dir_exists(char * path);
 VOID dpb16to32(struct dpb FAR *dpbp);
 struct xfreespace;
@@ -206,10 +206,10 @@ VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp, BOOL extended);
 #else
 VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp);
 #endif
-CLUSTER link_fat(struct dpb FAR * dpbp, CLUSTER Cluster1,
+CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
                  REG CLUSTER Cluster2);
-CLUSTER next_cluster(struct dpb FAR * dpbp, REG CLUSTER ClusterNum);
-BOOL is_free_cluster(struct dpb FAR * dpbp, REG CLUSTER ClusterNum);
+CLUSTER next_cluster(dos_far_ptr /* -> struct dpb */ x86_dpbp, REG CLUSTER ClusterNum);
+BOOL is_free_cluster(dos_far_ptr /* -> struct dpb */ x86_dpbp, REG CLUSTER ClusterNum);
 
 /* fcbfns.c */
 VOID DosOutputString(BYTE FAR * s);

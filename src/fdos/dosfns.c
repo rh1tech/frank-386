@@ -1077,7 +1077,7 @@ UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc)
     cluster_size = (ULONG) dpbp->dpb_secsize << dpbp->dpb_shftcnt;
     ntotal = dpbp->dpb_xsize - 1;
     if (navc != NULL)
-      nfree = dos_free(dpbp);
+      nfree = dos_free(dpbp_x86);
     while (ntotal > FAT_MAGIC16 && cluster_size < 0x8000)
     {
       cluster_size <<= 1;
@@ -1097,7 +1097,7 @@ UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc)
   /* a passed navc of NULL means: skip free; see FatGetDrvData
      fcbfns.c */
   if (navc != NULL)
-    *navc = (UWORD) dos_free(dpbp);
+    *navc = (UWORD) dos_free(dpbp_x86);
   *nc = dpbp->dpb_size - 1;
   if (spc > 64)
   {
@@ -1345,7 +1345,7 @@ COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
     dpbp = (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
     xfsp->xfs_secsize = dpbp->dpb_secsize;
     xfsp->xfs_totalclusters = (ISFAT32(dpbp) ? dpbp->dpb_xsize : dpbp->dpb_size) - 1;
-    xfsp->xfs_freeclusters = dos_free(dpbp);
+    xfsp->xfs_freeclusters = dos_free(cdsp->cdsDpb);
     xfsp->xfs_clussize = dpbp->dpb_clsmask + 1;
   }
 

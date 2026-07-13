@@ -65,13 +65,13 @@ while(1); // remove it
  * it is converted directly to FAIL, as in the original kernel.
  */
 COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
-                             struct dhdr FAR *lpDevice)
+                             dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
 {
   CPU_regs saved_regs;
   struct int21_guest_iregs saved_frame;
   psp *p;
   dos_far_ptr user_stack;
-  dos_far_ptr device = MK_FP(0, 0);
+  dos_far_ptr /* -> struct dhdr */ device = x86_lpDevice;
   UWORD saved_ss;
   UBYTE saved_error_mode;
   UBYTE saved_indos;
@@ -95,14 +95,9 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
   else
     user_stack = MK_FP(CPU_SS, CPU_SP);
 
-  if (lpDevice != NULL && is_guest_ptr(lpDevice))
-    /* One of the few defensible native->guest conversions: is_guest_ptr()
-       has just proven lpDevice is inside the guest window, and the device
-       header's true seg:off is not available here (only the native pointer
-       is passed in). The normalised pair is only published as CritErrDev in
-       the SDA for the guest INT 24h handler to read as ES:DI, which does not
-       require the driver's canonical segment. Kept on linear_to_far(). */
-    device = linear_to_far((const BYTE *)lpDevice);
+  /* device is the caller's genuine guest dhdr pointer (or 0000:0000 for
+     "no device"); it is published verbatim as CritErrDev, which INT 21h/
+     AH=59h hands back to the guest as ES:DI. No native<->guest juggling. */
 
   /*
    * Publish the failing drive and device in the SDA before calling the
@@ -181,21 +176,21 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
 }
 
 /* Abort, retry or fail for character devices                   */
-COUNT char_error(request * rq, struct dhdr FAR * lpDevice)
+COUNT char_error(request * rq, dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
 {
   internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
   return CriticalError(EFLG_CHAR | EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE,
-                       0, rq->r_status & S_MASK, lpDevice);
+                       0, rq->r_status & S_MASK, x86_lpDevice);
 }
 
 /* Abort, retry or fail for block devices                       */
-COUNT block_error(request * rq, COUNT nDrive, struct dhdr FAR * lpDevice,
-                  int mode)
+COUNT block_error(request * rq, COUNT nDrive,
+                  dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode)
 {
   internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
   return CriticalError(EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE |
                        (mode == DSKWRITE ? EFLG_WRITE : 0),
-                       nDrive, rq->r_status & S_MASK, lpDevice);
+                       nDrive, rq->r_status & S_MASK, x86_lpDevice);
 }
 
 /* common - call the clock driver */
@@ -321,7 +316,7 @@ static int DosSetDateRegs(UWORD Year, UWORD Month, UWORD DayOfMonth)
   ExecuteClockDriverRequest(C_OUTPUT);
 
   if (CharReqHdr.r_status & S_ERROR)
-    return char_error(&CharReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
+    return char_error(&CharReqHdr, LoL->clock);
   return SUCCESS;
 }
 
@@ -377,7 +372,7 @@ static int DosSetTimeRegs(UBYTE hour, UBYTE minute, UBYTE second, UBYTE hundredt
   ExecuteClockDriverRequest(C_OUTPUT);
 
   if (CharReqHdr.r_status & S_ERROR)
-    return char_error(&CharReqHdr, (struct dhdr*)ARM_PTR(LoL->clock));
+    return char_error(&CharReqHdr, LoL->clock);
   return SUCCESS;
 }
 

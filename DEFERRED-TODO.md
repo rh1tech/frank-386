@@ -32,15 +32,19 @@ be converted mechanically and are each documented in-place:
       dos_far_ptr and derive the native view internally; callers pass the
       dos_far_ptr they already held (fnp->f_dpb / cdsDpb / _dpbp). Net removal
       of ARM_PTR round-trips.
-- [ ] **dsk.c:341 (r_bpptr)**: still needs the ddt signature change. The ddt
-      lives in the MCB arena (DynAlloc, arbitrary segment), so thread its real
-      dos_far_ptr into blk_bldbpb()/getbpb() rather than guessing a segment.
+- [x] **dsk.c:341 (r_bpptr)**: DONE in stage6b. Added getddt_far() (the ddt's
+      genuine guest pointer, computed from the same far base getddt() uses);
+      blk_bldbpb() now sets r_bpptr = ADD_OFF(getddt_far(dev), offsetof(ddt,
+      ddt_bpb)). dev is recovered as (pddt - getddt(0)) so the dispatch-table
+      signature stays uniform. Verified ARM_PTR(getddt_far(d))==getddt(d).
 - [ ] **nls.c:33 (call_nls buf)**: thread the original dos_far_ptr through
       call_nls()/muxGo()/muxBufGo() rather than reconstructing from a native
       pointer that came from ARM_PTR(ES:DI).
-- [ ] **fdos_21h.c:105 (lpDevice)**: defensible as-is (is_guest_ptr-guarded, no
-      canonical segment available, only published as SDA CritErrDev). Can drop
-      once CriticalError() is passed a dos_far_ptr instead of a native dhdr*.
+- [x] **fdos_21h.c:105 (lpDevice)**: DONE in stage7a. CriticalError()/
+      char_error()/block_error() now take dos_far_ptr; every caller already
+      held the guest dhdr pointer (dpb_device / LoL->clock / BP:SI) and was
+      throwing it away via ARM_PTR. The 0000:0000 sentinel doubles as the
+      old NULL "no device". linear_to_far() removed from this path.
 Only after all 4 are gone can linear_to_far() itself be deleted from kernel.c.
 
 ## Regression postmortem (stage5b)
@@ -56,17 +60,27 @@ function parameter, trace it to its origin FIRST - if it is ARM_PTR(guest reg),
 it is caller-segment and must NOT be re-anchored on DOS_PSP.
 
 ## New direction from review (reshapes the linear_to_far endgame)
-- [ ] **NATIVE_PTR convention for native drivers**: for the (few) native
-      drivers, redefine their dos_far_ptr to mean high16:low16 of a 32-bit
-      native address (NATIVE_PTR(seg,off) = ((u32)seg<<16)|off) rather than
-      seg:off, and make those paths use NATIVE_PTR instead of ARM_PTR. Track
-      every such site carefully. This gives a clean, checkable way to carry a
-      native pointer inside a dos_far_ptr where no guest seg:off exists (e.g.
-      the CriticalError lpDevice case, and possibly the DPB/ddt cases).
-- [ ] **Relocate static buffers out of SRAM** into spare guest RAM: unused HMA
-      region and the fake ROM area can host buffers currently eating the
-      520 KB SRAM. Candidates: the DiskTransferBuffer, deblock buffer, any
-      large static scratch. Frees precious SRAM.
+- [~] **NATIVE_PTR convention**: vocabulary landed in stage7a - NATIVE_PTR()/
+      NATIVE_ARM_PTR() macros (verified to round-trip any 32-bit address, which
+      x86_FAR_PTR/ARM_PTR cannot), plus documentary typedefs native_ptr (packed
+      native only) and mixed_ptr (either kind; gate on a discriminator). KEY
+      FACT recorded in portab.h: packed-native and guest seg:off are ambiguous
+      BY VALUE (a native 0x11xxxxxx packs to "segment" 0x11xx, a legal guest
+      segment), so discrimination must always come from context (ATTR_NATIVE),
+      never the bits. dh_next is now typed mixed_ptr. Still TODO: actually wire
+      a genuinely-native external driver load path that uses NATIVE_PTR for
+      dh_next / dh_interrupt (the ATTR_NATIVE external-driver item below).
+- [~] **Relocate static buffers out of SRAM** into spare guest RAM. Audit
+      done: DiskTransferBuffer/deblock_buf/local_buffer are ALREADY in guest
+      RAM (internal_data). The remaining native-SRAM arrays are either small
+      (<=256B init/debug scratch: kernel.c buf[256], config commandbuffer[256])
+      that never cross to the guest - moving them frees SRAM but removes no
+      linear_to_far - or fnode[2] (136B) which IS a dual-benefit target but
+      touches every f_node_ptr site (high regression risk; defer as its own
+      stage). ctrl_c_text was moved to guest stack in stage5a. Net: the easy
+      dual-benefit wins were the linear_to_far holdouts (ddt done in 6b);
+      fnode[] relocation is the remaining sizeable SRAM win, to be done
+      carefully on its own.
 
 ## Housekeeping tasks noticed
 - [ ] src/fdos/fcom/ contains a pair of proposed patches (against an OLDER

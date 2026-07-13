@@ -280,7 +280,7 @@ STATIC void fnode_to_sft(f_node_ptr fnp)
 #endif
 }
 
-STATIC VOID wipe_out_clusters(struct dpb FAR * dpbp, CLUSTER st);
+STATIC VOID wipe_out_clusters(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER st);
 /*
     shrink_file(fnp) - release every cluster past fnp's current file
     position, for a write that truncates a file mid-stream (the
@@ -314,7 +314,7 @@ STATIC int shrink_file(f_node_ptr fnp)
 
   st = fnp->f_cluster;
 
-  next = next_cluster(dpbp, st); /* return nr. of 1st cluster after new end */
+  next = next_cluster(fnp->f_dpb, st); /* return nr. of 1st cluster after new end */
 
   if (next <= 1) /* 1/error or 0/FREE chain points into the void */
     goto done;
@@ -336,10 +336,10 @@ STATIC int shrink_file(f_node_ptr fnp)
       goto done_success;
     last = LONG_LAST_CLUSTER; /* make file end */
   }
-  if (link_fat(dpbp, st, last) != SUCCESS)
+  if (link_fat(fnp->f_dpb, st, last) != SUCCESS)
     goto done; /* do not wipe remainder of chain if FAT is broken */
 
-  wipe_out_clusters(dpbp, next); /* free clusters after the end */
+  wipe_out_clusters(fnp->f_dpb, next); /* free clusters after the end */
   /* flush buffers, make sure disk is updated */
   if (!flush_buffers(dpbp->dpb_unit))
     goto done;
@@ -999,7 +999,7 @@ STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
   {
     FOREVER
     {
-      switch (block_error(&MediaReqHdrD, dpbp->dpb_unit, (struct dhdr*)ARM_PTR(dpbp->dpb_device), 0))
+      switch (block_error(&MediaReqHdrD, dpbp->dpb_unit, dpbp->dpb_device, 0))
       {
       case ABORT:
       case FAIL:
@@ -1119,8 +1119,9 @@ ckok:;
     write_fsinfo(). Needed by DosGetFree() (INT 21h AH=36h) and
     FatGetDrvData() (AH=1Bh/1Ch).
 */
-CLUSTER dos_free(struct dpb FAR * dpbp)
+CLUSTER dos_free(dos_far_ptr /* -> struct dpb */ x86_dpbp)
 {
+  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   /* There's an unwritten rule here. All fs       */
   /* cluster start at 2 and run to max_cluster+2  */
   REG CLUSTER i;
@@ -1142,7 +1143,7 @@ CLUSTER dos_free(struct dpb FAR * dpbp)
   cnt = 0;
   for (i = 2; i <= max_cluster; i++)
   {
-    if (is_free_cluster(dpbp, i))
+    if (is_free_cluster(x86_dpbp, i))
     {
       if (cnt == 0)
       {
@@ -1316,7 +1317,7 @@ STATIC CLUSTER extend(f_node_ptr fnp)
   struct dpb* f_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
   /* if 1a or 1b works but 2 fails, we get a pointer into an wrong FAT entry */
   /* our new fattab.c checks should be able to trap the bad pointers for now */
-  if (link_fat(f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* 2 */ /* free->last */
+  if (link_fat(fnp->f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* 2 */ /* free->last */
       return LONG_LAST_CLUSTER; /* do not try 1a/1b if 2 did not work out */
   /* if 2 works but 1a/1b fails, we only get a harmless lost cluster here */
 
@@ -1327,13 +1328,13 @@ STATIC CLUSTER extend(f_node_ptr fnp)
   else
   {
     /* let previously last chain element chain to newly allocated cluster! */
-    if (next_cluster(f_dpb, fnp->f_cluster) != LONG_LAST_CLUSTER)
+    if (next_cluster(fnp->f_dpb, fnp->f_cluster) != LONG_LAST_CLUSTER)
     {
       /* we tried to "grow a file in the middle", f_node or FAT messed up? */
       printf("FAT chain size bad!\n");
       return LONG_LAST_CLUSTER;
     }
-    if (link_fat(f_dpb, fnp->f_cluster, free_fat) != SUCCESS) /* 1b */ /* last->used */
+    if (link_fat(fnp->f_dpb, fnp->f_cluster, free_fat) != SUCCESS) /* 1b */ /* last->used */
       return LONG_LAST_CLUSTER; /* should never happen */
   }
 
@@ -1407,7 +1408,7 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
   while (fnp->f_cluster_offset != relcluster)
   {
     /* get next cluster in the chain */
-    cluster = next_cluster(f_dpb, fnp->f_cluster);
+    cluster = next_cluster(fnp->f_dpb, fnp->f_cluster);
 /*
     printf("map_cluster next off=%lu size=%lu rel=%lu cur=%lu next=%lu dpb_size=%u phys=%lu\n",
            fnp->f_offset, fnp->f_dir.dir_size,
@@ -1720,9 +1721,9 @@ STATIC CLUSTER find_fat_free(f_node_ptr fnp)
   for (;;)
   {
 #ifdef CHECK_FAT_DURING_CLUSTER_ALLOC /* slower but nice side effect ;-) */
-    if (next_cluster(dpbp, idx) == FREE)
+    if (next_cluster(fnp->f_dpb, idx) == FREE)
 #else
-    if (is_free_cluster(dpbp, idx))
+    if (is_free_cluster(fnp->f_dpb, idx))
 #endif
     {
       cluster = idx;
@@ -1820,7 +1821,7 @@ COUNT dos_mkdir(BYTE * dir)
 
   struct dpb* dpbp = (struct dpb*)ARM_PTR(fnp->f_dpb);
   /* Mark the cluster in the FAT as used and create new dir there */
-  if (link_fat(dpbp, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* free->last */
+  if (link_fat(fnp->f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* free->last */
     return DE_HNDLDSKFULL; /* should never happen */
 
   /* clean out the new directory */
@@ -1869,8 +1870,9 @@ COUNT dos_mkdir(BYTE * dir)
 /*                                                              */
 /* wipe out all FAT entries starting from st for create, delete, etc. */
 /*                                                              */
-STATIC VOID wipe_out_clusters(struct dpb FAR * dpbp, CLUSTER st)
+STATIC VOID wipe_out_clusters(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER st)
 {
+  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   REG CLUSTER next;
 
   /* Loop from start until either a FREE entry is         */
@@ -1879,14 +1881,14 @@ STATIC VOID wipe_out_clusters(struct dpb FAR * dpbp, CLUSTER st)
   while (st != LONG_LAST_CLUSTER) /* remove clusters at start until empty */
   {
     /* get the next cluster pointed to              */
-    next = next_cluster(dpbp, st);
+    next = next_cluster(x86_dpbp, st);
 
     /* just exit if a damaged file system exists    */
     if (next <= 1)
       return;
 
     /* zap the FAT pointed to                       */
-    if (link_fat(dpbp, st, FREE) != SUCCESS) /* nonfree->free */
+    if (link_fat(x86_dpbp, st, FREE) != SUCCESS) /* nonfree->free */
       return; /* better abort on error */
 
     /* and the start of free space pointer          */
@@ -1918,7 +1920,7 @@ STATIC VOID wipe_out(f_node_ptr fnp)
   struct dpb* dpbp = (struct dpb*)ARM_PTR(fnp->f_dpb);
   CLUSTER cluster = getdstart(dpbp, &fnp->f_dir);
   if (cluster != FREE)
-    wipe_out_clusters(dpbp, cluster);
+    wipe_out_clusters(fnp->f_dpb, cluster);
   /* no flushing here: could get lost chain or "crosslink seed" but */
   /* it would be annoying if mass-deletes could not use BUFFERS...  */
 }

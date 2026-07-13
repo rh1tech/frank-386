@@ -338,7 +338,13 @@ STATIC WORD blk_bldbpb(CPU *cpu, request FAR *rq, ddt *pddt)
   if (ret != 0)
     return ret;
 
-  rq->r_bpptr = linear_to_far(&pddt->ddt_bpb);
+  /* The driver reads r_bpptr as a GUEST far pointer, so it must be the ddt's
+     real guest address, not a normalisation of the native &pddt->ddt_bpb
+     (which would land in the wrong segment). Recover this ddt's index in the
+     contiguous array to get its far base, then add the field offset. The
+     dispatch signature stays uniform (no extra parameter). */
+  int dev = (int)(pddt - getddt(0));
+  rq->r_bpptr = ADD_OFF(getddt_far(dev), offsetof(ddt, ddt_bpb));
   return S_DONE;
 }
 
@@ -1309,4 +1315,19 @@ ddt *getddt(int dev)
 {
   dos_far_ptr base = ADD_OFF(DYN_BUFFER, sizeof(struct DynS));
   return (ddt *)ARM_PTR(base) + dev;
+}
+
+/*
+    getddt_far(dev) - the SAME ddt as getddt(dev), but as its genuine guest
+    far pointer instead of a native one. Needed wherever a ddt (or a field
+    inside it) must be handed back to a guest as a dos_far_ptr - e.g. the BPB
+    pointer in a Build-BPB request packet, which a real block driver reads as
+    a far pointer. Computing it from the far base (rather than linear_to_far()
+    on the native pointer) keeps the ddt array's own segment, so the packet
+    points where the guest expects.
+*/
+dos_far_ptr /* -> ddt */ getddt_far(int dev)
+{
+  dos_far_ptr base = ADD_OFF(DYN_BUFFER, sizeof(struct DynS));
+  return ADD_OFF(base, (uint32_t)dev * sizeof(ddt));
 }

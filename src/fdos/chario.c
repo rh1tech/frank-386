@@ -93,7 +93,6 @@ STATIC int CharIO(dos_far_ptr *pdev, unsigned char ch, unsigned command)
 
 STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
 {
-  struct dhdr* dev = (struct dhdr*)ARM_PTR(*pdev);
   CharReqHdr.r_command = command;
   CharReqHdr.r_unit = 0;
   CharReqHdr.r_status = 0;
@@ -102,7 +101,7 @@ STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
   if (CharReqHdr.r_status & S_ERROR)
   {
     for (;;) {
-      switch (char_error(&CharReqHdr, dev))
+      switch (char_error(&CharReqHdr, *pdev))
       {
       case ABORT:
       case FAIL:

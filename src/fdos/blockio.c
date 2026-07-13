@@ -149,7 +149,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
       return (IoReqHdrD.r_status);
 
   loop:
-    switch (block_error(&IoReqHdrD, dpbp->dpb_unit, dpb_device, mode))
+    switch (block_error(&IoReqHdrD, dpbp->dpb_unit, dpbp->dpb_device, mode))
     {
       case ABORT:
       case FAIL:

@@ -1082,9 +1082,8 @@ bool fdos_2fh(CPU* cpu) {
         UWORD arg = readw86(stk_lin(CPU_SS, CPU_SP, 6));
         UWORD flags = arg >> 8;
         UWORD drive = (flags & EFLG_CHAR) ? 0 : (arg & 0xff);
-        struct dhdr *dev = (struct dhdr *)ARM_PTR(MK_FP(CPU_BP, CPU_SI));
-
-        CPU_AL = CriticalError(flags, drive, CPU_DI, dev);
+        /* Failing device header, straight from the guest's BP:SI. */
+        CPU_AL = CriticalError(flags, drive, CPU_DI, MK_FP(CPU_BP, CPU_SI));
         cf = 0;
     }
     else
@@ -1111,13 +1110,12 @@ bool fdos_2fh(CPU* cpu) {
             cf = 1;
         } else {
             struct dpb *dpbp = (struct dpb *)ARM_PTR(cdsp->cdsDpb);
-            struct dhdr *dev = far_is_null(dpbp->dpb_device)
-                             ? NULL
-                             : (struct dhdr *)ARM_PTR(dpbp->dpb_device);
-
+            /* dpb_device is already the guest dhdr pointer, and its 0000:0000
+               "none" sentinel is exactly what CriticalError() treats as
+               "no device" - so pass it through verbatim. */
             CPU_AL = CriticalError(0x38, /* ignore/retry/fail */
                                    internal_data->default_drive,
-                                   error, dev);
+                                   error, dpbp->dpb_device);
             cf = (CPU_AL == RETRY) ? 0 : 1;
         }
     }
@@ -1137,12 +1135,9 @@ bool fdos_2fh(CPU* cpu) {
             struct cds *cdsp = get_cds1(internal_data->default_drive);
             if (cdsp != NULL && !far_is_null(cdsp->cdsDpb)) {
                 struct dpb *dpbp = (struct dpb *)ARM_PTR(cdsp->cdsDpb);
-                struct dhdr *dev = far_is_null(dpbp->dpb_device)
-                                 ? NULL
-                                 : (struct dhdr *)ARM_PTR(dpbp->dpb_device);
                 retry = CriticalError(0x38, /* ignore/retry/fail */
                                       internal_data->default_drive,
-                                      error, dev) == RETRY;
+                                      error, dpbp->dpb_device) == RETRY;
             }
         }
         CPU_AX = DE_SHARE;

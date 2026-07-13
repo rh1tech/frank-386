@@ -299,6 +299,42 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define x86_FAR_PTR(s, arm_addr) \
     MK_FP((s), (uint16_t)(((uintptr_t)(arm_addr) - (uintptr_t)X86_RAM_BASE) - ((uint32_t)(s) << 4)))
 
+/*
+    Two documentary aliases of dos_far_ptr. They do NOT change layout or add
+    type checking (C typedefs are transparent) - their whole job is to make a
+    signature state, at a glance, WHICH kind of pointer it expects, because the
+    bits alone cannot tell you:
+
+      a packed native address (NATIVE_PTR below) and a guest seg:off are
+      AMBIGUOUS BY VALUE. A native ARM address like 0x11xxxxxx packs to a
+      "segment" of 0x11xx, which is also a perfectly legal guest segment, so no
+      runtime test can distinguish them. The distinction is carried by context
+      (e.g. dhdr's ATTR_NATIVE flag), never by the value.
+
+      native_ptr  - carries a PACKED NATIVE pointer (high16:low16 of a 32-bit
+                    ARM address). Dereference with NATIVE_ARM_PTR(), NEVER
+                    ARM_PTR(). A function taking native_ptr must not be handed
+                    a guest pointer.
+      mixed_ptr   - may carry EITHER a guest seg:off or a packed native
+                    pointer; the holder must consult a discriminator before
+                    dereferencing (today only dhdr.dh_next, gated on
+                    ATTR_NATIVE). Never dereference a mixed_ptr blindly.
+
+    Plain dos_far_ptr continues to mean a genuine guest seg:off.
+*/
+typedef dos_far_ptr native_ptr;
+typedef dos_far_ptr mixed_ptr;
+
+/* Pack / unpack a native ARM pointer inside a (native_ptr) dos_far_ptr as
+   high16:low16. This is NOT seg:off arithmetic - there is no <<4 - so it can
+   represent any 32-bit native address exactly, which x86_FAR_PTR/ARM_PTR
+   cannot. Use ONLY on native_ptr / the native arm of a mixed_ptr. */
+#define NATIVE_PTR(arm_addr) \
+    MK_FP((uint16_t)(((uintptr_t)(arm_addr) >> 16) & 0xFFFF), \
+          (uint16_t)((uintptr_t)(arm_addr) & 0xFFFF))
+#define NATIVE_ARM_PTR(np) \
+    ((void *)(uintptr_t)(((uint32_t)FP_SEG(np) << 16) | FP_OFF(np)))
+
 #define FP_DS_DX (MK_FP(CPU_DS, CPU_DX))
 #define FP_ES_DI (MK_FP(CPU_ES, CPU_DI))
 
