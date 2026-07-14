@@ -23,17 +23,39 @@ ULONG call_nls(UWORD bp,
     SET_DS ( FP_SEG (x86_ptr) );
     CPU_SI = FP_OFF (x86_ptr);
     if (buf) {
-        /* TODO(stage4-unify): buf is a native pointer reconstructed from
-           the guest ES:DI in fdos_nls_2fh() (or a native NLS string from
-           muxUpMem). linear_to_far() only works because those all currently
-           fall inside the guest window; the correct fix is to thread the
-           original dos_far_ptr through call_nls()/muxGo()/muxBufGo() instead
-           of round-tripping through a native pointer. Left as-is until that
-           signature change so this patch introduces no behavioural change. */
+        /*
+           This is the one deliberate native->guest recovery left in the tree,
+           and it is legitimate rather than a shortcut. Every path that reaches
+           call_nls():
+
+             - is taken ONLY when an external NLSFUNC has cleared a package's
+               NLS_FLAG_DIRECT_* bits. The built-in package is created with
+               NLS_FLAG_HARDCODED (all DIRECT bits set, see kernel.c), so every
+               upcase/yesno/getdata request is served natively and never comes
+               here at all;
+             - passes a buf that ALWAYS originates as ARM_PTR() of a guest
+               register: ARM_PTR(R_FP_DS_DX) (DosUpMem/DosUpFMem/
+               DosGetCountryInformation via INT 21h) or ARM_PTR(FP_ES_DI)
+               (fdos_nls_2fh). The genuinely-native callers (kernel.c boot-time
+               upcase, an SFT name) all carry a DIRECT flag and take the native
+               branch, so they cannot reach this line.
+
+           So buf is always a guest-window address here and linear_to_far()
+           recovers its unique linear location - exactly what the external
+           driver needs in ES:DI. Threading a dos_far_ptr through the whole
+           muxBufGo()/muxGo()/call_nls() spine was considered and rejected:
+           several intermediate callers hold only native pointers, so it would
+           just move this same recovery to each of them (more sites, more risk)
+           without removing it. Guarded with is_guest_ptr() so a future
+           out-of-window caller fails loudly instead of silently. */
+        if (!is_guest_ptr(buf)) {
+            cpu_restore_regs(cpu, &regs);   /* unreachable per analysis; refuse
+                                               rather than pass a bogus ES:DI */
+            return 0;
+        }
         x86_ptr = linear_to_far(buf);
         SET_ES ( FP_SEG (x86_ptr) );
-        CPU_DI = FP_OFF (x86_ptr);
-    } else {
+        CPU_DI = FP_OFF (x86_ptr);    } else {
         SET_ES ( 0 );
         CPU_DI = 0;
     }
