@@ -292,6 +292,32 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define FP_SEG(fp)             ((fp).segment)
 #define FP_OFF(fp)             ((fp).offset)
 #define ADD_OFF(p, n) MK_FP(FP_SEG(p), FP_OFF(p) + (n))
+
+/*
+   adjust_far_x86 / add_far_x86 - the NORMALISING far-pointer advance.
+
+   ADD_OFF() above only adds to the offset and keeps the segment, so once
+   the offset passes 0xFFFF it wraps back to the START of the same 64K
+   segment. That is correct for real-mode SP/PUSH wrap, but WRONG for
+   walking a linear buffer across a segment boundary: the caller ends up
+   pointing 64K low, corrupting whatever lives at the wrapped offset.
+
+   add_far_x86() carries the overflow into the segment instead
+   (seg += off>>4; off &= 0xF), matching upstream adjust_far() in
+   memmgr.c. Use it for buffer walks (disk transfers, FAT streaming);
+   use ADD_OFF()/stk_lin() only where 16-bit wrap is actually intended. */
+static inline dos_far_ptr adjust_far_x86(dos_far_ptr p) {
+    if (FP_SEG(p) == 0xffff)   /* HMA selector: leave as-is, like upstream */
+        return p;
+    return MK_FP(FP_SEG(p) + (FP_OFF(p) >> 4), FP_OFF(p) & 0x000f);
+}
+static inline dos_far_ptr add_far_x86(dos_far_ptr p, uint32_t n) {
+    /* n can be up to 0x10000 (a full 64K transfer); do the add in 32 bits
+       before normalising so it cannot itself truncate. */
+    uint32_t off = (uint32_t)FP_OFF(p) + n;
+    return adjust_far_x86(MK_FP(FP_SEG(p) + (uint16_t)(off >> 4),
+                                (uint16_t)(off & 0x000f)));
+}
 ///#define DHDR_END ((void*)(uintptr_t)-1)
 #define EFFECTIVE(a) (((uint32_t)(a).segment << 4) + (a).offset)
 #define ARM_PTR(p_x86) ( X86_RAM_BASE + EFFECTIVE(p_x86) )

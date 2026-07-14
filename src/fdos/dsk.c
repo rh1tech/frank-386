@@ -635,7 +635,12 @@ STATIC int LBA_Transfer(CPU* cpu,
     LBA_address += count;
     totaltodo -= count;
 
-    buffer = ADD_OFF(buffer, count * bytes_sector);
+    /* Normalising advance: a multi-sector transfer can push the offset
+       past 0xFFFF, and a plain ADD_OFF() would wrap it back to the start
+       of this segment (64K low), corrupting memory there - including a
+       DPB that shares the segment. add_far_x86() carries into the
+       segment, matching upstream adjust_far(). */
+    buffer = add_far_x86(buffer, (uint32_t)count * bytes_sector);
   }
 
   return 0;

@@ -217,7 +217,7 @@ void update_scr_pos(unsigned char c, unsigned char count)
 
 STATIC int raw_get_char(dos_far_ptr *pdev, BOOL check_break);
 
-long cooked_write(dos_far_ptr *pdev, size_t n, char *bp)
+long cooked_write(dos_far_ptr *pdev, size_t n, const char *bp)
 {
   size_t xfer;
 

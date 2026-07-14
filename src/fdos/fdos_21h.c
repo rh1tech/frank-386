@@ -1102,8 +1102,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           R_AL = 0x00;
           break;
         default:
-          R_AL = 0xff;
-          break;
+          /* Upstream (inthndlr.c case 0x37) sends an unsupported SWITCHAR
+             subfunction to error_invalid: AX=0001h with CF set. Returning
+             AL=FFh with carry untouched is a different API contract - a guest
+             testing CF would think the call succeeded. */
+          goto error_invalid;
         }
         break;
 /// TODO: ensure
@@ -2494,6 +2497,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 #ifdef NO_HANDLER_DETECTOR
         no_handler(_cpu);
 #endif
+        /* Upstream's dispatcher default deliberately falls through into the
+           CP/M compatibility group just above (inthndlr.c: its default label
+           is marked "Fall through" and lands on case 0x18/0x1d/0x1e/0x20/
+           0x61/0x6b, which do AL = 0 and break). So an unknown AH returns
+           AL=0 with carry UNCHANGED. Leaving the registers untouched, as this
+           port did, is a third behaviour matching neither. NO_HANDLER_DETECTOR
+           stays available for debugging without altering release behaviour. */
+        R_AL = 0;
         break;
     }
     goto exit_dispatch;

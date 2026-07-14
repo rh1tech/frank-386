@@ -70,7 +70,7 @@ size_t read_line_handle(int sft_idx, size_t n, char FAR * bp);
 void write_char(int c, int sft_idx);
 void write_char_stdout(int c);
 void update_scr_pos(unsigned char c, unsigned char count);
-long cooked_write(dos_far_ptr/*struct dhdr*/ *pdev, size_t n, char *bp);
+long cooked_write(dos_far_ptr/*struct dhdr*/ *pdev, size_t n, const char *bp);
 
 dos_far_ptr /*sft*/ get_sft(UCOUNT);
 

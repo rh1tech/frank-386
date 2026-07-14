@@ -646,91 +646,91 @@ static void NulIntr(request FAR *rq) {
     }
 }
 
-const static struct dhdr _blk_dev = {
+static const struct dhdr _blk_dev = {
     .dh_next = MK_FP(-1, -1),
     .dh_attr = 0x08c2 | ATTR_NATIVE,
     .arm.dh_interrupt = BlkEntry,
     .dh_name = { 4, 0, 0, 0, 0, 0, 0, 0 },
 };
 
-const static struct dhdr _clk_dev = {
+static const struct dhdr _clk_dev = {
     .dh_next = x86_blk_dev,
     .dh_attr = 0x8008 | ATTR_NATIVE,
     .arm.dh_interrupt = ClkEntry,
     .dh_name = "CLOCK$  "
 };
 
-const static struct dhdr _com4_dev = {
+static const struct dhdr _com4_dev = {
     .dh_next = x86_clk_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com4Intr,
     .dh_name = "COM4    "
 };
 
-const static struct dhdr _com3_dev = {
+static const struct dhdr _com3_dev = {
     .dh_next = x86_com4_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com3Intr,
     .dh_name = "COM3    "
 };
 
-const static struct dhdr _com2_dev = {
+static const struct dhdr _com2_dev = {
     .dh_next = x86_com3_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = Com2Intr,
     .dh_name = "COM2    "
 };
 
-const static struct dhdr _com1_dev = {
+static const struct dhdr _com1_dev = {
     .dh_next = x86_com2_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = AuxIntr,
     .dh_name = "COM1    "
 };
 
-const static struct dhdr _lpt3_dev = {
+static const struct dhdr _lpt3_dev = {
     .dh_next = x86_com1_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt3Intr,
     .dh_name = "LPT3    "
 };
 
-const static struct dhdr _lpt2_dev = {
+static const struct dhdr _lpt2_dev = {
     .dh_next = x86_lpt3_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt2Intr,
     .dh_name = "LPT2    "
 };
 
-const static struct dhdr _lpt1_dev = {
+static const struct dhdr _lpt1_dev = {
     .dh_next = x86_lpt2_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = Lpt1Intr,
     .dh_name = "LPT1    "
 };
 
-const static struct dhdr _aux_dev = {
+static const struct dhdr _aux_dev = {
     .dh_next = x86_lpt1_dev,
     .dh_attr = 0x8000 | ATTR_NATIVE,
     .arm.dh_interrupt = AuxIntr,
     .dh_name = "AUX     "
 };
 
-const static struct dhdr _prn_dev = {
+static const struct dhdr _prn_dev = {
     .dh_next = x86_aux_dev,
     .dh_attr = 0xA040 | ATTR_NATIVE,
     .arm.dh_interrupt = PrnIntr,
     .dh_name = "PRN     "
 };
 
-const static struct dhdr _con_dev = {
+static const struct dhdr _con_dev = {
     .dh_next = x86_prn_dev,
     .dh_attr = 0x8013 | ATTR_NATIVE,
     .arm.dh_interrupt = ConIntr,
     .dh_name = "CON     "
 };
 
-const static struct lol lol = {
+static const struct lol lol = {
     .dos_data = 0,              /* 0x00  abs / -0x26 rel: SDA format byte (0=DOS3.x, 1=DOS4+) */
     .kernel_start_off = 0,      /* 0x01  abs / -0x25 rel: offset of kernel_start, may be 0x0100?, in case somebody reads it*/
     ._pad0 = 0,                 /* 0x03  abs / -0x23 rel: padding */

@@ -372,14 +372,6 @@ done:
   return ret;
 }
 
-static inline dos_far_ptr adjust_far_x86(dos_far_ptr p) {
-  if (FP_SEG(p) == 0xffff)
-    return p;
-  return MK_FP(FP_SEG(p) + (FP_OFF(p) >> 4), FP_OFF(p) & 0x000f);
-}
-static inline dos_far_ptr add_far_x86(dos_far_ptr p, UCOUNT n) {
-  return adjust_far_x86(MK_FP(FP_SEG(p), FP_OFF(p) + n));
-}
 /*
     rwblock(fd, buffer, count, mode) - the core of DosRead()/DosWrite()
     for a regular (non-device) file: transfer "count" bytes between

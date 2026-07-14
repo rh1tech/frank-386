@@ -200,3 +200,57 @@ it is caller-segment and must NOT be re-anchored on DOS_PSP.
       Corrects my stage4a claim that this was a backstop - it is not; the
       stage4a XMS bound is load-bearing.
 - [ ] XMS HMA functions 07h/08h absent from xms_handler.
+
+## Stage 12 - compiler warnings from the stage-0 -Wall/-Wextra (the point of enabling them)
+Original ~54 warnings across the fdos sources. Cleared in three commits:
+
+- [x] 12a: -Wunused-variable (9) - removed genuinely-dead locals, (void)-guarded
+      debug-only ones (img, op). -Wmaybe-uninitialized (4) - initialised
+      'attributes = 0' in fcom.c (false positives, but harmless + correct).
+- [x] 12b: -Wparentheses (5) - parenthesised && within || (host-verified
+      behaviour-preserving). -Wcomment (1) - dosfns.c TODO block -> #if 0.
+      -Wmissing-braces (1) - THE stage-0 landmine: 7 dos_far_ptr LoL fields
+      `= 0` -> MK_FP(0,0). -Wpointer-sign (10) - ARM_PTR now returns void*
+      (kills the whole class systemically), + 2 lfn_checksum casts.
+- [x] 12c: -Wold-style-declaration (13) - `const static` -> `static const` on
+      the 13 device-header/LoL initialisers in kernel.c.
+      -Wdiscarded-qualifiers (1) - cooked_write() bp param -> const char*
+      (it only reads bp).
+
+Remaining, NOT in the fdos mandate (documented, not patched):
+- [ ] -Wstrict-aliasing (6): ALL one root cause - CPU_IP macro in 286/cpu.h
+      (an assignable uint16 view of the 32-bit ip/next_ip register, lvalue in
+      52+ core sites). The obvious rvalue fix breaks the build; the right fix
+      is a union in the CPU struct - a core-owner decision. See
+      ADVISORY-cpu-ip-aliasing.md. (I tried the cast, caught the lvalue break,
+      reverted before committing.)
+- [ ] -Wattributes (1): vga_hw.c inline+noinline conflict - driver, out of scope.
+
+## Stage 13b - THE block-driver bug (your hint: hang / native stack-or-memory exhaustion)
+Root cause found in LBA_Transfer() (dsk.c), the getbpb->RWzero->LBA_Transfer and
+blk_rdwrt->LBA_Transfer chains the author had already instrumented with the
+dpb_watch harness and the "somewhere behind this door" comment.
+
+The multi-sector buffer advance used a NON-normalising add:
+    buffer = ADD_OFF(buffer, count * bytes_sector);   // WRONG
+ADD_OFF only adds to the offset and keeps the segment, so once the offset
+passes 0xFFFF it wraps back to the START of the same 64K segment - 64K low.
+Upstream FreeDOS uses adjust_far() there, which carries the overflow into the
+segment. Demonstrated on the host: 2000:FE00 + 2048 gave 2000:0600 (lin 0x20600)
+instead of the correct lin 0x30600. The next loop iteration then reads/writes
+64K away from where it should - and if a DPB (or another buffer) shares that
+segment, that IS the corruption dpb_watch_check() panics on, and the source of
+the "chain to the bulk driver misbehaves" symptom.
+
+Fix: the port ALREADY had the correct normalising helpers (adjust_far_x86 /
+add_far_x86) - but they were static inline in fatfs.c, invisible to dsk.c, and
+used only on the FAT path. Moved them to portab.h (next to ADD_OFF, with a
+comment on when to use which), widened add_far_x86's count to uint32_t (a full
+64K transfer is 0x10000 bytes), and switched LBA_Transfer's advance to it.
+Verified the fixed advance on the host (incl. the exact 64K-boundary case).
+
+NOTE: not claiming this is the ONLY issue on that chain - the author's own
+guards (gen_rw_sane, the CHS count==0 check, the volume-bounds check, the
+BLK_GENIOCTL bisect switch) suggest more than one suspect was investigated. But
+this is a concrete, demonstrated memory-corruption bug on exactly the path
+described, matching the dpb_watch instrumentation.
