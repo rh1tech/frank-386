@@ -56,7 +56,7 @@ VOID dir_init_fnode(f_node_ptr fnp, CLUSTER dirstart)
   /* reset the directory flags    */
   fnp->f_sft_idx = 0xff;
   fnp->f_dmp = &sda_tmp_dmD;
-  if (fnp == &fnode[1])
+  if (fnp == fnode_slot(1))
     fnp->f_dmp = &sda_tmp_dm_renD;
   fnp->f_offset = 0l;
   fnp->f_cluster_offset = 0;
@@ -371,7 +371,7 @@ COUNT dos_findfirst(UCOUNT attr, BYTE * name)
 
   /* Now open this directory so that we can read the      */
   /* fnode entry and do a match on it.                    */
-  if ((fnp = split_path(name, &fnode[0])) == NULL)
+  if ((fnp = split_path(name, fnode_slot(0))) == NULL)
     return DE_PATHNOTFND;
 
   /* Now search through the directory to find the entry...        */
@@ -410,7 +410,7 @@ COUNT dos_findnext(void)
 
   /* Select the default to help non-drive specified path          */
   /* searches...                                                  */
-  fnp = &fnode[0];
+  fnp = fnode_slot(0);
   dmp = &sda_tmp_dmD;
   fnp->f_dpb = get_dpb(dmp->dm_drive);
   if (media_check_tagged(fnp->f_dpb, "dos_findnext/fnp->f_dpb") < 0)

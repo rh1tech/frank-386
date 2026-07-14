@@ -110,15 +110,17 @@ COUNT ASMCFUNC
 extern /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 extern /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer; // BSS
 
-/* near fnodes:
- * fnode[0] is used internally for almost all cases.
- * fnode[1] is only used for:
+/* Scratch fnodes (moved to guest RAM - see fatfs.c). Reached through the
+ * fnode_slot() accessor, never as a native array:
+ * slot 0 is used internally for almost all cases.
+ * slot 1 is only used for:
  * 1) rename (target)
  * 2) rmdir (checks if the directory to remove is empty)
- * 3) commit (copies, than closes fnode[0])
+ * 3) commit (copies, then closes slot 0)
  * 3) merge_file_changes (for SHARE)
  */
-GLOBAL struct f_node fnode[2];
+void fnode_init(void);          /* DynAlloc the two scratch nodes */
+f_node_ptr fnode_slot(int i);   /* native view of scratch node i (0/1) */
 GLOBAL BYTE ASM ReturnAnyDosVersionExpected;
 
 UWORD fgetword(const void *vp);

@@ -2804,12 +2804,36 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     /* Now config the temporary file system */
     FsConfig();
 
+    /* Scratch fnodes live in guest RAM (DynAlloc), so they must exist before
+       the first file is opened: DoConfig() below reads CONFIG.SYS, and any
+       open goes INT 21h/AH=3Dh -> DosOpenSft -> dos_open -> sft_to_fnode(),
+       which calls fnode_slot(). (FsConfig()'s CON/AUX/PRN opens above are
+       fine either way - DosOpenSft() short-circuits character devices at
+       IsDevice() and never reaches dos_open().)
+
+       Timing is safe in both directions:
+         - EARLY ENOUGH: DynAlloc() is a fixed bump allocator in DYN_BUFFER
+           (DOS_PSP:240Eh). It never consults UmbState/HMAState, and
+           MoveKernelToHMA() does not relocate DOS_PSP data (the kernel is
+           native ARM here - there is no code image to move), so DOS=HIGH,UMB
+           cannot invalidate it. dsk_init()/update_dcb() above already
+           DynAlloc() the ddt and DPB arrays, even earlier than this.
+         - LATE ENOUGH: it must precede PreConfig2(), which sets
+           first_mcb = AlignParagraph(DynLast() + 0Fh) - i.e. the MCB arena
+           starts immediately above the end of the Dyn area. Any DynAlloc()
+           after that point would hand out memory the MCB arena already owns. */
+    fnode_init();
+
     /* Now process CONFIG.SYS     */
     DoConfig(0);
     DoConfig(1);
 
 #ifdef WITHLFNAPI
-    /* Persistent LFN helper fnodes belong to resident guest DOS data. */
+    /* Persistent LFN helper fnodes belong to resident guest DOS data.
+       (The old comment here implied DoConfig() had to run first to "bring the
+       dynamic area up". It does not - Dyn is live from file scope. The only
+       real constraint is the PreConfig2() one described above, which this
+       still satisfies.) */
     lfnapi_init();
 #endif    
     /* initialize near data and MCBs */

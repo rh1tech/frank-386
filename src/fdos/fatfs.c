@@ -44,22 +44,41 @@
 static const char *media_check_source = "?";
 
 /*
-    fnode[] - internal scratch file nodes used while servicing a single
-    DOS API call (open/read/write/seek/close/etc). See the comment on
-    f_dpb/f_dmp in fnode.h for why these stay as plain native ARM
-    structures/pointers, unlike sft/cds: no guest code or DOS API ever
-    holds a reference to an f_node, only to the SFT index that
+    fnode scratch nodes - internal file nodes used while servicing a
+    single DOS API call (open/read/write/seek/close/etc). No guest code
+    or DOS API ever holds a reference to an f_node, only to the SFT index
+    that
     sft_to_fnode()/fnode_to_sft() below translate to/from one.
 
     Migrated from globals.h (GLOBAL struct f_node fnode[2]). fnode[0]
     is used for ordinary single-file operations; fnode[1] is only
     needed by operations that touch two files at once (rename, and
     DOS's "move within filesystem"), neither of which is implemented
-    yet - but the second slot is kept here so later code matches the
-    original's indexing (&fnode[0] / &fnode[1]) instead of needing a
-    separate single-entry special case.
+    yet - but the second slot is kept so code matches the original's
+    indexing (fnode_slot(0) / fnode_slot(1)).
+
+    These two scratch nodes now live in GUEST RAM (DynAlloc), not native
+    SRAM, to reclaim ~136 bytes of the scarce 520 KB SRAM. That is safe
+    for exactly the reason the previous comment gives - nothing guest-side
+    ever holds an f_node pointer - AND all of f_node's own pointer fields
+    (f_dpb, f_dmp) already target guest RAM (the DPB chain, and the SDA
+    dmatch / DynAlloc'd LFN slots respectively), so an f_node is fully
+    self-consistent wherever it lives. Same proven pattern as lfnapi.c's
+    lfn_fnode_slot table. fnode_slot(i) returns the native view.
 */
-struct f_node fnode[2];
+static dos_far_ptr x86_fnode;   /* -> struct f_node[2] in guest RAM */
+
+void fnode_init(void)
+{
+  if (far_is_null(x86_fnode))
+    x86_fnode = DynAlloc("fnode", 2, sizeof(struct f_node));
+}
+
+/* Native view of scratch node i (0 or 1). Valid only after fnode_init(). */
+f_node_ptr fnode_slot(int i)
+{
+  return (f_node_ptr)ARM_PTR(ADD_OFF(x86_fnode, (ULONG)i * sizeof(struct f_node)));
+}
 
 /* /// Added - Ron Cemer */
 /* If more than one SFT has a file open, and a write
@@ -142,14 +161,15 @@ STATIC int merge_file_changes(f_node_ptr fnp, int collect)
 /*
     sft_to_fnode(fd)/fnode_to_sft(fnp) - copy an open file's state
     between its SFT entry (guest-visible, dos_far_ptr-based) and
-    fnode[0] (native scratch struct used while servicing the call).
+    scratch node fnode_slot(0) (used while servicing the call; it lives
+    in guest RAM but is reached natively via ARM_PTR).
 
     Migrated from fatfs.c.
 */
 STATIC f_node_ptr sft_to_fnode(int fd)
 {
   sft* sftp = (sft*) ARM_PTR (idx_to_sft(fd));
-  f_node_ptr fnp = &fnode[0];
+  f_node_ptr fnp = fnode_slot(0);
 
   fnp->f_sft_idx = (UBYTE)fd;
 
@@ -911,7 +931,7 @@ f_node_ptr split_path(const char * path, f_node_ptr fnp)
 */
 BOOL dir_exists(char * path)
 {
-  return split_path(path, &fnode[0]) != NULL;
+  return split_path(path, fnode_slot(0)) != NULL;
 }
 
 /*
@@ -928,7 +948,7 @@ int dos_cd(char *PathName)
   f_node_ptr fnp;
   struct cds *cdsp;
   /* now test for its existance. If it doesn't, return an error.  */
-  if ((fnp = dir_open(PathName, FALSE, &fnode[0])) == NULL)
+  if ((fnp = dir_open(PathName, FALSE, fnode_slot(0))) == NULL)
     return DE_PATHNOTFND;
 
   /* problem: RBIL table 01643 does not give a FAT32 field for the
@@ -1592,14 +1612,14 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
     return DE_RMVCUDIR;
 
   /* first check if the source file exists                        */
-  fnp1 = &fnode[0];
+  fnp1 = fnode_slot(0);
   ret = find_fname(path1, attrib, fnp1);
   if (ret != SUCCESS)
     return ret;
 
   /* Check that we don't have a duplicate name, so if we find     */
   /* one, it's an error.                                          */
-  fnp2 = &fnode[1];
+  fnp2 = fnode_slot(1);
   ret = find_fname(path2, attrib, fnp2);
   if (ret != DE_FILENOTFND)
     return ret == SUCCESS ? DE_ACCESS : ret;
@@ -1645,7 +1665,7 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
 
 COUNT dos_getfattr(BYTE * name)
 {
-  f_node_ptr fnp = &fnode[0];
+  f_node_ptr fnp = fnode_slot(0);
   int ret = find_fname(name, D_ALL, fnp);
   return ret == SUCCESS ? fnp->f_dir.dir_attrib : ret;
 }
@@ -1664,7 +1684,7 @@ COUNT dos_setfattr(BYTE * name, UWORD attrp)
   if ((attrp & (D_VOLID | 0xC0)) != 0)
     return DE_ACCESS;
 
-  fnp = &fnode[0];
+  fnp = fnode_slot(0);
   rc = find_fname(name, D_ALL, fnp);
   if (rc != SUCCESS)
     return rc;
@@ -1795,7 +1815,7 @@ COUNT dos_mkdir(BYTE * dir)
 
   /* Check that we don't have a duplicate name, so if we  */
   /* find one, it's an error.                             */
-  fnp = &fnode[0];
+  fnp = fnode_slot(0);
   ret = find_fname(dir, D_ALL, fnp);
   if (ret != DE_FILENOTFND)
     return ret == SUCCESS ? DE_ACCESS : ret;
@@ -1955,7 +1975,7 @@ COUNT delete_dir_entry(f_node_ptr fnp)
    delete_dir_entry(), both already present above in this file. */
 COUNT dos_delete(BYTE * path, int attrib)
 {
-  REG f_node_ptr fnp = &fnode[0];
+  REG f_node_ptr fnp = fnode_slot(0);
 
   /* Check that we don't have a duplicate name, so if we  */
   /* find one, it's an error.                             */
@@ -1993,7 +2013,7 @@ COUNT dos_rmdir(BYTE * path)
 
   /* Check that the directory is empty. Only the  */
   /* "." and ".." are permissable.                */
-  fnp = dir_open(path, FALSE, &fnode[0]);
+  fnp = dir_open(path, FALSE, fnode_slot(0));
   if (fnp == NULL)
     return DE_PATHNOTFND;
 
