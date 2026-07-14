@@ -2608,3 +2608,65 @@ bool fdos_20h(CPU* _cpu) {
     request_terminate(0, 0);
     return true;
 }
+
+/*
+ * CP/M-compatible DOS CALL 5 entry.
+ *
+ * PSP:0005h contains  9Ah C0h 00h 00h 00h  = CALL FAR 0000:00C0, and
+ * 0000:00C0 is a JMP FAR to the native fake-BIOS page FFE0:0030, which the
+ * dispatcher routes here. PSPInit() (kernel.c) writes both. This is a
+ * FAR-CALL entry, not a software interrupt: on entry the guest stack holds
+ *
+ *   SS:SP+0  000Ah              the offset just past CALL FAR in the PSP
+ *   SS:SP+2  caller PSP segment (== the CALL FAR return CS)
+ *   SS:SP+4  return offset from the program's near CALL PSP:0005h
+ *
+ * Upstream entry.asm discards the 000Ah, rebuilds the rest into a normal
+ * INT 21h frame, runs function CL (only 00h..24h are valid here), then IRETs
+ * straight back to the near-call return address.
+ *
+ * All stack addressing goes through stk_lin() so the 16-bit SP wrap is
+ * honoured (see init-mod.h) - the hand-written "(SS<<4)+sp+n" form in the
+ * original proposal would mis-address a caller whose SP sits near 0xFFFF.
+ *
+ * Returns false: this entry consumes its own CALL/RETF-style frame and must
+ * not fall through to the dispatcher's common IRET path.
+ */
+bool fdos_30h(CPU* _cpu)
+{
+    const UWORD entry_sp = CPU_SP;
+    const UWORD caller_cs = readw86(stk_lin(CPU_SS, entry_sp, 2));
+    const UWORD caller_ip = readw86(stk_lin(CPU_SS, entry_sp, 4));
+    const UWORD return_sp = (UWORD)(entry_sp + 6);
+    const UWORD int_sp    = (UWORD)(return_sp - 6);   /* == entry_sp */
+    UWORD return_flags = cpu_getflags(_cpu);
+
+    cpu = _cpu;
+
+    if (CPU_CL > 0x24)
+    {
+        CPU_AL = 0;
+    }
+    else
+    {
+        /* Build the hardware half of a normal INT 21h frame (IP, CS, FLAGS);
+           fdos_21h() adds its guest-visible iregs below it. */
+        writew86(stk_lin(CPU_SS, int_sp, 0), caller_ip);
+        writew86(stk_lin(CPU_SS, int_sp, 2), caller_cs);
+        writew86(stk_lin(CPU_SS, int_sp, 4), return_flags);
+        CPU_SP = int_sp;
+        CPU_AH = CPU_CL;
+
+        fdos_21h(_cpu);
+
+        return_flags = readw86(stk_lin(CPU_SS, int_sp, 4));
+    }
+
+    /* Complete the synthetic IRET straight back to the near caller.
+       cpu_setflags() is (set-mask, clear-mask). */
+    cpu_setflags(_cpu, return_flags, (UWORD)~return_flags);
+    CPU_SP = return_sp;
+    SET_CS(caller_cs);
+    SET_IP(caller_ip);
+    return false;
+}

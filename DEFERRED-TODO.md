@@ -6,9 +6,19 @@
       corrupted by an out-of-range access that stage4a now blocks at the XMS
       layer, but the emulator memory layer itself is still permissive.
       (User confirmed: fix later.)
-- [ ] **XMS HMA functions (07h/08h) absent** from xms_handler switch. Kernel
-      takes HMA directly (DOS=HIGH), not via XMS, so not critical, but a guest
-      XMS client asking for HMA falls into default. Add for completeness.
+- [x] **XMS HMA functions**: CORRECTED + FIXED (stage9c). My note was wrong -
+      07h (QUERY_A20) and 08h (QUERY_EMB) were already present, as were HMA
+      01h/02h and A20 03h-06h. The real bug: REQUEST_HMA/RELEASE_HMA were
+      always-succeed STUBS with no ownership tracking. On a DOS=HIGH system a
+      guest REQUEST_HMA was told it owned the HMA the KERNEL was running in ->
+      corruption. Fixed: single-ownership state machine that consults the
+      kernel's own claim (DosLoadedInHMA, read live), returns 91h "in use" /
+      93h "not yours" per spec; the kernel's resident HMA can never be handed
+      out or released by a guest. Also: QUERY_A20 now clears BL on success
+      (was leaving caller's BL); XMS_VERSION's BL left alone on purpose (it is
+      the low byte of the BX version return). DosLoadedInHMA given a proper
+      extern in init-mod.h (was a bare global). Verified the ownership state
+      machine on the host across all request/release orderings.
 
 ## Versioning / build
 - [ ] **Bump build version 1.04 -> release version** (it is the release build,
@@ -123,8 +133,21 @@ it is caller-segment and must NOT be re-anchored on DOS_PSP.
 - [ ] Wire up the three parked FreeCOM helpers (ATTRIB built-in, route the
       executable search through fcom_which_candidate, use report_file_error in
       COPY/DEL/MOVE error paths).
-- [ ] fcom/ contains a pair of proposed patches against an OLDER base - analyse,
-      rebase, apply if still relevant.
+- [x] fcom/ proposed patches: ANALYSED (stage10a).
+      * native_process_common_runner.patch: already applied to the current base
+        (exec_run_process/exec_set_initial_registers/exec_run_native_command and
+        the 2-arg fcom_process_main are all present). Obsolete - no action.
+      * port_cpm_call5_entry.patch: relevant and UNAPPLIED - it fixed a live bug.
+        PSPInit already advertised the CP/M CALL-5 gateway (ps_farcall=9Ah,
+        ps_reentry=0000:00C0) but nothing populated 0000:00C0 and there was no
+        handlers[0x30], so any program using CALL 5 far-jumped into an unwritten
+        IVT slot. Reworked onto the current base and applied: rewrote all stack
+        addressing through stk_lin() (the proposal's raw (SS<<4)+sp+n would
+        mis-address a caller with SP near 0xFFFF - the stage2a bug), dropped the
+        stale handlers[0x20/21/29] re-adds (already present), kept the 0000:00C0
+        JMP FAR FFE0:0030 gateway and handlers[0x30]=fdos_30h. Verified the
+        frame reconstruction (int_sp==entry_sp, return_sp=entry_sp+6, IRET to
+        near caller) on the host.
 - [ ] src/diag.c unwired runtime diagnostics - adapt + CMake switch.
 - [ ] Housekeeping: build version bump, README memory map, 286/386 CMake switch.
 - [~] RAM border in pstore/pload: INVESTIGATED (stage9b). Worse than thought -

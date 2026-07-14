@@ -18,6 +18,7 @@ bool fdos_27h(CPU*); // OLD-STYLE TERMINATE AND STAY RESIDENT
 bool fdos_28h(CPU*); // DOS IDLE
 bool fdos_2fh(CPU*); // XMS
 bool fdos_29h(CPU*); // FAST CONSOLE OUTPUT
+bool fdos_30h(CPU*); // CP/M CALL-5 FAR-CALL ENTRY
 
 void cpu_far_call(CPU* cpu, uint16_t seg, uint16_t off);
 

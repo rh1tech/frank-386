@@ -220,7 +220,14 @@ void cpu_install_dos_handlers(CPU* cpu) {
 	pstore16(0x2f*4, 0x002f);
 	pstore16(0x2f*4 + 2, 0xFFE0);
 
-// TODO: INT 30h как far jump на CP/M entry
+    /*
+     * CP/M CALL-5 gateway. This is NOT a software INT 30h: PSP:0005h does
+     * CALL FAR 0000:00C0, and 0000:00C0 (written in PSPInit) is a JMP FAR to
+     * FFE0:0030. Landing on that fake-BIOS page dispatches here. fdos_30h()
+     * consumes the far-call frame itself and returns false, so the common
+     * IRET path is not applied.
+     */
+    handlers[0x30] = fdos_30h;
 }
 
 //#define CPU_ALLOW_ILLEGAL_OP_EXCEPTION

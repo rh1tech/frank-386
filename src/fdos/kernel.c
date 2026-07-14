@@ -1550,6 +1550,23 @@ STATIC void PSPInit(void)
   /* CP/M-like entry point - call far to special entry    */
   p->ps_farcall = 0x9a;
   p->ps_reentry = MK_FP(0, 0x30 * 4);
+
+  /*
+   * DOS keeps the CP/M CALL-5 gateway in the low IVT region: PSP:0005h
+   * CALL FARs to 0000:00C0 (== 0030h*4, the slot ps_reentry points at),
+   * and 0000:00C0 is itself a FAR JMP - executable bytes, not a vector:
+   *
+   *   EA 30 00 E0 FF            JMP FAR FFE0:0030
+   *
+   * FFE0:0030 is the native fake-BIOS page; the dispatcher routes it to
+   * fdos_30h(). Without this, every PSP advertised a CALL-5 entry that
+   * jumped into an unwritten IVT slot - CP/M-style programs using CALL 5
+   * crashed. (Writing it once per PSPInit is harmless: the bytes are
+   * identical and the location is fixed.)
+   */
+  write86(0x00c0, 0xea);         /* JMP FAR opcode        */
+  writew86(0x00c1, 0x0030);      /* target offset 0030h   */
+  writew86(0x00c3, 0xffe0);      /* target segment FFE0h  */
   /* unix style call - 0xcd 0x21 0xcb (int 21, retf)      */
   p->ps_unix[0] = 0xcd;
   p->ps_unix[1] = 0x21;

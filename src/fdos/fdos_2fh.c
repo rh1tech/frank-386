@@ -60,6 +60,27 @@ typedef struct {
 
 static emb_handle_t emb_handles[XMS_HANDLES + 1]; /* index 0 is never a valid handle */
 
+/* HMA ownership. There is exactly one HMA (FFFF:0010..FFFF:FFFF, ~64K-16).
+   REQUEST_HMA (01h) grants it to the FIRST caller and must refuse everyone
+   after with 91h.
+
+   Crucially, when DOS=HIGH the KERNEL already owns the HMA (DosLoadedInHMA,
+   set by MoveKernelToHMA() - see inithma.c) via a path that never goes through
+   this handler. Before this, REQUEST_HMA was a stub that always returned
+   success: a guest asking for the HMA on a DOS=HIGH system was told it now
+   owned the very region the kernel was running in, and any use of it corrupted
+   the kernel. Both claims are consulted below.
+
+   DosLoadedInHMA is read live rather than cached: it is settled inside
+   Dosmem() during DoConfig(1), long before the first guest program starts at
+   P_0(), so no guest can observe it mid-flight - but reading it directly means
+   we do not depend on that ordering staying true. */
+static bool xms_hma_taken_by_guest = false;
+
+static bool hma_in_use(void) {
+    return DosLoadedInHMA || xms_hma_taken_by_guest;
+}
+
 static int emb_free_handle_count(void) {
     int n = 0;
     for (int i = 1; i <= XMS_HANDLES; ++i)
@@ -470,19 +491,41 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
     switch (CPU_AH) {
         case XMS_VERSION:
             // Get XMS Version
-            CPU_AX = 0x0200; // We are himem 2.06
-            CPU_BX = 0x0206; // driver version
-            CPU_DX = 0x0001; // HMA Exist
+            CPU_AX = 0x0200; // XMS spec version 2.00
+            CPU_BX = 0x0206; // internal driver revision (we report HIMEM 2.06)
+            CPU_DX = 0x0001; // HMA exists
+            /* BX is the version, so BL must NOT be zeroed here - it is part of
+               the return value, unlike every other function below. */
             break;
         case REQUEST_HMA:
-            // Request HMA
-            // Stub: Implement HMA request functionality
-            CPU_AX = 1; // Success
+            /* DX = bytes needed (an application passes FFFFh; a TSR passes its
+               own size, which HIMEM compares against /HMAMIN=). We do not
+               enforce a minimum, but we DO enforce single ownership, including
+               the kernel's own DOS=HIGH claim. */
+            if (hma_in_use()) {
+                CPU_AX = 0;
+                CPU_BL = 0x91;   /* HMA already in use */
+            } else {
+                xms_hma_taken_by_guest = true;
+                CPU_AX = 1;
+                CPU_BL = 0;
+            }
             break;
         case RELEASE_HMA:
-            // Release HMA
-            // Stub: Implement HMA release functionality
-            CPU_AX = 1; // Success
+            /* The kernel's HMA (DOS=HIGH) is never released through here: it is
+               resident for the life of the system. Only a guest that itself
+               obtained the HMA may give it back. */
+            if (!xms_hma_taken_by_guest) {
+                /* Either nobody holds it, or the KERNEL does (DOS=HIGH) - and
+                   the kernel's HMA is resident for the life of the system, so
+                   a guest can never release it. */
+                CPU_AX = 0;
+                CPU_BL = 0x93;   /* HMA not allocated by the caller */
+            } else {
+                xms_hma_taken_by_guest = false;
+                CPU_AX = 1;
+                CPU_BL = 0;
+            }
             break;
         case GLOBAL_ENABLE_A20:
         case LOCAL_ENABLE_A20:
@@ -499,8 +542,11 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             cpu_set_a20(cpu, 0);
             break;
         case QUERY_A20:
-            // Query A20 (Function 07h):
-            CPU_AX = cpu_get_a20(cpu); // Success
+            /* 07h: AX = 1 if A20 is enabled, 0 if disabled (cpu_get_a20()
+               returns exactly that). BL must be 00h on success - it was left
+               holding whatever the caller passed in. */
+            CPU_AX = cpu_get_a20(cpu);
+            CPU_BL = 0;
             break;
         case QUERY_EMB: { // 08h
             uint32_t largest, total;
