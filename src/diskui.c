@@ -275,7 +275,7 @@ static void draw_file_browser(void) {
 
     if (file_count == 0) {
         osd_print_center(FILE_Y + FILE_H / 2,
-                         (selected_row == DRIVE_BIOS) ? "No BIOS files found in 386/" : "No disk images found in 386/",
+                         (selected_row == DRIVE_BIOS) ? "No BIOS files found in " SD_DATA_DIR_SLASH : "No disk images found in " SD_DATA_DIR_SLASH,
                          OSD_ATTR_DISABLED);
     }
 
@@ -300,7 +300,7 @@ static void scan_disk_images(int drive_idx) {
         strncpy(file_list[file_count++], "[native]", MAX_FILENAME_LEN - 1);
     }
 
-    res = f_opendir(&dir, "386");
+    res = f_opendir(&dir, SD_DATA_DIR);
     if (res != FR_OK) return;
 
     while (file_count < MAX_FILES) {

@@ -406,4 +406,15 @@ static inline uint get_psram_pin(void) {
 #define DEBUG_PRINTF(...)
 #endif
 
+
+/* SD-card data directory (BIOS/config/disk images). Normally supplied by the
+   build as -DSD_DATA_DIR / -DSD_DATA_DIR_SLASH, tied to CPU_TARGET (286 vs 386
+   need different files). These fallbacks only apply to a non-CMake compile. */
+#ifndef SD_DATA_DIR
+#define SD_DATA_DIR "386"
+#endif
+#ifndef SD_DATA_DIR_SLASH
+#define SD_DATA_DIR_SLASH SD_DATA_DIR "/"
+#endif
+
 #endif // BOARD_CONFIG_H

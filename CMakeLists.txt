@@ -17,7 +17,29 @@ cmake_minimum_required(VERSION 3.13)
 # Set board to Pico 2 (RP2350)
 set(PICO_BOARD pico2 CACHE STRING "Pico board type")
 
-set(BUILD_NAME "386")
+# CPU target: "386" (full i386/486/586 core, I386_MODE=1) or "286"
+# (8086/186/286 core). This single switch sets BOTH the output base name
+# and the I386_MODE compile definition, so the binary name can no longer
+# disagree with the core actually compiled in (it used to always say
+# "386" while I386_MODE was left commented out - i.e. a 286 build).
+set(CPU_TARGET "286" CACHE STRING "Emulated CPU core: 286 or 386")
+set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386)
+if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
+    message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
+endif()
+set(BUILD_NAME "${CPU_TARGET}")
+#
+# NOTE: the tree previously shipped with I386_MODE commented out, so the
+# binary named "386" was in fact a 286-mode core. This switch now makes
+# the two agree. Defaulting CPU_TARGET to 386 therefore selects the real
+# i386 core - a behavioural change from the old default. Configure with
+#   -DCPU_TARGET=286
+# to reproduce the previous (286-mode) build exactly.
+if(CPU_TARGET STREQUAL "386")
+    message(STATUS "CPU target: 386 (I386_MODE=1, full i386 core)")
+else()
+    message(STATUS "CPU target: 286 (I386_MODE off, 8086/186/286 core)")
+endif()
 
 # Firmware version string (set by release.sh or manually)
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
@@ -360,8 +382,19 @@ if(EMM)
         EMS_END=0xE0000ul
     )
 endif()
+if(CPU_TARGET STREQUAL "386")
+    target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1)
+endif()
+
+# SD-card data directory. It holds the BIOS images, config.ini and disk
+# images, which DIFFER between a 286 and a 386 build - so it is tied to
+# CPU_TARGET and can never disagree with the binary. Previously "386" was
+# hardcoded in ~19 places and had to be hand-edited per build.
+# SD_DATA_DIR is the bare name ("386"); SD_DATA_DIR_SLASH adds the "/".
 target_compile_definitions(${BUILD_NAME} PRIVATE
-    #I386_MODE=1
+    SD_DATA_DIR="${CPU_TARGET}"
+    SD_DATA_DIR_SLASH="${CPU_TARGET}/")
+target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
     FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
     FRANK_386_VERSION_MINOR=${FRANK_386_VERSION_MINOR}

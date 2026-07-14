@@ -209,7 +209,7 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
     UINT bytes_read;
 
     char path[256];
-    snprintf(path, sizeof(path), "386/%s", file);
+    snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", file);
 
     res = f_open(&fp, path, FA_READ);
     if (res != FR_OK) {
@@ -497,9 +497,9 @@ static int load_config_from_sd(const char *filename) {
 
     // Debug: List 386 directory contents
     DBG_PRINT("Checking SD card contents...\n");
-    res = f_opendir(&dir, "386");
+    res = f_opendir(&dir, SD_DATA_DIR);
     if (res == FR_OK) {
-        DBG_PRINT("  386/ directory found, contents:\n");
+        DBG_PRINT("  " SD_DATA_DIR_SLASH " directory found, contents:\n");
         while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != 0) {
             DBG_PRINT("    %s%s (%lu bytes)\n",
                    fno.fname,
@@ -508,7 +508,7 @@ static int load_config_from_sd(const char *filename) {
         }
         f_closedir(&dir);
     } else {
-        DBG_PRINT("  386/ directory not found (error %d)\n", res);
+        DBG_PRINT("  " SD_DATA_DIR_SLASH " directory not found (error %d)\n", res);
         // Try root directory
         res = f_opendir(&dir, "");
         if (res == FR_OK) {
@@ -521,7 +521,7 @@ static int load_config_from_sd(const char *filename) {
     }
 
     char path[256];
-    snprintf(path, sizeof(path), "386/%s", filename);
+    snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", filename);
 
     res = f_open(&fp, path, FA_READ);
     if (res != FR_OK) {
@@ -707,15 +707,15 @@ static bool init_hardware(void) {
     }
     DBG_PRINT("  SD card mounted\n");
 
-    // Check if 386/ directory exists
+    // Check if the SD_DATA_DIR directory exists
     DIR dir;
-    res = f_opendir(&dir, "386");
+    res = f_opendir(&dir, SD_DATA_DIR);
     if (res != FR_OK) {
-        show_error_screen(" Missing Directory ", "Directory '386/' not found on SD card.", "Create it and add config.ini, bios.bin");
+        show_error_screen(" Missing Directory ", "Directory '" SD_DATA_DIR_SLASH "' not found on SD card.", "Create it and add config.ini, bios.bin");
         // show_error_screen never returns
     }
     f_closedir(&dir);
-    DBG_PRINT("  386/ directory found\n");
+    DBG_PRINT("  " SD_DATA_DIR_SLASH " directory found\n");
 
     // Load frank-386-specific hardware settings from INI
     // This allows cpu_freq and psram_freq to be configured
@@ -723,7 +723,7 @@ static bool init_hardware(void) {
         FIL fp;
         char *content = NULL;
 
-        if (f_open(&fp, "386/config.ini", FA_READ) == FR_OK) {
+        if (f_open(&fp, SD_DATA_DIR_SLASH "config.ini", FA_READ) == FR_OK) {
             FSIZE_t size = f_size(&fp);
             content = malloc(size + 1);
             if (content) {
@@ -880,7 +880,7 @@ static bool init_emulator(void) {
     if (config.bios && config.bios[0]) {
         char bios_path[256];
         FIL fp;
-        snprintf(bios_path, sizeof(bios_path), "386/%s", config.bios);
+        snprintf(bios_path, sizeof(bios_path), SD_DATA_DIR_SLASH "%s", config.bios);
         if (f_open(&fp, bios_path, FA_READ) != FR_OK) {
             char detail[64];
             snprintf(detail, sizeof(detail), "File: %s", bios_path);

@@ -162,9 +162,9 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
 
 uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathname) {
     if ((is_fdd && drivenum >= 2) || drivenum >= 4) return false;
-    // Build full path (files are in 386/ directory)
+    // Build full path (files are in the SD_DATA_DIR directory)
     char path[256];
-    snprintf(path, sizeof(path), "386/%s", pathname);
+    snprintf(path, sizeof(path), SD_DATA_DIR_SLASH "%s", pathname);
 
     /* CD-ROMs are read-only; regular disks need write access */
     BYTE fmode = is_cd ? FA_READ : (FA_READ | FA_WRITE);

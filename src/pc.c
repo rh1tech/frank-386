@@ -1670,8 +1670,11 @@ int parse_conf_ini(void* user, const char* section,
 	PCConfig *conf = user;
 #define SEC(a) (strcmp(section, a) == 0)
 #define NAME(a) (strcmp(name, a) == 0)
-	// Support both [pc] and [386] sections for compatibility
-	if (SEC("pc") || SEC("386")) {
+	// Accept [pc], [386] and the build's own [SD_DATA_DIR] section.
+	// [pc] and [386] are kept for backward compatibility with existing
+	// config.ini files; SD_DATA_DIR ("286" or "386") lets a config match
+	// the build without editing.
+	if (SEC("pc") || SEC("386") || SEC(SD_DATA_DIR)) {
 		if (NAME("bios")) {
 			if (value[0] == '\0' || strcasecmp(value, "native") == 0)
 				conf->bios = NULL;

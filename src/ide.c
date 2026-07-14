@@ -44,7 +44,7 @@ static int _atapi_tf_open = 0;
 void atapi_tlog(const char *fmt, ...)
 {
     if (!_atapi_tf_open) {
-        _atapi_tf_open = (f_open(&_atapi_tf, "386/atapi2.txt",
+        _atapi_tf_open = (f_open(&_atapi_tf, SD_DATA_DIR_SLASH "atapi2.txt",
                                  FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK);
     }
     if (!_atapi_tf_open)

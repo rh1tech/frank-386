@@ -21,7 +21,7 @@ static FIL _2f_tf;
 static int _2f_tf_open = 0;
 void debug_log(const char *fmt, ...) {
     if (!_2f_tf_open) {
-        _2f_tf_open = (f_open(&_2f_tf, "386/2f.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK);
+        _2f_tf_open = (f_open(&_2f_tf, SD_DATA_DIR_SLASH "2f.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK);
     }
     if (!_2f_tf_open) return;
     char buf[256];

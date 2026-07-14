@@ -1,3 +1,8 @@
+## Housekeeping default note
+CPU_TARGET default: user set it to 286 locally (only 286 is being tested for now;
+386 still needs SRAM optimisation - it uses more and hits OOM). So the shipped
+default stays 286-consistent; 386 is opt-in via -DCPU_TARGET=386.
+
 # Deferred items (raised during review, parked for a later stage)
 
 ## Stage 4-ish (memory-manager correctness)
@@ -158,7 +163,31 @@ it is caller-segment and must NOT be re-anchored on DOS_PSP.
       the release build is byte-unchanged and diag.c is not even compiled. Used
       #ifdef (not #if) to match the I386_PROFILE convention and stay -Wundef
       clean.
-- [ ] Housekeeping: build version bump, README memory map, 286/386 CMake switch.
+- [x] 286/386 CMake switch: DONE (stage11a). Added `set(CPU_TARGET 386 CACHE
+      STRING ...)` that drives BOTH the output BUILD_NAME and the I386_MODE
+      compile definition from one place, with validation and a STATUS message.
+      IMPORTANT discovery: the tree shipped with `#I386_MODE=1` COMMENTED OUT,
+      so the binary named "386" was actually a 286-mode core. The switch makes
+      name and core agree. Default CPU_TARGET=386 therefore FLIPS the shipped
+      build from 286-mode to a real i386 core - documented in-file as a
+      deliberate behavioural change, with `-DCPU_TARGET=286` to reproduce the
+      old build. **Your call whether 386 is the intended default now** (project
+      is murm386, so probably yes - but it is a real behavioural change, not
+      cosmetic, so I did not bury it).
+- [x] Build version bumped to 1.05 (version.txt "1 4" -> "1 5"), per your call.
+- [x] SD-card data dir: DONE (stage11b). Confirmed with you it is genuinely
+      per-CPU (286 and 386 need different BIOS/config/disk files) and was being
+      hand-edited per build. Now driven from CPU_TARGET: CMake defines
+      SD_DATA_DIR / SD_DATA_DIR_SLASH ("286" or "386", + "/") for every file;
+      all ~17 real path literals replaced via C string-literal concatenation
+      (SD_DATA_DIR_SLASH "%s" etc). board_config.h carries a documented fallback
+      for non-CMake compiles. Deliberately preserved: the [pc]/[386] config.ini
+      SECTION names in pc.c (now ALSO accepts [SD_DATA_DIR] for a matching
+      build, keeping the old two for compatibility), and the "386/486 machines"
+      BIOS prose string (not a path). Verified the concatenation yields correct
+      286/ and 386/ paths on the host.
+- [ ] README.md outdated - especially the memory map (from a very early port).
+      Still open.
 - [~] RAM border in pstore/pload: INVESTIGATED (stage9b). Worse than thought -
       CHECK_RAM_BOARDER_ENABLED is 0, so ALL bound checks in mem.h are compiled
       out, and with paging off i386.c sets res->addr1 = raw guest laddr with no

@@ -46,7 +46,7 @@ static bool cfg_hw_changed = false;
 extern PC *pc;
 
 // INI file path
-#define CONFIG_PATH "386/config.ini"
+#define CONFIG_PATH SD_DATA_DIR_SLASH "config.ini"
 
 void config_init_from_current(void) {
     // These will be set from PCConfig in main.c

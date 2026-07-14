@@ -57,7 +57,7 @@ bool bios_05h(CPU* cpu) {
 
     FIL fp;
     UINT bw;
-    FRESULT fr = f_open(&fp, "/386/prn.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
+    FRESULT fr = f_open(&fp, "/" SD_DATA_DIR_SLASH "prn.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
     if (fr != FR_OK) {
         pstore8(0x500, 0xFF);
         return true;
