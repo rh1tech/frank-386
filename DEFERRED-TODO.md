@@ -37,15 +37,30 @@ be converted mechanically and are each documented in-place:
       blk_bldbpb() now sets r_bpptr = ADD_OFF(getddt_far(dev), offsetof(ddt,
       ddt_bpb)). dev is recovered as (pddt - getddt(0)) so the dispatch-table
       signature stays uniform. Verified ARM_PTR(getddt_far(d))==getddt(d).
-- [ ] **nls.c:33 (call_nls buf)**: thread the original dos_far_ptr through
-      call_nls()/muxGo()/muxBufGo() rather than reconstructing from a native
-      pointer that came from ARM_PTR(ES:DI).
+- [x] **nls.c (call_nls buf)**: RESOLVED in stage7b, but NOT by threading.
+      Investigated the full spine and found threading would be net-negative:
+      several intermediate callers (kernel.c boot upcase, SFT name) hold only
+      native pointers, so a dos_far_ptr parameter would just relocate the same
+      native->guest recovery to each of them - more sites, more risk, no
+      removal. Instead: proved the path is only reached via external NLSFUNC
+      (built-in pkg has NLS_FLAG_HARDCODED -> all-native), that buf there is
+      always ARM_PTR(guest reg), guarded the single recovery with
+      is_guest_ptr(), and documented the whole analysis in place.
 - [x] **fdos_21h.c:105 (lpDevice)**: DONE in stage7a. CriticalError()/
       char_error()/block_error() now take dos_far_ptr; every caller already
       held the guest dhdr pointer (dpb_device / LoL->clock / BP:SI) and was
       throwing it away via ARM_PTR. The 0000:0000 sentinel doubles as the
       old NULL "no device". linear_to_far() removed from this path.
-Only after all 4 are gone can linear_to_far() itself be deleted from kernel.c.
+RESULT (after stages 5a/6a/6b/7a/7b): 26 live calls -> 3, and each of the 3 is
+now GUARDED and justified in place rather than incidental:
+  - task.c:204 / task.c:1066 (EXEC path): correct - lp is ARM_PTR(guest DS:DX)
+    from a caller segment that is genuinely not knowable any other way.
+  - nls.c:56 (external NLSFUNC path): is_guest_ptr-guarded, full analysis in
+    the comment.
+These are irreducible: each recovers a real guest-window address whose
+canonical segment is not otherwise available. linear_to_far() therefore STAYS
+(it is the correct tool for exactly this), but it is no longer a latent hazard -
+every remaining caller is audited. Deleting it is no longer a goal.
 
 ## Regression postmortem (stage5b)
 stage5a wrongly converted two EXEC-path native pointers with

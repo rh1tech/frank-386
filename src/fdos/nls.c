@@ -55,7 +55,8 @@ ULONG call_nls(UWORD bp,
         }
         x86_ptr = linear_to_far(buf);
         SET_ES ( FP_SEG (x86_ptr) );
-        CPU_DI = FP_OFF (x86_ptr);    } else {
+        CPU_DI = FP_OFF (x86_ptr);
+    } else {
         SET_ES ( 0 );
         CPU_DI = 0;
     }

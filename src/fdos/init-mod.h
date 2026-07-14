@@ -233,7 +233,7 @@ static inline dos_far_ptr guest_stack_alloc(CPU *cpu, uint16_t n) {
     return MK_FP(CPU_SS, CPU_SP);
 }
 
-static inline bool far_is_null(dos_far_ptr p) {
+static inline bool far_is_null(dos_far_ptr p) {
     return FP_SEG(p) == 0 && FP_OFF(p) == 0;
 }
 static inline bool far_is_end(dos_far_ptr p) {
