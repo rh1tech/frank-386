@@ -53,6 +53,7 @@ option(DEBUG_ENABLED "Enable verbose debug output" OFF)
 
 # Profiling (for performance analysis)
 option(PROFILE_ENABLED "Enable i386 instruction profiling" OFF)
+option(DIAG_ENABLED "Enable on-device core0 fault/hang catcher (src/diag.c)" OFF)
 
 if(BOARD STREQUAL "M1")
     SET(BUILD_NAME "m1p2-${BUILD_NAME}")
@@ -431,6 +432,14 @@ endif()
 # Add I386_PROFILE if profiling enabled
 if(PROFILE_ENABLED)
     target_compile_definitions(${BUILD_NAME} PRIVATE I386_PROFILE=1)
+endif()
+
+# On-device diagnostics: core0 hardfault/stack-overflow/hang catcher.
+# Off by default (zero cost in release). When on, compile diag.c and
+# define DIAG_ENABLED so the three hooks in main.c are activated.
+if(DIAG_ENABLED)
+    target_sources(${BUILD_NAME} PRIVATE src/diag.c)
+    target_compile_definitions(${BUILD_NAME} PRIVATE DIAG_ENABLED=1)
 endif()
 
 # Compiler optimizations for performance

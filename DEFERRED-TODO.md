@@ -148,7 +148,16 @@ it is caller-segment and must NOT be re-anchored on DOS_PSP.
         JMP FAR FFE0:0030 gateway and handlers[0x30]=fdos_30h. Verified the
         frame reconstruction (int_sp==entry_sp, return_sp=entry_sp+6, IRET to
         near caller) on the host.
-- [ ] src/diag.c unwired runtime diagnostics - adapt + CMake switch.
+- [x] src/diag.c: WIRED (stage10b) behind `option(DIAG_ENABLED ... OFF)`. It is
+      a self-contained core0 fault/stack-overflow/hang catcher that writes
+      straight to the guest B8000h text framebuffer (no debugger/UART needed).
+      Verified its externs still exist (last_int_call in bios_intcall.c;
+      __StackBottom/__StackTop are pico-sdk linker symbols). Three hooks in
+      main.c (diag_init after init_hardware, diag_heartbeat in the pc_step loop,
+      diag_core1_poll in core1's idle loop), all under #ifdef DIAG_ENABLED so
+      the release build is byte-unchanged and diag.c is not even compiled. Used
+      #ifdef (not #if) to match the I386_PROFILE convention and stay -Wundef
+      clean.
 - [ ] Housekeeping: build version bump, README memory map, 286/386 CMake switch.
 - [~] RAM border in pstore/pload: INVESTIGATED (stage9b). Worse than thought -
       CHECK_RAM_BOARDER_ENABLED is 0, so ALL bound checks in mem.h are compiled

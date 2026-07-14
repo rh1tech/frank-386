@@ -665,6 +665,10 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
 //=============================================================================
 // Hardware Initialization
 //=============================================================================
+#ifdef DIAG_ENABLED
+#include "diag.h"        /* on-device fault/hang catcher, gated by CMake */
+#endif
+
 static void core1_entry(void);
 static bool init_hardware(void) {
     // Configure clocks (including overclock if enabled)
@@ -927,6 +931,9 @@ static void __not_in_flash_func(core1_entry)(void) {
 	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
     while(1) {
         repeat_me_often();
+#ifdef DIAG_ENABLED
+        diag_core1_poll();  /* reports if core0's heartbeat stopped */
+#endif
         sleep_us(1);
     }
     __unreachable();
@@ -1057,6 +1064,12 @@ int main(void) {
             sleep_ms(1000);
         }
     }
+#ifdef DIAG_ENABLED
+    /* Arm MSPLIM, fault handlers and the stall alarm on core0. Must be after
+       init_hardware() (it needs the clocks/timer up) and before the pc_step
+       loop below (whose heartbeat it watches). */
+    diag_init();
+#endif
 
     // Initialize emulator
     if (!init_emulator()) {
@@ -1120,6 +1133,9 @@ int main(void) {
         for (int i = 0; i < 10; i++) {
             pc_step(pc, 4096);
         }
+#ifdef DIAG_ENABLED
+        diag_heartbeat();   /* core0 alive; the stall alarm checks this */
+#endif
 
         // Poll keyboard less frequently (every 20 iterations ~5ms)
         // Keyboard events are buffered, so missing a few cycles is fine
