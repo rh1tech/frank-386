@@ -780,16 +780,15 @@ rebuild_dpb:
   return SUCCESS;
 }
 
-static COUNT int21_fat32(void)
-{
-  CPU_regs regs;
-  COUNT rc;
-
-  cpu_save_regs(cpu, &regs);
-  rc = int21_fat32_regs(&regs);
-  cpu_restore_regs(cpu, &regs);
-  return rc;
-}
+/* NOTE: there used to be an int21_fat32(void) wrapper here that did
+   cpu_save_regs() / int21_fat32_regs() / cpu_restore_regs() against the LIVE
+   CPU registers. It was left behind when case 0x73 moved to the INT 21h
+   register frame and had no callers (-Wunused-function). Removed rather than
+   kept: cpu_restore_regs() restores the whole gprx set AND flags, so that
+   wrapper would have discarded every result int21_fat32_regs() had just
+   written - it was a trap waiting for the next person to reuse it. The live
+   path is "case 0x73: rc = int21_fat32_regs(regs)", which writes into the
+   guest's frame directly. */
 #endif
 
 /*

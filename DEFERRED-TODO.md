@@ -103,3 +103,39 @@ it is caller-segment and must NOT be re-anchored on DOS_PSP.
       current tree and apply.
 - [ ] src/diag.c is an unwired runtime-diagnostics utility. Consider adapting
       it and gating it behind a CMake switch.
+
+## Stage 9a (dead code from -Wall) - DONE
+- [x] int21_fat32(): the FAT32 API itself is LIVE (case 0x73 -> int21_fat32_regs
+      on the guest frame). Only a leftover int21_fat32(void) wrapper was dead -
+      and it was a trap: it did cpu_save_regs/worker/cpu_restore_regs on the
+      LIVE registers, so restore would have wiped every result the worker wrote.
+      Removed, with a note saying why not to reintroduce it.
+- [x] init_oem(): superseded (ram_top now reads BIOS 0040:0013 directly instead
+      of INT 12h). Removed; rationale moved to the use site.
+- [x] fcom_which_candidate / fcom_set_file_attr / report_file_error: NOT dead -
+      three complete, unwired FreeCOM helpers (PATH/exec search, ATTRIB,
+      per-file error reporting). Kept and marked KEEP_UNUSED with what each is
+      waiting for. New KEEP_UNUSED convention added to portab.h, explicitly
+      warning that it must NOT be used to silence accidental orphans (the
+      SetverGetVersion case), only for deliberately parked complete code.
+
+## Still open
+- [ ] Wire up the three parked FreeCOM helpers (ATTRIB built-in, route the
+      executable search through fcom_which_candidate, use report_file_error in
+      COPY/DEL/MOVE error paths).
+- [ ] fcom/ contains a pair of proposed patches against an OLDER base - analyse,
+      rebase, apply if still relevant.
+- [ ] src/diag.c unwired runtime diagnostics - adapt + CMake switch.
+- [ ] Housekeeping: build version bump, README memory map, 286/386 CMake switch.
+- [~] RAM border in pstore/pload: INVESTIGATED (stage9b). Worse than thought -
+      CHECK_RAM_BOARDER_ENABLED is 0, so ALL bound checks in mem.h are compiled
+      out, and with paging off i386.c sets res->addr1 = raw guest laddr with no
+      mask. A 386 guest can thus write arbitrary host memory past the 6-8 MB
+      PC_RAM buffer. NOT patched: it is a CPU-core hot-path perf/safety tradeoff
+      (and 6 MB PSRAM is non-power-of-two, so no cheap mask) that the core
+      author should decide with a benchmark. Full write-up + costed options in
+      ADVISORY-ram-border.md. The device-string IO path is already bounded; the
+      open primitive is RAM-to-RAM rep movs/stos + single ordinary accesses.
+      Corrects my stage4a claim that this was a backstop - it is not; the
+      stage4a XMS bound is load-bearing.
+- [ ] XMS HMA functions 07h/08h absent from xms_handler.

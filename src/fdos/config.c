@@ -620,11 +620,6 @@ STATIC VOID Dosmem(BYTE * pLine)
   }
 }
 
-static unsigned init_oem(void) {
-  bios_intcall(cpu, 0x12, "OEM 12h");
-  return CPU_AX;
-}
-
 STATIC seg prev_mcb(seg cur_mcb, seg start)
 {
   /* determine prev mcb */
@@ -655,7 +650,11 @@ STATIC void umb_init(void)
 
     /* reset root */
     /* Note: since device drivers can change what is considered top of memory (e.g. move XBDA) we must requery */
-    ram_top = pload16(0x413); /// it was init_oem();
+    /* Conventional memory size, in KB. Read straight from the BIOS data
+       area rather than via INT 12h (the former init_oem() helper, now
+       removed): 0040:0013 is the same value INT 12h returns, and this
+       avoids a guest interrupt during early init. */
+    ram_top = pload16(0x413);
     LoL->uppermem_root = ram_top * 64 - 1;
 
 #ifdef INT21_DIAG

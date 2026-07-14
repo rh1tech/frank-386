@@ -559,6 +559,19 @@ typedef VOID (FAR ASMCFUNC * intvec) (void);
 */
 #define UNREFERENCED_PARAMETER(x) (void)x;
 
+/*
+    KEEP_UNUSED - a function that is deliberately kept although nothing calls
+    it yet: a finished helper whose feature has not been wired up.
+
+    Marking it is not the same as deleting it. -Wunused-function (enabled for
+    src/fdos) is valuable precisely because it finds code that fell out of the
+    call graph by accident - SetverGetVersion() was exactly that, and the fix
+    was to CALL it, not to silence it. So use KEEP_UNUSED only where the code
+    is complete and intentionally parked, and say what it is waiting for.
+    Anything else should either be wired up or removed.
+*/
+#define KEEP_UNUSED __attribute__((unused))
+
 #ifdef I86                      /* commandline overflow - removing /DPROTO TE */
 #define PROTO
 #endif

@@ -2435,7 +2435,9 @@ static int dos_rename_file(CPU *cpu, UWORD command_psp,
   return int21_failed(cpu) ? -(int)CPU_AX : 0;
 }
 
-static void report_file_error(CPU *cpu, UWORD command_psp,
+/* Complete; waiting on the commands that should report per-file errors
+   (COPY/DEL/MOVE error paths). Wire up rather than duplicate. */
+KEEP_UNUSED static void report_file_error(CPU *cpu, UWORD command_psp,
                               struct fcom_guest *g,
                               const char *prefix, const char *name)
 {
@@ -3967,7 +3969,8 @@ static int fcom_get_file_attr(CPU *cpu, UWORD command_psp,
   return 0;
 }
 
-static int fcom_set_file_attr(CPU *cpu, UWORD command_psp,
+/* Complete; waiting on an ATTRIB built-in (no command-table entry yet). */
+KEEP_UNUSED static int fcom_set_file_attr(CPU *cpu, UWORD command_psp,
                               struct fcom_guest *g,
                               const char *name, UWORD attributes)
 {
@@ -4137,7 +4140,9 @@ static int fcom_find_which(CPU *cpu, UWORD command_psp,
   return 0;
 }
 
-static int fcom_which_candidate(CPU *cpu, UWORD command_psp,
+/* Complete; PATH/executable-search helper, waiting on the search to be
+   routed through it (and on a WHICH built-in, if one is added). */
+KEEP_UNUSED static int fcom_which_candidate(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g,
                                 const char *base,
                                 char *result, size_t result_size)
