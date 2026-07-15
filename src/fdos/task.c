@@ -1054,11 +1054,18 @@ static void fcom_copy_exec_tail(char *dst, size_t dst_size, const CommandTail *t
     config.c).
 */
 /* Свободный запас нативного стека, без которого новый уровень EXEC не
-   стартует: замеры -fstack-usage дают ~1.2-1.6КБ (ARM) на уровень
-   вместе с файловым I/O под ним. Лучше честный DE_NOMEM
-   ("Insufficient memory"), чем сползание SP в SCRATCH_X - в стек
-   core1. */
-#define DOSEXEC_NATIVE_STACK_HEADROOM 1280u
+   стартует. Лучше честный DE_NOMEM, чем сползание SP через данные
+   SCRATCH_Y в SCRATCH_X - в стек core1.
+
+   Калибровка: первый порог 1280 был взят по host-замерам x86-64
+   (-fstack-usage), где кадры в 1.5-2 раза толще ARM'овских, и
+   срабатывал на ЛЕГИТИМНОЙ глубине - у оверлейного EXEC (Norton 4B03:
+   на стеке ещё весь родительский DosExec + exec_run_process) и у
+   external из вложенного COMMAND. Порог покрывает только то, что
+   реально нужно НИЖЕ этой точки: загрузчик (DosOpenSft + FatFs
+   open/read) плюс IRQ-запас. Точную цифру дают родные .su-файлы
+   ARM-сборки (включены в CMakeLists); до калибровки по ним - 768. */
+#define DOSEXEC_NATIVE_STACK_HEADROOM 768u
 
 static uint32_t native_stack_free(void)
 {
@@ -1079,8 +1086,18 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   long openresult;
   dos_far_ptr x86_lp;
 
-  if (native_stack_free() < DOSEXEC_NATIVE_STACK_HEADROOM)
-    return DE_NOMEM;
+  {
+    uint32_t free_bytes = native_stack_free();
+
+    if (free_bytes < DOSEXEC_NATIVE_STACK_HEADROOM)
+    {
+      /* Событие редкое и важное: молчаливый DE_NOMEM fcom показывает
+         как "Bad command or filename", маскируя причину. */
+      dos_printf("DOSEXEC: native stack low (%u bytes free), "
+                 "EXEC refused\n", (unsigned)free_bytes);
+      return DE_NOMEM;
+    }
+  }
 
   if ((mode & 0x7f) == EXEC_LOADNGO &&
       fcom_is_command_com((const char *)lp))
