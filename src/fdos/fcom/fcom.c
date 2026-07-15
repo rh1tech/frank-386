@@ -34,6 +34,8 @@ struct fcom_guest {
   keyboard input;
   exec_blk exec_block;
   CommandTail tail;
+  fcb exec_fcb1;
+  fcb exec_fcb2;
   char filename[128];
   char program[128];
   char init_tail[128];
@@ -68,6 +70,8 @@ struct fcom_guest {
   UBYTE exit_requested;
   UBYTE exit_batch_only;
   UWORD exit_code;
+  UBYTE errorlevel;
+  UBYTE exit_reason;
   UWORD dir_stack_used;
   UWORD alias_used;
   UWORD history_used;
@@ -125,7 +129,9 @@ int fcom_is_command_com(const char *name)
  */
 #define FCOM_ENTRY_OFFSET      FCOM_ALIGN16(FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES)
 #define FCOM_ENTRY_BYTES       2u
-#define FCOM_GUARD_OFFSET      FCOM_ALIGN16(FCOM_ENTRY_OFFSET + FCOM_ENTRY_BYTES)
+#define FCOM_TERM_OFFSET       (FCOM_ENTRY_OFFSET + FCOM_ENTRY_BYTES)
+#define FCOM_TERM_BYTES        2u
+#define FCOM_GUARD_OFFSET      FCOM_ALIGN16(FCOM_TERM_OFFSET + FCOM_TERM_BYTES)
 #define FCOM_STACK_BOTTOM      (FCOM_GUARD_OFFSET + FCOM_STACK_GUARD)
 #define FCOM_PROCESS_BYTES     FCOM_ALIGN16(FCOM_STACK_BOTTOM + FCOM_STACK_RESERVE)
 #define FCOM_PROCESS_PARAS     (FCOM_PROCESS_BYTES >> 4)
@@ -143,8 +149,8 @@ _Static_assert(FCOM_ENTRY_OFFSET >= FCOM_DATA_END,
 _Static_assert(FCOM_ENTRY_OFFSET >=
                    FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES,
                "FCOM guest entry overlaps persistent context storage");
-_Static_assert(FCOM_ENTRY_OFFSET + FCOM_ENTRY_BYTES <= FCOM_GUARD_OFFSET,
-               "FCOM guest entry overlaps stack guard");
+_Static_assert(FCOM_TERM_OFFSET + FCOM_TERM_BYTES <= FCOM_GUARD_OFFSET,
+               "FCOM guest entry/terminate hook overlaps stack guard");
 
 static int int21_failed(CPU *cpu)
 {
@@ -1183,6 +1189,67 @@ static int env_name_matches(const char *entry, size_t entry_len,
          strncasecmp(entry, name, name_len) == 0;
 }
 
+static int environment_layout(UWORD command_psp,
+                              size_t *variables_bytes,
+                              size_t *trailer_bytes,
+                              const char **program_name)
+{
+  const char *start = environment_start(command_psp);
+  const char *p = start;
+  unsigned left = 0x8000u;
+  UWORD extra_count;
+  size_t trailer = 2;
+  unsigned i;
+
+  *variables_bytes = 0;
+  *trailer_bytes = 0;
+  *program_name = NULL;
+
+  if (start == NULL)
+    return 0;
+
+  while (left != 0) {
+    size_t n = strnlen(p, left);
+
+    if (n == left)
+      return -1;
+    p += n + 1;
+    left -= (unsigned)n + 1u;
+    if (n == 0) {
+      if (p == start + 1) {
+        if (left == 0 || *p != '\0')
+          return -1;
+        ++p;
+        --left;
+      }
+      break;
+    }
+  }
+
+  if (left < 2)
+    return -1;
+
+  *variables_bytes = (size_t)(p - start);
+  extra_count = (UWORD)(UBYTE)p[0] | ((UWORD)(UBYTE)p[1] << 8);
+  p += 2;
+  left -= 2;
+
+  for (i = 0; i < extra_count; ++i) {
+    size_t n = strnlen(p, left);
+
+    if (n == left)
+      return -1;
+    if (i == 0)
+      *program_name = p;
+    trailer += n + 1;
+    p += n + 1;
+    left -= (unsigned)n + 1u;
+  }
+
+  *trailer_bytes = trailer;
+  return 0;
+}
+
 static int replace_environment_variable(CPU *cpu, UWORD command_psp,
                                         struct fcom_guest *g,
                                         const char *assignment)
@@ -1190,12 +1257,15 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
   const char *equal = strchr(assignment, '=');
   const char *value;
   const char *src;
+  const char *program_name;
   size_t name_len;
   size_t value_len;
+  size_t variables_bytes;
+  size_t trailer_bytes;
   size_t copied_bytes = 0;
   size_t entry_count = 0;
   size_t required;
-  unsigned left = 0x8000u;
+  unsigned left;
   UWORD paras;
   int allocated;
   UWORD new_seg;
@@ -1214,8 +1284,13 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
       memchr(assignment, '\t', name_len) != NULL)
     return -1;
 
+  if (environment_layout(command_psp, &variables_bytes,
+                         &trailer_bytes, &program_name) < 0)
+    return -1;
+
   src = environment_start(command_psp);
-  while (src && left && *src) {
+  left = (unsigned)variables_bytes;
+  while (src && left > 1u && *src) {
     size_t n = strnlen(src, left);
 
     if (n == left)
@@ -1235,12 +1310,7 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
     ++entry_count;
   }
 
-  /*
-   * Environment variables are followed by a double NUL.  After it,
-   * keep a zero extra-string count, which is a valid DOS environment
-   * trailer for this native COMMAND process.
-   */
-  required = copied_bytes + (entry_count ? 1u : 2u) + 2u;
+  required = copied_bytes + (entry_count ? 1u : 2u) + trailer_bytes;
   if (required > 0xfff0u)
     return -8;
 
@@ -1253,8 +1323,8 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
   dst = (char *)ARM_PTR(MK_FP(new_seg, 0));
 
   src = environment_start(command_psp);
-  left = 0x8000u;
-  while (src && left && *src) {
+  left = (unsigned)variables_bytes;
+  while (src && left > 1u && *src) {
     size_t n = strnlen(src, left);
 
     if (n == left) {
@@ -1283,8 +1353,15 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
   if (pos == 0)
     dst[pos++] = '\0';
   dst[pos++] = '\0';
-  dst[pos++] = '\0'; /* extra-string count, low byte */
-  dst[pos++] = '\0'; /* extra-string count, high byte */
+
+  if (environment_start(command_psp) != NULL) {
+    const char *old_trailer = environment_start(command_psp) + variables_bytes;
+    memcpy(dst + pos, old_trailer, trailer_bytes);
+    pos += trailer_bytes;
+  } else {
+    dst[pos++] = '\0';
+    dst[pos++] = '\0';
+  }
 
   process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
   process->ps_environ = new_seg;
@@ -1294,7 +1371,43 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
 
   g->owned_env_seg = new_seg;
   g->owned_env_bytes = (UWORD)(paras << 4);
+  (void)program_name;
   return 0;
+}
+
+static int fcom_initialize_environment(CPU *cpu, UWORD command_psp,
+                                       struct fcom_guest *g)
+{
+  psp *process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
+  const char *program_name = NULL;
+  size_t variables_bytes;
+  size_t trailer_bytes;
+
+  if (process->ps_environ != 0) {
+    const mcb *env_mcb =
+        (const mcb *)ARM_PTR(MK_FP(process->ps_environ - 1u, 0));
+
+    if (env_mcb->m_psp == command_psp) {
+      g->owned_env_seg = process->ps_environ;
+      g->owned_env_bytes = (UWORD)(env_mcb->m_size << 4);
+    }
+  }
+
+  if (environment_layout(command_psp, &variables_bytes,
+                         &trailer_bytes, &program_name) < 0)
+    program_name = NULL;
+
+  if (program_name == NULL || *program_name == '\0')
+    program_name = "COMMAND.COM";
+
+  {
+    int n = snprintf(g->text, sizeof(g->text),
+                     "COMSPEC=%s", program_name);
+    if (n < 0 || (size_t)n >= sizeof(g->text))
+      return -1;
+  }
+
+  return replace_environment_variable(cpu, command_psp, g, g->text);
 }
 
 static int fcom_set_bool_option(const char *arg,
@@ -6381,14 +6494,56 @@ static void build_tail(struct fcom_guest *g, const char *args)
   g->tail.ctBuffer[g->tail.ctCount] = '\r';
 }
 
+static void build_exec_fcbs(CPU *cpu, UWORD command_psp,
+                            struct fcom_guest *g)
+{
+  UWORD source = FCOM_WORK_OFFSET +
+      (UWORD)offsetof(struct fcom_guest, tail.ctBuffer);
+
+  memset(&g->exec_fcb1, 0, sizeof(g->exec_fcb1));
+  memset(&g->exec_fcb2, 0, sizeof(g->exec_fcb2));
+
+  SET_DS(command_psp);
+  CPU_SI = source;
+  SET_ES(command_psp);
+  CPU_DI = FCOM_WORK_OFFSET +
+      (UWORD)offsetof(struct fcom_guest, exec_fcb1);
+  CPU_AX = 0x2901;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM parse FCB1");
+
+  SET_ES(command_psp);
+  CPU_DI = FCOM_WORK_OFFSET +
+      (UWORD)offsetof(struct fcom_guest, exec_fcb2);
+  CPU_AX = 0x2901;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM parse FCB2");
+}
+
+static void capture_exec_status(CPU *cpu, UWORD command_psp,
+                                struct fcom_guest *g, int exec_rc)
+{
+  if (exec_rc < 0) {
+    g->errorlevel = (UBYTE)(-exec_rc);
+    g->exit_reason = 0xff;
+    return;
+  }
+
+  CPU_AH = 0x4d;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM get child status");
+  g->errorlevel = CPU_AL;
+  g->exit_reason = CPU_AH;
+}
+
 static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
 {
   memset(&g->exec_block, 0, sizeof(g->exec_block));
   g->exec_block.exec.env_seg = 0;                 /* inherit process-0 environment */
   g->exec_block.exec.cmd_line = MK_FP(command_psp, FCOM_WORK_OFFSET +
       (UWORD)offsetof(struct fcom_guest, tail));
-  g->exec_block.exec.fcb_1 = MK_FP(0xffff, 0xffff);
-  g->exec_block.exec.fcb_2 = MK_FP(0xffff, 0xffff);
+  build_exec_fcbs(cpu, command_psp, g);
+  g->exec_block.exec.fcb_1 = MK_FP(command_psp, FCOM_WORK_OFFSET +
+      (UWORD)offsetof(struct fcom_guest, exec_fcb1));
+  g->exec_block.exec.fcb_2 = MK_FP(command_psp, FCOM_WORK_OFFSET +
+      (UWORD)offsetof(struct fcom_guest, exec_fcb2));
 
   SET_DS(command_psp);
   CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, filename);
@@ -6396,7 +6551,11 @@ static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
   CPU_BX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, exec_block);
   CPU_AX = 0x4b00;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM EXEC");
-  return int21_failed(cpu) ? -(int)CPU_AX : 0;
+  {
+    int rc = int21_failed(cpu) ? -(int)CPU_AX : 0;
+    capture_exec_status(cpu, command_psp, g, rc);
+    return rc;
+  }
 }
 
 static int exec_program(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
@@ -7049,7 +7208,7 @@ static int execute_if(CPU *cpu, UWORD command_psp,
       } while (*++q != '\0' && *q != ' ' && *q != '\t');
 
       n &= 0xffu;
-      condition = (DosGetRetCode() & 0xffu) >= n;
+      condition = g->errorlevel >= n;
       command = skip_space(q);
     } else {
       char *equal;
@@ -8208,8 +8367,12 @@ UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
   {
     UBYTE *entry = (UBYTE *)ARM_PTR(
         MK_FP(command_psp, FCOM_ENTRY_OFFSET));
+    UBYTE *term = (UBYTE *)ARM_PTR(
+        MK_FP(command_psp, FCOM_TERM_OFFSET));
     entry[0] = 0xeb; /* JMP SHORT -2 */
     entry[1] = 0xfe;
+    term[0] = 0xcd;  /* INT 20h: native terminate hook */
+    term[1] = 0x20;
   }
 
   /*
@@ -8235,6 +8398,7 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
 {
   psp *process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
   UWORD parent_psp = process->ps_parent;
+  intvec terminate_addr = process->ps_isv22;
   struct fcom_guest *g;
   enum fcom_start_action start_action;
   char *start_command = NULL;
@@ -8253,6 +8417,16 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
   strcpy(g->fddebug_name, "stdout");
   g->echo_enabled = 1;
   init_stack_guard(command_psp);
+
+  /* FreeCOM initialize(): COMMAND temporarily owns itself as parent and
+     replaces PSP:0Ah with its terminate hook. */
+  process->ps_parent = command_psp;
+  process->ps_isv22 = MK_FP(command_psp, FCOM_TERM_OFFSET);
+
+  /* FreeCOM initialize(): publish COMSPEC before any startup command runs. */
+  if (fcom_initialize_environment(cpu, command_psp, g) < 0)
+    dos_printf("FCOM: cannot set COMSPEC in environment\n");
+
 #if FCOM_DEBUG
   dos_printf("FCOM: PSP=%04x parent=%04x block=%u paras (%u bytes) "
              "data=%04x..%04x stack=%04x..%04x (%u bytes) %s\n",
@@ -8318,7 +8492,9 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
 
 done:
   fcom_fddebug_close(cpu, command_psp, g);
-  return g->exit_code;
+  process->ps_parent = parent_psp;
+  process->ps_isv22 = terminate_addr;
+  return (UBYTE)(g->exit_requested ? g->exit_code : g->errorlevel);
 }
 
 void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode,
@@ -8329,11 +8505,15 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode,
       fcom_create_process(init_tail, start_mode, parent_psp, environment_seg);
 
   (void)cpu;
-  (void)own_environment;
 
   if (command_psp == 0) {
     dos_printf("FCOM: cannot allocate COMMAND process\n");
     return;
+  }
+
+  if (own_environment && environment_seg != 0) {
+    mcb *env_mcb = (mcb *)ARM_PTR(MK_FP(environment_seg - 1u, 0));
+    env_mcb->m_psp = command_psp;
   }
 
   /*
