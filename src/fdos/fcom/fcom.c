@@ -5277,10 +5277,18 @@ static int fcom_copy_group(CPU *cpu, UWORD command_psp,
   return found;
 }
 
-static void builtin_copy_body(CPU *cpu, UWORD command_psp,
-                              struct fcom_guest *g, char *args,
-                              struct fcom_copy_parse *parse)
+static void builtin_copy(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g, char *args)
 {
+  /*
+   * По результатам инспекции (см. STACK-INVENTORY): fcom_copy_parse -
+   * ~36 байт скаляров, НИЖЕ порога миграции на гостевой стек (данные
+   * >= 48Б одним объектом). Крупные данные COPY и так живут в гостевой
+   * памяти: items - в отдельном guest-сегменте (item_segment), пути - в
+   * g->path/g->path2. Обычный локал; временная kstack-обёртка удалена.
+   */
+  struct fcom_copy_parse parse_storage;
+  struct fcom_copy_parse *parse = &parse_storage;
   unsigned item_count;
   unsigned group_count;
   unsigned destination_index;
@@ -5424,22 +5432,6 @@ static void builtin_copy_body(CPU *cpu, UWORD command_psp,
 }
 
 
-
-/* Кадр builtin_copy был крупнейшим на нативном стеке (512 байт host:
- * struct fcom_copy_parse). Буфер переехал в kstack-арену - см. kernel.c. */
-static void builtin_copy(CPU *cpu, UWORD command_psp,
-                         struct fcom_guest *g, char *args)
-{
-  kstack_mark_t km = kstack_mark();
-  struct fcom_copy_parse *parse = kstack_push(sizeof(*parse));
-
-  if (parse == NULL) {
-    dos_puts(cpu, command_psp, g, "Out of memory.\r\n");
-    return;
-  }
-  builtin_copy_body(cpu, command_psp, g, args, parse);
-  kstack_release(km);
-}
 
 static int fcom_alias_name_char(int ch)
 {

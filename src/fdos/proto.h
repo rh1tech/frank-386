@@ -386,12 +386,6 @@ ULONG SftGetFsize(int sft_idx);
 void request_terminate(UBYTE exit_code, UBYTE exit_type);
 bool terminate_requested(void);
 
-/* kstack: арена ядра для крупных временных буферов (kernel.c) */
-typedef uint32_t kstack_mark_t;
-kstack_mark_t kstack_mark(void);
-void *kstack_push(size_t n);
-void kstack_release(kstack_mark_t mark);
-uint32_t kstack_low_water_bytes(void);
 COUNT exec_run_native_command(UWORD child_psp_seg, UWORD fcbcode);
 UWORD DosGetRetCode(void);
 

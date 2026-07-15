@@ -651,10 +651,10 @@ static COUNT exec_run_process(const struct exec_process_start *start)
    * when the guest supplied an odd SP, is released together with the
    * frame when restore_ctx() reinstates parent_sp.
    *
-   * Do not use kstack here.  This object belongs to the suspended DOS
-   * process, remains live for the complete child lifetime, and nested
-   * EXEC levels must therefore consume their respective parent stacks
-   * rather than one shared native/kernel arena.
+   * This object belongs to the suspended DOS process, remains live for
+   * the complete child lifetime, and nested EXEC levels must therefore
+   * consume their respective parent stacks rather than any shared
+   * arena.
    */
   frame_sp = (UWORD)((parent_sp - sizeof(*saved)) & (UWORD)~1u);
   CPU_SP = frame_sp;
@@ -1118,11 +1118,21 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   if ((mode & 0x7f) == EXEC_LOADNGO &&
       fcom_is_command_com((const char *)lp))
   {
-    kstack_mark_t km = kstack_mark();
-    char *tail = kstack_push(sizeof(((CommandTail *)0)->ctBuffer) + 1);
+    /*
+     * M1 (truename-стиль): хвост командной строки ребёнка собирается на
+     * ТЕКУЩЕМ гостевом стеке процесса-родителя, а не в нативном кадре и
+     * не в общей арене. Живёт только до копирования в PSP:80h ребёнка
+     * (fcom_create_process) и в FCB-параметры (patchPSP); SP
+     * восстанавливается ДО глубокого вложенного исполнения, поэтому
+     * вложенные EXEC-уровни этот резерв не наследуют.
+     */
+    const UWORD tail_bytes =
+        (UWORD)(sizeof(((CommandTail *)0)->ctBuffer) + 1);
+    UWORD saved_guest_sp = CPU_SP;
+    UWORD tail_sp = (UWORD)((saved_guest_sp - tail_bytes) & (UWORD)~1u);
+    char *tail = (char *)ARM_PTR(MK_FP(CPU_SS, tail_sp));
 
-    if (tail == NULL)
-      return DE_NOMEM;
+    CPU_SP = tail_sp;
     const CommandTail *command_tail = NULL;
     UWORD child_env_mcb = 0;
     COUNT env_rc;
@@ -1139,7 +1149,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
      */
     env_rc = ChildEnv(ep, &child_env_mcb, (char *)lp);
     if (env_rc < SUCCESS) {
-      kstack_release(km);
+      CPU_SP = saved_guest_sp;
       return env_rc;
     }
 
@@ -1155,7 +1165,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
                                       child_env_mcb + 1);
       if (command_psp == 0) {
         DosMemFree(child_env_mcb);
-        kstack_release(km);
+        CPU_SP = saved_guest_sp;
         return DE_NOMEM;
       }
 
@@ -1168,10 +1178,11 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
        */
       fcbcode=patchPSP(command_psp - 1,child_env_mcb,ep,lp);
 
-      /* tail уже скопирован в PSP:80h ребёнка (fcom_create_process) и
-         в FCB-параметры (patchPSP) - арена освобождается ДО глубокого
-         вложенного исполнения. */
-      kstack_release(km);
+      /* tail скопирован в PSP:80h ребёнка и в FCB-параметры - резерв
+         на гостевом стеке родителя освобождается ДО вложенного
+         исполнения (exec_run_process возьмёт свой exec_child_context
+         уже ниже ИСХОДНОГО SP родителя). */
+      CPU_SP = saved_guest_sp;
       return exec_run_native_command(command_psp,fcbcode);
     }
   }
