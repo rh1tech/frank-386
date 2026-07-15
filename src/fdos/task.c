@@ -494,6 +494,17 @@ void request_terminate(UBYTE exit_code, UBYTE exit_type)
 }
 
 /*
+ * Наблюдатель terminate_flag для путей, где upstream-код стоит ПОСЛЕ
+ * noreturn-вызова (spawn_int23() в chario.c): порт не может развернуть
+ * нативный C-стек прыжком в int21_handler, поэтому вызывающие циклы
+ * обязаны сами прекратить I/O, как только терминация запрошена.
+ */
+bool terminate_requested(void)
+{
+  return terminate_flag;
+}
+
+/*
  * Return AX-packed AL=last exit code, AH=exit type for INT 21h/AH=4Dh.
  *
  * The status is consumed by the read, matching upstream FreeDOS:
@@ -515,6 +526,7 @@ struct exec_child_context
   UBYTE indos;
   UBYTE error_mode;
   bool terminate;
+  bool native_done;
 };
 
 static void exec_enter_child(struct exec_child_context *saved,
@@ -526,13 +538,25 @@ static void exec_enter_child(struct exec_child_context *saved,
   saved->indos=internal_data->InDOS;
   saved->error_mode=internal_data->ErrorMode;
   saved->terminate=terminate_flag;
+  /* native_done is a shared signalling channel between three users:
+     request_terminate(), bios_intcall()'s waiter and cpu_far_call()'s
+     waiter. When this EXEC is entered from inside an OUTER pc_step()
+     loop (a guest parent - e.g. a file manager - spawning a native
+     COMMAND), the outer level may have its own pending state; it must
+     be part of this stack frame, not destroyed by the blanket clears
+     that used to live on both the enter and leave paths. */
+  saved->native_done=cpu->native_done;
   internal_data->cu_psp=child_psp_seg;
   internal_data->dta=MK_FP(child_psp_seg,offsetof(psp,ps_cmd));
   SET_SS(FP_SEG(stack)); CPU_SP=FP_OFF(stack);
   SET_DS(dses); SET_ES(dses);
   terminate_flag=false;
-  term_exit_code=0;
-  term_exit_type=0;
+  /* term_exit_code/term_exit_type are intentionally NOT cleared and NOT
+     part of this per-level context: upstream FreeDOS keeps the AH=4Dh
+     return status in a single kernel global (the SDA), so starting a
+     new child must not erase the status a previous sibling left for our
+     caller, and the status the child leaves at its termination must
+     survive exec_leave_child() for the parent to read via AH=4Dh. */
   cpu->native_done=false;
   if (internal_data->InDOS != 0) --internal_data->InDOS;
 }
@@ -550,7 +574,7 @@ static void exec_release_child(UWORD child_psp_seg)
 static void exec_leave_child(struct exec_child_context *saved,
                              UWORD child_psp_seg)
 {
-  cpu->native_done = false;
+  cpu->native_done = saved->native_done;
   terminate_flag = saved->terminate;
   internal_data->InDOS = saved->indos;
   /* Match return_user(): suppress recursive critical-error aborts
@@ -604,7 +628,18 @@ static COUNT exec_run_process(const struct exec_process_start *start)
   if (start->kind == EXEC_PROCESS_NATIVE_COMMAND)
   {
     UBYTE exit_code = fcom_process_main(cpu, start->child_psp);
-    request_terminate(exit_code, 0);
+
+    /* The native COMMAND has no pc_step() loop of its own, so
+       request_terminate() would be a category error here: its
+       cpu->native_done = true targets "the innermost ACTIVE pc_step()
+       batch" - which at this point is the OUTER loop of a guest
+       parent (if any), producing a spurious stop/clear pulse inside
+       someone else's CPU loop. All the native process needs is what
+       return_user() records for the parent's AH=4Dh: the exit status.
+       exec_release_child() below reads term_exit_type for the
+       keep-resident decision, so it must be set on this path too. */
+    term_exit_code = exit_code;
+    term_exit_type = 0;
   }
   else
   {

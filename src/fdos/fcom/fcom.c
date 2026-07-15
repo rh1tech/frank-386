@@ -20,6 +20,13 @@ int snprintf(char *s, size_t n, const char *fmt, ...);
 
 struct fcom_guest;
 static int fcom_write(CPU *cpu, UWORD command_psp, UWORD offset, UWORD count);
+/* chkCBreak() modes - include/misc.h */
+#define BREAK_BATCHFILE       1
+#define BREAK_ENDOFBATCHFILES 2
+#define BREAK_INPUT           3
+#define BREAK_FORCMD          5
+static int fcom_chk_cbreak(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g, int mode);
 static void build_tail(struct fcom_guest *g, const char *args);
 static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g);
 static int execute_command_line(CPU *cpu, UWORD command_psp, struct fcom_guest *g, char *line);
@@ -66,6 +73,7 @@ struct fcom_guest {
   char pipe_temp[128];
   UBYTE pipe_depth;
   UBYTE batch_active;
+  UBYTE cbreak_leave_all;   /* chkCBreak() 'leaveAll': abort ALL batch files */
   UBYTE echo_enabled;
   UBYTE exit_requested;
   UBYTE exit_batch_only;
@@ -129,9 +137,35 @@ int fcom_is_command_com(const char *name)
  */
 #define FCOM_ENTRY_OFFSET      FCOM_ALIGN16(FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES)
 #define FCOM_ENTRY_BYTES       2u
+/* FreeCOM terminate hook (PSP:0Ah target while COMMAND self-parents):
+   a real INT 20h in guest memory. */
 #define FCOM_TERM_OFFSET       (FCOM_ENTRY_OFFSET + FCOM_ENTRY_BYTES)
 #define FCOM_TERM_BYTES        2u
-#define FCOM_GUARD_OFFSET      FCOM_ALIGN16(FCOM_TERM_OFFSET + FCOM_TERM_BYTES)
+/*
+ * FreeCOM's INT 23h handler (shell/cb_catch.asm cbreak_handler):
+ *
+ *     inc WORD [CS:CBreakCounter]
+ *     clc                 ;; tell DOS to proceed
+ *     retf 2
+ *
+ * The native shell has no code image of its own in guest memory, but the
+ * Ctrl-Break handler MUST be genuine guest code: DOS (spawn_int23 /
+ * handle_break in this port) invokes it through the IVT in guest context,
+ * and its return style (RETF 2 with Carry clear = "resume") is what keeps
+ * ^C from terminating the shell.  Nine bytes right after the JMP $ entry:
+ *
+ *     2E FF 06 ll hh      inc word [cs:FCOM_CBREAK_COUNT_OFFSET]
+ *     F8                  clc
+ *     CA 02 00            retf 2
+ *
+ * followed by the CBreakCounter word itself.  fcom_chk_cbreak() (the
+ * chkCBreak() port) polls and clears the counter from native code.
+ */
+#define FCOM_CBREAK_STUB_OFFSET   (FCOM_TERM_OFFSET + FCOM_TERM_BYTES)
+#define FCOM_CBREAK_STUB_BYTES    9u
+#define FCOM_CBREAK_COUNT_OFFSET  (FCOM_CBREAK_STUB_OFFSET + FCOM_CBREAK_STUB_BYTES)
+#define FCOM_CBREAK_AREA_END      (FCOM_CBREAK_COUNT_OFFSET + 2u)
+#define FCOM_GUARD_OFFSET      FCOM_ALIGN16(FCOM_CBREAK_AREA_END)
 #define FCOM_STACK_BOTTOM      (FCOM_GUARD_OFFSET + FCOM_STACK_GUARD)
 #define FCOM_PROCESS_BYTES     FCOM_ALIGN16(FCOM_STACK_BOTTOM + FCOM_STACK_RESERVE)
 #define FCOM_PROCESS_PARAS     (FCOM_PROCESS_BYTES >> 4)
@@ -149,8 +183,8 @@ _Static_assert(FCOM_ENTRY_OFFSET >= FCOM_DATA_END,
 _Static_assert(FCOM_ENTRY_OFFSET >=
                    FCOM_BATCH_CONTEXT_OFFSET + FCOM_BATCH_CONTEXT_BYTES,
                "FCOM guest entry overlaps persistent context storage");
-_Static_assert(FCOM_TERM_OFFSET + FCOM_TERM_BYTES <= FCOM_GUARD_OFFSET,
-               "FCOM guest entry/terminate hook overlaps stack guard");
+_Static_assert(FCOM_CBREAK_AREA_END <= FCOM_GUARD_OFFSET,
+               "FCOM guest entry/terminate hook/cbreak stub overlaps stack guard");
 
 static int int21_failed(CPU *cpu)
 {
@@ -192,6 +226,13 @@ static struct fcom_batch_context *fcom_batch_context_storage(
 {
   return (struct fcom_batch_context *)ARM_PTR(
       MK_FP(command_psp, FCOM_BATCH_CONTEXT_OFFSET));
+}
+
+/* cb_catch.asm CBreakCounter - lives in guest memory because the INT 23h
+   stub increments it with a real CS-relative INC (see fcom_create_process) */
+static UWORD *fcom_cbreak_counter(UWORD command_psp)
+{
+  return (UWORD *)ARM_PTR(MK_FP(command_psp, FCOM_CBREAK_COUNT_OFFSET));
 }
 
 static void init_stack_guard(UWORD command_psp)
@@ -259,6 +300,19 @@ static unsigned fcom_readline(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
   CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, input);
   CPU_AH = 0x0a;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM input");
+
+  /*
+   * cmdinput.c:188: if(cbreak) ch = KEY_CTL_C; - a ^C/^Break during line
+   * input abandons the line.  The INT 23h stub incremented CBreakCounter
+   * and DOS resumed the read; poll-and-clear here (chkCBreak(BREAK_INPUT))
+   * and hand back an empty line so the main loop redisplays the prompt.
+   */
+  if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_INPUT)) {
+    dos_puts(cpu, command_psp, g, "\n");
+    g->input.kb_count = 0;
+    g->input.kb_buf[0] = '\0';
+    return 0;
+  }
 
   /*
    * DOS buffered input echoes Enter as CR. Complete the console
@@ -6634,6 +6688,571 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
 }
 
 
+/* --- LOADHIGH: port of shell/loadhigh.c --------------------------------
+ *
+ * FreeCOM 0.86 ships with INCLUDE_CMD_LOADHIGH enabled (config.h:148) and
+ * INCLUDE_CMD_FAKELOADHIGH commented out - LH/LOADHIGH are the REAL
+ * command that arranges upper-memory loading, not an alias of CALL.  The
+ * mechanism is pure DOS API state:
+ *
+ *   cmd_loadhigh(): save UMB link, call lh_lf(), restore UMB link.
+ *   lh_lf():        save alloc strategy; findUMBRegions(); parseArgs();
+ *                   loadhigh_prepare(); execute(fnam, args, 1);
+ *                   free blocker blocks; restore strategy.
+ *   loadhigh_prepare(): link UMBs, strategy=first-fit; walk every region,
+ *                   DosAlloc() each free block; blocks the program may
+ *                   use are freed again, blocks it must not touch stay
+ *                   allocated ("blockers"); finally strategy = 0x80
+ *                   (first fit high) when a usable UMB exists.
+ *
+ * DosExec()'s ExecMemAlloc honours mem_access_mode (task.c), so the child
+ * really lands in the UMB.  LOADFIX keeps its earlier separate port
+ * (builtin_loadfix/fcom_loadfix_prepare); upstream funnels both commands
+ * through lh_lf(), the difference being only *_prepare() - noted, not
+ * unified here to avoid touching the proven LOADFIX path.
+ *
+ * Bookkeeping arrays were malloc()ed in FreeCOM's private heap - equally
+ * invisible to other guest programs - so native static storage is a
+ * faithful home for them (one shell invocation at a time, like the
+ * original globals).
+ */
+
+enum {
+  LH_OK = 0,
+  LH_ERR_SILENT = -3,
+  LH_ERR_FILE_NOT_FOUND = 2,
+  LH_ERR_MCB_CHAIN = 7,
+  LH_ERR_OUT_OF_MEMORY = 8,
+  LH_ERR_INVALID_PARMS = 87
+};
+
+struct lh_umbregion {
+  UWORD start;              /* start of the region */
+  UWORD end;                /* end of the region */
+  UWORD minSize;            /* minimum free size, given by the L switch */
+  int access;               /* does the program have access to this region? */
+};
+
+#define LH_MAX_BLOCKS  256
+#define LH_MAX_REGIONS 64
+
+static UWORD lh_block[LH_MAX_BLOCKS];   /* blocks the program can't use  */
+static int   lh_allocatedBlocks;
+static struct lh_umbregion lh_umbRegion[LH_MAX_REGIONS];
+static int   lh_umbRegions;             /* region 0 = conventional memory */
+static int   lh_upper_flag;             /* load the program high?         */
+static int   lh_optS;
+static char  lh_optL[64];
+static int   lh_optL_present;
+static char  lh_fnam[128];
+
+static mcb *lh_mcb(UWORD mseg)
+{
+  return (mcb *)ARM_PTR(MK_FP(mseg, 0));
+}
+
+/* suppl DosAlloc(): INT 21h/48h - returns the DATA segment (MCB+1) or 0 */
+static UWORD lh_DosAlloc(UWORD size)
+{
+  seg mseg = 0;
+  UWORD largest = 0;
+
+  if (DosMemAlloc(size, internal_data->mem_access_mode, &mseg, &largest)
+      < SUCCESS)
+    return 0;
+  return (UWORD)(mseg + 1);
+}
+
+/* suppl DOSfree(): INT 21h/49h - argument is the DATA segment */
+static void lh_DOSfree(UWORD bl)
+{
+  (void)DosMemFree((UWORD)(bl - 1));
+}
+
+/* suppl DOSresize(): INT 21h/4Ah - argument is the DATA segment */
+static void lh_DOSresize(UWORD bl, UWORD size)
+{
+  UWORD maximum = 0;
+
+  (void)DosMemChange(bl, size, &maximum);
+}
+
+/* strtol(c, &c, 10) for the /L list; -1 on no digits (matches the
+   original's -1 minsize sentinel probing) */
+static long lh_scan_long(char *p, char **endp)
+{
+  long v = 0;
+  int neg = 0;
+  int any = 0;
+
+  if (*p == '-') { neg = 1; ++p; }
+  while (*p >= '0' && *p <= '9') {
+    v = v * 10 + (*p - '0');
+    any = 1;
+    ++p;
+  }
+  *endp = p;
+  if (!any)
+    return -1;
+  return neg ? -v : v;
+}
+
+/* findUMBRegions(): scan the MCB chain for all active memory regions.
+   Region 0 is the conventional memory. */
+static int lh_findUMBRegions(void)
+{
+  struct lh_umbregion *region = lh_umbRegion;
+  UWORD mseg = LoL->first_mcb;          /* GetFirstMCB() */
+  mcb *m = lh_mcb(mseg);
+  char sig;
+  int i;
+
+  lh_umbRegions = 0;
+  region->start = mseg;
+
+  /* First, find the end of the conventional memory:
+   * Turn UMB link off, and track the MCB chain to the end. */
+
+  DosUmbLink(0);
+
+  while (m->m_type == 'M') {
+    mseg = (UWORD)(mseg + m->m_size + 1);       /* mcbNext */
+    m = lh_mcb(mseg);
+  }
+
+  if (m->m_type != 'Z')
+    return LH_ERR_MCB_CHAIN;
+
+  /* If the last memory block in conventional memory is "reserved",
+   * conventional memory ends at the paragraph before the block. If
+   * the last block is an ordinary one, conventional memory ends at
+   * the last paragraph of the block. */
+
+  if (m->m_psp == 8 && !memcmp(m->m_name, "SC", 2))
+    region->end = (UWORD)(mseg - 1);
+  else
+    region->end = (UWORD)(mseg + m->m_size);
+
+  region++;
+  region->start = 0;
+
+  /* Turn UMB link on. If MS-DOS UMBs are available, the signature of
+   * the last conventional memory block will change from 'Z' to 'M'. */
+
+  DosUmbLink(1);
+
+  if (m->m_type == 'M')
+  {                             /* UMBs are available */
+    mseg = (UWORD)(mseg + m->m_size + 1);       /* go to next block */
+    m = lh_mcb(mseg);
+
+    /* This loop searches for the regions, by searching either for
+     * special MCBs or 'reserved' memory regions. */
+
+    do
+    {
+      /* port safety net: the original trusted its 64-entry array */
+      if (region - lh_umbRegion >= LH_MAX_REGIONS - 1)
+        return LH_ERR_MCB_CHAIN;
+
+      sig = (char)m->m_type;
+
+      if (m->m_psp == 8 && !memcmp(m->m_name, "SC", 2))
+      {
+        /* this is a 'hole' in memory */
+        if (region->start)
+        {
+          region->end = (UWORD)(mseg - 1);
+          region++;
+          region->start = 0;
+        }
+      }
+      else
+      {
+        /* In MS-DOS 6.x, each UMB region starts with a 'major' mcb
+         * that is outside the ordinary MCB chain. This mcb defines
+         * the size of the whole region. */
+
+        mcb *umb_mcb = lh_mcb((UWORD)(mseg - 1));
+
+        if ((umb_mcb->m_type == 'Z' || umb_mcb->m_type == 'M')
+         && !memcmp(umb_mcb->m_name, "UMB     ", 8))
+          {
+            /* This is the signature of the special MS-DOS MCBs */
+
+            region->start = umb_mcb->m_psp;
+            region->end = (UWORD)(umb_mcb->m_psp + umb_mcb->m_size - 1);
+            if ((sig = (char)umb_mcb->m_type) == 'M')
+              region->end--;
+            region++;
+            region->start = 0;
+            mseg = (UWORD)((mseg - 1) + umb_mcb->m_size);
+            m = lh_mcb(mseg);
+            if (sig == 'Z')
+              break;
+            continue;
+          }
+        if (!region->start)
+          region->start = mseg;
+      }
+
+      if (sig == 'Z')
+      {
+        region->end = (UWORD)(mseg + m->m_size);
+        region++;
+        break;
+      }
+
+      mseg = (UWORD)(mseg + m->m_size + 1);     /* mcbNext */
+      m = lh_mcb(mseg);
+    }
+    while (sig == 'M');
+
+    if (sig != 'Z')
+      return LH_ERR_MCB_CHAIN;
+  }
+  lh_umbRegions = (int)(region - lh_umbRegion);
+
+  /* By default, the program will have access to all UMB regions. This
+   * may be modified by command-line arguments. */
+
+  for (i = 0; i < lh_umbRegions; i++)
+  {
+    lh_umbRegion[i].access = 1;
+    lh_umbRegion[i].minSize = 0xffff;
+  }
+
+  return LH_OK;
+}
+
+/* loadhigh_prepare(): allocate memory as necessary.  All memory that
+   the program is not allowed to access must be temporarily allocated
+   while the program is running. */
+static int lh_loadhigh_prepare(void)
+{
+  int i;
+  struct lh_umbregion *region = lh_umbRegion;
+  static UWORD availBlock[LH_MAX_BLOCKS];
+  UWORD availBlocks = 0;
+
+  /* Set the UMB link and malloc strategy */
+  DosUmbLink(1);
+  internal_data->mem_access_mode = FIRST_FIT;
+
+  /* Call to force DOS to catenate any successive free memory blocks */
+  (void)lh_DosAlloc(0xffff);
+
+  /* See the original's long comment: when the loop finishes, lh_block[]
+   * holds every free block the program must NOT use, availBlock[] every
+   * free block it may use. */
+
+  for (i = 0; i < lh_umbRegions; i++, region++)
+  {
+    UWORD mseg;
+    mcb *m;
+    int startBlock = lh_allocatedBlocks;
+    int found_one = 0;
+
+    for (mseg = region->start, m = lh_mcb(mseg)
+     ; mseg < region->end && m->m_type == 'M' && m->m_size > 0
+     ; mseg = (UWORD)(mseg + m->m_size + 1), m = lh_mcb(mseg))
+    {
+      if (!m->m_psp)
+      {
+        /* Found a free memory block: allocate it */
+        UWORD bl = lh_DosAlloc(m->m_size);
+
+        if (bl != (UWORD)(mseg + 1))  /* Did we get the block we wanted? */
+          return LH_ERR_MCB_CHAIN;
+
+        if (lh_allocatedBlocks >= LH_MAX_BLOCKS ||
+            availBlocks >= LH_MAX_BLOCKS)
+          return LH_ERR_OUT_OF_MEMORY;  /* port safety net */
+
+        if (region->access)     /* /L option allows access to this region */
+        {
+          if (region->minSize == 0xffff ||      /* no minimum size set
+                                                   --> use it */
+              (!lh_optS && found_one) ||  /* a found previous block means to
+                                make this region available regardless
+                                of the size of this block; with an active
+                                /S option only one block per region is
+                                allowed. */
+              (!(lh_optS && found_one) &&
+               m->m_size >= region->minSize))
+          {
+
+            availBlock[availBlocks++] = bl;
+
+            if (lh_optS)
+              lh_DOSresize(bl, region->minSize);
+            else if (lh_allocatedBlocks > startBlock)
+            {
+              /* These _previously_ found blocks had been found
+                 too small, but must be made available now as this
+                 region is available */
+              memcpy(availBlock + availBlocks
+               , lh_block + startBlock
+               , (size_t)(lh_allocatedBlocks - startBlock)
+                   * sizeof(*lh_block));
+              availBlocks = (UWORD)(availBlocks +
+                  (lh_allocatedBlocks - startBlock));
+              lh_allocatedBlocks = startBlock;
+            }
+            found_one = 1;
+
+            continue;
+          }
+        }
+        lh_block[lh_allocatedBlocks++] = bl;  /* no access to this block */
+      }
+    }
+  }
+
+  /* Blocks the program may use are released again. */
+
+  for (i = 0; i < (int)availBlocks; i++)
+    lh_DOSfree(availBlock[i]);
+
+  /* If the program is to be loaded in upper memory, set the malloc
+   * strategy to 'first fit high', otherwise to 'first fit low'. */
+
+  internal_data->mem_access_mode = lh_upper_flag ? FIRST_FIT_U : FIRST_FIT;
+  return LH_OK;
+}
+
+/* parseArgs(): only '/' is a switch character; the first argument not
+   starting with '/' is the filename; LOADHIGH accepts /L and /S. */
+static int lh_parseArgs(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
+                        char *cmdline, char **fnam, char **rest)
+{
+  char *c;
+
+  /* leadOptions(opt_lh) */
+  cmdline = skip_space(cmdline);
+  while (*cmdline == '/')
+  {
+    char opt = (char)toupper((unsigned char)cmdline[1]);
+
+    if (opt == '\0')
+      return LH_ERR_INVALID_PARMS;
+    cmdline += 2;
+    if (opt == 'S')
+      lh_optS = 1;
+    else if (opt == 'L')
+    {
+      size_t n = 0;
+
+      if (*cmdline == ':' || *cmdline == '=')
+        ++cmdline;
+      while (*cmdline != '\0' && *cmdline != ' ' && *cmdline != '\t')
+      {
+        if (n < sizeof(lh_optL) - 1)
+          lh_optL[n++] = *cmdline;
+        ++cmdline;
+      }
+      lh_optL[n] = '\0';
+      lh_optL_present = 1;
+    }
+    else
+      return LH_ERR_INVALID_PARMS;      /* optErr(): unknown switch */
+    cmdline = skip_space(cmdline);
+  }
+
+  if (lh_optL_present)
+  {
+    int i, r;
+    char *lc = lh_optL;
+
+    /* (swapContext = FALSE is a no-op: the native shell never swaps) */
+
+    /* Disable access to all UMB regions not listed here */
+    for (i = 1; i < lh_umbRegions; i++)
+      lh_umbRegion[i].access = 0;
+
+    r = 0;
+
+    do
+    {
+      long region_minSize = -1;   /* flag: no minsize was specified */
+      int region_number = (int)lh_scan_long(lc, &lc);
+
+      if (*lc == ',')
+      {
+        long larg;
+
+        ++lc;
+        if ((larg = lh_scan_long(lc, &lc)) != -1L)
+          region_minSize = (larg + 15) >> 4;    /* topara() */
+      }
+
+      if (region_number >= lh_umbRegions || region_number < 0)
+      {
+        /* TEXT_ERROR_REGION_WARNING */
+        char msg[48];
+
+        snprintf(msg, sizeof(msg),
+                 "Illegal memory region %d - ignored.\r\n", region_number);
+        dos_puts(cpu, command_psp, g, msg);
+      }
+      else
+      {
+        if (!r && !region_number)
+          lh_upper_flag = 0;
+
+        r++;
+        lh_umbRegion[region_number].minSize =
+            region_minSize < 0 ? 0xffff : (UWORD)region_minSize;
+        lh_umbRegion[region_number].access = 1;
+      }
+    }
+    while (*lc++ == ';');
+    if (lc[-1])
+      cmdline = (char *)"";     /* to cause an error later */
+  }
+
+  /* does a file name follow? */
+  if (!*cmdline)
+    return LH_ERR_INVALID_PARMS;
+
+  if (lh_optS && !lh_optL_present)
+    return LH_ERR_INVALID_PARMS;
+
+  /* The next argument is the file name (unquote()); the rest of the
+   * command line is passed as parameters to the new program. */
+
+  {
+    size_t n = 0;
+
+    if (*cmdline == '"')
+    {
+      ++cmdline;
+      while (*cmdline != '\0' && *cmdline != '"')
+      {
+        if (n < sizeof(lh_fnam) - 1)
+          lh_fnam[n++] = *cmdline;
+        ++cmdline;
+      }
+      if (*cmdline == '"')
+        ++cmdline;
+    }
+    else
+    {
+      while (*cmdline != '\0' && *cmdline != ' ' && *cmdline != '\t')
+      {
+        if (n < sizeof(lh_fnam) - 1)
+          lh_fnam[n++] = *cmdline;
+        ++cmdline;
+      }
+    }
+    lh_fnam[n] = '\0';
+    c = cmdline;
+  }
+
+  *fnam = lh_fnam;
+  *rest = skip_space(c);        /* skipdm() */
+
+  return LH_OK;
+}
+
+/* lh_error(): print error messages */
+static void lh_error(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
+                     int errcode)
+{
+  switch (errcode)
+  {
+    case LH_ERR_INVALID_PARMS:
+      dos_puts(cpu, command_psp, g, "Syntax error\r\n");
+      break;
+
+    case LH_ERR_FILE_NOT_FOUND:
+      dos_puts(cpu, command_psp, g, "File not found\r\n");
+      break;
+
+    case LH_ERR_OUT_OF_MEMORY:
+      dos_puts(cpu, command_psp, g, "Out of memory\r\n");
+      break;
+
+    case LH_ERR_MCB_CHAIN:
+      dos_puts(cpu, command_psp, g, "Bad MCB chain\r\n");
+      break;
+
+    case LH_ERR_SILENT:
+      break;
+
+    default:
+      dos_puts(cpu, command_psp, g, "LOADHIGH: internal error\r\n");
+      break;
+  }
+}
+
+/* cmd_loadhigh() + lh_lf() */
+static int builtin_loadhigh(CPU *cpu, UWORD command_psp,
+                            struct fcom_guest *g, char *args)
+{
+  int old_link = (int)(LoL->uppermem_link & 1);   /* dosGetUMBLinkState() */
+  COUNT old_strat = internal_data->mem_access_mode; /* dosGetAllocStrategy() */
+  char *fnam = NULL;
+  char *rest = NULL;
+  int rc;
+  int i;
+
+  /* initialise() */
+  lh_allocatedBlocks = 0;
+  lh_upper_flag = 1;
+  lh_optS = 0;
+  lh_optL_present = 0;
+  lh_optL[0] = '\0';
+  /* (FEATURE_XMS_SWAP transient relocation: no-op for the native shell) */
+
+  rc = lh_findUMBRegions();
+  if (rc == LH_OK)
+  {
+    rc = lh_parseArgs(cpu, command_psp, g, args, &fnam, &rest);
+    if (rc == LH_OK)
+    {
+      /* command line was OK - allocate the memory */
+      rc = lh_loadhigh_prepare();
+
+      /* finally, execute the file */
+      if (!rc)
+      {
+        int exec_rc;
+
+        /* execute(fnam, args, 1): externals only -
+           command.c:206 "loadhigh/loadfix don't do batch files" */
+        strncpy(g->filename, fnam, sizeof(g->filename) - 1);
+        g->filename[sizeof(g->filename) - 1] = '\0';
+        exec_rc = exec_external(cpu, command_psp, g, rest);
+        if (exec_rc == -2 || exec_rc == -3)
+          rc = LH_ERR_FILE_NOT_FOUND;
+        else if (exec_rc < 0)
+          rc = LH_ERR_SILENT;   /* exec path reported its own error */
+      }
+    }
+  }
+
+  /** Clean Up **/
+  /* free any memory that was allocated to prevent the program from
+     using it */
+  for (i = 0; i < lh_allocatedBlocks; i++)
+    lh_DOSfree(lh_block[i]);
+  lh_allocatedBlocks = 0;
+
+  /* Restore DOS malloc strategy to its original value. */
+  internal_data->mem_access_mode = old_strat;
+
+  /* cmd_loadhigh(): restore UMB link state to its original value. */
+  DosUmbLink((unsigned)old_link);
+
+  /* if any error occurred, print it */
+  if (rc)
+    lh_error(cpu, command_psp, g, rc);
+
+  return 0;
+}
+
+
 static int name_has_extension_ci(const char *name, const char *extension)
 {
   const char *dot = NULL;
@@ -6905,6 +7524,85 @@ static int expand_batch_parameters(struct fcom_guest *g, char *line)
   return 1;
 }
 
+/*
+ * Port of lib/cbreak.c chkCBreak().
+ *
+ * ctrlBreak (CBreakCounter) lives in guest memory next to the INT 23h
+ * stub; 'leaveAll' lives in struct fcom_guest (one shell instance = one
+ * guest block, same lifetime as the original's static).
+ *
+ * The prompt is PROMPT_CANCEL_BATCH from strings/DEFAULT.lng:
+ * "Terminate batch file '%s' (Yes/No/All) ? " with metakeys YNA.
+ * The key is read with AH=07h (direct input, no ^C check) so the prompt
+ * itself cannot recurse into the break machinery; upstream cgetchar()
+ * differs only in that detail.  BREAK_* constants (include/misc.h) are
+ * defined at the top of this file next to the forward declaration.
+ */
+static int fcom_chk_cbreak(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g, int mode)
+{
+  UWORD *counter = fcom_cbreak_counter(command_psp);
+
+  switch (mode)
+  {
+    case BREAK_ENDOFBATCHFILES:
+      g->cbreak_leave_all = 0;
+      return 0;
+
+    case 0:
+      if (!g->batch_active)
+        goto justCheck;
+      /* fall through */
+
+    case BREAK_BATCHFILE:
+      if (g->cbreak_leave_all)
+        return 1;
+      if (*counter == 0)
+        return 0;
+
+      dos_puts(cpu, command_psp, g, "Terminate batch file '");
+      dos_puts(cpu, command_psp, g,
+               g->batch_name[0] != '\0' ? g->batch_name : "<<unknown>>");
+      dos_puts(cpu, command_psp, g, "' (Yes/No/All) ? ");
+
+      for (;;) {
+        int ch;
+
+        CPU_AH = 0x07;
+        fcom_intcall(cpu, command_psp, 0x21, "FCOM ^Break prompt");
+        ch = toupper((unsigned char)CPU_AL);
+
+        if (ch == 'Y' || ch == 'N' || ch == 'A') {
+          dos_puts(cpu, command_psp, g, "\r\n");
+          if (ch == 'N')
+            return (int)(*counter = 0);   /* ignore */
+          if (ch == 'A')
+            g->cbreak_leave_all = 1;
+          break;                          /* Yes: fall through */
+        }
+
+        g->io[0] = '\a';                  /* beep() */
+        (void)fcom_write(cpu, command_psp,
+            FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 1);
+      }
+      break;
+
+    justCheck:
+    case BREAK_FORCMD:         /* FOR commands are part of batch processing */
+      if (g->cbreak_leave_all)
+        return 1;
+      /* fall through */
+
+    case BREAK_INPUT:
+      if (*counter == 0)
+        return 0;
+      break;
+  }
+
+  *counter = 0;                /* state processed */
+  return 1;
+}
+
 static int execute_batch_handle(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g, UWORD handle)
 {
@@ -6925,6 +7623,10 @@ static int execute_batch_handle(CPU *cpu, UWORD command_psp,
             return 0;
           }
         } else {
+          /* batch.c:533 chkCBreak(BREAK_BATCHFILE): user break exits
+             this batch file (exit_batch(); leaveAll cascades outward) */
+          if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_BATCHFILE))
+            return 0;
           if (!expand_batch_parameters(g, g->batch_line)) {
             dos_puts(cpu, command_psp, g, "Line too long.\r\n");
             return 1;
@@ -6964,6 +7666,9 @@ static int execute_batch_handle(CPU *cpu, UWORD command_psp,
 
         /* Labels are declarations, not executable command lines. */
         if (*line != ':') {
+          /* batch.c:533 chkCBreak(BREAK_BATCHFILE) - see above */
+          if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_BATCHFILE))
+            return 0;
           if (!expand_batch_parameters(g, g->batch_line)) {
             dos_puts(cpu, command_psp, g, "Line too long.\r\n");
             return 1;
@@ -7044,6 +7749,11 @@ static int execute_batch_file(CPU *cpu, UWORD command_psp,
   g->batch_shiftlevel = saved->shiftlevel;
   memset(saved, 0, sizeof(*saved));
   --g->batch_depth;
+
+  /* batch.c:223: leaving the LAST batch context resets 'leaveAll'
+     (chkCBreak(BREAK_ENDOFBATCHFILES)) */
+  if (!g->batch_active)
+    (void)fcom_chk_cbreak(cpu, command_psp, g, BREAK_ENDOFBATCHFILES);
 
   return rc;
 }
@@ -7319,6 +8029,12 @@ static int execute_for_pattern(CPU *cpu, UWORD command_psp,
   }
 
   do {
+    /* batch.c:406 chkCBreak(BREAK_FORCMD) - see execute_for() */
+    if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_FORCMD)) {
+      restore_default_dta(cpu, command_psp);
+      return 0;
+    }
+
     if (execute_for_value(cpu, command_psp, g, variable,
                           g->find.dm_name, command) < 0) {
       restore_default_dta(cpu, command_psp);
@@ -7430,6 +8146,10 @@ static int execute_for(CPU *cpu, UWORD command_psp,
     p = skip_space(p);
     if (*p == '\0')
       break;
+
+    /* batch.c:406 chkCBreak(BREAK_FORCMD): user break exits just this FOR */
+    if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_FORCMD))
+      return 0;
 
     if (*p == '"') {
       quoted = 1;
@@ -7763,8 +8483,11 @@ static int execute_command_core(CPU *cpu, UWORD command_psp,
     return execute_for(cpu, command_psp, g, args);
 
   /*
-   * FreeCOM's INCLUDE_CMD_FAKELOADHIGH maps LH/LOADHIGH to cmd_call:
-   * consume the prefix and execute the remaining command normally.
+   * FreeCOM 0.86 builds with INCLUDE_CMD_LOADHIGH (config.h): LH and
+   * LOADHIGH are cmd_loadhigh from shell/loadhigh.c, NOT the
+   * FAKELOADHIGH alias of CALL that an earlier revision of this port
+   * implemented - that variant is commented out upstream and simply
+   * executed the command in low memory.
    */
   if (command_is(g->filename, "LH") ||
       command_is(g->filename, "LOADHIGH")) {
@@ -7773,7 +8496,7 @@ static int execute_command_core(CPU *cpu, UWORD command_psp,
       error_bad_command(cpu, command_psp, g, g->filename);
       return 0;
     }
-    return execute_command_line(cpu, command_psp, g, args);
+    return builtin_loadhigh(cpu, command_psp, g, args);
   }
 
   if (command_is(g->filename, "LOADFIX"))
@@ -8308,7 +9031,21 @@ UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
   UWORD command_psp;
   mcb *block;
   psp *process;
-  size_t n = init_tail ? strlen(init_tail) : 0;
+  size_t n = 0;
+
+  /*
+   * Upstream prep_shell() computes Cmd.ctCount by scanning up to the '\r'
+   * terminator - Config.cfgInitTail always carries a trailing "\r\n"
+   * appended by InitPgm().  strlen() here used to include that "\r\n" in
+   * ctCount, so PSP:80h (and thus parse_init_tail()) saw a tail ending in
+   * CR/LF.  The /P=<file> scanner only stops at space/TAB/NUL, so the
+   * autoexec path became "\FDAUTO.BAT\r\n" and the open silently failed -
+   * /P armed the permanent shell but FDAUTO.BAT never ran.
+   */
+  if (init_tail)
+    for (; init_tail[n] != '\0'; n++)
+      if (init_tail[n] == '\r')
+        break;
 
   {
     UBYTE old_umb_link = LoL->uppermem_link;
@@ -8376,6 +9113,29 @@ UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
   }
 
   /*
+   * cb_catch.asm cbreak_handler as real guest code - see the layout
+   * comment at FCOM_CBREAK_STUB_OFFSET.  fcom_process_main() installs
+   * the INT 23h vector; the previous vector was already captured into
+   * ps_isv23 by child_psp() above and is restored by process
+   * termination (task.c), exactly like a real FreeCOM instance.
+   */
+  {
+    UBYTE *stub = (UBYTE *)ARM_PTR(
+        MK_FP(command_psp, FCOM_CBREAK_STUB_OFFSET));
+    stub[0] = 0x2e;                                 /* CS:              */
+    stub[1] = 0xff;                                 /* INC WORD [imm16] */
+    stub[2] = 0x06;
+    stub[3] = (UBYTE)(FCOM_CBREAK_COUNT_OFFSET & 0xff);
+    stub[4] = (UBYTE)(FCOM_CBREAK_COUNT_OFFSET >> 8);
+    stub[5] = 0xf8;                                 /* CLC              */
+    stub[6] = 0xca;                                 /* RETF 2           */
+    stub[7] = 0x02;
+    stub[8] = 0x00;
+    stub[9] = 0x00;                                 /* CBreakCounter DW 0 */
+    stub[10] = 0x00;
+  }
+
+  /*
    * Do not transfer ownership of environment_seg here.  For normal EXEC,
    * patchPSP() owns that operation because ChildEnv() created a private MCB.
    * Process 0 instead points at DOS_PSP's permanent environment and must not
@@ -8422,6 +9182,13 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
      replaces PSP:0Ah with its terminate hook. */
   process->ps_parent = command_psp;
   process->ps_isv22 = MK_FP(command_psp, FCOM_TERM_OFFSET);
+
+  /*
+   * shell/init.c:193: set_isrfct(0x23, cbreak_handler).
+   * The stub bytes were written by fcom_create_process(); the previous
+   * vector is in ps_isv23 and comes back at process termination.
+   */
+  setvec(0x23, MK_FP(command_psp, FCOM_CBREAK_STUB_OFFSET));
 
   /* FreeCOM initialize(): publish COMSPEC before any startup command runs. */
   if (fcom_initialize_environment(cpu, command_psp, g) < 0)

@@ -245,6 +245,8 @@ long cooked_write(dos_far_ptr *pdev, size_t n, const char *bp)
          otherwise check every 32 characters */
       if (fast_counter <= 0x80 && check_handle_break(pdev) == CTL_S)
         raw_get_char(pdev, TRUE); /* Test for hold char and ctl_c */
+      if (terminate_requested())
+        return xfer;  /* upstream: spawn_int23() never returns on terminate */
       fast_counter++;
       fast_counter &= 0x9f;
       if (internal_data->PrinterEcho)
@@ -394,14 +396,52 @@ void handle_break(dos_far_ptr *pdev, int sft_out)
       CPU_SP = (uint16_t)(CPU_SP + (sizeof(ctrl_c_text) - 1));
     }
 
-  /* Upstream spawn_int23() switches to the user stack, invokes the
-     process' INT 23h handler, and does not return to the interrupted
-     DOS call.  bios_intcall() already performs the required guest
-     INT/IRET transition in this port.  A handler which IRETs instead
-     of terminating is followed by the standard Ctrl-Break termination
-     path, so native DOS execution cannot resume inside the aborted I/O. */
-  bios_intcall(cpu, 0x23, "DOS Ctrl-Break INT23");
-  request_terminate(0, 1);
+  /* Upstream spawn_int23() (procsupt.asm) switches to the user stack,
+     does CLC (default action: resume), invokes the process' INT 23h
+     handler and inspects HOW the handler returned:
+
+       - IRET or RETF 2 (SP back to the pre-INT value): Carry is IGNORED
+         (??int23_ign_carry) - the interrupted DOS call is respawned.
+         FreeCOM's cbreak_handler is exactly this: "inc counter; clc;
+         retf 2".
+       - RETF 0 (the FLAGS image is left on the stack, SP short by one
+         word): SP is fixed up and Carry is honoured - CF=1 means
+         "terminate program" (break_flg++, term_type=1, AH=0), CF=0
+         respawns.
+
+     bios_intcall() performs the guest INT/IRET transition; the live
+     guest SS:SP here is the user stack of the interrupted INT 21h, and
+     bios_intcall() restores CS:IP but deliberately not SP - which is
+     precisely what lets us read the handler's return style out of it.
+
+     Respawn itself (re-dispatching the saved INT 21h request) has no
+     native equivalent in this port yet: the C call chain of the current
+     INT 21h implementation cannot be unwound and restarted.  The resume
+     path therefore RETURNS to the caller, which continues the
+     interrupted operation in place; the console-input loops re-issue
+     their read, which is observably equivalent for the AH=01/07/08/0Ah
+     paths where ^C arrives.  The terminate path goes through
+     request_terminate(0, 1) - the port's combined equivalent of
+     break_flg/term_type=1/AH=0 - and callers must stop I/O promptly via
+     terminate_requested(). */
+  {
+    UWORD sp_before;
+    UBYTE cf_after;
+
+    cf = 0;                     /* spawn_int23: CLC - default is resume */
+    sp_before = CPU_SP;
+    bios_intcall(cpu, 0x23, "DOS Ctrl-Break INT23");
+    cf_after = (UBYTE)cf;
+
+    if (CPU_SP != sp_before)
+    {
+      /* RETF 0: discard the FLAGS image the handler left behind */
+      CPU_SP = sp_before;
+      if (cf_after)
+        request_terminate(0, 1);
+    }
+    /* equal SP: IRET or RETF 2 - ignore Carry, resume */
+  }
 }
 
 void DosIdle_int(void)
@@ -467,6 +507,8 @@ STATIC unsigned read_char_sft_dev(int sft_in, int sft_out,
       c = read_char_sft_dev(sft_in, sft_out, pdev, FALSE);
     if (c == CTL_C)
       handle_break(pdev, sft_out);
+    if (terminate_requested())
+      return c;   /* upstream: spawn_int23() never returns on terminate */
     /* DOS oddity: if you press ^S somekey ^C then ^C does not break */
     c = read_char(sft_in, sft_out, FALSE);
   }

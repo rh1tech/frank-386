@@ -212,6 +212,15 @@ void cpu_save_regs(const CPU*, CPU_regs*);
 void cpu_restore_regs(CPU*, const CPU_regs*);
 void cpu_intcall(CPU* cpu, uint8_t intnum);
 
+/*
+ * Отложенный single-step (TF) трап 286-ядра - см. 286/cpu.c.
+ * bios_intcall() сохраняет/сбрасывает его вокруг вложенного исполнения
+ * гостевого обработчика. В i386-ядре TF-трассировка не реализована -
+ * там это состояние всегда false и запись игнорируется.
+ */
+bool cpu_pending_trap(void);
+void cpu_pending_trap_set(bool v);
+
 CPU *cpu_new(int gen, CPU_CB **cb);
 inline static void enable_fpu(CPU *cpu) {
 	cpu->ext_accessors->enable_fpu(cpu);

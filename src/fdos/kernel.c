@@ -841,6 +841,9 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
     .done = false,
   };
 ///  printf("cpu_far_call @ CS:IP=%04x:%04x SS:SP=%04x:%04x\n", CPU_CS, CPU_IP, CPU_SS, CPU_SP);
+  /* См. bios_intcall(): native_done стекуется, внешнее состояние
+     восстанавливается после вложенного цикла. */
+  bool old_native_done = cpu->native_done;
   cpu->native_done = false;
   set_bios_callback(cpu, &params, true);
 ///  printf("cpu_far_call callback node=%p ret=%04x:%04x\n",  &params, params.expected_cs, params.expected_ip);
@@ -878,7 +881,7 @@ uint32_t wait_loops = 0;
     sleep_ms(1000);
     */
   }
-  cpu->native_done = false;
+  cpu->native_done = old_native_done;
   drop_bios_callback(cpu, &params);
   SET_CS(save_cs);
   SET_IP(save_ip);
@@ -2886,6 +2889,55 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     dpb_watch_capture_chain("after-InitializeAllBPBs-check");
 }
 
+/*
+ * Порт main.c init_vectors() (upstream FreeDOS):
+ *
+ *   for (i = 0x23; i <= 0x3f; i++) setvec(i, empty_handler);
+ *   ... затем vectors[] переустанавливает настоящие обработчики
+ *   (0x20,21,22,24,25,26,27,28,2a,2f) и int0/1/3/6, 0x1b, 0x29.
+ *
+ * В этом порту "настоящие обработчики" - это трап-страница FFE0:NN,
+ * уже прописанная bios_post()/cpu_install_dos_handlers(), поэтому здесь
+ * остаётся ровно недостающая часть: дефолтные ПУСТЫЕ обработчики для
+ * векторов, которые ядро обязано обслужить IRET'ом, пока их не
+ * перехватят программы. Без этого Ctrl-C уводил INT 23h в
+ * no_handler-трап ("no_handled FFE0:0023"), а любой вызов INT 2Ah/2Eh
+ * и т.п. печатал ту же диагностику.
+ *
+ * Пустой обработчик = FFF0:0006 (reusable IRET, pc.c).
+ * INT 24h = F000:FF44 "mov al,FAIL; iret" - байты кладёт pc.c, ставит
+ * вектор ядро, как в оригинале (kernel.asm _int24_handler в образе ядра).
+ */
+STATIC void setup_int_vectors(void)
+{
+  int i;
+
+  for (i = 0x23; i <= 0x3f; i++)
+  {
+    switch (i)
+    {
+    case 0x24:                  /* critical error: AL=FAIL; IRET */
+      setvec(0x24, MK_FP(0xF000, 0xFF44));
+      break;
+    case 0x25: case 0x26: case 0x27: case 0x28: case 0x29: case 0x2f:
+    case 0x33:
+      /* нативные обработчики порта (FFE0-страница) - эквивалент
+         upstream vectors[] / резидентного драйвера мыши: не трогать */
+      break;
+    case 0x30: case 0x31:
+      /* слоты заняты байтами CP/M CALL-5 gateway (PSPInit) */
+      break;
+    default:
+      setvec((UBYTE)i, MK_FP(0xFFF0, 0x0006));  /* empty_handler: IRET */
+      break;
+    }
+  }
+  /* upstream vectors[]: int22_handler - тот же пустой IRET */
+  setvec(0x22, MK_FP(0xFFF0, 0x0006));
+  /* INT 0/1/3/6, 0x1b, 0x29: эквиваленты уже установлены bios_post();
+     INT 1/3 указывают на IRET (point2iret), как при debugger_present==0 */
+}
+
 STATIC void prep_shell(CPU* cpu)
 {
   CommandTail Cmd;
@@ -3008,7 +3060,7 @@ void kernel(CPU* _cpu) {
     LoL->cpu = cpu->gen;
 
     /* install DOS API and other interrupt service routines, basic kernel functionality works */
-//    setup_int_vectors();
+    setup_int_vectors();
     HaltCpuWhileIdle = 0;
     // TODO: INT 30h как far jump на CP/M entry
 // CheckContinueBootFromHarddisk

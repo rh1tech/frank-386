@@ -1007,9 +1007,32 @@ bool rp2350_bios_handler(CPU* cpu, uint8_t intnum) {
     return res;
 }
 
+/*
+ * Отложенный single-step трап (TF).
+ *
+ * Семантика реального x86: если TF=1 в НАЧАЛЕ инструкции, после её
+ * завершения возбуждается INT 1. Инструкция, устанавливающая TF (POPF/
+ * IRET), даёт трап только ПОСЛЕ СЛЕДУЮЩЕЙ инструкции - отсюда двухфазная
+ * схема pending_ss_trap ("после текущей") <- tf ("после следующей").
+ *
+ * Программный INT n / INT3 / INTO сбрасывает TF в составе своего
+ * исполнения и ПОДАВЛЯЕТ отложенный трап: на реальном CPU трассировщик
+ * "перешагивает" INT n целиком и продолжает уже после IRET обработчика.
+ * (Интерраптные трассировщики типа Norton поэтому НЕ исполняют INT n,
+ * а эмулируют его вручную: pushf + far jmp по вектору.)
+ *
+ * Состояние выведено на уровень файла: bios_intcall() исполняет гостевой
+ * обработчик ВЛОЖЕННЫМ pc_step()-циклом, и висящий pending-трап внешнего
+ * потока не должен сработать внутри вложенного (и наоборот) -
+ * см. cpu_pending_trap()/cpu_pending_trap_set().
+ */
+static bool pending_ss_trap;
+
+bool cpu_pending_trap(void)        { return pending_ss_trap; }
+void cpu_pending_trap_set(bool v)  { pending_ss_trap = v; }
+
 static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
     static uint16_t firstip;
-    static bool was_TF;
 
     for (uint32_t loopcount = 0; loopcount < execloops; loopcount++) {
         if (cpu->native_done) break;
@@ -3007,17 +3030,20 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
 
             case 0xCC: /* CC INT 3 */
                 intcall86(cpu, 3);
+                pending_ss_trap = false; /* INT подавляет single-step трап */
                 break;
 
             case 0xCD: /* CD INT Ib */
                 oper1b = getmem8(CPU_CS, CPU_IP);
                 StepIP(1);
                 intcall86(cpu, oper1b);
+                pending_ss_trap = false; /* INT подавляет single-step трап */
                 break;
 
             case 0xCE: /* CE INTO */
                 if (of) {
                     intcall86(cpu, 4);
+                    pending_ss_trap = false; /* см. выше */
                 }
                 break;
 
@@ -3369,12 +3395,12 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
 #endif
                 break;
         }
-        if (was_TF) {
-            was_TF = false;
+        if (pending_ss_trap) {
+            pending_ss_trap = false;
             intcall86(cpu, 1);
         }
         if (tf) {
-            was_TF = true;
+            pending_ss_trap = true;
         }
     }
 }

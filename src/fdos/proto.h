@@ -384,6 +384,7 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
 COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
 ULONG SftGetFsize(int sft_idx);
 void request_terminate(UBYTE exit_code, UBYTE exit_type);
+bool terminate_requested(void);
 COUNT exec_run_native_command(UWORD child_psp_seg, UWORD fcbcode);
 UWORD DosGetRetCode(void);
 

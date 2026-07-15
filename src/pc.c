@@ -1597,6 +1597,63 @@ void bios_post(PC *pc) {
     pstore8(0xFFFFE, 0xFC);                          /* model byte: IBM AT   */
     pstore8(0xFFFFF, 0x01);                          /* submodel/revision    */
 
+/* --- Канонические IBM PC/AT точки входа BIOS в F000 ---------------------
+ * Вектора, указывающие прямо в трап-страницу FFE0:NN, ломают программы,
+ * которые трассируют прерывания через TF/INT 1 (Norton Utilities и т.п.):
+ * трассировщик пошагово идёт по обработчику, пока CS:IP не попадёт в
+ * "настоящий" ROM BIOS (обычно сравнивают с F000:xxxx или каноническими
+ * адресами вроде INT 13h = F000:E3FE). Попадание на FFE0-страницу
+ * исполняет ВЕСЬ обработчик нативно за один "шаг" - условие завершения
+ * трассировки не наступает никогда, и утилита зависает в бесконечном
+ * INT 1. Даём каждому классическому вектору настоящую 5-байтовую точку
+ * входа JMP FAR FFE0:NN по каноническому смещению IBM AT: первый же шаг
+ * трассировки видит CS=F000 и завершается, а исполнение всё равно
+ * попадает в нативный диспетчер.
+ *
+ * INT 19h (E05Bh) намеренно пропущен: смещение занято ROM-identity
+ * строками выше. INT 1Ch остаётся FFF0:0006 (каноничный F000:FF53 занят
+ * DPTE-таблицами по FFF50-FFF6F).
+ *
+ * ВАЖНО - тень трап-страницы: диспетчер ядер перехватывает исполнение по
+ * условию (phys >> 8) == 0xFFE, то есть ЛЮБОЙ линейный адрес
+ * 0xFFE00-0xFFEFF. Сегмент F000 со смещениями FE00h-FEFFh отображается
+ * ровно в это окно, поэтому канонические IBM-адреса INT 08h (FEA5h) и
+ * INT 1Ah (FE6Eh) использовать НЕЛЬЗЯ: первый же тик таймера уходил в
+ * handlers[0xA5] = no_handler. Эти два стаба смещены на страницу ниже
+ * (FDA5h/FD6Eh) - для трассировщиков значим сегмент F000, а не точное
+ * смещение. Никакие другие смещения таблицы в окно FExx не попадают. */
+    {
+        static const struct { uint8_t intno; uint16_t off; } rom_entry[] = {
+            { 0x05, 0xFF54 },   /* print screen                    */
+            { 0x08, 0xFDA5 },   /* IRQ0 timer (канонич. FEA5h - в тени) */
+            { 0x09, 0xE987 },   /* IRQ1 keyboard                   */
+            { 0x10, 0xF065 },   /* video                           */
+            { 0x11, 0xF84D },   /* equipment list                  */
+            { 0x12, 0xF841 },   /* memory size                     */
+            { 0x13, 0xE3FE },   /* disk                            */
+            { 0x14, 0xE739 },   /* serial                          */
+            { 0x15, 0xF859 },   /* system services                 */
+            { 0x16, 0xE82E },   /* keyboard services               */
+            { 0x17, 0xEFD2 },   /* printer (сразу за DPT @ EFC7)   */
+            { 0x1A, 0xFD6E },   /* time of day (канонич. FE6Eh - в тени) */
+        };
+        for (unsigned i = 0; i < sizeof(rom_entry)/sizeof(rom_entry[0]); ++i) {
+            uint32_t phys = 0xF0000u + rom_entry[i].off;
+            pstore8 (phys,     0xEA);              /* JMP FAR FFE0:00NN */
+            pstore16(phys + 1, rom_entry[i].intno);
+            pstore16(phys + 3, 0xFFE0);
+            pstore16(rom_entry[i].intno * 4,     rom_entry[i].off);
+            pstore16(rom_entry[i].intno * 4 + 2, 0xF000);
+        }
+    }
+/* Дефолтный обработчик INT 24h ядра DOS: kernel.asm _int24_handler =
+ * "mov al,FAIL; iret" (FAIL=03h). Байты живут в fake-ROM, вектор ставит
+ * init_vectors() ядра (fdos/kernel.c) - как в оригинале, где байты лежат
+ * в образе ядра. FFF44-FFF46 свободны (FFF50+ занят DPTE). */
+    pstore8(0xFFF44, 0xB0);   /* MOV AL, imm8 */
+    pstore8(0xFFF45, 0x03);   /* FAIL         */
+    pstore8(0xFFF46, 0xCF);   /* IRET         */
+
    /* INT 33h: сброс состояния + инициализация 8042/мыши через порты.
     * Делать ПОСЛЕ инициализации PIC (выше в bios_post), иначе IRQ12 замаскирован. */
     bios_33h_install(pc->cpu, pc->mouse_enabled);

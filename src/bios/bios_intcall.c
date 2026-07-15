@@ -24,6 +24,21 @@ void pc_step(struct PC* pc, size_t max_ops);
 void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     u16 cs = CPU_CS;
     u16 ip = CPU_IP;
+    /*
+     * Вложенное исполнение гостевого обработчика не должно ни наследовать
+     * single-step состояние прерванного потока, ни утащить своё наружу:
+     * - tf прерванного потока (например, Norton трассирует через TF, а
+     *   ядро посреди этого вызывает INT 28h/INT 23h) не должен пошагово
+     *   трассировать вызываемый здесь обработчик;
+     * - pending-трап, взведённый ПОСЛЕДНЕЙ инструкцией вложенного потока
+     *   (IRET обработчика, восстановивший TF=1 из стекового образа),
+     *   не должен выстрелить после первой инструкции внешнего потока.
+     * cpu_intcall() сам сбрасывает tf для входа в обработчик (как INT),
+     * но образ флагов в стеке хранит исходное значение - его IRET и
+     * вернёт; здесь мы страхуем только межпоточную утечку состояния.
+     */
+    bool old_pending_trap = cpu_pending_trap();
+    cpu_pending_trap_set(false);
     bios_callback_params_t params = {
         .callback = intcall_waiter,
         .expected_cs = 0xFFEF, // just default, may be changed
@@ -46,15 +61,22 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     SET_CS ( params.expected_cs ); // -> FFEFF
     SET_IP ( params.expected_ip );
     bool old_ifl = ifl;
+    /* native_done делят request_terminate(), этот waiter и
+       cpu_far_call(): состояние ВНЕШНЕГО потока (например, уже
+       запрошенная терминация) стекуется, а не затирается. Внутри
+       вложенного цикла оно обязано быть false - его выставит только
+       наш intcall_waiter. */
+    bool old_native_done = cpu->native_done;
     // set CS:IP/flags, prep stack, and on IRET will recover
     cpu_intcall(cpu, intnum);
     cpu->native_done = false;
     while(!params.done) {
         pc_step(pc, 4096); /// TODO: a lot of?
     }
-    cpu->native_done = false;
+    cpu->native_done = old_native_done;
     drop_bios_callback(cpu, &params);
     ifl = old_ifl;
+    cpu_pending_trap_set(old_pending_trap);
     params.done = false;
     // restore initial CS:IP
     SET_CS (cs);
