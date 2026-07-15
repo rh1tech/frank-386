@@ -720,6 +720,13 @@ rebuild_dpb:
           {
             bpb FAR *bpbp;
             struct buffer FAR *bp = getblock(1, dpb->dpb_unit);
+            /* getblk() returns NULL when the sector cannot be read (or a
+               buffer cannot be freed). Upstream dereferences it regardless -
+               harmless-ish there, where a NULL far pointer just writes low
+               memory, but here bp is a NATIVE pointer and this is a hard fault
+               that takes both cores down. Report a device error instead. */
+            if (bp == NULL)
+              return DE_ACCESS;
             bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT);
             bp->b_flag |= BFR_VALID | BFR_DIRTY;
             bpbp = (bpb FAR *)&bp->b_buffer[BT_BPB];

@@ -45,7 +45,7 @@ endif()
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
 
 # Board configuration variant (M1, M2, PC or Z2)
-set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC or Z2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC or Z2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})

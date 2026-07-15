@@ -389,6 +389,12 @@ void read_fsinfo(struct dpb FAR * dpbp)
     return;
 
   bp = getblock(dpbp->dpb_xfsinfosec, dpbp->dpb_unit);
+  /* Upstream omits this check; there a NULL far pointer is survivable, here
+     bp is a native pointer and dereferencing NULL faults the core. The FSInfo
+     sector is only a free-space HINT, so a failed read is not fatal: leave the
+     cached counts alone and carry on. */
+  if (bp == NULL)
+    return;
   bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT | BFR_DIRTY);
   bp->b_flag |= BFR_VALID;
 
@@ -413,6 +419,10 @@ void write_fsinfo(struct dpb FAR * dpbp)
     return;
 
   bp = getblock(dpbp->dpb_xfsinfosec, dpbp->dpb_unit);
+  /* Same as read_fsinfo(): NULL here is a native null-pointer dereference.
+     FSInfo is a hint - skip the update rather than fault. */
+  if (bp == NULL)
+    return;
   bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT);
   bp->b_flag |= BFR_VALID;
 

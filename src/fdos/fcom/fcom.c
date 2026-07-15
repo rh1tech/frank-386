@@ -8045,8 +8045,28 @@ static enum fcom_start_action parse_init_tail(struct fcom_guest *g,
   while (*p != '\0') {
     char option;
 
-    if (*p != '/' && *p != '-')
-      break;
+    if (*p != '/' && *p != '-') {
+      /*
+       * A non-option word. FreeCOM does NOT stop here: shell/init.c loops,
+       * takes the word with skip_word() and uses it as the COMSPEC path
+       * (grabComFilename()) or a CTTY device, then goes back for MORE
+       * options. Only /C or /K ends the scan.
+       *
+       * That matters for the standard CONFIG.SYS form
+       *     SHELL=...\command.com \freedos\bin /E:2048 /P=\FDAUTO.BAT
+       * where the very first token is the COMSPEC directory. Breaking out
+       * here meant /E: and /P= were never seen at all - so /P never armed
+       * the shell as permanent and FDAUTO.BAT never ran (which is also why
+       * PATH stayed at its default: AUTOEXEC.BAT is what sets it).
+       *
+       * This port's shell is native and needs no COMSPEC path of its own,
+       * so the word is consumed and discarded - but the scan CONTINUES.
+       */
+      while (*p != '\0' && *p != ' ' && *p != '\t')
+        ++p;
+      p = skip_space(p);
+      continue;
+    }
 
     ++p;
     option = (char)toupper((unsigned char)*p);
