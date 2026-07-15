@@ -5277,10 +5277,10 @@ static int fcom_copy_group(CPU *cpu, UWORD command_psp,
   return found;
 }
 
-static void builtin_copy(CPU *cpu, UWORD command_psp,
-                         struct fcom_guest *g, char *args)
+static void builtin_copy_body(CPU *cpu, UWORD command_psp,
+                              struct fcom_guest *g, char *args,
+                              struct fcom_copy_parse *parse)
 {
-  struct fcom_copy_parse parse;
   unsigned item_count;
   unsigned group_count;
   unsigned destination_index;
@@ -5292,8 +5292,8 @@ static void builtin_copy(CPU *cpu, UWORD command_psp,
   int allocated;
   UWORD paras;
 
-  memset(&parse, 0, sizeof(parse));
-  fcom_copy_parse_env(command_psp, &parse);
+  memset(parse, 0, sizeof(*parse));
+  fcom_copy_parse_env(command_psp, parse);
 
   if (strlen(args) >= sizeof(g->batch_line) ||
       strlen(args) >= sizeof(g->redirect_command)) {
@@ -5328,63 +5328,63 @@ static void builtin_copy(CPU *cpu, UWORD command_psp,
     return;
   }
 
-  parse.item_segment = (UWORD)allocated;
-  parse.items = (struct fcom_copy_item *)ARM_PTR(
-      MK_FP(parse.item_segment, 0));
-  parse.count = item_count;
-  memset(parse.items, 0,
+  parse->item_segment = (UWORD)allocated;
+  parse->items = (struct fcom_copy_item *)ARM_PTR(
+      MK_FP(parse->item_segment, 0));
+  parse->count = item_count;
+  memset(parse->items, 0,
          (size_t)paras << 4);
 
   strcpy(g->redirect_command, args);
   if (!fcom_copy_parse_items(cpu, command_psp, g,
-                             &parse, g->redirect_command)) {
-    guest_free(cpu, command_psp, parse.item_segment);
+                             parse, g->redirect_command)) {
+    guest_free(cpu, command_psp, parse->item_segment);
     dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
     return;
   }
 
-  if (parse.groups > 1) {
-    destination_index = parse.count - 1;
+  if (parse->groups > 1) {
+    destination_index = parse->count - 1;
 
     if (destination_index != 0 &&
-        parse.items[destination_index].group ==
-        parse.items[destination_index - 1].group) {
-      guest_free(cpu, command_psp, parse.item_segment);
+        parse->items[destination_index].group ==
+        parse->items[destination_index - 1].group) {
+      guest_free(cpu, command_psp, parse->item_segment);
       dos_puts(cpu, command_psp, g,
                "The COPY destination must not contain plus ('+') characters.\r\n");
       return;
     }
 
-    if (strlen(parse.items[destination_index].name) >= sizeof(g->program)) {
-      guest_free(cpu, command_psp, parse.item_segment);
+    if (strlen(parse->items[destination_index].name) >= sizeof(g->program)) {
+      guest_free(cpu, command_psp, parse->item_segment);
       dos_puts(cpu, command_psp, g, "Invalid parameter.\r\n");
       return;
     }
-    strcpy(g->program, parse.items[destination_index].name);
-    parse.dest_flags = parse.items[destination_index].flags;
-    --parse.count;
-    --parse.groups;
+    strcpy(g->program, parse->items[destination_index].name);
+    parse->dest_flags = parse->items[destination_index].flags;
+    --parse->count;
+    --parse->groups;
   } else {
     strcpy(g->program, ".\\*.*");
-    parse.dest_flags = 0;
+    parse->dest_flags = 0;
   }
 
   destination_is_directory =
       fcom_path_is_directory(cpu, command_psp, g, g->program);
 
-  for (group = 1; group <= parse.groups; ++group) {
+  for (group = 1; group <= parse->groups; ++group) {
     unsigned first = 0;
     unsigned last;
 
-    while (first < parse.count &&
-           parse.items[first].group != group)
+    while (first < parse->count &&
+           parse->items[first].group != group)
       ++first;
-    if (first == parse.count)
+    if (first == parse->count)
       continue;
 
     last = first;
-    while (last + 1 < parse.count &&
-           parse.items[last + 1].group == group)
+    while (last + 1 < parse->count &&
+           parse->items[last + 1].group == group)
       ++last;
 
     /*
@@ -5395,23 +5395,23 @@ static void builtin_copy(CPU *cpu, UWORD command_psp,
       unsigned i;
 
       for (i = first; i <= last; ++i) {
-        if (parse.items[i].flags == 0)
-          parse.items[i].flags = FCOM_COPY_ASCII;
+        if (parse->items[i].flags == 0)
+          parse->items[i].flags = FCOM_COPY_ASCII;
       }
 
-      if (parse.dest_flags == 0)
-        parse.dest_flags = FCOM_COPY_ASCII;
+      if (parse->dest_flags == 0)
+        parse->dest_flags = FCOM_COPY_ASCII;
     }
 
-    if (!fcom_copy_group(cpu, command_psp, g, &parse,
+    if (!fcom_copy_group(cpu, command_psp, g, parse,
                          first, last, g->program,
                          destination_is_directory,
-                         0, parse.dest_flags,
+                         0, parse->dest_flags,
                          &all, &copied))
       break;
   }
 
-  guest_free(cpu, command_psp, parse.item_segment);
+  guest_free(cpu, command_psp, parse->item_segment);
 
   {
     int n = snprintf(g->text, sizeof(g->text),
@@ -5424,6 +5424,22 @@ static void builtin_copy(CPU *cpu, UWORD command_psp,
 }
 
 
+
+/* Кадр builtin_copy был крупнейшим на нативном стеке (512 байт host:
+ * struct fcom_copy_parse). Буфер переехал в kstack-арену - см. kernel.c. */
+static void builtin_copy(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g, char *args)
+{
+  kstack_mark_t km = kstack_mark();
+  struct fcom_copy_parse *parse = kstack_push(sizeof(*parse));
+
+  if (parse == NULL) {
+    dos_puts(cpu, command_psp, g, "Out of memory.\r\n");
+    return;
+  }
+  builtin_copy_body(cpu, command_psp, g, args, parse);
+  kstack_release(km);
+}
 
 static int fcom_alias_name_char(int ch)
 {

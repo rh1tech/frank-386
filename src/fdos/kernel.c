@@ -1533,6 +1533,66 @@ dos_far_ptr /* -> interrupt handler entry */ getvec(uint8_t intno) {
     return MK_FP((uint16_t)(res >> 16), (uint16_t)(res & 0xFFFFu));
 }
 
+/* ------------------------------------------------------------------ *
+ * kstack: арена ядра для крупных временных буферов.
+ *
+ * Нативный стек core0 - верх SCRATCH_Y (PICO_STACK_SIZE, по умолчанию
+ * 2КБ), сразу под ним лежит SCRATCH_X со стеком core1: переполнение
+ * молча разрушает контекст core1. Цепочка
+ *   fcom -> nested COMMAND -> DosExec -> INT 21h гостя -> FatFs
+ * по замерам (-fstack-usage) требует 3-3.5КБ в пике - в основном за
+ * счёт буферов путей/хвостов в кадрах.
+ *
+ * Upstream FreeDOS решает то же самое внутренними стеками ядра
+ * (kernel.asm: char_api_tos/disk_api_tos/error_tos в сегменте данных
+ * ядра) - пользовательский стек НЕ используется, потому что у
+ * COM-программ он бывает крошечным. kstack - прямой аналог для
+ * нативного порта: kernel-owned область вне SCRATCH_Y, с
+ * mark/release-дисциплиной, переживающей произвольную вложенность
+ * EXEC и рекурсию execute_command_line().
+ *
+ * Использование (только через обёртку, чтобы не трогать return-пути):
+ *   kstack_mark_t km = kstack_mark();
+ *   char *buf = kstack_push(n);
+ *   if (!buf) return DE_NOMEM;      // деградация вместо разрушения
+ *   ... работа ...
+ *   kstack_release(km);
+ * ------------------------------------------------------------------ */
+
+#define KSTACK_BYTES (24u * 1024u)
+
+static uint8_t kstack_area[KSTACK_BYTES];   /* .bss: основной SRAM */
+static uint32_t kstack_sp = KSTACK_BYTES;
+static uint32_t kstack_low_water = KSTACK_BYTES;   /* диагностика */
+
+kstack_mark_t kstack_mark(void)
+{
+  return kstack_sp;
+}
+
+void *kstack_push(size_t n)
+{
+  uint32_t need = (uint32_t)((n + 7u) & ~7u);
+
+  if (need > kstack_sp)
+    return NULL;                       /* исчерпание -> вызывающий даёт
+                                          штатную DOS-ошибку */
+  kstack_sp -= need;
+  if (kstack_sp < kstack_low_water)
+    kstack_low_water = kstack_sp;
+  return &kstack_area[kstack_sp];
+}
+
+void kstack_release(kstack_mark_t mark)
+{
+  kstack_sp = mark;
+}
+
+uint32_t kstack_low_water_bytes(void)
+{
+  return kstack_low_water;
+}
+
 void setvec(uint8_t intno, dos_far_ptr vec) {
     pstore16(4ul * intno,     FP_OFF(vec));
     pstore16(4ul * intno + 2, FP_SEG(vec));

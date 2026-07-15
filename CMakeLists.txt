@@ -386,6 +386,28 @@ if(CPU_TARGET STREQUAL "386")
     target_compile_definitions(${BUILD_NAME} PRIVATE I386_MODE=1)
 endif()
 
+# --- Нативный стек core0 -----------------------------------------------
+# По умолчанию PicoSDK даёт core0 всего PICO_STACK_SIZE=0x800 (2КБ) на
+# верху SCRATCH_Y; сразу под ним - SCRATCH_X со стеком core1, поэтому
+# переполнение молча разрушает контекст core1. Замеры -fstack-usage
+# цепочки fcom -> nested COMMAND -> DosExec -> INT 21h -> FatFs дают
+# пик 3-3.5КБ. Поднимаем до 3КБ: вместе с __scratch_y-данными
+# видеодрайверов (VGA: spread8_lut = 1КБ) банк занят ровно целиком;
+# при превышении линкер честно откажет, тихого перекрытия не будет.
+# Крупные временные буферы дополнительно выносятся из кадров в
+# kstack-арену ядра (src/fdos/kernel.c).
+#
+# 0xBE0 - точный максимум: в SCRATCH_Y уже лежат данные ОБОИХ
+# видеодрайверов (VGA spread8_lut = 1024Б + hdmi dma_lines/DMA_BUF_ADDR
+# = 32Б, итого 1056Б); 4096 - 1056 = 3040 = 0xBE0. Любое новое
+# __scratch_y-данное снова уронит линковку - это желаемое поведение,
+# правьте размер здесь осознанно.
+target_compile_definitions(${BUILD_NAME} PRIVATE PICO_STACK_SIZE=0xBE0)
+
+# Точная карта кадров для дальнейшей разгрузки стека: родные .su-файлы
+# ARM-тулчейна (build/**/*.su после сборки).
+target_compile_options(${BUILD_NAME} PRIVATE -fstack-usage)
+
 # SD-card data directory. It holds the BIOS images, config.ini and disk
 # images, which DIFFER between a 286 and a 386 build - so it is tied to
 # CPU_TARGET and can never disagree with the binary. Previously "386" was

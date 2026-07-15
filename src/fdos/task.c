@@ -574,8 +574,24 @@ static void exec_release_child(UWORD child_psp_seg)
 static void exec_leave_child(struct exec_child_context *saved,
                              UWORD child_psp_seg)
 {
-  cpu->native_done = saved->native_done;
-  terminate_flag = saved->terminate;
+  /* Cleanup runs with LOCAL, quiescent signals: the child has already
+     terminated (its request_terminate() left terminate_flag=true /
+     native_done=true on this level), and the OUTER level's pending
+     state must not be visible either - DosClose()/FcbCloseAll()/
+     FreeProcessMem() below may perform nested DOS/device calls (device
+     driver close goes through cpu_far_call() and its pc_step() loop),
+     and those must not be aborted by a signal that belongs to a
+     different nesting level. The outer values are re-armed LAST, when
+     this level is fully dismantled.
+
+     term_exit_code/term_exit_type stay untouched throughout: they are
+     the single DOS-global AH=4Dh status the child just left for the
+     parent, and exec_release_child() reads term_exit_type for the
+     keep-resident (TSR) decision. cu_psp is still the child's until
+     exec_release_child() finishes - DosClose() locates the handle
+     table through it. */
+  cpu->native_done = false;
+  terminate_flag = false;
   internal_data->InDOS = saved->indos;
   /* Match return_user(): suppress recursive critical-error aborts
      while vectors, handles, FCBs and process memory are released. */
@@ -586,6 +602,9 @@ static void exec_leave_child(struct exec_child_context *saved,
   internal_data->abort_progress = 0;
   internal_data->ErrorMode = saved->error_mode;
   restore_ctx(cpu, &saved->cpu);
+  /* last: restore the outer level's signalling state */
+  terminate_flag = saved->terminate;
+  cpu->native_done = saved->native_done;
 }
 
 enum exec_process_kind
@@ -1034,6 +1053,25 @@ static void fcom_copy_exec_tail(char *dst, size_t dst_size, const CommandTail *t
     CONFIG.SYS's DEVICE=/DEVICEHIGH= uses - see LoadDevice() in
     config.c).
 */
+/* Свободный запас нативного стека, без которого новый уровень EXEC не
+   стартует: замеры -fstack-usage дают ~1.2-1.6КБ (ARM) на уровень
+   вместе с файловым I/O под ним. Лучше честный DE_NOMEM
+   ("Insufficient memory"), чем сползание SP в SCRATCH_X - в стек
+   core1. */
+#define DOSEXEC_NATIVE_STACK_HEADROOM 1280u
+
+static uint32_t native_stack_free(void)
+{
+#if defined(__arm__) || defined(__thumb__)
+  extern uint32_t __StackBottom;
+  uint32_t sp;
+  __asm volatile ("mov %0, sp" : "=r" (sp));
+  return sp - (uint32_t)(uintptr_t)&__StackBottom;
+#else
+  return 0xffffffffu;   /* host-сборки для статического анализа */
+#endif
+}
+
 COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 {
   COUNT rc;
@@ -1041,10 +1079,17 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   long openresult;
   dos_far_ptr x86_lp;
 
+  if (native_stack_free() < DOSEXEC_NATIVE_STACK_HEADROOM)
+    return DE_NOMEM;
+
   if ((mode & 0x7f) == EXEC_LOADNGO &&
       fcom_is_command_com((const char *)lp))
   {
-    char tail[sizeof(((CommandTail *)0)->ctBuffer) + 1];
+    kstack_mark_t km = kstack_mark();
+    char *tail = kstack_push(sizeof(((CommandTail *)0)->ctBuffer) + 1);
+
+    if (tail == NULL)
+      return DE_NOMEM;
     const CommandTail *command_tail = NULL;
     UWORD child_env_mcb = 0;
     COUNT env_rc;
@@ -1060,12 +1105,16 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
      * and appends argv[0].  FCOM owns that copy for its whole lifetime.
      */
     env_rc = ChildEnv(ep, &child_env_mcb, (char *)lp);
-    if (env_rc < SUCCESS)
+    if (env_rc < SUCCESS) {
+      kstack_release(km);
       return env_rc;
+    }
 
     {
       UWORD command_psp;
-      fcom_copy_exec_tail(tail,sizeof(tail),command_tail);
+      fcom_copy_exec_tail(tail,
+                          sizeof(((CommandTail *)0)->ctBuffer) + 1,
+                          command_tail);
       UWORD fcbcode;
 
       command_psp=fcom_create_process(tail,mode & LOAD_HIGH,
@@ -1073,6 +1122,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
                                       child_env_mcb + 1);
       if (command_psp == 0) {
         DosMemFree(child_env_mcb);
+        kstack_release(km);
         return DE_NOMEM;
       }
 
@@ -1085,6 +1135,10 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
        */
       fcbcode=patchPSP(command_psp - 1,child_env_mcb,ep,lp);
 
+      /* tail уже скопирован в PSP:80h ребёнка (fcom_create_process) и
+         в FCB-параметры (patchPSP) - арена освобождается ДО глубокого
+         вложенного исполнения. */
+      kstack_release(km);
       return exec_run_native_command(command_psp,fcbcode);
     }
   }
