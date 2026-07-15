@@ -67,10 +67,10 @@ static INLINE void push(CPU* cpu, uint16_t pushval) {
 static void reset(CPU* cpu) {
     if (cpu->gen == 2) {
         CPU_CS = 0xF000;
-        CPU_IP = 0xFFF0;
+        SET_IP ( 0xFFF0 );
     } else {
         CPU_CS = 0xFFFF;
-        CPU_IP = 0x0000;
+        SET_IP ( 0x0000 );
     }
     cpu->flags.value = 2;
 }
@@ -426,7 +426,7 @@ static INLINE void intcall86(CPU* cpu, uint8_t intnum) {
     push(cpu, CPU_CS);
     push(cpu, CPU_IP);
     CPU_CS = getmem16(0, (uint16_t) intnum * 4 + 2);
-    CPU_IP = getmem16(0, (uint16_t) intnum * 4);
+    SET_IP ( getmem16(0, (uint16_t) intnum * 4) );
     ifl = 0;
     tf = 0;
 }
@@ -954,24 +954,24 @@ static __not_in_flash() void op_grp5(CPU* cpu) {
 
         case 2: /* CALL Ev */
             push(cpu, CPU_IP);
-            CPU_IP = oper1;
+            SET_IP ( oper1 );
             break;
 
         case 3: /* CALL Mp */
             push(cpu, CPU_CS);
             push(cpu, CPU_IP);
             getea(cpu, rm);
-            CPU_IP = (uint16_t) read86(ea) + (uint16_t) read86(ea + 1) * 256;
+            SET_IP ( (uint16_t) read86(ea) + (uint16_t) read86(ea + 1) * 256 );
             CPU_CS = (uint16_t) read86(ea + 2) + (uint16_t) read86(ea + 3) * 256;
             break;
 
         case 4: /* JMP Ev */
-            CPU_IP = oper1;
+            SET_IP ( oper1 );
             break;
 
         case 5: /* JMP Mp */
             getea(cpu, rm);
-            CPU_IP = (uint16_t) read86(ea) + (uint16_t) read86(ea + 1) * 256;
+            SET_IP ( (uint16_t) read86(ea) + (uint16_t) read86(ea + 1) * 256 );
             CPU_CS = (uint16_t) read86(ea + 2) + (uint16_t) read86(ea + 3) * 256;
             break;
 
@@ -1047,7 +1047,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
             //    printf("fake BIOS trap phys=%05lx int=%02x CS:IP=%04x:%04x\n",
             //           (unsigned long)ip32, (uint8_t)ip32, CPU_CS, CPU_IP);
                 if (rp2350_bios_handler(cpu, (uint8_t)ip32)) { // normal flow IRET is expected
-                    CPU_IP = 0x0006;
+                    SET_IP ( 0x0006 );
                     CPU_CS = 0xFFF0; // reusable IRET (pc.c)
                 }
                 else {// internal using INT in JMP style (INT 19h...)
@@ -2013,7 +2013,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0x6D: /* 6F INSW */
@@ -2039,7 +2039,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0x6E: /* 6E OUTSB */
@@ -2064,7 +2064,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0x6F: /* 6F OUTSW */
@@ -2089,7 +2089,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 #endif
 
@@ -2097,7 +2097,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (of) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2105,7 +2105,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (!of) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2113,7 +2113,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (cf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2121,7 +2121,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (!cf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2129,7 +2129,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (zf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2137,7 +2137,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (!zf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2145,7 +2145,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (cf || zf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2153,7 +2153,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (!cf && !zf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2161,7 +2161,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (sf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2169,7 +2169,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (!sf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2177,7 +2177,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (pf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2185,7 +2185,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (!pf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2193,7 +2193,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (sf != of) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2201,7 +2201,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (sf == of) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2209,7 +2209,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if ((sf != of) || zf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2219,7 +2219,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 if (!
                     zf && (sf
                            == of)) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -2469,7 +2469,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 StepIP(2);
                 push(cpu, CPU_CS);
                 push(cpu, CPU_IP);
-                CPU_IP = oper1;
+                SET_IP ( oper1 );
                 CPU_CS = oper2;
                 break;
 
@@ -2540,7 +2540,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xA5: /* A5 MOVSW */
@@ -2569,7 +2569,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xA6: /* A6 CMPSB */
@@ -2606,7 +2606,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xA7: /* A7 CMPSW */
@@ -2645,7 +2645,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xA8: /* A8 TEST CPU_AL Ib */
@@ -2688,7 +2688,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xAB: /* AB STOSW */
@@ -2715,7 +2715,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xAC: /* AC LODSB */
@@ -2741,7 +2741,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xAD: /* AD LODSW */
@@ -2768,7 +2768,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xAE: /* AE SCASB */
@@ -2803,7 +2803,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xAF: /* AF SCASW */
@@ -2839,7 +2839,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                     break;
                 }
 
-                CPU_IP = firstip;
+                SET_IP ( firstip );
                 break;
 
             case 0xB0: /* B0 MOV CPU_AL Ib */
@@ -2947,12 +2947,12 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
 
             case 0xC2: /* C2 RET Iw */
                 oper1 = getmem16(CPU_CS, CPU_IP);
-                CPU_IP = pop(cpu);
+                SET_IP ( pop(cpu) );
                 CPU_SP = CPU_SP + oper1;
                 break;
 
             case 0xC3: /* C3 RET */
-                CPU_IP = pop(cpu);
+                SET_IP ( pop(cpu) );
                 break;
 
             case 0xC4: /* C4 LES Gv Mp */
@@ -3018,13 +3018,13 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
 
             case 0xCA: /* CA RETF Iw */
                 oper1 = getmem16(CPU_CS, CPU_IP);
-                CPU_IP = pop(cpu);
+                SET_IP ( pop(cpu) );
                 CPU_CS = pop(cpu);
                 CPU_SP = CPU_SP + oper1;
                 break;
 
             case 0xCB: /* CB RETF */
-                CPU_IP = pop(cpu);
+                SET_IP ( pop(cpu) );
                 CPU_CS = pop(cpu);
                 break;
 
@@ -3048,7 +3048,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 break;
 
             case 0xCF: /* CF IRET */
-                CPU_IP = pop(cpu);
+                SET_IP ( pop(cpu) );
                 CPU_CS = pop(cpu);
                 decodeflagsword(cpu, pop(cpu) & cpu->flags_mask);
 
@@ -3135,7 +3135,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 StepIP(1);
                 CPU_CX = CPU_CX - 1;
                 if ((CPU_CX) && !zf) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -3144,7 +3144,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 StepIP(1);
                 CPU_CX = CPU_CX - 1;
                 if (CPU_CX && (zf == 1)) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -3153,7 +3153,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 StepIP(1);
                 CPU_CX = CPU_CX - 1;
                 if (CPU_CX) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -3161,7 +3161,7 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 temp16 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
                 if (!CPU_CX) {
-                    CPU_IP = CPU_IP + temp16;
+                    SET_IP ( CPU_IP + temp16 );
                 }
                 break;
 
@@ -3193,27 +3193,27 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 oper1 = getmem16(CPU_CS, CPU_IP);
                 StepIP(2);
                 push(cpu, CPU_IP);
-                CPU_IP = CPU_IP + oper1;
+                SET_IP ( CPU_IP + oper1 );
                 break;
 
             case 0xE9: /* E9 JMP Jv */
                 oper1 = getmem16(CPU_CS, CPU_IP);
                 StepIP(2);
-                CPU_IP = CPU_IP + oper1;
+                SET_IP ( CPU_IP + oper1 );
                 break;
 
             case 0xEA: /* EA JMP Ap */
                 oper1 = getmem16(CPU_CS, CPU_IP);
                 StepIP(2);
                 oper2 = getmem16(CPU_CS, CPU_IP);
-                CPU_IP = oper1;
+                SET_IP ( oper1 );
                 CPU_CS = oper2;
                 break;
 
             case 0xEB: /* EB JMP Jb */
                 oper1 = signext(getmem8(CPU_CS, CPU_IP));
                 StepIP(1);
-                CPU_IP = CPU_IP + oper1;
+                SET_IP ( CPU_IP + oper1 );
                 break;
 
             case 0xEC: /* EC IN CPU_AL regdx */

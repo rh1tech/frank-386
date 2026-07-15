@@ -2064,19 +2064,14 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
 
     Migrated from newstuff.c. Differences from the original:
       - src is a dos_far_ptr here (it comes straight from the guest
-        program via DS:DX, just like the original), copied into a
-        native PATHLEN-sized stack buffer up front via ARM_PTR() so
-        the rest of the function (an exact port of the original's
-        logic) can work with a plain native char* the same way
-        split_path()/dos_open()/etc above already do. There is no
-        adjust_far()-equivalent normalization step: adjust_far()
-        exists to keep a real 16-bit DOS far pointer's offset away
-        from the 0xFFFF wraparound boundary as the original indexes
-        further and further into src - ARM_PTR()/EFFECTIVE() compute
-        a plain linear address with no such 16-bit wraparound to
-        guard against (the same reasoning as linear_to_far()'s
-        comment above), so copying once up front and then doing
-        ordinary pointer arithmetic on a native copy is sufficient.
+        program via DS:DX, just like the original). ARM_PTR() exposes
+        the guest string as one linear read-only view, so the port can
+        walk it directly instead of copying PATHLEN bytes to the native
+        ARM stack. There is no adjust_far()-equivalent normalization
+        step: adjust_far() only keeps a real 16-bit far offset away from
+        the 0xFFFF wrap boundary while the original advances through
+        src; EFFECTIVE()/ARM_PTR() already form the corresponding linear
+        address in this emulator.
       - UNC paths (the "\\\\server\\share" case), the network
         redirector (QRemote_Fn()), and SHARE/JOIN are all real, live
         code paths in the original - migrated as-is, but with
@@ -2101,7 +2096,7 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
 #define TNDBG(fmt, ...) 
 ///printf("[truename] " fmt "\n", ##__VA_ARGS__)
 
-#define TNPTR(p)  ((unsigned)((const char *)(p) - srcbuf))
+#define TNPTR(p)  ((unsigned)((const char *)(p) - src))
 #define TNDPTR(p) ((unsigned)((const char *)(p) - dest))
 
 static int dpb_chain_contains(dos_far_ptr needle)
@@ -2160,7 +2155,8 @@ static void panic_bad_cds_dpb(const char *tag, dos_far_ptr x86_cds,
   for (;;) ;
 }
 
-COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
+static COUNT truename_worker(dos_far_ptr x86_src, char *dest, COUNT mode,
+                             struct cds *TempCDS)
 {
   COUNT i;
   const char *froot;
@@ -2171,27 +2167,13 @@ COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
   char *p = dest;	  /* dynamic pointer into dest */
   char *rootPos;
   char src0;
-  char srcbuf[PATHLEN];
-  char *src;
-  struct cds TempCDS;
+  const char *src = (const char *)ARM_PTR(x86_src);
 
   TNDBG("TN00 enter x86_src=%04X:%04X guest=%p mode=%04X raw='%s'",
         FP_SEG(x86_src), FP_OFF(x86_src), ARM_PTR(x86_src), mode,
         (const char *)ARM_PTR(x86_src));
 
-  {
-    unsigned len;
-    const char *guest_src = (const char *)ARM_PTR(x86_src);
-    for (len = 0; len < sizeof(srcbuf) - 1; len++)
-    {
-      srcbuf[len] = guest_src[len];
-      if (srcbuf[len] == '\0')
-        break;
-    }
-    srcbuf[sizeof(srcbuf) - 1] = '\0';
-  }
-  src = srcbuf;
-  TNDBG("TN01 copied srcbuf='%s'", srcbuf);
+  TNDBG("TN01 direct guest src='%s'", src);
 
   src0 = src[0];
   if (src0 == '\0') {
@@ -2293,16 +2275,16 @@ invalid_path:
     }
   }
 
-  memcpy(&TempCDS, cdsEntry, sizeof(TempCDS));
-  panic_bad_cds_dpb("after-memcpy", x86_cdsEntry, cdsEntry, &TempCDS);
+  memcpy(TempCDS, cdsEntry, sizeof(*TempCDS));
+  panic_bad_cds_dpb("after-memcpy", x86_cdsEntry, cdsEntry, TempCDS);
   TNDBG("TN12 CDS path='%s' flags=%04X dpb=%04X:%04X backslash=%u join=%u",
-        TempCDS.cdsCurrentPath, TempCDS.cdsFlags,
-        FP_SEG(TempCDS.cdsDpb), FP_OFF(TempCDS.cdsDpb),
-        TempCDS.cdsBackslashOffset, TempCDS.cdsJoinOffset);
+        TempCDS->cdsCurrentPath, TempCDS->cdsFlags,
+        FP_SEG(TempCDS->cdsDpb), FP_OFF(TempCDS->cdsDpb),
+        TempCDS->cdsBackslashOffset, TempCDS->cdsJoinOffset);
 
   internal_data->current_ldt = x86_cdsEntry;
 
-  if (TempCDS.cdsFlags & CDSNETWDRV)
+  if (TempCDS->cdsFlags & CDSNETWDRV)
     result |= IS_NETWORK;
 
   if (EFFECTIVE(x86_dhp))
@@ -2379,14 +2361,14 @@ invalid_path:
   {
     BYTE *cp;
 
-    cp = TempCDS.cdsCurrentPath;
+    cp = TempCDS->cdsCurrentPath;
     cp[MAX_CDSPATH - 1] = '\0';
 
-    TNDBG("TN23 CDS current cp='%s' flags=%04X", cp, TempCDS.cdsFlags);
+    TNDBG("TN23 CDS current cp='%s' flags=%04X", cp, TempCDS->cdsFlags);
 
-    if ((TempCDS.cdsFlags & CDSNETWDRV) == 0)
+    if ((TempCDS->cdsFlags & CDSNETWDRV) == 0)
     {
-      int mc = media_check_tagged(TempCDS.cdsDpb, "truename/TempCDS.cdsDpb");
+      int mc = media_check_tagged(TempCDS->cdsDpb, "truename/TempCDS.cdsDpb");
       TNDBG("TN25 after media_check rc=%d", mc);
 
       if (mc < 0) {
@@ -2397,10 +2379,10 @@ invalid_path:
 
       if (dos_cd((char *)cp) != SUCCESS) {
         TNDBG("TN28 dos_cd failed cp='%s' backslash=%u",
-              cp, TempCDS.cdsBackslashOffset);
+              cp, TempCDS->cdsBackslashOffset);
 
-        cp[TempCDS.cdsBackslashOffset + 1] =
-          cdsEntry->cdsCurrentPath[TempCDS.cdsBackslashOffset + 1] = '\0';
+        cp[TempCDS->cdsBackslashOffset + 1] =
+          cdsEntry->cdsCurrentPath[TempCDS->cdsBackslashOffset + 1] = '\0';
 
         TNDBG("TN29 retry dos_cd cp='%s'", cp);
         dos_cd((char *)cp);
@@ -2416,7 +2398,7 @@ invalid_path:
       strcpy(dest, (char *)cp);
       TNDBG("TN32 after strcpy dest='%s'", dest);
 
-      if (TempCDS.cdsFlags & CDSSUBST)
+      if (TempCDS->cdsFlags & CDSSUBST)
       {
         TNDBG("TN33 CDSSUBST dest='%s'", dest);
         if (dest[1] == ':')
@@ -2430,14 +2412,14 @@ invalid_path:
         }
       }
 
-      rootPos = p = dest + TempCDS.cdsBackslashOffset;
+      rootPos = p = dest + TempCDS->cdsBackslashOffset;
 
       TNDBG("TN35 after root setup p=%u root=%u backslash=%u dest='%s'",
-            TNDPTR(p), TNDPTR(rootPos), TempCDS.cdsBackslashOffset, dest);
+            TNDPTR(p), TNDPTR(rootPos), TempCDS->cdsBackslashOffset, dest);
     }
     else
     {
-      cp += TempCDS.cdsBackslashOffset;
+      cp += TempCDS->cdsBackslashOffset;
 
       TNDBG("TN36 skip physical cp='%s'", cp);
 
@@ -2661,6 +2643,33 @@ invalid_path:
   }
 
   TNDBG("TN66 return result=%04X dest='%s'", result, dest);
+  return result;
+}
+
+
+COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
+{
+  UWORD saved_sp = CPU_SP;
+  UWORD temp_sp = (UWORD)((saved_sp - sizeof(struct cds)) & (UWORD)~3u);
+  struct cds *temp_cds;
+  COUNT result;
+
+  /*
+   * TempCDS is the only large private object retained by upstream
+   * truename(). Keep it on the currently active guest DOS stack, where
+   * the original 16-bit kernel kept automatic data. During CONFIG.SYS
+   * this is the dedicated 1 KiB init stack established before DoConfig();
+   * after startup it is the current process or DOS internal stack.
+   *
+   * The source pathname is not copied: truename_worker() reads the guest
+   * ASCIIZ string directly through ARM_PTR(). The native frame therefore
+   * contains only scalar state, pointers and compiler spills. Restoring SP
+   * here releases TempCDS for every early-return path in the worker.
+   */
+  CPU_SP = temp_sp;
+  temp_cds = (struct cds *)ARM_PTR(MK_FP(CPU_SS, temp_sp));
+  result = truename_worker(x86_src, dest, mode, temp_cds);
+  CPU_SP = saved_sp;
   return result;
 }
 

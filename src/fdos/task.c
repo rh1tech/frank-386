@@ -410,29 +410,26 @@ set_name:
    jump between processes, because upstream itself has no other way to
    suspend and resume execution contexts.
 
-   This port doesn't need any of that: since fdos_21h() (and therefore
-   every DOS call, including this one) already runs as a plain,
-   synchronous, *nested* C function call from inside the CPU core's
-   own pc_step() loop (see cpu_far_call()/execrh() in kernel.c for the
-   same pattern used to call into loaded device drivers), "suspend the
-   caller, run something else, then resume the caller" is just:
-     1. save every CPU register (the C call stack itself keeps this
-        call's local variables alive - no separate "user stack" is
-        needed);
-     2. point the CPU at the child's own initial register state and
-        keep calling pc_step() until the child signals termination
-        (see request_terminate(), called synchronously from the new
-        INT 20h/INT 21h AH=00h/4Ch handlers - "synchronously" meaning:
-        by the time those handlers run, CS:IP has not yet been pushed
-        anywhere, so they can simply set a flag and return, and this
-        loop notices it on the very next pc_step());
-     3. restore every register saved in step 1 and return.
+   This port still uses a synchronous, nested C call to suspend the
+   caller and run the child, but the suspended DOS process state must
+   not live for the whole child lifetime on the tiny native ARM stack.
+   Real DOS keeps that state in guest memory, on the current process's
+   DOS/user stack.  The port therefore does the same:
+     1. reserve an exec_child_context below the parent's guest SS:SP;
+     2. save the parent CPU/DOS state there, then switch SS:SP and the
+        visible process state to the child;
+     3. run the child (pc_step() for guest code, a native function for
+        FCOM), release it, restore the parent from the guest frame and
+        restore the parent's original SP, which releases the frame.
 
-   Nesting (a running child EXEC-ing a further grandchild) works for
-   free: each nested EXEC is just another nested call to this same
-   function, and terminate_flag only ever needs to be checked by
-   whichever call is currently the innermost one - which is always
-   exactly the call whose pc_step() loop is presently executing.
+   Only the small native ABI frame, scalar temporaries and return
+   addresses remain on the ARM stack.  Consequently nested EXECs use
+   the per-process guest stacks for their long-lived saved contexts
+   instead of accumulating those contexts in SCRATCH_Y.
+
+   terminate_flag still only needs to be checked by the innermost
+   active guest pc_step() loop.  Its outer value, together with
+   native_done, is part of each guest-resident exec_child_context.
 */
 static volatile bool terminate_flag;
 static UBYTE term_exit_code, term_exit_type;
@@ -574,6 +571,9 @@ static void exec_release_child(UWORD child_psp_seg)
 static void exec_leave_child(struct exec_child_context *saved,
                              UWORD child_psp_seg)
 {
+  bool outer_terminate = saved->terminate;
+  bool outer_native_done = saved->native_done;
+
   /* Cleanup runs with LOCAL, quiescent signals: the child has already
      terminated (its request_terminate() left terminate_flag=true /
      native_done=true on this level), and the OUTER level's pending
@@ -602,9 +602,11 @@ static void exec_leave_child(struct exec_child_context *saved,
   internal_data->abort_progress = 0;
   internal_data->ErrorMode = saved->error_mode;
   restore_ctx(cpu, &saved->cpu);
-  /* last: restore the outer level's signalling state */
-  terminate_flag = saved->terminate;
-  cpu->native_done = saved->native_done;
+  /* restore_ctx() reinstates the parent's original SP and thereby
+     releases the guest-resident exec_child_context.  Do not dereference
+     saved beyond this point; the two outer signals were copied above. */
+  terminate_flag = outer_terminate;
+  cpu->native_done = outer_native_done;
 }
 
 enum exec_process_kind
@@ -638,10 +640,31 @@ static void exec_set_initial_registers(const struct exec_process_start *start)
 
 static COUNT exec_run_process(const struct exec_process_start *start)
 {
-  struct exec_child_context saved;
+  UWORD parent_sp = CPU_SP;
+  UWORD frame_sp;
+  struct exec_child_context *saved;
 
-  exec_enter_child(&saved, start->child_psp,
+  /*
+   * Keep the long-lived suspended-parent context in guest RAM, exactly
+   * where a real DOS task switch keeps it: below the current process's
+   * SS:SP.  Align the native view to a UWORD boundary; the extra byte,
+   * when the guest supplied an odd SP, is released together with the
+   * frame when restore_ctx() reinstates parent_sp.
+   *
+   * Do not use kstack here.  This object belongs to the suspended DOS
+   * process, remains live for the complete child lifetime, and nested
+   * EXEC levels must therefore consume their respective parent stacks
+   * rather than one shared native/kernel arena.
+   */
+  frame_sp = (UWORD)((parent_sp - sizeof(*saved)) & (UWORD)~1u);
+  CPU_SP = frame_sp;
+  saved = (struct exec_child_context *)ARM_PTR(MK_FP(CPU_SS, frame_sp));
+
+  exec_enter_child(saved, start->child_psp,
                    start->stack, start->dses);
+  /* save_ctx() saw the reserved frame at SS:frame_sp.  The process state
+     to restore is the pre-reservation stack pointer. */
+  saved->cpu.sp = parent_sp;
   exec_set_initial_registers(start);
 
   if (start->kind == EXEC_PROCESS_NATIVE_COMMAND)
@@ -666,7 +689,7 @@ static COUNT exec_run_process(const struct exec_process_start *start)
       pc_step(pc, 4096);
   }
 
-  exec_leave_child(&saved, start->child_psp);
+  exec_leave_child(saved, start->child_psp);
   return SUCCESS;
 }
 
@@ -1057,15 +1080,8 @@ static void fcom_copy_exec_tail(char *dst, size_t dst_size, const CommandTail *t
    стартует. Лучше честный DE_NOMEM, чем сползание SP через данные
    SCRATCH_Y в SCRATCH_X - в стек core1.
 
-   Калибровка: первый порог 1280 был взят по host-замерам x86-64
-   (-fstack-usage), где кадры в 1.5-2 раза толще ARM'овских, и
-   срабатывал на ЛЕГИТИМНОЙ глубине - у оверлейного EXEC (Norton 4B03:
-   на стеке ещё весь родительский DosExec + exec_run_process) и у
-   external из вложенного COMMAND. Порог покрывает только то, что
-   реально нужно НИЖЕ этой точки: загрузчик (DosOpenSft + FatFs
-   open/read) плюс IRQ-запас. Точную цифру дают родные .su-файлы
-   ARM-сборки (включены в CMakeLists); до калибровки по ним - 768. */
-#define DOSEXEC_NATIVE_STACK_HEADROOM 768u
+   Калибровка: пока 512 с тенденцией к снижению */
+#define DOSEXEC_NATIVE_STACK_HEADROOM 512u
 
 static uint32_t native_stack_free(void)
 {

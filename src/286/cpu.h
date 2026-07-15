@@ -81,10 +81,10 @@ void getea(CPU* cpu, uint8_t rmval);
 
 #if I386_MODE
 #define SET_IP(x) do { cpu->ip = (x); cpu->next_ip = (x); PREFETCH_RESET } while(0)
-#define CPU_IP    (*(uint16_t*)&(cpu->next_ip))
+#define CPU_IP    ((uint16_t)(cpu->next_ip))
 #else
-#define SET_IP(x) cpu->ip = (x)
-#define CPU_IP    (*(uint16_t*)&(cpu->ip))
+#define SET_IP(x) do { cpu->ip = (x); } while(0)
+#define CPU_IP    ((uint16_t)(cpu->ip))
 #endif
 
 #endif // CPU_286_H

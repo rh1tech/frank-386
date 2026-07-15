@@ -179,31 +179,43 @@ static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16
         return true;
     }
 
-    uint8_t buf[512];
+    /*
+     * FatFs already buffers the underlying file.  Keep only a tiny native
+     * staging buffer for the guest-memory byte interface instead of placing
+     * a whole sector on the core0 stack.  Re-entrancy is not required here:
+     * the transfer is synchronous and each chunk is consumed before the next
+     * f_read()/f_write().
+     */
+    uint8_t buf[16];
 
     for (uint16_t i = 0; i < count; i++) {
-        UINT done = 0;
         uint32_t mem = addr + (uint32_t)i * 512u;
 
-        if (write) {
-            for (uint32_t j = 0; j < 512; j++)
-                buf[j] = read86(mem + j);
+        for (uint16_t off = 0; off < 512; off += sizeof(buf)) {
+            UINT done = 0;
 
-            if (f_write(d->f, buf, 512, &done) != FR_OK || done != 512) {
-                CPU_AL = (uint8_t)i;
-                int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-                return true;
-            }
-        } else {
-            if (f_read(d->f, buf, 512, &done) != FR_OK || done != 512) {
-                CPU_AL = (uint8_t)i;
-                int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-                return true;
-            }
+            if (write) {
+                for (uint16_t j = 0; j < sizeof(buf); j++)
+                    buf[j] = read86(mem + off + j);
 
-            if (!verify) {
-                for (uint32_t j = 0; j < 512; j++)
-                    write86(mem + j, buf[j]);
+                if (f_write(d->f, buf, sizeof(buf), &done) != FR_OK ||
+                    done != sizeof(buf)) {
+                    CPU_AL = (uint8_t)i;
+                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+                    return true;
+                }
+            } else {
+                if (f_read(d->f, buf, sizeof(buf), &done) != FR_OK ||
+                    done != sizeof(buf)) {
+                    CPU_AL = (uint8_t)i;
+                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+                    return true;
+                }
+
+                if (!verify) {
+                    for (uint16_t j = 0; j < sizeof(buf); j++)
+                        write86(mem + off + j, buf[j]);
+                }
             }
         }
     }
@@ -428,8 +440,12 @@ static bool bios_13h_05h(CPU* cpu)
         return true;
     }
 
-    /* Заполнить каждый сектор дорожки fill byte 0xF6 (DPT offset+8, IBM standard) */
-    uint8_t buf[512];
+    /*
+     * Заполнить каждый сектор дорожки байтом 0xF6 (DPT offset+8, IBM
+     * standard).  FatFs already buffers the file, so a 16-byte staging
+     * buffer is sufficient and avoids a 512-byte native stack frame.
+     */
+    uint8_t buf[16];
     memset(buf, 0xF6, sizeof(buf));
 
     for (uint8_t s = 0; s < count; s++) {
@@ -438,10 +454,14 @@ static bool bios_13h_05h(CPU* cpu)
             int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
             return true;
         }
-        UINT done = 0;
-        if (f_write(d.f, buf, 512, &done) != FR_OK || done != 512) {
-            int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
-            return true;
+
+        for (uint16_t off = 0; off < 512; off += sizeof(buf)) {
+            UINT done = 0;
+            if (f_write(d.f, buf, sizeof(buf), &done) != FR_OK ||
+                done != sizeof(buf)) {
+                int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+                return true;
+            }
         }
     }
     f_sync(d.f);

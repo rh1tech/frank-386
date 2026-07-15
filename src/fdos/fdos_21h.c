@@ -64,11 +64,27 @@ while(1); // remove it
  * after the handler returns.  A nested critical error cannot recurse:
  * it is converted directly to FAIL, as in the original kernel.
  */
-COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
-                             dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
+struct critical_error_workspace
 {
   CPU_regs saved_regs;
   struct int21_guest_iregs saved_frame;
+};
+
+_Static_assert(sizeof(struct critical_error_workspace) <=
+               offsetof(struct dos_data, disk_stack) -
+               offsetof(struct dos_data, error_stack),
+               "critical-error workspace must fit the resident DOS error stack");
+
+COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
+                             dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
+{
+  const UWORD error_tos =
+      (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, disk_stack));
+  const UWORD work_sp =
+      (UWORD)((error_tos - sizeof(struct critical_error_workspace)) &
+              (UWORD)~3u);
+  struct critical_error_workspace *work =
+      (struct critical_error_workspace *)ARM_PTR(MK_FP(DOS_PSP, work_sp));
   psp *p;
   dos_far_ptr user_stack;
   dos_far_ptr /* -> struct dhdr */ device = x86_lpDevice;
@@ -91,7 +107,7 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * such as INT 2Fh helpers invoked outside INT 21h.
    */
   if (have_frame)
-    guest_read(&saved_frame, user_stack, sizeof(saved_frame));
+    guest_read(&work->saved_frame, user_stack, sizeof(work->saved_frame));
   else
     user_stack = MK_FP(CPU_SS, CPU_SP);
 
@@ -111,7 +127,18 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
   internal_data->CritErrDrive = (UBYTE)nDrive;
   internal_data->CritErrDev = device;
 
-  cpu_save_regs(cpu, &saved_regs);
+  /*
+   * The original kernel runs INT 24h processing on _error_tos, a dedicated
+   * resident guest stack in the SDA.  Keep the two objects that must survive
+   * the user handler there as well: the complete CPU register snapshot and
+   * the published INT 21h frame.  ErrorMode rejects recursion, so one LIFO
+   * reservation below _error_tos is sufficient and cannot collide with a
+   * second CriticalError() instance.
+   *
+   * Deliberately left on the native stack: scalar flags, offsets and pointers.
+   * They are small and do not remain live across another DOS process level.
+   */
+  cpu_save_regs(cpu, &work->saved_regs);
   saved_ss = CPU_SS;
   saved_error_mode = internal_data->ErrorMode;
   saved_indos = internal_data->InDOS;
@@ -137,9 +164,9 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * interrupted INT 21h dispatcher.
    */
   if (have_frame)
-    guest_write(user_stack, &saved_frame, sizeof(saved_frame));
+    guest_write(user_stack, &work->saved_frame, sizeof(work->saved_frame));
 
-  cpu_restore_regs(cpu, &saved_regs);
+  cpu_restore_regs(cpu, &work->saved_regs);
   SET_SS(saved_ss);
   internal_data->ErrorMode = saved_error_mode;
   internal_data->InDOS = saved_indos;
@@ -803,11 +830,11 @@ DOS 1+ - main DOS handler
 */
 bool fdos_21h(CPU* _cpu) {
     COUNT rc;
-    CPU_regs lr;
-    CPU_regs *regs = &lr;
+    CPU_regs *regs;
     UWORD entry_ss, entry_sp;
     UWORD entry_ip, entry_cs;
     UWORD frame_sp;
+    UWORD regs_sp;
     dos_far_ptr old_ps_stack;
     dos_far_ptr old_user_r;
     dos_far_ptr old_prev_user_r;
@@ -818,21 +845,34 @@ bool fdos_21h(CPU* _cpu) {
     entry_sp = CPU_SP;
     entry_ip = readw86(stk_lin(entry_ss, entry_sp, 0));
     entry_cs = readw86(stk_lin(entry_ss, entry_sp, 2));
-    cpu_save_regs(_cpu, regs);
     uint16_t flags_on_stack = readw86(stk_lin(entry_ss, entry_sp, 4));
-    regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
 
     /*
-     * Native C code uses the host stack, so the guest user stack is still
-     * available.  Build the same guest-visible iregs frame that the
-     * original entry.asm creates with PUSH$ALL and publish it at PSP:2Eh.
+     * Keep both INT 21h register images on the current DOS process stack.
      *
-     * Nested INT 21h calls get their own frame below the outer one.  Save
-     * and restore ps_stack so the outer invocation becomes current again
+     * The upper frame is the original FreeDOS PUSH$ALL/iRegs ABI published
+     * through PSP:2Eh for critical-error handlers and DOS extenders.  The
+     * lower CPU_regs object is the native dispatcher's private working copy:
+     * BIOS/device calls may freely modify the live CPU, while R_AX..R_GS keep
+     * referring to this saved process state.
+     *
+     * CPU_regs used to be a long-lived local C object, so every nested DOS
+     * call retained another copy on the scarce ARM stack.  A real DOS keeps
+     * this state on its user/internal guest stack; reserve it below the
+     * public iRegs frame here for the complete duration of this invocation.
+     * Align the native view to 4 bytes because CPU_regs contains 32-bit union
+     * members.  Restoring entry_sp releases both frames at once.
+     *
+     * Nested INT 21h calls reserve their own pair below the outer pair. Save
+     * and restore ps_stack so the outer public frame becomes current again
      * when the nested call returns.
      */
     frame_sp = (UWORD)(entry_sp - sizeof(struct int21_guest_iregs));
-    CPU_SP = frame_sp;
+    regs_sp = (UWORD)((frame_sp - sizeof(*regs)) & (UWORD)~3u);
+    CPU_SP = regs_sp;
+    regs = (CPU_regs *)ARM_PTR(MK_FP(entry_ss, regs_sp));
+    cpu_save_regs(_cpu, regs);
+    regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
     current_psp = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
     old_ps_stack = current_psp->ps_stack;
     old_user_r = internal_data->user_r;

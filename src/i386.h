@@ -267,7 +267,7 @@ inline static void cpu_abort(CPU *cpu, int code) {
 #define SI_REG_IDX 6
 #define DI_REG_IDX 7
 
-#define StepIP(x) CPU_IP += x
+#define StepIP(x) SET_IP ( CPU_IP + (x) )
 
 #define CPU_AX    cpu->gprx[regax].r16
 #define CPU_BX    cpu->gprx[regbx].r16
