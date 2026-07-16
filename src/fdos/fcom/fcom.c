@@ -59,6 +59,7 @@ struct fcom_guest {
   UBYTE persistent;
   UBYTE skip_autoexec;
   char autoexec_path[128];
+  char comspec_arg[128];  /* SHELL= path word: COMSPEC source (FreeCom grabComFilename) */
   char batch_line[FCOM_LINE_MAX + 1];
   char batch_name[128];
   char batch_args[128];
@@ -1434,6 +1435,11 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
   return 0;
 }
 
+/* Определены ниже, у прочих int21-хелперов редиректа. */
+static int dos_open_mode(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g,
+                         const char *name, UBYTE mode);
+
 static int fcom_initialize_environment(CPU *cpu, UWORD command_psp,
                                        struct fcom_guest *g)
 {
@@ -1458,6 +1464,61 @@ static int fcom_initialize_environment(CPU *cpu, UWORD command_psp,
 
   if (program_name == NULL || *program_name == '\0')
     program_name = "COMMAND.COM";
+
+  /*
+   * SHELL=-аргумент пути (FreeCom grabComFilename): абсолютизация
+   * штатным truename (AH=60h), каталог дополняется \COMMAND.COM
+   * (атрибут по AH=43h), результат валидируется открытием. Успех
+   * замещает argv[0]-значение COMSPEC; отказ - предупреждение и
+   * прежнее поведение, как error_open_file() оригинала.
+   */
+  if (g->comspec_arg[0] != '\0') {
+    size_t n = strlen(g->comspec_arg);
+
+    if (n < sizeof(g->path)) {
+      memcpy(g->path, g->comspec_arg, n + 1);
+      SET_DS(command_psp);
+      CPU_SI = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+      SET_ES(command_psp);
+      CPU_DI = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path2);
+      CPU_AH = 0x60;
+      fcom_intcall(cpu, command_psp, 0x21, "FCOM comspec truename");
+      if (!int21_failed(cpu)) {
+        int is_dir = 0;
+
+        memcpy(g->path, g->path2, sizeof(g->path2));
+        SET_DS(command_psp);
+        CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+        CPU_AX = 0x4300;
+        fcom_intcall(cpu, command_psp, 0x21, "FCOM comspec attr");
+        if (!int21_failed(cpu) && (CPU_CX & 0x10))
+          is_dir = 1;
+
+        if (is_dir) {
+          size_t len = strlen(g->path2);
+          while (len > 0 && g->path2[len - 1] == '\\')
+            g->path2[--len] = '\0';
+          if (len + sizeof("\\COMMAND.COM") <= sizeof(g->path2))
+            memcpy(g->path2 + len, "\\COMMAND.COM",
+                   sizeof("\\COMMAND.COM"));
+        }
+
+        {
+          int fd = dos_open_mode(cpu, command_psp, g, g->path2, 0);
+          if (fd >= 0) {
+            CPU_BX = (UWORD)fd;
+            CPU_AH = 0x3e;
+            fcom_intcall(cpu, command_psp, 0x21, "FCOM comspec close");
+            program_name = g->path2;
+          } else {
+            dos_printf("FCOM: cannot open \"%s\"\n", g->path2);
+          }
+        }
+      } else {
+        dos_printf("FCOM: bad COMSPEC path \"%s\"\n", g->comspec_arg);
+      }
+    }
+  }
 
   {
     int n = snprintf(g->text, sizeof(g->text),
@@ -9068,23 +9129,30 @@ static enum fcom_start_action parse_init_tail(struct fcom_guest *g,
 
     if (*p != '/' && *p != '-') {
       /*
-       * A non-option word. FreeCOM does NOT stop here: shell/init.c loops,
-       * takes the word with skip_word() and uses it as the COMSPEC path
-       * (grabComFilename()) or a CTTY device, then goes back for MORE
-       * options. Only /C or /K ends the scan.
-       *
-       * That matters for the standard CONFIG.SYS form
+       * Не-опционное слово - путь COMSPEC, как в FreeCom: shell/init.c
+       * отдаёт первое такое слово в grabComFilename() (абсолютизация,
+       * каталог дополняется \COMMAND.COM, файл валидируется открытием) и
+       * публикует результат в COMSPEC; сканирование ПРОДОЛЖАЕТСЯ - только
+       * /C и /K завершают разбор. Стандартная форма CONFIG.SYS:
        *     SHELL=...\command.com \freedos\bin /E:2048 /P=\FDAUTO.BAT
-       * where the very first token is the COMSPEC directory. Breaking out
-       * here meant /E: and /P= were never seen at all - so /P never armed
-       * the shell as permanent and FDAUTO.BAT never ran (which is also why
-       * PATH stayed at its default: AUTOEXEC.BAT is what sets it).
-       *
-       * This port's shell is native and needs no COMSPEC path of its own,
-       * so the word is consumed and discarded - but the scan CONTINUES.
+       * Здесь слово лишь запоминается (первое - победитель, как гейт
+       * !comPath оригинала); применяет его fcom_initialize_environment().
+       * Второе и далее у оригинала уходит в CTTY либо "too many
+       * parameters" - CTTY в порту нет, лишние слова игнорируются.
        */
-      while (*p != '\0' && *p != ' ' && *p != '\t')
-        ++p;
+      {
+        char *w = p;
+        size_t n;
+        while (*p != '\0' && *p != ' ' && *p != '\t')
+          ++p;
+        n = (size_t)(p - w);
+        if (g->comspec_arg[0] == '\0' && n > 0) {
+          if (n >= sizeof(g->comspec_arg))
+            n = sizeof(g->comspec_arg) - 1;
+          memcpy(g->comspec_arg, w, n);
+          g->comspec_arg[n] = '\0';
+        }
+      }
       p = skip_space(p);
       continue;
     }
