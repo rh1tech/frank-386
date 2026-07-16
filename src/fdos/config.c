@@ -9,7 +9,7 @@
 
 #define EOF 0x1a
 
-STATIC BYTE szBuf[256] BSS_INIT({0});
+#define szBuf ((BYTE *)ARM_PTR(x86_SZ_BUF))
 STATIC unsigned nCfgLine BSS_INIT(0);
 static UBYTE ErrorAlreadyPrinted[128] BSS_INIT({0});
 BYTE *pLineStart BSS_INIT(0);
@@ -567,7 +567,7 @@ STATIC VOID Dosmem(BYTE * pLine)
   strcpy(szBuf, pLine);
   strupr(szBuf);
 
-  /* printf("DOS called with %s\n", szBuf); */
+  printf("CFG Dosmem: arg=[%.30s]\n", szBuf);   /* INITCHK, remove later */
 
   for (pTmp = szBuf;;)
   {
@@ -618,6 +618,8 @@ STATIC VOID Dosmem(BYTE * pLine)
   {
     HMAState = HMA_DONE;
   }
+  printf("CFG Dosmem: exit UMBwanted=%d UmbState=%d HMAState=%d\n",
+         UMBwanted, UmbState, HMAState);   /* INITCHK, remove later */
 }
 
 STATIC seg prev_mcb(seg cur_mcb, seg start)
@@ -634,6 +636,49 @@ STATIC seg prev_mcb(seg cur_mcb, seg start)
 }
 
 STATIC VOID mumcb_init(UCOUNT seg, UWORD size);
+
+/* INITCHK: boot-visible integrity snapshot for the UMB+CONFIG regression
+   hunt (11ca8c0 -> bef7e2f).  Walks the low MCB chain, reports the first
+   corruption, and shows the SDA apistk high-water floor (the 90h fill is
+   laid down by kernel(); a floor of 0 means the init stack underflowed
+   into the head of internal_data).  Remove after the regression closes. */
+void initchk(const char *phase)
+{
+  UWORD mseg = LoL->first_mcb;
+  UWORD n = 0;
+  const char *mcb_state = "OK";
+
+  if (mseg == 0) {
+    mcb_state = "not-yet";
+  } else {
+    for (;;) {
+      mcb *m = para2far(mseg);
+      if (m->m_type == MCB_LAST) { ++n; break; }
+      if (m->m_type != MCB_NORMAL || m->m_size == 0xffff) {
+        mcb_state = "CORRUPT";
+        break;
+      }
+      if (++n > 512) { mcb_state = "LOOP"; break; }
+      mseg = mseg + m->m_size + 1;
+    }
+  }
+
+  {
+    const UBYTE *base = (const UBYTE *)internal_data->sda_tmp_dm_ren;
+    unsigned span = (unsigned)(sizeof(internal_data->sda_tmp_dm_ren) +
+                               sizeof(internal_data->SearchDir_ren) +
+                               sizeof(internal_data->error_stack) +
+                               sizeof(internal_data->disk_stack) +
+                               sizeof(internal_data->char_stack));
+    unsigned floor90 = 0;
+    while (floor90 < span && base[floor90] == 0x90)
+      ++floor90;
+    printf("INITCHK %-12s mcb=%s(%u@%04X) sda_floor=%u dyn=%04X:%04X umb=%d\n",
+           phase, mcb_state, n, mseg, floor90,
+           FP_SEG(DynLast()), FP_OFF(DynLast()), UmbState);
+  }
+}
+
 STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type);
 STATIC void umb_init(void)
 {
@@ -641,10 +686,22 @@ STATIC void umb_init(void)
   seg umb_max;
   dos_far_ptr xms_addr = DetectXMSDriver();
 
+  /* INITCHK: one-line boot diagnostics for the UMB+CONFIG regression
+     hunt (11ca8c0 -> bef7e2f).  Visible on a normal boot, no debug
+     session needed; remove after the regression is closed. */
+  printf("INITCHK umb_init: xms=%04X:%04X UmbState=%d\n",
+         FP_SEG(xms_addr), FP_OFF(xms_addr), UmbState);
+
   if (EFFECTIVE(xms_addr) == 0)
     return;
 
-  if (UMB_get_largest(xms_addr, &umb_seg, &umb_size))
+  {
+    int gl = UMB_get_largest(xms_addr, &umb_seg, &umb_size);
+    printf("INITCHK umb_init: get_largest rc=%d seg=%04X size=%04X\n",
+           gl, umb_seg, umb_size);
+    if (!gl)
+      goto umb_init_done;
+  }
   {
     UmbState = 1;
 
@@ -730,6 +787,9 @@ STATIC void umb_init(void)
     para2far(umb_max)->m_type = MCB_LAST;
     CfgDbgPrintf(("UMB Allocation completed: start at 0x%x\n", umb_base_seg));
   }
+umb_init_done:
+  printf("INITCHK umb_init: done UmbState=%d root=%04X start=%04X top=%04X\n",
+         UmbState, LoL->uppermem_root, umb_start, UMB_top);
 }
 
 STATIC VOID InitPgm(BYTE * pLine)
@@ -1259,9 +1319,9 @@ STATIC VOID CmdChain(BYTE * pLine)
     CfgFailure(pLine);
     return;
   }
-  dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
-  strcpy(PriPathName, pLine);
-  if ((fd = open(x86_path, 0)) < 0) {
+  /* upstream: open(pLine) из собственного буфера, не из SDA */
+  strcpy((char *)szBuf, (const char *)pLine);
+  if ((fd = open(x86_SZ_BUF, 0)) < 0) {
     CfgFailure(pLine);
     return;
   }
@@ -1378,9 +1438,9 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
   BYTE FAR *ptable;
   dos_far_ptr CharMapFn;
 
-  dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
-  strcpy(PriPathName, filename);
-  if ((fd = open(x86_path, 0)) < 0)
+  /* upstream: open(filename) из собственного буфера, не из SDA */
+  strcpy((char *)szBuf, filename);
+  if ((fd = open(x86_SZ_BUF, 0)) < 0)
   {
     if (filenam == NULL)
       return !LoadCountryInfoHardCoded(ctryCode);
@@ -1690,19 +1750,14 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 
   CfgDbgPrintf(("Loading device driver %s at segment %04x\n", szBuf, base));
 
-  /* szBuf is native (ARM) memory; DosExec()/DosOpenSft() need the
-     filename in guest RAM, so copy it into the SDA's scratch path
-     buffer first - same idiom the CONFIG.SYS search loop above uses
-     (see x86_FAR_PTR(DOS_PSP, PriPathName) there). DosExec()'s "lp"
-     is, like init_device()'s cmdLine, an already-native pointer into
-     guest RAM (FAR is a no-op in this port) - not a dos_far_ptr.
-     PriPathName, not SecPathName: DosExec() uses SecPathName itself
-     as scratch space (ExeHeader/TempExeBlock, see task.c) for the
-     duration of the call, so writing the filename there too would let
-     it clobber the tail of its own argument on long paths. */
-  strcpy(PriPathName, szBuf);
-
-  if ((result = DosExec(EXEC_OVERLAY, &eb, (BYTE FAR *) PriPathName)) != SUCCESS)
+  /* upstream: init_DosExec(3, &eb, szBuf) - szBuf теперь гостевой
+     (x86_SZ_BUF), поэтому передаётся напрямую. SDA PriPathName здесь
+     запрещён: это dest-буфер truename(), и DosOpenSft(имя ИЗ него)
+     давал src==dest - имя разрушалось посреди разбора (регрессия
+     UMB+конфиг 11ca8c0 -> bef7e2f). DosExec()'s "lp" - нативный
+     указатель в гостевую память (linear_to_far в task.c), сегмент
+     значения не имеет. */
+  if ((result = DosExec(EXEC_OVERLAY, &eb, (BYTE FAR *) szBuf)) != SUCCESS)
   {
     dpb_watch_check_chain("LoadDevice err");
     CfgFailure(pLine);
@@ -1776,9 +1831,11 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 STATIC VOID DeviceHigh(BYTE * pLine)
 {
   /* might have been the UMB driver or DOS=UMB */
-  if (UmbState == 2)
+  if (UmbState == 2) {
+    initchk("pre-umb");
     umb_init();
-
+    initchk("post-umb");
+  }
   if (UmbState == 1)
   {
     if (LoadDevice(pLine, MK_FP(umb_start + UMB_top, 0), TRUE) == DE_NOMEM)
@@ -2023,16 +2080,21 @@ VOID DoConfig(int nPass)
       "fdconfig.sys", "config.sys", NULL
     };
     int ii;
-    dos_far_ptr x86_path = x86_FAR_PTR(DOS_PSP, PriPathName);
+    /* upstream: open("fdconfig.sys") - имя из СОБСТВЕННОГО буфера (в
+       оригинале это литерал init-сегмента). SDA PriPathName здесь
+       запрещён: DosOpenSft() -> truename(имя, PriPathName) при
+       src==dest разрушал имя посреди разбора, и CONFIG.SYS молча не
+       открывался - корень регрессии UMB+конфиг 11ca8c0 -> bef7e2f. */
 
     for (ii = 0; configcommands[ii] != NULL; ++ii) {
-      strcpy(PriPathName, configcommands[ii]);
-      if ((nFileDesc = open(x86_path, 0)) >= 0) {
-        CfgDbgPrintf(("Reading \"%s\"...\n", configcommands[ii]));
+      strcpy((char *)szBuf, configcommands[ii]);
+      nFileDesc = open(x86_SZ_BUF, 0);
+      /* INITCHK: unconditional open trace - CfgDbgPrintf is compiled
+         out, which made this failure silent.  Remove when closed. */
+      printf("CFG open pass=%d \"%s\" -> %d\n",
+             nPass, configcommands[ii], nFileDesc);
+      if (nFileDesc >= 0) {
         break;
-      } else {
-        CfgDbgPrintf(("\"%s\" not found, PriPathName=\"%s\"\n",
-                      configcommands[ii], PriPathName));
       }
     }
     if (configcommands[ii] == NULL) {
@@ -2141,7 +2203,14 @@ VOID DoConfig(int nPass)
     }
     else
     {
-      if (SkipLine(pLineStart))   /* F5/F8/?/! processing */
+      /* INITCHK/CFG: per-line dispatch verdicts for the UMB+CONFIG
+         regression hunt.  Pass 1 only, capped; remove when closed. */
+      int cfg_skip = SkipLine(pLineStart);   /* F5/F8/?/! processing */
+
+      if (nCfgLine < 24)
+        printf("CFG L%02d skip=%d ml=%02x sel=%d [%.34s]\n",
+               nCfgLine, cfg_skip, MenuLine, MenuSelected, pLineStart);
+      if (cfg_skip)
         continue;
     }
 
@@ -2161,6 +2230,7 @@ VOID DoConfig(int nPass)
     /* YES. DO IT */
     pEntry->func(pLine);
   }
+  printf("CFG pass=%d done, %d lines\n", nPass, nCfgLine); /* INITCHK */
   close(nFileDesc);
 
   if (nPass == 0)

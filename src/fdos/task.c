@@ -1119,22 +1119,17 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
       fcom_is_command_com((const char *)lp))
   {
     /*
-     * M1 (truename-стиль): хвост командной строки ребёнка собирается на
-     * ТЕКУЩЕМ гостевом стеке процесса-родителя, а не в нативном кадре и
-     * не в общей арене. Живёт только до копирования в PSP:80h ребёнка
-     * функцией fcom_create_process(). patchPSP() отдельно переносит FCB1
-     * и FCB2, переданные вызывающим процессом в EXEC parameter block; из
-     * command tail они здесь не строятся. SP восстанавливается ДО
-     * глубокого вложенного исполнения, поэтому вложенные EXEC-уровни
-     * этот резерв не наследуют.
+     * Хвост командной строки ребёнка собирается в фиксированном слоте
+     * SDA_EXEC_TAIL_OFF на disk API-стеке SDA (init-mod.h) - там, где
+     * у оригинала живут автоматики kernel-кода. Живёт до копирования в
+     * PSP:80h ребёнка функцией fcom_create_process(); patchPSP()
+     * отдельно переносит FCB1/FCB2 из EXEC parameter block. Слот
+     * one-shot: к моменту запуска ребёнка (и любых вложенных EXEC)
+     * содержимое уже скопировано. Стек вызывающего не трогается.
      */
-    const UWORD tail_bytes =
-        (UWORD)(sizeof(((CommandTail *)0)->ctBuffer) + 1);
-    UWORD saved_guest_sp = CPU_SP;
-    UWORD tail_sp = (UWORD)((saved_guest_sp - tail_bytes) & (UWORD)~1u);
-    char *tail = (char *)ARM_PTR(MK_FP(CPU_SS, tail_sp));
-
-    CPU_SP = tail_sp;
+    _Static_assert(sizeof(((CommandTail *)0)->ctBuffer) + 1 <=
+                   SDA_EXEC_TAIL_LEN, "EXEC tail slot too small");
+    char *tail = (char *)ARM_PTR(MK_FP(DOS_PSP, SDA_EXEC_TAIL_OFF));
     const CommandTail *command_tail = NULL;
     UWORD child_env_mcb = 0;
     COUNT env_rc;
@@ -1150,10 +1145,8 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
      * and appends argv[0].  FCOM owns that copy for its whole lifetime.
      */
     env_rc = ChildEnv(ep, &child_env_mcb, (char *)lp);
-    if (env_rc < SUCCESS) {
-      CPU_SP = saved_guest_sp;
+    if (env_rc < SUCCESS)
       return env_rc;
-    }
 
     {
       UWORD command_psp;
@@ -1167,7 +1160,6 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
                                       child_env_mcb + 1);
       if (command_psp == 0) {
         DosMemFree(child_env_mcb);
-        CPU_SP = saved_guest_sp;
         return DE_NOMEM;
       }
 
@@ -1182,10 +1174,8 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 
       /* tail уже скопирован в PSP:80h ребёнка; patchPSP() отдельно
          установил caller-supplied FCB1/FCB2 из EXEC parameter block.
-         Резерв на гостевом стеке родителя освобождается ДО вложенного
-         исполнения (exec_run_process возьмёт свой exec_child_context
-         уже ниже ИСХОДНОГО SP родителя). */
-      CPU_SP = saved_guest_sp;
+         Слот SDA_EXEC_TAIL_OFF с этого момента свободен для любых
+         вложенных EXEC. */
       return exec_run_native_command(command_psp,fcbcode);
     }
   }

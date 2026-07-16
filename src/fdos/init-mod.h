@@ -111,6 +111,45 @@
 #define x86_DAP           MK_FP(DOS_PSP, X86_BSS_OFF + MAX_SEC_SIZE + 256) // = 0x1CF4 /* 16 */
 // end = 0x1D04 /* 128 */
 
+/* Конфиг-буфер szBuf. В оригинале szBuf лежит в DATA-сегменте ядра
+   (гостевая память по определению), и именно ЕГО upstream отдаёт в
+   open()/init_DosExec() для имён CONFIG.SYS и путей DEVICE=/INSTALL=
+   (config.c: init_DosExec(3, &eb, szBuf)).Гостевой szBuf:
+    у каждого имени свой буфер, SDA не участвует. */
+#define X86_SZ_BUF_OFF    (X86_BSS_OFF + MAX_SEC_SIZE + 256u + 16u + 128u) /* = 0x1D84 */
+#define x86_SZ_BUF        MK_FP(DOS_PSP, X86_SZ_BUF_OFF)
+#define SZ_BUF_LEN        256u
+_Static_assert(X86_SZ_BUF_OFF + SZ_BUF_LEN <= 0x240E /* DYN_BUFFER */,
+               "szBuf overruns DYN_BUFFER");
+
+/*
+ * Фиксированные слоты на disk API-стеке SDA (internal_data->disk_stack,
+ * область [disk_stack .. char_stack)). В оригинале это автоматики
+ * kernel-кода: entry.asm переключает SS:SP на _disk_api_tos для
+ * дисковых функций INT 21h, и TempCDS truename()/буфер хвоста EXEC
+ * живут там как локальные переменные. Порт INT 21h стеки не
+ * переключает, поэтому регион свободен и занят теми же объектами по
+ * фиксированным адресам:
+ *   - TempCDS: truename() не вкладывается сам в себя (вызов всегда
+ *     завершается до передачи управления EXEC-ребёнку), одного
+ *     экземпляра достаточно;
+ *   - хвост EXEC: жив от сборки до fcom_create_process()/patchPSP(),
+ *     в т.ч. поперёк ChildEnv() -> truename() - поэтому слоты не
+ *     пересекаются; уровни EXEC не накладываются, т.к. хвост
+ *     копируется в PSP ребёнка до его запуска.
+ * Стек вызывающего процесса несёт тот же контракт INT 21h, что и в
+ * MS-DOS: IRET-кадр + образ регистров, без kernel-автоматиков.
+ */
+#define SDA_DISK_TOS_OFF   ((UWORD)(X86_INTERNAL_DATA_OFF + \
+                                    offsetof(struct dos_data, char_stack)))
+#define SDA_TEMPCDS_OFF    ((UWORD)((SDA_DISK_TOS_OFF - sizeof(struct cds)) & ~3u))
+#define SDA_EXEC_TAIL_LEN  132u
+#define SDA_EXEC_TAIL_OFF  ((UWORD)((SDA_TEMPCDS_OFF - SDA_EXEC_TAIL_LEN) & ~3u))
+_Static_assert(offsetof(struct dos_data, char_stack) -
+               offsetof(struct dos_data, disk_stack)
+               >= sizeof(struct cds) + SDA_EXEC_TAIL_LEN + 8,
+               "disk_stack too small for TempCDS + EXEC tail slots");
+
 #include "hdr/nls.h"
 
 /* Layout guards: silently overlapping these areas costs days of debugging. */

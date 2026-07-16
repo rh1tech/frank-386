@@ -6138,6 +6138,65 @@ static void builtin_memory(CPU *cpu, UWORD command_psp,
     (void)fcom_write(cpu, command_psp,
         FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
         (UWORD)n);
+
+  /*
+   * Дамп обеих MCB-цепочек (аналог mem /debug). Обход не доверяет
+   * заголовкам: невалидный тип/размер печатается с маркером BROKEN и
+   * останавливает проход по этой цепочке - владелец предыдущего блока
+   * виден в его имени. UMB-цепь берётся от uppermem_root независимо от
+   * состояния uppermem_link, чтобы дамп показывал и разлинкованные
+   * блоки.
+   */
+  {
+    int pass;
+
+    for (pass = 0; pass < 2; pass++)
+    {
+      UWORD mseg = pass ? LoL->uppermem_root : LoL->first_mcb;
+      int hops;
+
+      if (pass && (mseg == 0 || mseg == 0xffff))
+        break;
+
+      n = snprintf(g->text, sizeof(g->text),
+                   "\t%s chain (link=%u):\r\n",
+                   pass ? "UMB" : "Low", (unsigned)LoL->uppermem_link);
+      if (n > 0)
+        (void)fcom_write(cpu, command_psp,
+            FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+            (UWORD)n);
+
+      for (hops = 0; hops < 32; hops++)
+      {
+        const mcb *m = (const mcb *)ARM_PTR(MK_FP(mseg, 0));
+        char name[9];
+        int i;
+        int bad = (m->m_type != MCB_NORMAL && m->m_type != MCB_LAST) ||
+                  m->m_size == 0xffff;
+
+        for (i = 0; i < 8; i++)
+          name[i] = (m->m_name[i] >= ' ' && m->m_name[i] < 127)
+                        ? m->m_name[i] : '.';
+        name[8] = '\0';
+
+        n = snprintf(g->text, sizeof(g->text),
+                     "\t %04X %c psp=%04X size=%04X %s%s\r\n",
+                     mseg,
+                     (m->m_type >= ' ' && m->m_type < 127)
+                         ? (char)m->m_type : '?',
+                     m->m_psp, m->m_size, name,
+                     bad ? "  <-BROKEN" : "");
+        if (n > 0)
+          (void)fcom_write(cpu, command_psp,
+              FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
+              (UWORD)n);
+
+        if (bad || m->m_type == MCB_LAST)
+          break;
+        mseg = (UWORD)(mseg + m->m_size + 1u);
+      }
+    }
+  }
 }
 
 
@@ -6676,50 +6735,78 @@ static int exec_program(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
   return rc;
 }
 
+/*
+ * PATH-search scratch is shared rather than placed on the native stack.
+ *
+ * This code runs only on core0. Logical re-entry is also safe: when an
+ * exec_program() call actually starts a child, the outer invocation goes
+ * directly to "resolved" after the child returns and no longer reads the
+ * saved PATH cursor. A "not found" return cannot have run a child, so no
+ * nested FCOM invocation could have overwritten the cursor. BAT recursion
+ * starts only after the PATH-search state is dead.
+ */
+struct fcom_exec_search_workspace {
+  const char *path;
+  const char *end;
+  const char *dir;
+  size_t len;
+  int rc;
+};
+
+static struct fcom_exec_search_workspace fcom_exec_search;
+
 static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
                          const char *args)
 {
-  const char *path;
-  int rc;
 
   build_tail(g, args);
   strcpy(g->program, g->filename);
 
   /* Explicit drive/path names are never searched through PATH. */
   if (path_is_explicit(g->program)) {
-    rc = exec_program(cpu, command_psp, g, g->program);
+    fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->program);
     goto resolved;
   }
 
   /* DOS shells search the current directory before PATH. */
-  rc = exec_program(cpu, command_psp, g, g->program);
-  if (rc == 0 || (rc != -2 && rc != -3))
+  fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->program);
+  if (fcom_exec_search.rc == 0 ||
+      (fcom_exec_search.rc != -2 && fcom_exec_search.rc != -3))
     goto resolved;
 
-  path = find_path_value(command_psp);
-  while (path && *path) {
-    const char *end = strchr(path, ';');
-    size_t len = end ? (size_t)(end - path) : strlen(path);
-    const char *dir = path;
+  fcom_exec_search.path = find_path_value(command_psp);
+  while (fcom_exec_search.path && *fcom_exec_search.path) {
+    fcom_exec_search.end = strchr(fcom_exec_search.path, ';');
+    fcom_exec_search.len = fcom_exec_search.end
+        ? (size_t)(fcom_exec_search.end - fcom_exec_search.path)
+        : strlen(fcom_exec_search.path);
+    fcom_exec_search.dir = fcom_exec_search.path;
 
-    while (len && (*dir == ' ' || *dir == '\t')) {
-      ++dir;
-      --len;
+    while (fcom_exec_search.len &&
+           (*fcom_exec_search.dir == ' ' ||
+            *fcom_exec_search.dir == '\t')) {
+      ++fcom_exec_search.dir;
+      --fcom_exec_search.len;
     }
-    while (len && (dir[len - 1] == ' ' || dir[len - 1] == '\t'))
-      --len;
+    while (fcom_exec_search.len &&
+           (fcom_exec_search.dir[fcom_exec_search.len - 1] == ' ' ||
+            fcom_exec_search.dir[fcom_exec_search.len - 1] == '\t'))
+      --fcom_exec_search.len;
 
     /* Empty PATH components denote the current directory, already tried. */
-    if (len && make_path_candidate(g->text, sizeof(g->text),
-                                   dir, len, g->program)) {
-      rc = exec_program(cpu, command_psp, g, g->text);
-      if (rc == 0 || (rc != -2 && rc != -3))
+    if (fcom_exec_search.len &&
+        make_path_candidate(g->text, sizeof(g->text),
+                            fcom_exec_search.dir,
+                            fcom_exec_search.len, g->program)) {
+      fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->text);
+      if (fcom_exec_search.rc == 0 ||
+          (fcom_exec_search.rc != -2 && fcom_exec_search.rc != -3))
         goto resolved;
     }
 
-    if (!end)
+    if (!fcom_exec_search.end)
       break;
-    path = end + 1;
+    fcom_exec_search.path = fcom_exec_search.end + 1;
   }
 resolved:
   /*
@@ -6727,7 +6814,7 @@ resolved:
    * remained live for the whole exec_program()->DosExec() path and cost
    * another 48 bytes of native stack without owning independent state.
    */
-  if (rc == -2 || rc == -3) {
+  if (fcom_exec_search.rc == -2 || fcom_exec_search.rc == -3) {
     int batch_rc = execute_batch_file(cpu, command_psp, g, g->filename, args);
 
     if (batch_rc == 0)
@@ -6736,7 +6823,7 @@ resolved:
       return -1;
   }
 
-  if (rc < 0)
+  if (fcom_exec_search.rc < 0)
     error_bad_command(cpu, command_psp, g, g->program);
   return 0;
 }

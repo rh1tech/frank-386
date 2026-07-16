@@ -2565,28 +2565,21 @@ invalid_path:
 
 COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 {
-  UWORD saved_sp = CPU_SP;
-  UWORD temp_sp = (UWORD)((saved_sp - sizeof(struct cds)) & (UWORD)~3u);
-  struct cds *temp_cds;
-  COUNT result;
-
   /*
-   * TempCDS is the only large private object retained by upstream
-   * truename(). Keep it on the currently active guest DOS stack, where
-   * the original 16-bit kernel kept automatic data. During CONFIG.SYS
-   * this is the dedicated 1 KiB init stack established before DoConfig();
-   * after startup it is the current process or DOS internal stack.
+   * TempCDS - единственный крупный приватный объект upstream'ного
+   * truename(); в оригинале это автоматик на disk API-стеке (entry.asm
+   * переключает SS:SP на _disk_api_tos для дисковых функций). Здесь тот
+   * же регион SDA хранит его в фиксированном слоте SDA_TEMPCDS_OFF -
+   * см. init-mod.h, там же обоснование единственности экземпляра.
+   * Стек вызывающего процесса не расходуется и не сдвигается: гостю
+   * INT 21h обходится в IRET-кадр + образ регистров, как в MS-DOS.
    *
-   * The source pathname is not copied: truename_worker() reads the guest
-   * ASCIIZ string directly through ARM_PTR(). The native frame therefore
-   * contains only scalar state, pointers and compiler spills. Restoring SP
-   * here releases TempCDS for every early-return path in the worker.
+   * Источник не копируется: truename_worker() читает гостевую ASCIIZ-
+   * строку напрямую через ARM_PTR(), как upstream читает far-указатель.
    */
-  CPU_SP = temp_sp;
-  temp_cds = (struct cds *)ARM_PTR(MK_FP(CPU_SS, temp_sp));
-  result = truename_worker(x86_src, dest, mode, temp_cds);
-  CPU_SP = saved_sp;
-  return result;
+  struct cds *temp_cds =
+      (struct cds *)ARM_PTR(MK_FP(DOS_PSP, SDA_TEMPCDS_OFF));
+  return truename_worker(x86_src, dest, mode, temp_cds);
 }
 
 /* FAT time notation in the form of hhhh hmmm mmmd dddd (d = double second)
@@ -2830,8 +2823,11 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     fnode_init();
 
     /* Now process CONFIG.SYS     */
+    { void initchk(const char *); initchk("pre-config"); }
     DoConfig(0);
+    { void initchk(const char *); initchk("config-0"); }
     DoConfig(1);
+    { void initchk(const char *); initchk("config-1"); }
 
 #ifdef WITHLFNAPI
     /* Persistent LFN helper fnodes belong to resident guest DOS data.
@@ -3043,6 +3039,40 @@ void kernel(CPU* _cpu) {
     }
 
     LoL->cpu = cpu->gen;
+
+    /*
+     * INIT guest stack: SDA apistk_top (верх char_stack, DOS_PSP-регион
+     * 300h..780h). Ставится до первого сдвига CPU_SP: нативный init-путь
+     * (FsConfig()/DoConfig() -> DosOpenSft(), execrh() драйверов,
+     * INSTALL=) исполняется раньше первой гостевой инструкции, и SS:SP
+     * иначе держали бы reset-значение 0:0000 - любая резервация на
+     * гостевом стеке заворачивалась бы в 0000:FFxx поверх Dyn-арены.
+     *
+     * Почему именно apistk, а не другое место:
+     *   - регион принадлежит ядру навсегда и в оригинале несёт ровно
+     *     эту нагрузку: entry.asm исполняет INT 21h на этих стеках,
+     *     т.е. глубина драйверной инициализации бюджетируется upstream
+     *     теми же 90h-заполненными областями (floor виден в INITCHK);
+     *   - Dyn-арена запрещена: dsk.c/getddt() адресует ddt-массив как
+     *     ПЕРВУЮ аллокацию (base = DYN_BUFFER + sizeof(DynS)), любая
+     *     вставка раньше dsk_init() сдвигает ddt и лишает диски
+     *     геометрии;
+     *   - верх conventional запрещён: umb_init() кладёт мостовой MCB в
+     *     uppermem_root (ram_top-1, обычно 9FFF) - стек, растущий от
+     *     A0000 вниз, затирает мост, после чего seam-guard DosUmbLink()
+     *     навсегда отказывает в линковке и UMB-цепь недостижима.
+     *
+     * Фиксированные слоты SDA_TEMPCDS_OFF/SDA_EXEC_TAIL_OFF занимают
+     * вершину disk-региона (см. init-mod.h); init-стек достигает их
+     * только при глубине > sizeof(char_stack) - INITCHK sda_floor
+     * показывает фактический минимум. fcom process 0 и каждый EXEC-
+     * ребёнок ставят собственные SS:SP, так что это значение живёт
+     * только в init-фазе.
+     */
+    SET_SS(DOS_PSP);
+    CPU_SP = (UWORD)(X86_INTERNAL_DATA_OFF +
+                     offsetof(struct dos_data, char_stack) +
+                     sizeof(internal_data->char_stack));
 
     /* install DOS API and other interrupt service routines, basic kernel functionality works */
     setup_int_vectors();
