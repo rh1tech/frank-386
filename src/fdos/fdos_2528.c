@@ -8,17 +8,44 @@ struct int2526_packet {
   dos_far_ptr buf;
 } __attribute__((packed));
 
-static void fdos_set_cf(CPU *cpu, bool set)
+/*
+ * Возврат INT 25h/26h по их особому ABI: обработчик завершается RETF,
+ * ОСТАВЛЯЯ исходный FLAGS вызывающего на стеке (тот обязан снять его
+ * своим POPF), а CF результата несут ЖИВЫЕ флаги. Диспетчер трапов
+ * завершает нативные обработчики универсальной IRET-заглушкой (снимает
+ * IP/CS/FLAGS), поэтому кадр перед возвратом сдвигается на слово вниз:
+ *
+ *   вход:   [SP]=IP [SP+2]=CS [SP+4]=FLAGS(исходные)
+ *   выход:  [SP-2]=IP [SP]=CS [SP+2]=FLAGS|CF [SP+4]=FLAGS(исходные)
+ *           CPU_SP -= 2
+ *
+ * IRET заглушки снимает IP/CS/результат-флаги, и гость продолжает с
+ * SP = entry-2 и исходным FLAGS на вершине - в точности состояние после
+ * RETF реального DOS. Без сдвига POPF вызывающего съедал собственное
+ * слово стека: случайный TF (INT 1 на честной TF-механике порта),
+ * смещённый RET - исполнение мусора. Дисковые утилиты (NDD и родня)
+ * зовут INT 25h в прологе - и висли ровно так.
+ */
+static bool fdos_2526h_return(CPU *cpu, bool set_cf)
 {
   uint32_t frame = ((uint32_t)CPU_SS << 4) + CPU_SP;
+  UWORD ip = readw86(frame);
+  UWORD cs = readw86(frame + 2);
   UWORD flags = readw86(frame + 4);
 
-  if (set)
+  if (set_cf)
     flags |= 0x0001;
   else
     flags &= (UWORD)~0x0001;
 
+  CPU_SP = (UWORD)(CPU_SP - 2);
+  frame -= 2;
+  writew86(frame, ip);
+  writew86(frame + 2, cs);
   writew86(frame + 4, flags);
+  /* frame + 6: исходный FLAGS вызывающего, остаётся на стеке */
+
+  return true;
 }
 
 static bool fdos_2526h(CPU *cpu, COUNT mode)
@@ -34,8 +61,7 @@ static bool fdos_2526h(CPU *cpu, COUNT mode)
   if (drive >= LoL->lastdrive || far_is_null(dpb_fp))
   {
     CPU_AX = 0x0201;
-    fdos_set_cf(cpu, true);
-    return true;
+    return fdos_2526h_return(cpu, true);
   }
 
 #ifdef WITHFAT32
@@ -46,8 +72,7 @@ static bool fdos_2526h(CPU *cpu, COUNT mode)
     if (block != 0 && ISFAT32(dpb) && dpb->dpb_xfatsize != 0)
     {
       CPU_AX = 0x0207;
-      fdos_set_cf(cpu, true);
-      return true;
+      return fdos_2526h_return(cpu, true);
     }
   }
 #endif
@@ -69,17 +94,15 @@ static bool fdos_2526h(CPU *cpu, COUNT mode)
 
   CPU_AX = dskxfer(drive, block, buffer, count, mode);
 
+  internal_data->InDOS--;
+
   if (CPU_AX != 0)
   {
     if (mode == DSKWRITEINT26)
       setinvld(drive);
-    fdos_set_cf(cpu, true);
+    return fdos_2526h_return(cpu, true);
   }
-  else
-    fdos_set_cf(cpu, false);
-
-  internal_data->InDOS--;
-  return true;
+  return fdos_2526h_return(cpu, false);
 }
 
 bool fdos_25h(CPU *cpu)
