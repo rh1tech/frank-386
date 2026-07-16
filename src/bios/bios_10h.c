@@ -160,7 +160,6 @@
 #define BIOS10_FONT_BLOCK_COUNT        8
 #define BIOS10_FONT_CHARS_PER_BLOCK    256
 #define BIOS10_FONT_MAX_HEIGHT         32
-#define BIOS10_FONT_PLANE              2
 #define BIOS10_FONT_BLOCK_BYTES        (BIOS10_FONT_CHARS_PER_BLOCK * BIOS10_FONT_MAX_HEIGHT)
 
 /*
@@ -243,11 +242,22 @@ static void bios_10h_program_cursor_shape(CPU* cpu, uint16_t shape)
  * corresponding ROM font into VGA plane-2 font RAM.  The full implementation
  * is below the AX=11xx font services.
  */
-static void bios_10h_load_font_block(uint8_t block,
+static void bios_10h_load_font_block(CPU* cpu,
+                                     uint8_t block,
                                      uint32_t src,
                                      uint16_t first_char,
                                      uint16_t count,
                                      uint8_t bytes_per_char);
+
+/* Линейный адрес ROM-шрифта по высоте знакоместа (8/14/16). */
+static uint32_t bios_10h_rom_font_src(uint8_t height)
+{
+    switch (height) {
+    case 8:  return ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
+    case 14: return ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
+    default: return ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
+    }
+}
 
 /*
  * Update hardware text-mode cursor through the VGA CRT Controller.
@@ -673,22 +683,9 @@ static void bios_10h_apply_selected_text_scanlines(CPU* cpu)
         return;
 
     uint8_t height = bios_10h_selected_scanline_char_height();
-    uint32_t src;
 
-    switch (height) {
-    case 8:
-        src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
-        break;
-    case 14:
-        src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
-        break;
-    case 16:
-    default:
-        src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
-        break;
-    }
-
-    bios_10h_load_font_block(0, src, 0, 256, height);
+    bios_10h_load_font_block(cpu, 0, bios_10h_rom_font_src(height),
+                             0, 256, height);
 
     write86(0x484, 24);
     writew86(0x485, height);
@@ -754,6 +751,14 @@ static bool bios_10h_00h(CPU* cpu)
     write86(BIOS10_BDA_VIDEO_DISPLAY_DATA,
             read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) | BIOS10_VDD_VGA_ACTIVE);
     if (m->text) {
+        /* Плоскость 2 - общая планарная память: легальные записи
+           графических режимов (Mode X/Y и т.п.) стирают знакогенератор.
+           Как в SeaBIOS vga_set_mode, текстовый mode-set ВСЕГДА
+           перезаливает ROM-шрифт режима в plane 2; политика
+           AH=12h/BL=30h ниже лишь заменяет его другим по высоте. */
+        bios_10h_load_font_block(cpu, 0,
+                                 bios_10h_rom_font_src(m->char_height),
+                                 0, 256, m->char_height);
         bios_10h_apply_selected_text_scanlines(cpu);
         bios_10h_program_cursor_shape(cpu, readw86(0x460));
     }
@@ -2785,16 +2790,55 @@ static bool bios_10h_101Bh(CPU* cpu)
  * character glyphs are stored in plane 2, with four bytes per VGA memory
  * address because the emulator keeps planes interleaved.
  */
+/*
+ * Гостевой адрес байта шрифта в plane 2 - ЛИНЕЙНЫЙ (A0000 + block*2000h +
+ * ch*20h + row): в планарном режиме каждая плоскость адресуется гостем
+ * плоско, плоскость выбирает map mask секвенсора. Interleave x4 (+2) - это
+ * host-раскладка vga_ram, её формирует обработчик записи (стандартная
+ * ветка vga_mem_write кладёт ((uint32_t*)vga_ram)[addr] с plane-маской).
+ * Запись обязана идти при запрограммированном plane-2 доступе - см.
+ * bios_10h_font_access_begin()/_end() ниже.
+ */
 static uint32_t bios_10h_font_plane_addr(uint8_t block,
                                          uint8_t ch,
                                          uint8_t row)
 {
     uint32_t off =
-        (uint32_t)(block & 0x07) * BIOS10_FONT_BLOCK_BYTES * 4u +
-        (uint32_t)ch * BIOS10_FONT_MAX_HEIGHT * 4u +
-        (uint32_t)row * 4u +
-        BIOS10_FONT_PLANE;
+        (uint32_t)(block & 0x07) * BIOS10_FONT_BLOCK_BYTES +
+        (uint32_t)ch * BIOS10_FONT_MAX_HEIGHT +
+        (uint32_t)row;
     return VGA_MEM_BASE_GFX + off;
+}
+
+/*
+ * Программирование доступа к знакогенератору - зеркально SeaBIOS stdvga
+ * get_font_access()/release_font_access(): plane 2, линейная планарная
+ * адресация, окно A0000 64K; восстановление - штатные значения текстового
+ * режима (odd/even, окно B8000). Без этого записи в A0000 при текстовом
+ * GC6 (карта B8000) отбрасываются обработчиком, и шрифт не грузится -
+ * именно так терялся знакогенератор после планарных игр (Wolf3D, Mode Y):
+ * их записи легально стирают plane 2, а mode-set обязан перезалить шрифт.
+ */
+static void bios_10h_font_access_begin(CPU* cpu)
+{
+    cpu_portout8(0x3C4, 0x00); cpu_portout8(0x3C5, 0x01); /* sync reset */
+    cpu_portout8(0x3C4, 0x02); cpu_portout8(0x3C5, 0x04); /* map mask: plane 2 */
+    cpu_portout8(0x3C4, 0x04); cpu_portout8(0x3C5, 0x07); /* ext, flat, no chain4 */
+    cpu_portout8(0x3C4, 0x00); cpu_portout8(0x3C5, 0x03); /* reset off */
+    cpu_portout8(0x3CE, 0x04); cpu_portout8(0x3CF, 0x02); /* read map: plane 2 */
+    cpu_portout8(0x3CE, 0x05); cpu_portout8(0x3CF, 0x00); /* write mode 0, flat */
+    cpu_portout8(0x3CE, 0x06); cpu_portout8(0x3CF, 0x04); /* map A0000/64K, gfx */
+}
+
+static void bios_10h_font_access_end(CPU* cpu)
+{
+    cpu_portout8(0x3C4, 0x00); cpu_portout8(0x3C5, 0x01);
+    cpu_portout8(0x3C4, 0x02); cpu_portout8(0x3C5, 0x03); /* planes 0+1 */
+    cpu_portout8(0x3C4, 0x04); cpu_portout8(0x3C5, 0x03); /* ext, odd/even */
+    cpu_portout8(0x3C4, 0x00); cpu_portout8(0x3C5, 0x03);
+    cpu_portout8(0x3CE, 0x04); cpu_portout8(0x3CF, 0x00);
+    cpu_portout8(0x3CE, 0x05); cpu_portout8(0x3CF, 0x10); /* odd/even write */
+    cpu_portout8(0x3CE, 0x06); cpu_portout8(0x3CF, 0x0E); /* map B8000/32K, text */
 }
 
 /*
@@ -2843,7 +2887,8 @@ static void bios_10h_set_text_char_height(CPU* cpu, uint8_t height)
  * Rows above bytes_per_char are cleared up to 32 bytes so switching from a
  * taller font to a shorter one cannot leave stale glyph scanlines visible.
  */
-static void bios_10h_load_font_block(uint8_t block,
+static void bios_10h_load_font_block(CPU* cpu,
+                                     uint8_t block,
                                      uint32_t src,
                                      uint16_t first_char,
                                      uint16_t count,
@@ -2860,6 +2905,8 @@ static void bios_10h_load_font_block(uint8_t block,
 
     block &= 0x07;
 
+    bios_10h_font_access_begin(cpu);
+
     for (uint16_t i = 0; i < count; i++) {
         uint8_t ch = (uint8_t)(first_char + i);
 
@@ -2872,6 +2919,8 @@ static void bios_10h_load_font_block(uint8_t block,
             write86(bios_10h_font_plane_addr(block, ch, row), 0x00);
         }
     }
+
+    bios_10h_font_access_end(cpu);
 }
 
 /*
@@ -2890,7 +2939,7 @@ static bool bios_10h_1100h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)CPU_ES << 4) + CPU_BP;
 
-    bios_10h_load_font_block(CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
+    bios_10h_load_font_block(cpu, CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
     bios_10h_set_text_char_height(cpu, CPU_BH);
     cf = 0;
     return true;
@@ -2907,7 +2956,7 @@ Nothing
 static bool bios_10h_1101h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 14);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 14);
     bios_10h_set_text_char_height(cpu, 14);
     cf = 0;
     return true;
@@ -2924,7 +2973,7 @@ Nothing
 static bool bios_10h_1102h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 8);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 8);
     bios_10h_set_text_char_height(cpu, 8);
     cf = 0;
     return true;
@@ -2941,7 +2990,7 @@ Nothing
 static bool bios_10h_1104h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 16);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 16);
     bios_10h_set_text_char_height(cpu, 16);
     cf = 0;
     return true;
@@ -2965,7 +3014,7 @@ the graphics-font variant explicitly.
 static bool bios_10h_1110h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)CPU_ES << 4) + CPU_BP;
-    bios_10h_load_font_block(CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
+    bios_10h_load_font_block(cpu, CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
     bios_10h_set_text_char_height(cpu, CPU_BH);
     cf = 0;
     return true;
@@ -2982,7 +3031,7 @@ Loads the BIOS ROM 8x14 font into VGA character-generator RAM.
 static bool bios_10h_1111h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 14);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 14);
     bios_10h_set_text_char_height(cpu, 14);
     cf = 0;
     return true;
@@ -2999,7 +3048,7 @@ Loads the BIOS ROM 8x8 font into VGA character-generator RAM.
 static bool bios_10h_1112h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 8);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 8);
     bios_10h_set_text_char_height(cpu, 8);
     cf = 0;
     return true;
@@ -3016,7 +3065,7 @@ Loads the BIOS ROM 8x16 font into VGA character-generator RAM.
 static bool bios_10h_1114h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 16);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 16);
     bios_10h_set_text_char_height(cpu, 16);
     cf = 0;
     return true;
@@ -3055,7 +3104,7 @@ Loads user-supplied graphics character glyphs into VGA plane-2 font RAM.
 static bool bios_10h_1121h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)CPU_ES << 4) + CPU_BP;
-    bios_10h_load_font_block(CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
+    bios_10h_load_font_block(cpu, CPU_BL, src, CPU_DX, CPU_CX, CPU_BH);
     bios_10h_set_text_char_height(cpu, CPU_BH);
     cf = 0;
     return true;
@@ -3072,7 +3121,7 @@ Loads BIOS ROM 8x14 glyphs into VGA plane-2 font RAM.
 static bool bios_10h_1122h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 14);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 14);
     bios_10h_set_text_char_height(cpu, 14);
     cf = 0;
     return true;
@@ -3092,7 +3141,7 @@ glyph data itself is still a normal 8-byte-per-character font table.
 static bool bios_10h_1123h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 8);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 8);
     bios_10h_set_text_char_height(cpu, 8);
     cf = 0;
     return true;
@@ -3109,7 +3158,7 @@ Loads BIOS ROM 8x16 glyphs into VGA plane-2 font RAM.
 static bool bios_10h_1124h(CPU* cpu)
 {
     uint32_t src = ((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF;
-    bios_10h_load_font_block(CPU_BL, src, 0, 256, 16);
+    bios_10h_load_font_block(cpu, CPU_BL, src, 0, 256, 16);
     bios_10h_set_text_char_height(cpu, 16);
     cf = 0;
     return true;
@@ -3395,6 +3444,15 @@ ok:
 #include "font8x14.h"
 #include "font8x16.h"
 
+/* Реверс битов в байте: бит 7 <-> бит 0. */
+static inline uint8_t bios_10h_bitrev8(uint8_t b)
+{
+    b = (uint8_t)(((b & 0xF0u) >> 4) | ((b & 0x0Fu) << 4));
+    b = (uint8_t)(((b & 0xCCu) >> 2) | ((b & 0x33u) << 2));
+    b = (uint8_t)(((b & 0xAAu) >> 1) | ((b & 0x55u) << 1));
+    return b;
+}
+
 void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
 {
     /*
@@ -3402,18 +3460,26 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
      * Host pointers to font arrays are useless for DOS code,
      * so copy compact ROM font tables into emulated F000:xxxx area.
      */
+    /*
+     * Заголовки font_8x8/font_8x14/font_8x16 хранят строки глифов
+     * LSB-влево. ROM-шрифт - гостевой ABI: INT 10h/AX=1130h выдаёт на
+     * него указатели, AX=111xh копирует его в знакогенератор, и всё это
+     * в стандартном порядке VGA - бит 7 слева. Реверс выполняется один
+     * раз здесь, при материализации; дальше по цепочке байты стандартные
+     * (в т.ч. для программ, читающих ROM напрямую).
+     */
     for (uint32_t ch = 0; ch < 256; ch++) {
         for (uint32_t y = 0; y < 16; y++)
             pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X16_OFF + ch * 16 + y,
-                    font_8x16[ch * 16 + y]);
+                    bios_10h_bitrev8(font_8x16[ch * 16 + y]));
 
         for (uint8_t y = 0; y < 14; y++)
             pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF + ch * 14 + y,
-                    font_8x14[ch * 14 + y]);
+                    bios_10h_bitrev8(font_8x14[ch * 14 + y]));
 
         for (uint8_t y = 0; y < 8; y++)
             pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF + ch * 8 + y,
-                    font_8x8[ch * 8 + y]);
+                    bios_10h_bitrev8(font_8x8[ch * 8 + y]));
     }
 }
 
