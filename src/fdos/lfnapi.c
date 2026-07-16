@@ -214,7 +214,7 @@ COUNT lfn_create_entries(UWORD handle, lfn_inode_ptr lip)
     return LHE_INVLDHNDL;
 
   lfn_name = lip->l_name;
-  sfn_checksum = lfn_checksum(lip->l_dir.dir_name);
+  sfn_checksum = lfn_checksum((UBYTE*)lip->l_dir.dir_name);
   entries_needed = (ufstrlen(lfn_name) + CHARS_IN_LFN_ENTRY - 1)
                  / CHARS_IN_LFN_ENTRY + 1;
 
@@ -338,7 +338,7 @@ COUNT lfn_dir_read(UWORD handle, lfn_inode_ptr lip)
     }
 
     if (name_tail || real_id != id ||
-        lfn(fnp)->lfn_checksum != lfn_checksum(lip->l_dir.dir_name))
+        lfn(fnp)->lfn_checksum != lfn_checksum((UBYTE*)lip->l_dir.dir_name))
       return LHE_DAMAGEDFS;
 
     id++;

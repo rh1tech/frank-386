@@ -30,6 +30,9 @@ static int fcom_chk_cbreak(CPU *cpu, UWORD command_psp,
 static void build_tail(struct fcom_guest *g, const char *args);
 static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g);
 static int execute_command_line(CPU *cpu, UWORD command_psp, struct fcom_guest *g, char *line);
+static int execute_batch_file(CPU *cpu, UWORD command_psp,
+                              struct fcom_guest *g,
+                              const char *name, const char *args);
 static const char *command_basename(const char *name);
 static void fcom_output_resource(CPU *cpu, UWORD command_psp,
                                  struct fcom_guest *g,
@@ -91,6 +94,8 @@ struct fcom_guest {
   UBYTE batch_shiftlevel;
   UWORD active_saved_stdin;
   UWORD active_saved_stdout;
+  UWORD saved_parent_psp;
+  intvec saved_terminate_addr;
   UWORD fddebug_handle;
   char fddebug_name[128];
 };
@@ -2705,6 +2710,10 @@ static int fcom_get_file_attr(CPU *cpu, UWORD command_psp,
                               struct fcom_guest *g,
                               const char *name, UWORD *attributes);
 
+/* fcom_get_file_attr() writes attributes on every zero return; GCC 14
+   does not preserve that relationship through the emulated INT 21h call. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 static int fcom_recursive_mkdir(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g,
                                 const char *directory)
@@ -2759,6 +2768,7 @@ static int fcom_recursive_mkdir(CPU *cpu, UWORD command_psp,
 
   return 0;
 }
+#pragma GCC diagnostic pop
 
 static int fcom_rmdir_confirm(CPU *cpu, UWORD command_psp,
                               struct fcom_guest *g,
@@ -2823,6 +2833,10 @@ static int fcom_rmdir_join(char *dst, size_t dst_size,
   return 1;
 }
 
+/* fcom_get_file_attr() writes attributes on every zero return; GCC 14
+   does not preserve that relationship through the emulated INT 21h call. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 static int fcom_recursive_rmdir(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g,
                                 const char *directory,
@@ -2953,6 +2967,7 @@ done:
   guest_free(cpu, command_psp, (UWORD)segment);
   return result;
 }
+#pragma GCC diagnostic pop
 
 static void builtin_mkdir(CPU *cpu, UWORD command_psp,
                           struct fcom_guest *g, char *args)
@@ -3264,8 +3279,10 @@ static void builtin_del(CPU *cpu, UWORD command_psp,
     strcpy(g->batch_arg, arg);
 
     {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
       UWORD attributes;
-
+#pragma GCC diagnostic pop
       if (fcom_get_file_attr(cpu, command_psp, g,
                              g->batch_arg, &attributes) == 0 &&
           (attributes & D_DIR)) {
@@ -3760,7 +3777,7 @@ static int fcom_datetime_no_prompt(char **args)
 
   if ((toupper((unsigned char)p[1]) != 'D' &&
        toupper((unsigned char)p[1]) != 'T') ||
-      p[2] != '\0' && p + 2 != end)
+      (p[2] != '\0' && p + 2 != end))
     return -1;
 
   result = 1;
@@ -4600,16 +4617,18 @@ static int fcom_copy_stream(CPU *cpu, UWORD command_psp,
   }
 }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
 static int fcom_path_is_directory(CPU *cpu, UWORD command_psp,
                                   struct fcom_guest *g,
                                   const char *name)
 {
   UWORD attributes;
-
   return fcom_get_file_attr(cpu, command_psp, g,
                             name, &attributes) == 0 &&
          (attributes & D_DIR) != 0;
 }
+#pragma GCC diagnostic pop
 
 static int fcom_copy_join_path(char *dst, size_t dst_size,
                                const char *directory,
@@ -4966,7 +4985,6 @@ static void fcom_copy_parse_env(UWORD command_psp,
 {
   const char *env = fcom_env_value(command_psp, "COPYCMD");
   char *cursor;
-  char *arg;
 
   if (env == NULL || *env == '\0')
     return;
@@ -6638,6 +6656,15 @@ static int exec_program(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
     memcpy(g->filename, name, n);
     memcpy(g->filename + n, suffixes[i], e + 1);
 
+    /*
+     * The final candidate cannot fall through to another suffix.  Return it
+     * directly so GCC can tail-call exec_once(): while the child is running,
+     * exec_program() then contributes no native frame at all.  This covers an
+     * explicitly named .COM/.EXE and the final .EXE attempt for a bare name.
+     */
+    if (i + 1u == last)
+      return exec_once(cpu, command_psp, g);
+
     rc = exec_once(cpu, command_psp, g);
     if (rc == 0)
       return 0;
@@ -6659,13 +6686,15 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
   strcpy(g->program, g->filename);
 
   /* Explicit drive/path names are never searched through PATH. */
-  if (path_is_explicit(g->program))
-    return exec_program(cpu, command_psp, g, g->program);
+  if (path_is_explicit(g->program)) {
+    rc = exec_program(cpu, command_psp, g, g->program);
+    goto resolved;
+  }
 
   /* DOS shells search the current directory before PATH. */
   rc = exec_program(cpu, command_psp, g, g->program);
   if (rc == 0 || (rc != -2 && rc != -3))
-    return rc;
+    goto resolved;
 
   path = find_path_value(command_psp);
   while (path && *path) {
@@ -6685,14 +6714,31 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
                                    dir, len, g->program)) {
       rc = exec_program(cpu, command_psp, g, g->text);
       if (rc == 0 || (rc != -2 && rc != -3))
-        return rc;
+        goto resolved;
     }
 
     if (!end)
       break;
     path = end + 1;
   }
-  return rc;
+resolved:
+  /*
+   * Keep BAT fallback and bad-command reporting here. A separate wrapper
+   * remained live for the whole exec_program()->DosExec() path and cost
+   * another 48 bytes of native stack without owning independent state.
+   */
+  if (rc == -2 || rc == -3) {
+    int batch_rc = execute_batch_file(cpu, command_psp, g, g->filename, args);
+
+    if (batch_rc == 0)
+      return 0;
+    if (batch_rc == -1)
+      return -1;
+  }
+
+  if (rc < 0)
+    error_bad_command(cpu, command_psp, g, g->program);
+  return 0;
 }
 
 
@@ -8434,8 +8480,17 @@ static int execute_compact_echo(CPU *cpu, UWORD command_psp,
   return 1;
 }
 
-static int execute_command_core(CPU *cpu, UWORD command_psp,
-                                struct fcom_guest *g, char *line)
+/*
+ * Keep command dispatch out of execute_redirected_command().
+ *
+ * GCC otherwise inlines this large dispatcher into the redirection
+ * coordinator.  That recreates a large frame which remains live across
+ * synchronous DosExec(), even though redirection setup/teardown were already
+ * split out.  noinline is therefore part of the native-stack lifetime model.
+ */
+static __attribute__((noinline))
+int execute_command_core(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g, char *line)
 {
   char *args;
   char *command;
@@ -8625,19 +8680,11 @@ static int execute_command_core(CPU *cpu, UWORD command_psp,
     return rc == -1 ? -1 : 0;
   }
 
-  rc = exec_external(cpu, command_psp, g, args);
-  if (rc == -2 || rc == -3) {
-    int batch_rc = execute_batch_file(cpu, command_psp, g, g->filename, args);
-
-    if (batch_rc == 0)
-      return 0;
-    if (batch_rc == -1)
-      return -1;
-  }
-
-  if (rc < 0)
-    error_bad_command(cpu, command_psp, g, g->program);
-  return 0;
+  /*
+   * Direct return is intentional.  The large command-dispatch frame must end
+   * before an external program enters synchronous DosExec().
+   */
+  return exec_external(cpu, command_psp, g, args);
 }
 
 
@@ -8798,28 +8845,109 @@ static int execute_command_line(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g, char *line)
 {
   char *p = skip_space(line);
-  int trace_this_line = 0;
-  int rc;
 
   /*
    * FreeCOM shell/command.c:
    *   "?" alone is the short-help command;
    *   "? command" enables trace mode for this line only.
+   *
+   * Keep the ordinary path as a direct return. External commands use this
+   * path, so GCC can tail-call execute_command_line_body() instead of keeping
+   * this wrapper's native ARM frame alive for the complete nested DOS EXEC.
+   * The traced path still needs a small wrapper because trace_mode must be
+   * restored after the command returns.
    */
   if (*p == '?') {
     char *command = skip_space(p + 1);
 
     if (*command != '\0') {
+      int rc;
+
       memmove(line, command, strlen(command) + 1);
       ++g->trace_mode;
-      trace_this_line = 1;
+      rc = execute_command_line_body(cpu, command_psp, g, line);
+      --g->trace_mode;
+      return rc;
     }
   }
 
-  rc = execute_command_line_body(cpu, command_psp, g, line);
+  return execute_command_line_body(cpu, command_psp, g, line);
+}
 
-  if (trace_this_line)
-    --g->trace_mode;
+
+/*
+ * Redirection setup and teardown must not remain on the native stack while
+ * execute_command_core() synchronously runs a DOS child.  The saved handles
+ * already have a process-owned home in struct fcom_guest; use that instead of
+ * keeping saved_stdin/saved_stdout in the coordinator's ARM frame.
+ *
+ * Keep both helpers out of line. Their frames are needed only before or after
+ * the child lifetime, never during it.
+ */
+static __attribute__((noinline))
+int prepare_redirections(CPU *cpu, UWORD command_psp,
+                         struct fcom_guest *g, int append_output)
+{
+  int saved_stdin = -1;
+  int saved_stdout = -1;
+  int rc = apply_redirections(cpu, command_psp, g, append_output,
+                              &saved_stdin, &saved_stdout);
+  g->active_saved_stdin =
+      saved_stdin >= 0 ? (UWORD)saved_stdin : 0xffffu;
+  g->active_saved_stdout =
+      saved_stdout >= 0 ? (UWORD)saved_stdout : 0xffffu;
+  if (rc < 0) {
+    restore_redirections(cpu, command_psp,
+                         saved_stdin, saved_stdout);
+    g->active_saved_stdin = 0xffffu;
+    g->active_saved_stdout = 0xffffu;
+    dos_puts(cpu, command_psp, g, "Redirection failed\r\n");
+    return 0;
+  }
+
+  return 1;
+}
+
+
+static __attribute__((noinline))
+void finish_redirected_command(CPU *cpu, UWORD command_psp,
+                               struct fcom_guest *g, int rc)
+{
+  int saved_stdin =
+      g->active_saved_stdin != 0xffffu ? (int)g->active_saved_stdin : -1;
+  int saved_stdout =
+      g->active_saved_stdout != 0xffffu ? (int)g->active_saved_stdout : -1;
+
+  restore_redirections(cpu, command_psp,
+                       saved_stdin, saved_stdout);
+  g->active_saved_stdin = 0xffffu;
+  g->active_saved_stdout = 0xffffu;
+
+  {
+    int n = snprintf(g->path, sizeof(g->path), "%d", rc);
+    if (n > 0)
+      fcom_fddebug_write(cpu, command_psp, g, "RESULT: ", g->path);
+  }
+}
+ 
+static __attribute__((noinline))
+int execute_redirected_command(CPU *cpu, UWORD command_psp,
+                               struct fcom_guest *g,
+                               int append_output)
+{
+  int rc;
+
+  /*
+   * Only this small coordinator frame remains live across the child EXEC.
+   * Parser state ended in execute_command_line_body(); redirection setup state
+   * is process-owned in g; setup/teardown helper frames have already returned
+   * or have not yet been entered.
+   */
+  if (!prepare_redirections(cpu, command_psp, g, append_output))
+    return 0;
+
+  rc = execute_command_core(cpu, command_psp, g, g->redirect_command);
+  finish_redirected_command(cpu, command_psp, g, rc);
 
   return rc;
 }
@@ -8829,10 +8957,7 @@ static int execute_command_line_body(CPU *cpu, UWORD command_psp,
                                      struct fcom_guest *g, char *line)
 {
   int append_output;
-  int saved_stdin;
-  int saved_stdout;
   int pipe_state;
-  int rc;
 
   fcom_fddebug_write(cpu, command_psp, g, "COMMAND: ", line);
   fcom_expand_aliases(command_psp, g, line, FCOM_LINE_MAX + 1);
@@ -8885,33 +9010,10 @@ static int execute_command_line_body(CPU *cpu, UWORD command_psp,
     return 0;
   }
 
-  rc = apply_redirections(cpu, command_psp, g, append_output,
-                          &saved_stdin, &saved_stdout);
-  g->active_saved_stdin =
-      saved_stdin >= 0 ? (UWORD)saved_stdin : 0xffffu;
-  g->active_saved_stdout =
-      saved_stdout >= 0 ? (UWORD)saved_stdout : 0xffffu;
-  if (rc < 0) {
-    restore_redirections(cpu, command_psp,
-                         saved_stdin, saved_stdout);
-    dos_puts(cpu, command_psp, g, "Redirection failed\r\n");
-    return 0;
-  }
-
-  rc = execute_command_core(cpu, command_psp, g,
-                            g->redirect_command);
-  restore_redirections(cpu, command_psp,
-                       saved_stdin, saved_stdout);
-  g->active_saved_stdin = 0xffffu;
-  g->active_saved_stdout = 0xffffu;
-
-  {
-    int n = snprintf(g->path, sizeof(g->path), "%d", rc);
-    if (n > 0)
-      fcom_fddebug_write(cpu, command_psp, g, "RESULT: ", g->path);
-  }
-
-  return rc;
+  /* Direct return is intentional: for an ordinary external command the
+     compiler can tail-call the helper, so this parser frame is not retained
+     while DosExec() and the child run below it. */
+  return execute_redirected_command(cpu, command_psp, g, append_output);
 }
 
 
@@ -9162,73 +9264,19 @@ UWORD fcom_process_entry_offset(void)
   return FCOM_ENTRY_OFFSET;
 }
 
-UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
+/*
+ * The interactive/session phase is kept separate from bootstrap.  All values
+ * needed after the session (the original parent and INT 22h vector) live in the
+ * process-owned guest block, so fcom_process_main() can tail-call this helper
+ * instead of retaining its bootstrap frame for every nested EXEC.
+ */
+static __attribute__((noinline))
+UBYTE fcom_process_session(CPU *cpu, UWORD command_psp,
+                           struct fcom_guest *g)
 {
   psp *process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
-  UWORD parent_psp = process->ps_parent;
-  intvec terminate_addr = process->ps_isv22;
-  struct fcom_guest *g;
   enum fcom_start_action start_action;
   char *start_command = NULL;
-
-  g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
-  memset(g, 0, sizeof(*g));
-  g->active_saved_stdin = 0xffffu;
-  g->active_saved_stdout = 0xffffu;
-  memset(fcom_dir_stack_storage(command_psp), 0, FCOM_DIR_STACK_BYTES);
-  memset(fcom_alias_storage(command_psp), 0, FCOM_ALIAS_BYTES);
-  memset(fcom_history_storage(command_psp), 0, FCOM_HISTORY_BYTES);
-  memset(fcom_loadfix_storage(command_psp), 0, FCOM_LOADFIX_BYTES);
-  memset(fcom_batch_context_storage(command_psp), 0,
-         FCOM_BATCH_CONTEXT_BYTES);
-  g->fddebug_handle = 1;
-  strcpy(g->fddebug_name, "stdout");
-  g->echo_enabled = 1;
-  init_stack_guard(command_psp);
-
-  /* FreeCOM initialize(): COMMAND temporarily owns itself as parent and
-     replaces PSP:0Ah with its terminate hook. */
-  process->ps_parent = command_psp;
-  process->ps_isv22 = MK_FP(command_psp, FCOM_TERM_OFFSET);
-
-  /*
-   * shell/init.c:193: set_isrfct(0x23, cbreak_handler).
-   * The stub bytes were written by fcom_create_process(); the previous
-   * vector is in ps_isv23 and comes back at process termination.
-   */
-  setvec(0x23, MK_FP(command_psp, FCOM_CBREAK_STUB_OFFSET));
-
-  /* FreeCOM initialize(): publish COMSPEC before any startup command runs. */
-  if (fcom_initialize_environment(cpu, command_psp, g) < 0)
-    dos_printf("FCOM: cannot set COMSPEC in environment\n");
-
-#if FCOM_DEBUG
-  dos_printf("FCOM: PSP=%04x parent=%04x block=%u paras (%u bytes) "
-             "data=%04x..%04x stack=%04x..%04x (%u bytes) %s\n",
-             command_psp,
-             parent_psp,
-             (unsigned)FCOM_PROCESS_PARAS,
-             (unsigned)FCOM_PROCESS_BYTES,
-             FCOM_WORK_OFFSET,
-             (unsigned)(FCOM_DATA_END - 1u),
-             (unsigned)FCOM_STACK_BOTTOM,
-             (unsigned)(FCOM_STACK_TOP - 1u),
-             (unsigned)FCOM_STACK_BYTES,
-             command_psp >= 0xa000u ? "HIGH" : "LOW");
-#else
-  dos_printf("FreeCom v.0.86 (for RP2350) @ %04Xh [%s]\n",
-    command_psp, command_psp >= 0xa000u ? "UMB" : "LOW");
-#endif
-  /* The process command line has one canonical home: PSP:80h. */
-  {
-    unsigned count = process->ps_cmd.ctCount;
-
-    if (count >= sizeof(g->init_tail))
-      count = sizeof(g->init_tail) - 1u;
-    if (count != 0)
-      memcpy(g->init_tail, process->ps_cmd.ctBuffer, count);
-    g->init_tail[count] = '\0';
-  }
 
   start_action = parse_init_tail(g, &start_command);
 
@@ -9267,9 +9315,83 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
 
 done:
   fcom_fddebug_close(cpu, command_psp, g);
-  process->ps_parent = parent_psp;
-  process->ps_isv22 = terminate_addr;
+  process->ps_parent = g->saved_parent_psp;
+  process->ps_isv22 = g->saved_terminate_addr;
   return (UBYTE)(g->exit_requested ? g->exit_code : g->errorlevel);
+}
+
+
+UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
+{
+  psp *process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
+  struct fcom_guest *g;
+
+  g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+  memset(g, 0, sizeof(*g));
+  g->active_saved_stdin = 0xffffu;
+  g->active_saved_stdout = 0xffffu;
+  g->saved_parent_psp = process->ps_parent;
+  g->saved_terminate_addr = process->ps_isv22;
+  memset(fcom_dir_stack_storage(command_psp), 0, FCOM_DIR_STACK_BYTES);
+  memset(fcom_alias_storage(command_psp), 0, FCOM_ALIAS_BYTES);
+  memset(fcom_history_storage(command_psp), 0, FCOM_HISTORY_BYTES);
+  memset(fcom_loadfix_storage(command_psp), 0, FCOM_LOADFIX_BYTES);
+  memset(fcom_batch_context_storage(command_psp), 0,
+         FCOM_BATCH_CONTEXT_BYTES);
+  g->fddebug_handle = 1;
+  strcpy(g->fddebug_name, "stdout");
+  g->echo_enabled = 1;
+  init_stack_guard(command_psp);
+
+  /* FreeCOM initialize(): COMMAND temporarily owns itself as parent and
+     replaces PSP:0Ah with its terminate hook. */
+  process->ps_parent = command_psp;
+  process->ps_isv22 = MK_FP(command_psp, FCOM_TERM_OFFSET);
+
+  /*
+   * shell/init.c:193: set_isrfct(0x23, cbreak_handler).
+   * The stub bytes were written by fcom_create_process(); the previous
+   * vector is in ps_isv23 and comes back at process termination.
+   */
+  setvec(0x23, MK_FP(command_psp, FCOM_CBREAK_STUB_OFFSET));
+
+  /* FreeCOM initialize(): publish COMSPEC before any startup command runs. */
+  if (fcom_initialize_environment(cpu, command_psp, g) < 0)
+    dos_printf("FCOM: cannot set COMSPEC in environment\n");
+
+#if FCOM_DEBUG
+  dos_printf("FCOM: PSP=%04x parent=%04x block=%u paras (%u bytes) "
+             "data=%04x..%04x stack=%04x..%04x (%u bytes) %s\n",
+             command_psp,
+             g->saved_parent_psp,
+             (unsigned)FCOM_PROCESS_PARAS,
+             (unsigned)FCOM_PROCESS_BYTES,
+             FCOM_WORK_OFFSET,
+             (unsigned)(FCOM_DATA_END - 1u),
+             (unsigned)FCOM_STACK_BOTTOM,
+             (unsigned)(FCOM_STACK_TOP - 1u),
+             (unsigned)FCOM_STACK_BYTES,
+             command_psp >= 0xa000u ? "HIGH" : "LOW");
+#else
+  dos_printf("FreeCom v.0.86 (for RP2350) @ %04Xh [%s]\n",
+    command_psp, command_psp >= 0xa000u ? "UMB" : "LOW");
+#endif
+  /* The process command line has one canonical home: PSP:80h. */
+  {
+    unsigned count = process->ps_cmd.ctCount;
+
+    if (count >= sizeof(g->init_tail))
+      count = sizeof(g->init_tail) - 1u;
+    if (count != 0)
+      memcpy(g->init_tail, process->ps_cmd.ctBuffer, count);
+    g->init_tail[count] = '\0';
+  }
+
+  /*
+   * Direct return is intentional: bootstrap locals and saved PSP values are
+   * no longer live while commands and their synchronous children execute.
+   */
+  return fcom_process_session(cpu, command_psp, g);
 }
 
 void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode,

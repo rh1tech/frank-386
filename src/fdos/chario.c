@@ -251,7 +251,7 @@ long cooked_write(dos_far_ptr *pdev, size_t n, const char *bp)
       fast_counter &= 0x9f;
       if (internal_data->PrinterEcho)
       {
-        char* ch = ARM_PTR(x86_szLine);
+        char *ch = (char *)ARM_PTR(x86_szLine);
         *ch = (char)c;
         dos_far_ptr x86_ch = x86_szLine;
         DosWrite(STDPRN, 1, x86_ch);
@@ -272,7 +272,7 @@ long cooked_write(dos_far_ptr *pdev, size_t n, const char *bp)
 /* writes character for disk file or device */
 void write_char(int c, int sft_idx)
 {
-  char* ch = ARM_PTR(x86_DATA);
+  char *ch = (char *)ARM_PTR(x86_DATA);
   *ch = (char)c;
   dos_far_ptr x86_ch = x86_DATA;
   DosRWSft(sft_idx, 1, x86_ch, XFR_FORCE_WRITE);
@@ -466,8 +466,6 @@ STATIC unsigned read_char_sft_dev(int sft_in, int sft_out,
                                        BOOL check_break)
 {
   unsigned c;
-  dos_far_ptr null_far = MK_FP(0, 0);
-
   if (FP_SEG(*pdev) || FP_OFF(*pdev)) /* *pdev != NULL */
   {
     FOREVER
@@ -493,7 +491,7 @@ STATIC unsigned read_char_sft_dev(int sft_in, int sft_out,
   }
   else
   {
-    char* ch = ARM_PTR(x86_DATA);
+    char *ch = (char *)ARM_PTR(x86_DATA);
     *ch = 0;
     dos_far_ptr x86_ch = x86_DATA;
     DosRWSft(sft_in, 1, x86_ch, XFR_READ);

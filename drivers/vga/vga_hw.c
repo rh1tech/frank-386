@@ -632,7 +632,7 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
 
 // 80 cols: one uint16 = 2 pixels (left in low byte, right in high byte)
 // 40 cols: need true 2x horizontal scaling per pixel: A B -> A A B B
-static inline void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint16_t v) {
+static void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint16_t v) {
     uint16_t *p = *pp;
     uint8_t a = (uint8_t)(v & 0xFF);
     uint8_t b = (uint8_t)(v >> 8);

@@ -1109,6 +1109,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
       }
 
       /* fall through to verify */
+      __attribute__((fallthrough));
 
     case 0x62:                 /* verify track */
       {

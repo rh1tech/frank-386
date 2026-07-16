@@ -2445,6 +2445,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x01:
             internal_data->break_ena = R_DL & 1;
             /* fall through so DL only low bit (as in MS-DOS) */
+            __attribute__((fallthrough));
           /* Get Ctrl-C flag                                          */
           case 0x00:
             R_DL = internal_data->break_ena;

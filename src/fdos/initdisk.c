@@ -575,9 +575,9 @@ static BOOL is_suspect(struct CHS *chs, struct CHS *pEntry_chs)
   return !((pEntry_chs->Cylinder == chs->Cylinder &&
             pEntry_chs->Head     == chs->Head     &&
             pEntry_chs->Sector   == chs->Sector)        ||
-           chs->Cylinder > 1023u &&
-           (pEntry_chs->Cylinder == 1023 ||
-            pEntry_chs->Cylinder == (0x3ff & chs->Cylinder)));
+           (chs->Cylinder > 1023u &&
+            (pEntry_chs->Cylinder == 1023 ||
+             pEntry_chs->Cylinder == (0x3ff & chs->Cylinder))));
 }
 
 static void printCHS(char *title, struct CHS *chs)

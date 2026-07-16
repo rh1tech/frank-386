@@ -1122,9 +1122,11 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
      * M1 (truename-стиль): хвост командной строки ребёнка собирается на
      * ТЕКУЩЕМ гостевом стеке процесса-родителя, а не в нативном кадре и
      * не в общей арене. Живёт только до копирования в PSP:80h ребёнка
-     * (fcom_create_process) и в FCB-параметры (patchPSP); SP
-     * восстанавливается ДО глубокого вложенного исполнения, поэтому
-     * вложенные EXEC-уровни этот резерв не наследуют.
+     * функцией fcom_create_process(). patchPSP() отдельно переносит FCB1
+     * и FCB2, переданные вызывающим процессом в EXEC parameter block; из
+     * command tail они здесь не строятся. SP восстанавливается ДО
+     * глубокого вложенного исполнения, поэтому вложенные EXEC-уровни
+     * этот резерв не наследуют.
      */
     const UWORD tail_bytes =
         (UWORD)(sizeof(((CommandTail *)0)->ctBuffer) + 1);
@@ -1178,8 +1180,9 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
        */
       fcbcode=patchPSP(command_psp - 1,child_env_mcb,ep,lp);
 
-      /* tail скопирован в PSP:80h ребёнка и в FCB-параметры - резерв
-         на гостевом стеке родителя освобождается ДО вложенного
+      /* tail уже скопирован в PSP:80h ребёнка; patchPSP() отдельно
+         установил caller-supplied FCB1/FCB2 из EXEC parameter block.
+         Резерв на гостевом стеке родителя освобождается ДО вложенного
          исполнения (exec_run_process возьмёт свой exec_child_context
          уже ниже ИСХОДНОГО SP родителя). */
       CPU_SP = saved_guest_sp;

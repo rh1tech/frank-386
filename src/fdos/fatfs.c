@@ -1,45 +1,4 @@
-#include <pico.h>
-#include <pico/time.h>
-#include <hardware/pio.h>
-#include <ctype.h>
-#include "286/cpu.h"
-#include "bios/bios.h"
-#include "fdos.h"
-#include "i8254.h"
-
-#include "hdr/kconfig.h"
-#include "hdr/portab.h"
-
-#include "hdr/ddate.h"
-#include "hdr/dtime.h"
-#include "hdr/error.h"
-#include "hdr/clock.h"
-#include "hdr/device.h"
-#include "hdr/sft.h"
-#include "hdr/kbd.h"
-#include "hdr/fcb.h"
-#include "hdr/fat.h"
-#include "hdr/pcb.h"
-#include "hdr/dirmatch.h"
-#include "hdr/fnode.h"
-#include "hdr/mcb.h"
-#include "hdr/lol.h"
-#include "hdr/dcb.h"
-#include "hdr/cds.h"
-#include "hdr/tail.h"
-#include "hdr/process.h"
-#include "hdr/version.h"
-#include "proto.h"
-#include "globals.h"
-#include "hdr/debug.h"
-#include "hdr/buffer.h"
-#include "hdr/file.h"
-#include "config.h"
-#include "hdr/network.h"
-#include "init-mod.h"
-#include "dyndata.h"
-
-#define printf(...) dos_printf(__VA_ARGS__)
+#include "hdrs.h"
 
 static const char *media_check_source = "?";
 
@@ -379,20 +338,56 @@ done:
 
     Migrated from fatfs.c.
 */
-long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
+struct rwblock_workspace
 {
-  /* Translate the fd into an fnode pointer, since all internal   */
-  /* operations are achieved through fnodes.                      */
-  REG f_node_ptr fnp = sft_to_fnode(fd);
-  REG struct buffer *bp;
-  UCOUNT xfr_cnt = 0;
-  UCOUNT ret_cnt = 0;
-  unsigned secsize;
-  unsigned to_xfer = count;
+  f_node_ptr fnp;
+  struct buffer *bp;
+  struct dpb *f_dpb;
+  BYTE *buffer;
+  dos_far_ptr x86_buffer;
   ULONG currentblock;
+  ULONG startoffset;
+  UCOUNT xfr_cnt;
+  UCOUNT ret_cnt;
+  UCOUNT to_xfer;
+  UCOUNT sectors_to_xfer;
+  UCOUNT sectors_wanted;
+  unsigned secsize;
+  unsigned sector;
+  unsigned boff;
+};
+
+static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
+                           struct rwblock_workspace *work)
+{
+#define fnp             (work->fnp)
+#define bp              (work->bp)
+#define wf_dpb          (work->f_dpb)
+#define buffer          (work->buffer)
+#define x86_buffer      (work->x86_buffer)
+#define currentblock    (work->currentblock)
+#define startoffset     (work->startoffset)
+#define xfr_cnt         (work->xfr_cnt)
+#define ret_cnt         (work->ret_cnt)
+#define to_xfer         (work->to_xfer)
+#define sectors_to_xfer (work->sectors_to_xfer)
+#define sectors_wanted  (work->sectors_wanted)
+#define secsize         (work->secsize)
+#define sector          (work->sector)
+#define boff            (work->boff)
+
+  /* This state belongs to the active DOS read/write operation and remains
+     live across FAT, cache and device-driver calls.  Keep it on the current
+     guest stack instead of the tiny native ARM stack. */
+  fnp = sft_to_fnode(fd);
+  bp = NULL;
+  xfr_cnt = 0;
+  ret_cnt = 0;
+  to_xfer = count;
+  currentblock = 0;
 
   x86_buffer = adjust_far_x86(x86_buffer);
-  BYTE *buffer = (BYTE *)ARM_PTR(x86_buffer);
+  buffer = (BYTE *)ARM_PTR(x86_buffer);
 
   if (mode == XFR_WRITE)
   {
@@ -458,15 +453,13 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
   }               
 
   /* The variable secsize will be used later.                     */
-  struct dpb* f_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
-  secsize = f_dpb->dpb_secsize;
+  wf_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
+  secsize = wf_dpb->dpb_secsize;
 
   /* Do the data transfer. Use block transfer methods so that we  */
   /* can utilize memory management in future DOS-C versions.      */
   while (ret_cnt < count)
   {
-    unsigned sector, boff;
-
     /* Do an EOF test and return whatever was transferred   */
     if (mode == XFR_READ && fnp->f_offset >= fnp->f_dir.dir_size)
     {
@@ -501,18 +494,15 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
 
     /* Compute the block within the cluster and the offset  */
     /* within the block.                                    */
-    sector = (UBYTE)(fnp->f_offset / secsize) & f_dpb->dpb_clsmask;
+    sector = (UBYTE)(fnp->f_offset / secsize) & wf_dpb->dpb_clsmask;
     boff = (UWORD)(fnp->f_offset % secsize);
 
-    currentblock = clus2phys(fnp->f_cluster, f_dpb) + sector;
+    currentblock = clus2phys(fnp->f_cluster, wf_dpb) + sector;
 
     /* see comments above */
 
     if (boff == 0)              /* complete sectors only */
     {
-      static ULONG startoffset;
-      UCOUNT sectors_to_xfer, sectors_wanted;
-
       startoffset = fnp->f_offset;
       sectors_wanted = to_xfer;
 
@@ -525,7 +515,7 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
       if (sectors_wanted == 0)
         goto normal_xfer;
 
-      sectors_to_xfer = f_dpb->dpb_clsmask + 1 - sector;
+      sectors_to_xfer = wf_dpb->dpb_clsmask + 1 - sector;
 
       sectors_to_xfer = min(sectors_to_xfer, sectors_wanted);
 
@@ -536,11 +526,11 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
         if (map_cluster(fnp, mode) != SUCCESS)
           break;
 
-        if (clus2phys(fnp->f_cluster, f_dpb) !=
+        if (clus2phys(fnp->f_cluster, wf_dpb) !=
             currentblock + sectors_to_xfer)
           break;
 
-        sectors_to_xfer += f_dpb->dpb_clsmask + 1;
+        sectors_to_xfer += wf_dpb->dpb_clsmask + 1;
 
         sectors_to_xfer = min(sectors_to_xfer, sectors_wanted);
 
@@ -554,9 +544,9 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
 
       DeleteBlockInBufferCache(currentblock,
                                currentblock + sectors_to_xfer - 1,
-                               f_dpb->dpb_unit, mode);
+                               wf_dpb->dpb_unit, mode);
 
-      if (dskxfer(f_dpb->dpb_unit,
+      if (dskxfer(wf_dpb->dpb_unit,
                   currentblock,
                   x86_buffer, sectors_to_xfer,
                   mode == XFR_READ ? DSKREAD : DSKWRITE))
@@ -573,7 +563,7 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
   normal_xfer:
 
     /* Get the block we need from cache                     */
-    bp = getblock(currentblock, f_dpb->dpb_unit);
+    bp = getblock(currentblock, wf_dpb->dpb_unit);
 
     if (bp == NULL)             /* (struct buffer *)0 --> DS:0 !! */
     {
@@ -616,7 +606,7 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
     ret_cnt += xfr_cnt;
     to_xfer -= xfr_cnt;
     x86_buffer = add_far_x86(x86_buffer, xfr_cnt);
-    buffer = ARM_PTR (x86_buffer);
+    buffer = (BYTE *)ARM_PTR(x86_buffer);
     if (mode == XFR_WRITE)
     {
       if (fnp->f_offset > fnp->f_dir.dir_size)
@@ -627,7 +617,54 @@ long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
     }
   }
   fnode_to_sft(fnp);
-  return ret_cnt;
+  {
+    long result = ret_cnt;
+#undef fnp
+#undef bp
+#undef wf_dpb
+#undef buffer
+#undef x86_buffer
+#undef currentblock
+#undef startoffset
+#undef xfr_cnt
+#undef ret_cnt
+#undef to_xfer
+#undef sectors_to_xfer
+#undef sectors_wanted
+#undef secsize
+#undef sector
+#undef boff
+    return result;
+  }
+}
+
+long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
+{
+  UWORD saved_sp = CPU_SP;
+  UWORD work_sp = (UWORD)((saved_sp - sizeof(struct rwblock_workspace)) &
+                          (UWORD)~3u);
+  struct rwblock_workspace *work;
+  long result;
+
+  /*
+   * The workspace contains only DOS-process state: current fnode/cache
+   * pointers, transfer counters and the complete-sector fast-path state.
+   * Reserve it below the active guest SS:SP so nested FAT/block/device calls
+   * naturally use lower addresses and the reservation remains valid until
+   * the operation completes.  This also removes the old function-static
+   * startoffset, which was shared by unrelated processes and prevented
+   * correct nesting.
+   *
+   * Deliberately retained on the native stack: the four call arguments, the
+   * workspace pointer, saved SP and return value.  Moving those scalars would
+   * add guest-memory traffic without materially reducing the ABI frame.
+   */
+  CPU_SP = work_sp;
+  work = (struct rwblock_workspace *)ARM_PTR(MK_FP(CPU_SS, work_sp));
+  work->x86_buffer = x86_buffer;
+  result = rwblock_worker(fd, count, mode, work);
+  CPU_SP = saved_sp;
+  return result;
 }
 
 void dos_merge_file_changes(int fd)
@@ -1222,6 +1259,7 @@ COUNT media_check_tagged(dos_far_ptr /*struct dpb*/ _dpbp, const char *source)
       dpb_watch_check("media_check-after-dirty_buffers2", _dpbp);
       /* If it definitely changed, don't know (falls through) */
       /* or has been changed, rebuild the bpb.                */
+      __attribute__((fallthrough));
     /* case M_CHANGED: */
     default:
       dpb_watch_check("media_check-case-default-before-setinvld", _dpbp);

@@ -250,12 +250,22 @@ bits for flags (bits 11-8 are internal FreeDOS bits only)
 */
 long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 {
-  long result = truename(fname, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  /*
+   * Stack audit: this function has no large process-owned object to move to
+   * guest SS:SP.  Its 104-byte .su frame is predominantly ABI saves/spills
+   * across the many calls below; the explicit locals are only scalars and
+   * pointers.  Keep those native, but shorten their live ranges so the ARM
+   * compiler does not have to preserve path-resolution state through the
+   * later open/device paths.  Revisit only if a new .su build still shows
+   * this frame on the measured worst-case chain.
+   */
+  COUNT path_result = truename(fname, PriPathName, CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosOpenSft 1");
-  if (result < SUCCESS) {
+  if (path_result < SUCCESS) {
     dpb_watch_check_chain("DosOpenSft 1err");
-    return result;
+    return path_result;
   }
+  const unsigned path_kind = (unsigned)path_result;
 
   set_fcbname();
   dpb_watch_check_chain("DosOpenSft 2");
@@ -279,9 +289,8 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 
   dpb_watch_check_chain("DosOpenSft 5");
   /* check for a (local) device */
-  dos_far_ptr dhp;
-  if ((result & IS_DEVICE) && !(result & IS_NETWORK)) {
-      dhp = IsDevice((const char *)ARM_PTR(fname));
+  if ((path_kind & IS_DEVICE) && !(path_kind & IS_NETWORK)) {
+      dos_far_ptr dhp = IsDevice((const char *)ARM_PTR(fname));
       dpb_watch_check_chain("DosOpenSft 6");
       if (EFFECTIVE(dhp) != 0) {
         int rc = DeviceOpenSft(dhp, sftp);
@@ -297,7 +306,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   }
 
   dpb_watch_check_chain("DosOpenSft 8");
-  if (result & IS_NETWORK)
+  if (path_kind & IS_NETWORK)
   {
     return DE_PATHNOTFND;
     /// TODO:
@@ -357,9 +366,9 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 
   sftp->sft_count++;
   sftp->sft_flags = PriPathName[0] - 'A';
-  result = dos_open(PriPathName, flags, attrib, sft_idx);
+  long open_result = dos_open(PriPathName, flags, attrib, sft_idx);
   dpb_watch_check_chain("DosOpenSft 10");
-  if (result < 0)
+  if (open_result < 0)
   {
 /* /// Added for SHARE *** CURLY BRACES ADDED ALSO!!! ***.  - Ron Cemer */
     /* if we allocated a share slot above, but open failed, free slot */
@@ -370,10 +379,10 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     }
 /* /// End of additions for SHARE.  - Ron Cemer */
     sftp->sft_count--;
-    return result;
+    return open_result;
   }
   dpb_watch_check_chain("DosOpenSft 11");
-  return sft_idx | ((long)result << 16);
+  return sft_idx | (open_result << 16);
 }
 
 /*
@@ -623,8 +632,8 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
     dos_far_ptr save_dta;
 
     save_dta = internal_data->dta;
-    internal_data->lpCurSft = _s;  /* _s is already the SFT's dos_far_ptr */
-    internal_data->current_filepos = s->sft_posit;     /* needed for MSCDEX * /
+    internal_data->lpCurSft = _s;  // _s is already the SFT's dos_far_ptr 
+    internal_data->current_filepos = s->sft_posit;     // needed for MSCDEX
     internal_data->dta = bp;
     XferCount = remote_rw(mode == XFR_READ ? REM_READ : REM_WRITE, s, n);
     internal_data->dta = save_dta;

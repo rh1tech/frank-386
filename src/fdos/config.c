@@ -950,6 +950,7 @@ STATIC VOID CfgSwitches(BYTE * pLine)
           }
           /* else fall through (failure) */
         }
+        __attribute__((fallthrough));
       default:
         CfgFailure(pLine);
       }
@@ -964,7 +965,6 @@ STATIC VOID CfgSwitches(BYTE * pLine)
 STATIC void ClearScreen(unsigned char attr)
 {
   /* scroll down (newlines): */
-  iregs r;
   unsigned char rows;
 
   /* clear */
@@ -1102,7 +1102,6 @@ STATIC VOID CfgSwitchar(BYTE * pLine)
 */
 STATIC VOID sysScreenMode(BYTE * pLine)
 {
-  iregs r;
   COUNT nMode;
   COUNT nFunc = 0x11;
 
@@ -1440,7 +1439,7 @@ err:printf("%s has invalid format\n", filename);
   {
     if (read(fd, x86_entry, sizeof(struct entry)) != sizeof(struct entry) || entry->length != 12)
       goto err;
-    if (entry->country != ctryCode || entry->codepage != codePage && codePage)
+    if (entry->country != ctryCode || (entry->codepage != codePage && codePage))
       continue;
     if (lseek(fd, entry->offset) == 0xffffffffL
       || read(fd, x86_count, sizeof(UWORD)) != sizeof(UWORD)
@@ -1460,20 +1459,19 @@ err:printf("%s has invalid format\n", filename);
         subf_tbl_ndx = 8;  /* 0 through 7 match, but subfunction 35 is 9th entry in table[] */
       if (lseek(fd, hdr[i].offset) == 0xffffffffL
        || read(fd, x86_subf_data_, 10) != 10
-       || memcmp(subf_data->signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
-       || memcmp(subf_data->signature, table[2].sig, 8))  /* UCASE for FUCASE ^*/
+       || (memcmp(subf_data->signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
+       || memcmp(subf_data->signature, table[2].sig, 8)))  /* UCASE for FUCASE ^*/
        || subf_data->length > sizeof(subf_data->buffer)
        || subf_data->length > table[subf_tbl_ndx].max
        || read(fd, x86_subf_data_buffer, subf_data->length) != subf_data->length)
         goto err;
       if (hdr[i].id == 1)
       {
-        if (((struct CountrySpecificInfo *)subf_data->buffer)->CountryID
-                                                     != entry->country
-         || ((struct CountrySpecificInfo *)subf_data->buffer)->CodePage
-                                                     != entry->codepage
-         && codePage)
+        if (((struct CountrySpecificInfo *)subf_data->buffer)->CountryID != entry->country
+         || (((struct CountrySpecificInfo *)subf_data->buffer)->CodePage != entry->codepage && codePage)
+        ) {
           continue;
+        }
         nlsPackageHardcoded->cntry = entry->country;
         nlsPackageHardcoded->cp = entry->codepage;
         subf_data->length =      /* MS-DOS "CTYINFO" is up to 38 bytes */
@@ -1736,7 +1734,9 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   {
     struct dhdr *p = (struct dhdr *) ARM_PTR(dhp);
 
-    UBYTE *img = (UBYTE *) ARM_PTR(dhp);
+#ifdef DEBUGCFG
+    UBYTE *img = (UBYTE *)ARM_PTR(dhp);
+#endif
 
     /* One-shot check of the loaded x86 device header before init_device()
        and before x86_execrh() can execute dh_strategy.  Keep it to one
@@ -1915,7 +1915,8 @@ STATIC BOOL SkipLine(char *pLine)
                                    ESCAPE answers all following questions
                                    with YES
                                  */
-        singleStep = FALSE;     /* and fall through */
+        singleStep = FALSE;
+        __attribute__((fallthrough));
 
       case '\r':
       case '\n':
@@ -2053,7 +2054,7 @@ VOID DoConfig(int nPass)
   /* do the table lookup and execute the handler for that         */
   /* function.                                                    */
 
-  BYTE* szLine = ARM_PTR(x86_szLine);
+  BYTE* szLine = (BYTE*)ARM_PTR(x86_szLine);
 #ifdef MEMDISK_ARGS
   for (; !bEof || (mdsk != NULL); nCfgLine++)
 #else
@@ -2563,8 +2564,6 @@ STATIC VOID InstallExec(struct instCmds *icmd)
 VOID DoInstall(void)
 {
   int i;
-///  unsigned short installMemory;
-  struct instCmds *cmd;
 
   if (numInstallCmds == 0)
     return;

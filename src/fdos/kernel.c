@@ -10,19 +10,6 @@
 #define printf(...) dos_printf(__VA_ARGS__)
 CPU* cpu;
 
-static bool waiter(CPU* cpu, bios_callback_params_t* any) {
-    // actually do nothing, since reboot only is allowed in this case
-    ifl = 1; // allow IRQ
-    return false; // in a loop on the same CS:IP, no IRET required there
-}
-
-static bios_callback_params_t params = {
-    .callback = waiter,
-    .expected_cs = 0xF000,
-    .expected_ip = 0xFEFF,
-    .owner = "FAR CALL"
-};
-
 int	vsnprintf (char *__restrict, size_t, const char *__restrict, __gnuc_va_list)
                _ATTRIBUTE ((__format__ (__printf__, 3, 0)));
 
@@ -363,7 +350,7 @@ static void ConIntr(request FAR *rq) {
         CPU_AH = 0x00;              /* INT 16h AH=00h: read keystroke */
         bios_intcall(cpu, 0x16, "C_INPUT");    /* returns false (re-enters) until key ready */
         if (rq->r_count > 0 && EFFECTIVE(rq->r_trans)) {
-            BYTE FAR *p = ARM_PTR(rq->r_trans);
+            BYTE* p = (BYTE*)ARM_PTR(rq->r_trans);
             *p = CPU_AL;
             rq->r_count = 1;
         } else {
@@ -378,8 +365,8 @@ static void ConIntr(request FAR *rq) {
         /* teletype output via INT 10h AH=0Eh */
         cpu_save_regs(cpu, &saved);
         {
-            BYTE FAR *p   = ARM_PTR(rq->r_trans);
-            UWORD     cnt = rq->r_count;
+            BYTE* p   = (BYTE*)ARM_PTR(rq->r_trans);
+            UWORD cnt = rq->r_count;
             while (cnt--) {
                 CPU_AH = 0x0E;
                 CPU_AL = *p++;
@@ -745,12 +732,12 @@ static const struct lol lol = {
     .first_mcb = 0,             /* 0x24  abs / -0x02 rel: start of user memory */
     /* === MARK0026H, offset 0x26 = offsetof(struct lol, DPBp) */
     .DPBp        = MK_FP(-1,-1),
-    .sfthead     = 0,
+    .sfthead     = {0},
     .clock       = x86_clk_dev,
     .syscon      = x86_con_dev,
     .maxsecsize  = 512,
-    .CDSp        = 0,
-    .FCBp        = 0,
+    .CDSp        = {0},
+    .FCBp        = {0},
     .nprotfcb    = 0,
     .nblkdev     = 0,
     .lastdrive   = 0,
@@ -858,19 +845,8 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
 
   SET_CS(seg);
   SET_IP(off);
-uint32_t wait_loops = 0;
   while (!params.done) {
     pc_step(pc, 4096); /// ???
-    if ((++wait_loops & 0x3ff) == 0) {
-      uint8_t op = getmem8(CPU_CS, CPU_IP);
-      /*
-      printf("cpu_far_call wait target=%04x:%04x ret=%04x:%04x "
-             "now=%04x:%04x op=%02x SS:SP=%04x:%04x\n",
-             seg, off,
-             params.expected_cs, params.expected_ip,
-             CPU_CS, CPU_IP, op, CPU_SS, CPU_SP);
-      */
-    }    
     /*
     if (CPU_CS == params.expected_cs && CPU_IP == params.expected_ip) {
         printf("cpu_far_call reached return %04x:%04x SP=%04x\n",
@@ -2772,7 +2748,7 @@ STATIC VOID InitSerialPorts(VOID)
 static void InitializeAllBPBs(VOID)
 {
   int drive, fileno;
-  char *path = ARM_PTR(x86_szLine);
+  char* path = (char*)ARM_PTR(x86_szLine);
   dos_far_ptr x86_path = x86_szLine;
   strcpy(path, "A:-@JUNK@-.TMP");
   for (drive = 'C'; drive < 'A' + LoL->nblkdev; drive++)

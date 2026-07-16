@@ -254,3 +254,13 @@ guards (gen_rw_sane, the CHS count==0 check, the volume-bounds check, the
 BLK_GENIOCTL bisect switch) suggest more than one suspect was investigated. But
 this is a concrete, demonstrated memory-corruption bug on exactly the path
 described, matching the dpb_watch instrumentation.
+
+Хорошие кандидаты на static, но не в текущем EXEC-пути
+| Функция                        |   Кадр | Что можно вынести        | Оценка                                                                                                                |
+| ------------------------------ | -----: | ------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `builtin_copy`                 |  368 Б | `struct fcom_copy_parse` | безопасный кандидат: COPY синхронно не запускает новую COPY; но выигрыш лишь около 36–40 Б                            |
+| `ProcessDisk`                  |  448 Б | init-only workspace      | хороший кандидат в отдельную init-static область                                                                      |
+| `read_iso_boot_sector`         | 2088 Б | ISO sector buffer        | однозначно static/init-only                                                                                           |
+| `bios_05h`                     |  920 Б | PrintScreen buffers      | static допустим при защите от повторного PrintScreen                                                                  |
+| `Country`                      |  112 Б | CONFIG-only workspace    | static/init-only                                                                                                      |
+| `replace_environment_variable` |   96 Б | набор расчётных полей    | технически можно собрать в static workspace, но вызов завершается до исполнения команд и текущую проблему не улучшает |

@@ -39,7 +39,7 @@ static uint32_t read_le32(const uint8_t *p)
 static int read_iso_boot_sector(FIL *f)
 {
     UINT br = 0;
-    uint8_t buf[2048];
+    uint8_t buf[2048]; /// TODO: get rid from stack such huge thigns
     uint32_t catalog_lba = 0;
 
     if (!f || !f->obj.fs)
