@@ -1629,6 +1629,47 @@ STATIC void PSPInit(void)
 /* Bytes from off to the end of its 64K segment. off == 0 gives a full 64K. */
 static inline size_t seg_room(uint16_t off) { return (size_t)0x10000u - off; }
 
+/*
+    Линейные копиры guest_lin_read()/guest_lin_write()/guest_lin_set() -
+    нижний этаж всех far-примитивов: каждый непрерывный (в смысле 16-бит
+    оффсета) кусок дополнительно дробится guest_span_ptr()'ом по гранулам
+    гостевой физической карты, чтобы копия попадала в АКТИВНУЮ страницу
+    окна EMS, а не в сырую линейную память под ним (см. mem.h). Экспорт в
+    proto.h - для путей данных, держащих гостевой линейный курсор напрямую
+    (rwblock() в fatfs.c).
+*/
+void guest_lin_write(uint32_t lin, const void *src, size_t n) {
+    const uint8_t *p = (const uint8_t *)src;
+    while (n) {
+        uint32_t span;
+        uint8_t *h = guest_span_ptr(lin, &span);
+        size_t chunk = (span < n) ? span : n;
+        memcpy(h, p, chunk);
+        p += chunk; lin += chunk; n -= chunk;
+    }
+}
+
+void guest_lin_read(void *dst, uint32_t lin, size_t n) {
+    uint8_t *p = (uint8_t *)dst;
+    while (n) {
+        uint32_t span;
+        const uint8_t *h = guest_span_ptr(lin, &span);
+        size_t chunk = (span < n) ? span : n;
+        memcpy(p, h, chunk);
+        p += chunk; lin += chunk; n -= chunk;
+    }
+}
+
+static void guest_lin_set(uint32_t lin, int v, size_t n) {
+    while (n) {
+        uint32_t span;
+        uint8_t *h = guest_span_ptr(lin, &span);
+        size_t chunk = (span < n) ? span : n;
+        memset(h, v, chunk);
+        lin += chunk; n -= chunk;
+    }
+}
+
 void* fmemset(dos_far_ptr p, int v, unsigned int sz) {
     void* res = ARM_PTR(p);
     uint16_t seg = FP_SEG(p), off = FP_OFF(p);
@@ -1637,7 +1678,7 @@ void* fmemset(dos_far_ptr p, int v, unsigned int sz) {
     while (n) {
         size_t chunk = n, room = seg_room(off);
         if (chunk > room) chunk = room;
-        memset(ARM_PTR(MK_FP(seg, off)), v, chunk);
+        guest_lin_set(EFFECTIVE(MK_FP(seg, off)), v, chunk);
         n -= chunk;
         off = (uint16_t)(off + chunk);   /* wraps to 0 at the segment end */
     }
@@ -1658,7 +1699,21 @@ void fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n) {
         if (chunk > droom) chunk = droom;
         if (chunk > sroom) chunk = sroom;
 
-        memcpy(ARM_PTR(MK_FP(dseg, doff)), ARM_PTR(MK_FP(sseg, soff)), chunk);
+        {
+            uint32_t dlin = EFFECTIVE(MK_FP(dseg, doff));
+            uint32_t slin = EFFECTIVE(MK_FP(sseg, soff));
+            size_t   left = chunk;
+            while (left) {
+                uint32_t dspan, sspan;
+                uint8_t       *dh = guest_span_ptr(dlin, &dspan);
+                const uint8_t *sh = guest_span_ptr(slin, &sspan);
+                size_t m = left;
+                if (m > dspan) m = dspan;
+                if (m > sspan) m = sspan;
+                memcpy(dh, sh, m);
+                dlin += m; slin += m; left -= m;
+            }
+        }
         n -= chunk;
         doff = (uint16_t)(doff + chunk);
         soff = (uint16_t)(soff + chunk);
@@ -1674,7 +1729,7 @@ void guest_write(dos_far_ptr d, const void *src, size_t n) {
     while (n) {
         size_t chunk = n, room = seg_room(off);
         if (chunk > room) chunk = room;
-        memcpy(ARM_PTR(MK_FP(seg, off)), p, chunk);
+        guest_lin_write(EFFECTIVE(MK_FP(seg, off)), p, chunk);
         p += chunk;
         n -= chunk;
         off = (uint16_t)(off + chunk);
@@ -1689,7 +1744,7 @@ void guest_read(void *dst, dos_far_ptr s, size_t n) {
     while (n) {
         size_t chunk = n, room = seg_room(off);
         if (chunk > room) chunk = room;
-        memcpy(p, ARM_PTR(MK_FP(seg, off)), chunk);
+        guest_lin_read(p, EFFECTIVE(MK_FP(seg, off)), chunk);
         p += chunk;
         n -= chunk;
         off = (uint16_t)(off + chunk);
@@ -2823,11 +2878,8 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     fnode_init();
 
     /* Now process CONFIG.SYS     */
-    { void initchk(const char *); initchk("pre-config"); }
     DoConfig(0);
-    { void initchk(const char *); initchk("config-0"); }
     DoConfig(1);
-    { void initchk(const char *); initchk("config-1"); }
 
 #ifdef WITHLFNAPI
     /* Persistent LFN helper fnodes belong to resident guest DOS data.
@@ -3052,7 +3104,8 @@ void kernel(CPU* _cpu) {
      *   - регион принадлежит ядру навсегда и в оригинале несёт ровно
      *     эту нагрузку: entry.asm исполняет INT 21h на этих стеках,
      *     т.е. глубина драйверной инициализации бюджетируется upstream
-     *     теми же 90h-заполненными областями (floor виден в INITCHK);
+     *     теми же областями (90h-заливка позволяет измерить фактический
+     *     минимум по остатку заполнителя);
      *   - Dyn-арена запрещена: dsk.c/getddt() адресует ddt-массив как
      *     ПЕРВУЮ аллокацию (base = DYN_BUFFER + sizeof(DynS)), любая
      *     вставка раньше dsk_init() сдвигает ddt и лишает диски
@@ -3064,9 +3117,8 @@ void kernel(CPU* _cpu) {
      *
      * Фиксированные слоты SDA_TEMPCDS_OFF/SDA_EXEC_TAIL_OFF занимают
      * вершину disk-региона (см. init-mod.h); init-стек достигает их
-     * только при глубине > sizeof(char_stack) - INITCHK sda_floor
-     * показывает фактический минимум. fcom process 0 и каждый EXEC-
-     * ребёнок ставят собственные SS:SP, так что это значение живёт
+     * только при глубине > sizeof(char_stack). fcom process 0 и каждый
+     * EXEC-ребёнок ставят собственные SS:SP, так что это значение живёт
      * только в init-фазе.
      */
     SET_SS(DOS_PSP);

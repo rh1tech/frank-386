@@ -343,7 +343,6 @@ struct rwblock_workspace
   f_node_ptr fnp;
   struct buffer *bp;
   struct dpb *f_dpb;
-  BYTE *buffer;
   dos_far_ptr x86_buffer;
   ULONG currentblock;
   ULONG startoffset;
@@ -363,7 +362,6 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
 #define fnp             (work->fnp)
 #define bp              (work->bp)
 #define wf_dpb          (work->f_dpb)
-#define buffer          (work->buffer)
 #define x86_buffer      (work->x86_buffer)
 #define currentblock    (work->currentblock)
 #define startoffset     (work->startoffset)
@@ -387,7 +385,6 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
   currentblock = 0;
 
   x86_buffer = adjust_far_x86(x86_buffer);
-  buffer = (BYTE *)ARM_PTR(x86_buffer);
 
   if (mode == XFR_WRITE)
   {
@@ -580,14 +577,19 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
     if (mode == XFR_READ)
       xfr_cnt = (UWORD) min(xfr_cnt, fnp->f_dir.dir_size - fnp->f_offset);
 
+    /* Копия через guest_lin_*: буфер пользователя может лежать в окне EMS
+       (Wolf3D читает VSWAP прямо в замапленный page frame) - данные обязаны
+       попасть в АКТИВНУЮ страницу, а не в сырую линейную память (mem.h).
+       Полносекторный путь ниже (dskxfer -> INT 13h -> write86) банкуется
+       сам по себе. */
     if (mode == XFR_WRITE)
     {
-      memcpy(&bp->b_buffer[boff], buffer, xfr_cnt);
+      guest_lin_read(&bp->b_buffer[boff], EFFECTIVE(x86_buffer), xfr_cnt);
       bp->b_flag |= BFR_DIRTY | BFR_VALID;
     }
     else
     {
-      memcpy(buffer, &bp->b_buffer[boff], xfr_cnt);
+      guest_lin_write(EFFECTIVE(x86_buffer), &bp->b_buffer[boff], xfr_cnt);
     }
 
     /* complete buffer transferred ? 
@@ -606,7 +608,6 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
     ret_cnt += xfr_cnt;
     to_xfer -= xfr_cnt;
     x86_buffer = add_far_x86(x86_buffer, xfr_cnt);
-    buffer = (BYTE *)ARM_PTR(x86_buffer);
     if (mode == XFR_WRITE)
     {
       if (fnp->f_offset > fnp->f_dir.dir_size)
@@ -622,7 +623,6 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
 #undef fnp
 #undef bp
 #undef wf_dpb
-#undef buffer
 #undef x86_buffer
 #undef currentblock
 #undef startoffset

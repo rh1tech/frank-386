@@ -123,6 +123,8 @@ UBYTE *jft_of(psp *p);
 /* Guest-memory copies that wrap the 16-bit offset inside the segment, the
    way real-mode rep movsb/stosb do. See the long note in kernel.c. */
 void guest_write(dos_far_ptr d, const void *src, size_t n);
+void guest_lin_write(uint32_t lin, const void *src, size_t n);
+void guest_lin_read(void *dst, uint32_t lin, size_t n);
 void guest_read(void *dst, dos_far_ptr s, size_t n);
 void guest_strcpy(dos_far_ptr d, const char *s);
 struct cds FAR *get_cds_unvalidated(unsigned dsk);

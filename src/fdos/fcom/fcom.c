@@ -6139,64 +6139,6 @@ static void builtin_memory(CPU *cpu, UWORD command_psp,
         FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
         (UWORD)n);
 
-  /*
-   * Дамп обеих MCB-цепочек (аналог mem /debug). Обход не доверяет
-   * заголовкам: невалидный тип/размер печатается с маркером BROKEN и
-   * останавливает проход по этой цепочке - владелец предыдущего блока
-   * виден в его имени. UMB-цепь берётся от uppermem_root независимо от
-   * состояния uppermem_link, чтобы дамп показывал и разлинкованные
-   * блоки.
-   */
-  {
-    int pass;
-
-    for (pass = 0; pass < 2; pass++)
-    {
-      UWORD mseg = pass ? LoL->uppermem_root : LoL->first_mcb;
-      int hops;
-
-      if (pass && (mseg == 0 || mseg == 0xffff))
-        break;
-
-      n = snprintf(g->text, sizeof(g->text),
-                   "\t%s chain (link=%u):\r\n",
-                   pass ? "UMB" : "Low", (unsigned)LoL->uppermem_link);
-      if (n > 0)
-        (void)fcom_write(cpu, command_psp,
-            FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
-            (UWORD)n);
-
-      for (hops = 0; hops < 32; hops++)
-      {
-        const mcb *m = (const mcb *)ARM_PTR(MK_FP(mseg, 0));
-        char name[9];
-        int i;
-        int bad = (m->m_type != MCB_NORMAL && m->m_type != MCB_LAST) ||
-                  m->m_size == 0xffff;
-
-        for (i = 0; i < 8; i++)
-          name[i] = (m->m_name[i] >= ' ' && m->m_name[i] < 127)
-                        ? m->m_name[i] : '.';
-        name[8] = '\0';
-
-        n = snprintf(g->text, sizeof(g->text),
-                     "\t %04X %c psp=%04X size=%04X %s%s\r\n",
-                     mseg,
-                     (m->m_type >= ' ' && m->m_type < 127)
-                         ? (char)m->m_type : '?',
-                     m->m_psp, m->m_size, name,
-                     bad ? "  <-BROKEN" : "");
-        if (n > 0)
-          (void)fcom_write(cpu, command_psp,
-              FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, text),
-              (UWORD)n);
-
-        if (bad || m->m_type == MCB_LAST)
-          break;
-        mseg = (UWORD)(mseg + m->m_size + 1u);
-      }
-    }
-  }
 }
 
 
@@ -9460,8 +9402,12 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
              (unsigned)FCOM_STACK_BYTES,
              command_psp >= 0xa000u ? "HIGH" : "LOW");
 #else
-  dos_printf("FreeCom v.0.86 (for RP2350) @ %04Xh [%s]\n",
-    command_psp, command_psp >= 0xa000u ? "UMB" : "LOW");
+  /* Баннер печатает только процесс #0 (родитель - PSP ядра):
+     COMSPEC-дети (COMMAND /C для внешних команд) стартуют молча,
+     как транзиентные экземпляры COMMAND.COM в MS-DOS. */
+  if (g->saved_parent_psp == DOS_PSP)
+    dos_printf("FreeCom v.0.86 (for RP2350) @ %04Xh [%s]\n",
+      command_psp, command_psp >= 0xa000u ? "UMB" : "LOW");
 #endif
   /* The process command line has one canonical home: PSP:80h. */
   {

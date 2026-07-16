@@ -31,6 +31,33 @@ void iomem_write32(void *iomem, uint32_t addr, uint32_t val);
 bool iomem_write_string(void *iomem, uint32_t addr, uint32_t buf, int len);
 bool iomem_write_string_ptr(void *iomem, uint32_t addr, const uint8_t *buf, int len);
 void reset_umb();
+
+/*
+ * Разрешение линейного гостевого адреса в host-указатель с учётом окна EMS.
+ * В *span возвращается длина непрерывного участка от addr: окно EMS
+ * банкуется 16К-страницами (у каждого подокна page frame свой селектор
+ * ems_pages[]), поэтому гранула - до ближайшей 16К-границы; вне окна
+ * дробление по той же грануле безвредно и упрощает вызывающий цикл.
+ *
+ * Обязателен для любых НАТИВНЫХ bulk-копий в гостевую память по адресу,
+ * который задаёт гость (файловый ввод-вывод DOS, far-примитивы ядра):
+ * CPU-путь pload/pstore банкуется сам, а голый PC_RAM+addr кладёт данные
+ * в сырую линейную память - после переключения страницы гость видит
+ * содержимое EMS-страницы, и данные "исчезают" (симптом: Wolf3D грузит
+ * VSWAP-чанки INT 21h-чтением прямо в замапленный page frame и теряет
+ * текстуры). Окно VGA (A0000..BFFFF) здесь сознательно НЕ обрабатывается:
+ * ядро в него не целится, а запись в видеопамять обязана идти через
+ * write86/iomem.
+ */
+static inline uint8_t *guest_span_ptr(uint32_t addr, uint32_t *span)
+{
+    *span = 0x4000u - (addr & 0x3FFFu);
+#if EMULATE_LTEMS
+    if (unlikely(EMS_WINDOW(addr)))
+        return ems_host_ptr(addr);
+#endif
+    return PC_RAM + addr;
+}
 /* fdos_2fh.c: pick the UMB map matching the selected BIOS */
 void umb_select_map(int native_bios, uint32_t rom_start, int vga_bios_loaded);
 
