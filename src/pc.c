@@ -1458,8 +1458,24 @@ void bios_post(PC *pc) {
 //	pstore8 (0x466, 0x00);                               /* CGA palette */
 
 //	pstore8 (0x46B, 0x00);                               /* ctrl-break flag */
-//	pstore32(0x46C, 0x00000000);                         /* timer ticks */
-//	pstore8 (0x470, 0x00);                               /* midnight flag */
+	/* D5. SeaBIOS clock_setup() засевает timer_counter текущим временем
+	   RTC; без этого INT 1Ah/AH=00h до первого тика отдаёт 00:00, и DOS
+	   стартует с полуночи. Множитель привязан к TICKS_PER_DAY (0x1800B0),
+	   которым INT 08h делает rollover, поэтому результат гарантированно
+	   меньше суток. От ticks_from_ms() SeaBIOS отличается не более чем на
+	   4 тика (~0.2 c) из-за двойного округления вверх у эталона. */
+	{
+		uint8_t bh = cmos_read(pc->cpu, 0x04);
+		uint8_t bm = cmos_read(pc->cpu, 0x02);
+		uint8_t bs = cmos_read(pc->cpu, 0x00);
+		uint32_t hh = ((bh >> 4) & 0x0F) * 10u + (bh & 0x0F);
+		uint32_t mm = ((bm >> 4) & 0x0F) * 10u + (bm & 0x0F);
+		uint32_t ss = ((bs >> 4) & 0x0F) * 10u + (bs & 0x0F);
+		uint32_t secs = (hh * 60u + mm) * 60u + ss;
+		if (secs >= 86400u) secs = 0;
+		pstore32(0x46C, (uint32_t)(((uint64_t)secs * 0x1800B0u) / 86400u));
+	}
+	pstore8 (0x470, 0x00);                               /* midnight flag */
 //	pstore8 (0x471, 0x00);                               /* break flag */
 //	pstore16(0x472, 0x0000);                             /* reset flag */
 //	pstore8 (0x474, 0x00);                               /* last HDD status */

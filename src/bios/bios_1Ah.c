@@ -46,31 +46,46 @@ bool bios_1Ah(CPU* cpu)
 
     /* ── AH=02h: Get RTC Time ─────────────────────────────────────────── */
     case 0x02: {
-        /* CF=1 if RTC lost power (REG_D bit 7 = VRT, 0 means battery dead) */
-        if (!(cmos_read(cpu, 0x0D) & 0x80)) {
+        /* SeaBIOS handle_1a02(): негодность определяется по UIP (REG_A
+           бит 7, "идёт обновление"), а не по VRT - тот говорит лишь о
+           состоянии батареи. В этой эмуляции UIP не выставляется никогда
+           (misc.c обновляет регистры атомарно), так что проверка всегда
+           проходит; важна семантика, совпадающая с эталоном. */
+        if (cmos_read(cpu, 0x0A) & 0x80) {
             cf = 1;
             goto ret;
         }
         CPU_CH = cmos_read(cpu, 0x04); /* hours   BCD */
         CPU_CL = cmos_read(cpu, 0x02); /* minutes BCD */
         CPU_DH = cmos_read(cpu, 0x00); /* seconds BCD */
-        CPU_DL = 0;               /* DST: not supported */
+        CPU_DL = cmos_read(cpu, 0x0B) & 0x01; /* DSE из STATUS_B */
+        CPU_AH = 0x00;
+        CPU_AL = CPU_CH;               /* SeaBIOS: AL = часы */
         cf = 0;
         goto ret;
     }
 
     /* ── AH=03h: Set RTC Time ─────────────────────────────────────────── */
     case 0x03: {
-        cmos_write(cpu, 0x04, CPU_CH); /* hours   BCD */
-        cmos_write(cpu, 0x02, CPU_CL); /* minutes BCD */
+        uint8_t dl = CPU_DL;
         cmos_write(cpu, 0x00, CPU_DH); /* seconds BCD */
+        cmos_write(cpu, 0x02, CPU_CL); /* minutes BCD */
+        cmos_write(cpu, 0x04, CPU_CH); /* hours   BCD */
+        /* SeaBIOS handle_1a03(): RegB = (RegB & (PIE|AIE)) | 24HR |
+           (DL & DSE) - сбрасывает SET/UIE/BIN, сохраняет периодические и
+           будильниковые прерывания, переносит признак летнего времени. */
+        uint8_t b = (uint8_t)((cmos_read(cpu, 0x0B) & 0x60) | 0x02 | (dl & 0x01));
+        cmos_write(cpu, 0x0B, b);
+        CPU_AH = 0x00;
+        CPU_AL = b;                    /* последнее записанное в RegB */
         cf = 0;
         goto ret;
     }
 
     /* ── AH=04h: Get RTC Date ─────────────────────────────────────────── */
     case 0x04: {
-        if (!(cmos_read(cpu, 0x0D) & 0x80)) {
+        CPU_AH = 0x00;
+        if (cmos_read(cpu, 0x0A) & 0x80) {  /* UIP, как в SeaBIOS */
             cf = 1;
             goto ret;
         }
@@ -78,6 +93,7 @@ bool bios_1Ah(CPU* cpu)
         CPU_CL = cmos_read(cpu, 0x09); /* year    BCD */
         CPU_DH = cmos_read(cpu, 0x08); /* month   BCD */
         CPU_DL = cmos_read(cpu, 0x07); /* day     BCD */
+        CPU_AL = CPU_CH;               /* SeaBIOS: AL = век */
         cf = 0;
         goto ret;
     }
@@ -88,6 +104,11 @@ bool bios_1Ah(CPU* cpu)
         cmos_write(cpu, 0x09, CPU_CL); /* year    BCD */
         cmos_write(cpu, 0x08, CPU_DH); /* month   BCD */
         cmos_write(cpu, 0x07, CPU_DL); /* day     BCD */
+        /* SeaBIOS handle_1a05(): снять бит SET (остановка часов). */
+        uint8_t b5 = (uint8_t)(cmos_read(cpu, 0x0B) & ~0x80);
+        cmos_write(cpu, 0x0B, b5);
+        CPU_AH = 0x00;
+        CPU_AL = b5;
         cf = 0;
         goto ret;
     }

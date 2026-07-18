@@ -380,8 +380,15 @@ Windows 3.0 has problems when this function reports more than 15 MB. Some releas
 even when this function reports more.
 */
 static bool bios_15h_88h(CPU* cpu) {
+    /* SeaBIOS handle_1588(): по Ralf Brown предел 15 МБ, но реальные
+       машины отдают максимум 63 МБ - эталон клампит именно так. CMOS
+       0x17/0x18 в POST уже ограничен 0xFFFF, что дало бы 63.99 МБ. */
+    uint32_t ext_kb = (uint32_t)cmos_read(cpu, 0x17) |
+                      ((uint32_t)cmos_read(cpu, 0x18) << 8);
+    if (ext_kb > 63u * 1024u)
+        ext_kb = 63u * 1024u;
     cf = 0;
-    CPU_AX = (uint16_t)cmos_read(cpu, 0x17) | ((uint16_t)cmos_read(cpu, 0x18) << 8);
+    CPU_AX = (uint16_t)ext_kb;
     return true;
 }
 

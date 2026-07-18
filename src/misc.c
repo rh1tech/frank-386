@@ -145,37 +145,143 @@ static int month_from_str(const char *m)
     return 1;
 }
 
+/* ---- виртуальный RTC ---------------------------------------------------
+ * Раньше cmos_update_time() при КАЖДОМ чтении порта CMOS перезаписывал
+ * регистры времени значениями __DATE__/__TIME__. Следствия: часы стояли
+ * на месте, а INT 1Ah AH=03h/05h (то есть DOS TIME и DATE) молча
+ * откатывались на ближайшем же чтении.
+ *
+ * Теперь храним привязку: момент time_us_64() и соответствующее ему
+ * время. На чтении время вычисляется как привязка плюс прошедшие
+ * секунды, на записи привязка пересчитывается - поэтому установка
+ * времени держится, а часы идут.
+ *
+ * Календарь - алгоритм Хауарда Хиннанта; сверен с gmtime() на 50000
+ * суток (1970-01-01 .. 2106) включая високосные годы и век 2100.
+ */
+static int bcd2bin(int a)
+{
+	return ((a >> 4) & 0x0F) * 10 + (a & 0x0F);
+}
+
+static int32_t rtc_days_from_civil(int32_t y, uint32_t m, uint32_t d)
+{
+	y -= m <= 2;
+	const int32_t era = (y >= 0 ? y : y - 399) / 400;
+	const uint32_t yoe = (uint32_t)(y - era * 400);
+	const uint32_t doy = (153u * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+	const uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return era * 146097 + (int32_t)doe - 719468;
+}
+
+static void rtc_civil_from_days(int32_t z, int32_t *py, uint32_t *pm, uint32_t *pd)
+{
+	z += 719468;
+	const int32_t era = (z >= 0 ? z : z - 146096) / 146097;
+	const uint32_t doe = (uint32_t)(z - era * 146097);
+	const uint32_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	const int32_t y = (int32_t)yoe + era * 400;
+	const uint32_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	const uint32_t mp = (5 * doy + 2) / 153;
+	const uint32_t d = doy - (153 * mp + 2) / 5 + 1;
+	const uint32_t m = mp + (mp < 10 ? 3 : -9);
+	*py = y + (m <= 2);
+	*pm = m;
+	*pd = d;
+}
+
+static uint32_t rtc_anchor_sec;   /* секунды с 1970-01-01 в момент привязки */
+static uint64_t rtc_anchor_us;    /* time_us_64() в момент привязки        */
+static uint32_t rtc_cached_sec;   /* для какой секунды уже заполнен data[] */
+static int      rtc_cache_valid;
+
+static uint32_t rtc_now_sec(void)
+{
+	uint64_t el = (time_us_64() - rtc_anchor_us) / 1000000u;
+	return rtc_anchor_sec + (uint32_t)el;
+}
+
+static void rtc_fields_from_sec(CMOS *s, uint32_t secs)
+{
+	uint32_t days = secs / 86400u;
+	uint32_t tod  = secs % 86400u;
+	int32_t y; uint32_t m, d;
+	rtc_civil_from_days((int32_t)days, &y, &m, &d);
+	s->data[0x00] = bin2bcd((int)(tod % 60));
+	s->data[0x02] = bin2bcd((int)((tod / 60) % 60));
+	s->data[0x04] = bin2bcd((int)(tod / 3600));
+	s->data[0x06] = bin2bcd((int)((days + 4) % 7) + 1); /* 1 = воскресенье */
+	s->data[0x07] = bin2bcd((int)d);
+	s->data[0x08] = bin2bcd((int)m);
+	s->data[0x09] = bin2bcd((int)(y % 100));
+	s->data[0x32] = bin2bcd((int)(y / 100));
+}
+
+/* Пересчитать привязку по текущему содержимому регистров времени.
+   Вызывается после гостевой записи в любой из них. */
+static void rtc_anchor_from_fields(CMOS *s)
+{
+	int sec  = bcd2bin(s->data[0x00]); if (sec  > 59) sec  = 59;
+	int min  = bcd2bin(s->data[0x02]); if (min  > 59) min  = 59;
+	int hour = bcd2bin(s->data[0x04]); if (hour > 23) hour = 23;
+	int day  = bcd2bin(s->data[0x07]); if (day  < 1)  day  = 1;
+	                                   if (day  > 31) day  = 31;
+	int mon  = bcd2bin(s->data[0x08]); if (mon  < 1)  mon  = 1;
+	                                   if (mon  > 12) mon  = 12;
+	int yy   = bcd2bin(s->data[0x09]); if (yy   > 99) yy   = 99;
+	int cc   = bcd2bin(s->data[0x32]); if (cc < 19 || cc > 20) cc = 20;
+	int year = cc * 100 + yy;
+	int32_t days = rtc_days_from_civil(year, (uint32_t)mon, (uint32_t)day);
+	if (days < 0) days = 0;
+	rtc_anchor_sec  = (uint32_t)days * 86400u +
+	                  (uint32_t)(hour * 3600 + min * 60 + sec);
+	rtc_anchor_us   = time_us_64();
+	rtc_cache_valid = 0;
+}
+
 static void cmos_update_time(CMOS *s)
 {
-    /* Parse compile date: "Mmm dd yyyy" */
-    const char *d = __DATE__;
+	/* REG_B бит 7 (SET) - гость просил заморозить часы на время записи. */
+	if (s->data[11] & 0x80)
+		return;
+	uint32_t now = rtc_now_sec();
+	if (rtc_cache_valid && now == rtc_cached_sec)
+		return;
+	rtc_fields_from_sec(s, now);
+	rtc_cached_sec  = now;
+	rtc_cache_valid = 1;
+}
 
-    int month = month_from_str(d);
-    int day = (d[4] == ' ') ? (d[5] - '0') : (10 * (d[4] - '0') + (d[5] - '0'));
-    int year = (d[7] - '0') * 1000 +
-               (d[8] - '0') * 100 +
-               (d[9] - '0') * 10 +
-               (d[10] - '0');
+static int rtc_is_time_reg(int i)
+{
+	return i == 0x00 || i == 0x02 || i == 0x04 ||
+	       i == 0x06 || i == 0x07 || i == 0x08 ||
+	       i == 0x09 || i == 0x32;
+}
 
-    /* Optional: parse compile time */
-    const char *t = __TIME__;
-    int hour = (t[0] - '0') * 10 + (t[1] - '0');
-    int min  = (t[3] - '0') * 10 + (t[4] - '0');
-    int sec  = (t[6] - '0') * 10 + (t[7] - '0');
+/* Стартовая привязка: время сборки прошивки. Реального источника времени
+   на плате нет (platform_set_time_offset() никто не вызывает), поэтому
+   дата сборки - лучшее доступное приближение, и оно хотя бы правдоподобно
+   для DOS. Дальше часы идут от неё и переустанавливаются гостем. */
+static void cmos_time_init(CMOS *s)
+{
+	const char *d = __DATE__;
+	int month = month_from_str(d);
+	int day = (d[4] == ' ') ? (d[5] - '0') : (10 * (d[4] - '0') + (d[5] - '0'));
+	int year = (d[7] - '0') * 1000 + (d[8] - '0') * 100 +
+	           (d[9] - '0') * 10 + (d[10] - '0');
+	const char *t = __TIME__;
+	int hour = (t[0] - '0') * 10 + (t[1] - '0');
+	int min  = (t[3] - '0') * 10 + (t[4] - '0');
+	int sec  = (t[6] - '0') * 10 + (t[7] - '0');
 
-    s->data[0] = bin2bcd(sec);
-    s->data[2] = bin2bcd(min);
-    s->data[4] = bin2bcd(hour);
-
-    /* weekday неизвестен — можно оставить 1 */
-    s->data[6] = bin2bcd(1);
-
-    s->data[7] = bin2bcd(day);
-    s->data[8] = bin2bcd(month);
-    s->data[9] = bin2bcd(year % 100);
-
-    /* century */
-    s->data[0x32] = bin2bcd(year / 100);
+	int32_t days = rtc_days_from_civil(year, (uint32_t)month, (uint32_t)day);
+	if (days < 0) days = 0;
+	rtc_anchor_sec  = (uint32_t)days * 86400u +
+	                  (uint32_t)(hour * 3600 + min * 60 + sec);
+	rtc_anchor_us   = time_us_64();
+	rtc_cache_valid = 0;
+	cmos_update_time(s);
 }
 
 void cmos_set_floppy_types(CMOS *c, uint8_t type_a, uint8_t type_b) {
@@ -191,7 +297,7 @@ CMOS *cmos_init(long mem_size, int irq, void *pic, void (*set_irq)(void *pic, in
 	c->pic = pic;
 	c->set_irq = set_irq;
 
-	cmos_update_time(c);
+	cmos_time_init(c);
 	c->data[0x10] = 0x44;  /* floppy: A=1.44M(4), B=1.44M(4) */
 	c->data[10] = 0x26;
 	c->data[11] = 0x02;
@@ -404,7 +510,15 @@ void cmos_ioport_write(CMOS *cmos, int addr, uint8_t val)
 			cmos_update_timer(s);
 			break;
 		default:
-			s->data[s->index] = val;
+			if (rtc_is_time_reg(s->index)) {
+				/* освежить остальные поля, чтобы привязка считалась
+				   от актуального времени, а не от устаревшего */
+				cmos_update_time(s);
+				s->data[s->index] = val;
+				rtc_anchor_from_fields(s);
+			} else {
+				s->data[s->index] = val;
+			}
 			break;
 		}
 	}
