@@ -12,6 +12,12 @@
 #include <unistd.h>
 #include <hardware/watchdog.h>
 #include "bios/bios.h"
+#include "bulk_bounce.h"
+
+/* Общий bounce-буфер нативных bulk-обменов FatFs <-> гость.
+   Условия, при которых его допустимо разделять, - в bulk_bounce.h. */
+uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
+
 #include "mpu401.c.inl"
 void netredirect_init(CPU *cpu, int enable);
 
@@ -113,7 +119,7 @@ static int emulink_data_read(PC *pc, uint32_t addr, int size, int count)
 		if (len > pc->emulink.dataleft) goto err;
 		FIL *fil = fdd_get_file(drv);
         UINT br = 0;
-        uint8_t buf[512];
+        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
         for (int i = 0; i < len; i += 512) {
             UINT l = len - i;
             if (l > 512) l = 512;
@@ -146,7 +152,7 @@ static int emulink_data_write(PC *pc, uint32_t addr, int size, int count)
 		if (len > pc->emulink.dataleft) goto err;
 		FIL *fil = fdd_get_file(drv);
 		UINT bw = 0;
-        uint8_t buf[512];
+        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
         for (int i = 0; i < len; i += 512) {
             UINT l = len - i;
             if (l > 512) l = 512;

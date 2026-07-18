@@ -61,6 +61,11 @@ static inline uint8_t *guest_span_ptr(uint32_t addr, uint32_t *span)
 /* fdos_2fh.c: pick the UMB map matching the selected BIOS */
 void umb_select_map(int native_bios, uint32_t rom_start, int vga_bios_loaded);
 
+/* Общий bounce-буфер нативных bulk-обменов вынесен в bulk_bounce.h:
+   mem.h включается почти всем деревом, и extern здесь провоцировал бы
+   переиспользование буфера из контекстов, где его предположения о
+   невложенности не выполняются. */
+
 static inline uint8_t __attribute__((always_inline)) pload8(uint32_t addr)
 {
     if (unlikely(VGA_WINDOW(addr))) {

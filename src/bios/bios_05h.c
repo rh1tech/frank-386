@@ -1,6 +1,7 @@
 #include "286/cpu.h"
 #include "bios.h"
 #include "ff.h"
+#include <stdlib.h>
 
 #define PRINTER_MAX_COLS 160
 
@@ -57,14 +58,24 @@ bool bios_05h(CPU* cpu) {
     uint32_t base = (mode == 0x07) ? 0xB0000UL : 0xB8000UL;
     uint32_t screen = base + (uint32_t)page * page_size;
 
-    FIL fp;
-    UINT bw;
-    FRESULT fr = f_open(&fp, "/" SD_DATA_DIR_SLASH "prn.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
-    if (fr != FR_OK) {
+    /* FIL (~592 байта) не держим ни на стеке трапа, ни в статике: на
+       стеке core0 это слишком дорого, а постоянный SRAM ради редкого
+       PrtSc жалко. Куча - лучший компромисс: есть память - печать
+       работает, нет - PrtSc честно вернёт ошибку и не помешает работе
+       прошивки. Тот же приём в netredirect.c:547 (тоже трап на core0). */
+    FIL *fp = (FIL *)malloc(sizeof(FIL));
+    if (!fp) {
         pstore8(0x500, 0xFF);
         return true;
     }
-    char line[PRINTER_MAX_COLS + 1]; /* text plus newline */
+    UINT bw;
+    FRESULT fr = f_open(fp, "/" SD_DATA_DIR_SLASH "prn.txt", FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS);
+    if (fr != FR_OK) {
+        free(fp);
+        pstore8(0x500, 0xFF);
+        return true;
+    }
+    static char line[PRINTER_MAX_COLS + 1]; /* text plus newline */
     uint16_t line_cols = cols;
     if (line_cols > PRINTER_MAX_COLS)
         line_cols = PRINTER_MAX_COLS;
@@ -81,16 +92,18 @@ bool bios_05h(CPU* cpu) {
 
         line[n++] = '\n';
 
-        fr = f_write(&fp, line, n, &bw);
+        fr = f_write(fp, line, n, &bw);
         if (fr != FR_OK || bw != n) {
-            f_close(&fp);
+            f_close(fp);
+            free(fp);
             pstore8(0x500, 0xFF);
             return true;
         }
     }
 
-    fr = f_write(&fp, "\f", 1, &bw);
-    f_close(&fp);
+    fr = f_write(fp, "\f", 1, &bw);
+    f_close(fp);
+    free(fp);
 
     if (fr != FR_OK)
         pstore8(0x500, 0xFF);

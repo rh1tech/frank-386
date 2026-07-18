@@ -30,6 +30,7 @@
 //#include "cutils.h"
 #include "ide.h"
 #include "mem.h"
+#include "bulk_bounce.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1597,7 +1598,7 @@ int ide_data_write_string(void *opaque, uint32_t addr, int size, int count)
     len -= len % size;
     if (s->drive_kind == IDE_HD) {
         UINT bw;
-        uint8_t buf[512];
+        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
         for (int i = 0; i < len; i += 512) {
             UINT l = len - i;
             if (l > 512) l = 512;
@@ -1626,7 +1627,7 @@ int ide_data_read_string(void *opaque, uint32_t addr, int size, int count)
     len -= len % size;
     if (xfer_from_file(s)) {
         UINT br;
-        uint8_t buf[512];
+        uint8_t *buf = guest_bulk_buf;   /* общий bounce, не на стеке */
         for (int i = 0; i < len; i += 512) {
             UINT l = len - i;
             if (l > 512) l = 512;
