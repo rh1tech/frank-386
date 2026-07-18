@@ -24,6 +24,15 @@ static uint32_t read_le32(const uint8_t *p)
            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static int read_exact_at(FIL *f, FSIZE_t offset, void *buf, UINT size)
+{
+    UINT br = 0;
+
+    if (f_lseek(f, offset) != FR_OK)
+        return 0;
+    return f_read(f, buf, size, &br) == FR_OK && br == size;
+}
+
 /*
  * Read an El Torito no-emulation boot image from an ISO-9660 image.
  *
@@ -38,25 +47,30 @@ static uint32_t read_le32(const uint8_t *p)
  */
 static int read_iso_boot_sector(FIL *f)
 {
-    UINT br = 0;
-    uint8_t buf[2048]; /// TODO: get rid from stack such huge thigns
+    uint8_t buf[16];
     uint32_t catalog_lba = 0;
 
     if (!f || !f->obj.fs)
         return 0;
 
     for (uint32_t vd_lba = 16; vd_lba < 64; vd_lba++) {
-        if (f_lseek(f, vd_lba * 2048u) != FR_OK)
-            return 0;
-        if (f_read(f, buf, sizeof(buf), &br) != FR_OK || br != sizeof(buf))
-            return 0;
+        FSIZE_t vd_offset = (FSIZE_t)vd_lba * 2048u;
 
+        if (!read_exact_at(f, vd_offset, buf, 7))
+            return 0;
         if (memcmp(buf + 1, "CD001", 5) != 0 || buf[6] != 0x01)
             return 0;
 
-        if (buf[0] == 0x00 &&
-            memcmp(buf + 7, "EL TORITO SPECIFICATION", 23) == 0) {
-            catalog_lba = read_le32(buf + 0x47);
+        if (buf[0] == 0x00) {
+            if (!read_exact_at(f, vd_offset + 7, buf, 16) ||
+                memcmp(buf, "EL TORITO SPECIF", 16) != 0)
+                continue;
+            if (!read_exact_at(f, vd_offset + 23, buf, 7) ||
+                memcmp(buf, "ICATION", 7) != 0)
+                continue;
+            if (!read_exact_at(f, vd_offset + 0x47, buf, 4))
+                return 0;
+            catalog_lba = read_le32(buf);
             break;
         }
 
@@ -67,26 +81,28 @@ static int read_iso_boot_sector(FIL *f)
     if (catalog_lba == 0)
         return 0;
 
-    if (f_lseek(f, catalog_lba * 2048u) != FR_OK)
+    FSIZE_t catalog_offset = (FSIZE_t)catalog_lba * 2048u;
+
+    /* Validation entry: header ID and trailing signature. */
+    if (!read_exact_at(f, catalog_offset, buf, 1) || buf[0] != 0x01)
         return 0;
-    if (f_read(f, buf, sizeof(buf), &br) != FR_OK || br != sizeof(buf))
+    if (!read_exact_at(f, catalog_offset + 0x1E, buf, 2) ||
+        buf[0] != 0x55 || buf[1] != 0xAA)
         return 0;
 
-    /* Validation entry. */
-    if (buf[0] != 0x01 || buf[0x1E] != 0x55 || buf[0x1F] != 0xAA)
+    /* Initial/default entry.  Only bytes 0..11 are used. */
+    if (!read_exact_at(f, catalog_offset + 0x20, buf, 12))
+        return 0;
+    if (buf[0] != 0x88)
         return 0;
 
-    uint8_t *entry = buf + 0x20;
-    if (entry[0] != 0x88)
-        return 0;
-
-    uint8_t media_type = entry[1] & 0x0F;
+    uint8_t media_type = buf[1] & 0x0F;
     if (media_type > 4)
         return 0;
 
-    uint16_t load_seg = (uint16_t)entry[2] | ((uint16_t)entry[3] << 8);
-    uint16_t sector_count = (uint16_t)entry[6] | ((uint16_t)entry[7] << 8);
-    uint32_t image_lba = read_le32(entry + 8);
+    uint16_t load_seg = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+    uint16_t sector_count = (uint16_t)buf[6] | ((uint16_t)buf[7] << 8);
+    uint32_t image_lba = read_le32(buf + 8);
 
     if (load_seg != 0 && load_seg != 0x07C0)
         return 0;
@@ -99,7 +115,8 @@ static int read_iso_boot_sector(FIL *f)
     if (bytes > 2048u)
         bytes = 2048u;
 
-    if (f_lseek(f, image_lba * 2048u) != FR_OK)
+    UINT br = 0;
+    if (f_lseek(f, (FSIZE_t)image_lba * 2048u) != FR_OK)
         return 0;
     if (f_read(f, PC_RAM + BOOT_ADDR, bytes, &br) != FR_OK || br < 512)
         return 0;

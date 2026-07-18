@@ -2,6 +2,8 @@
 #include "bios.h"
 #include "ff.h"
 
+#define PRINTER_MAX_COLS 160
+
 static bool text_mode(uint8_t mode) {
     return mode == 0x00 || mode == 0x01 ||
            mode == 0x02 || mode == 0x03 ||
@@ -62,12 +64,13 @@ bool bios_05h(CPU* cpu) {
         pstore8(0x500, 0xFF);
         return true;
     }
-    for (uint16_t y = 0; y < rows; y++) {
-        char line[256];
+    char line[PRINTER_MAX_COLS + 1]; /* text plus newline */
+    uint16_t line_cols = cols;
+    if (line_cols > PRINTER_MAX_COLS)
+        line_cols = PRINTER_MAX_COLS;
 
-        uint16_t n = cols;
-        if (n > sizeof(line) - 2)
-            n = sizeof(line) - 2;
+    for (uint16_t y = 0; y < rows; y++) {
+        uint16_t n = line_cols;
 
         for (uint16_t x = 0; x < n; x++) {
             uint8_t ch = pload8(screen + ((uint32_t)y * cols + x) * 2);

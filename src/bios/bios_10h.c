@@ -745,11 +745,20 @@ static bool bios_10h_00h(CPU* cpu)
     if (m->text)
         writew86(0x460, 0x0607);
 
-    /* SeaBIOS vga_set_mode: update video_ctl, video_switches, modeset_ctl */
-    write86(0x465, no_clear ? 0xE0 : 0x60);             /* video_ctl: bit7=no_clear (SeaBIOS) */
+    /* SeaBIOS vga_set_mode: video_ctl/video_switches/modeset_ctl.
+       video_ctl - это BDA 0x487 (vgabios.c:303: 0x60 = 256K, адаптер
+       активен; бит 7 = no_clear). Пишем канонические IBM-значения
+       3x8 по номеру режима. */
+    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, no_clear ? 0xE0 : 0x60);
+    {
+        static const uint8_t crt_msr[8] =
+            { 0x2C, 0x28, 0x2D, 0x29, 0x2A, 0x2E, 0x1E, 0x29 };
+        write86(0x465, (mode < 8) ? crt_msr[mode] : 0x29);
+    }
     write86(0x488, 0xF9);                               /* video_switches */
+    write86(0x48A, 0x08);                               /* dcc_index: VGA color */
     write86(BIOS10_BDA_VIDEO_DISPLAY_DATA,
-            read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) | BIOS10_VDD_VGA_ACTIVE);
+            read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) & 0x7F);  /* modeset_ctl: clear bit7 */
     if (m->text) {
         /* Плоскость 2 - общая планарная память: легальные записи
            графических режимов (Mode X/Y и т.п.) стирают знакогенератор.
@@ -3455,6 +3464,12 @@ static inline uint8_t bios_10h_bitrev8(uint8_t b)
 
 void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
 {
+    /* POST-значения видео-полей BDA (SeaBIOS vgainit.c): modeset_ctl -
+       базовые опции 0x51, dcc_index - VGA color 0x08. Читаются
+       библиотеками определения адаптера напрямую из BDA. */
+    write86(0x489, 0x51);
+    write86(0x48A, 0x08);
+
     /*
      * INT 10h/AX=1130h must return a guest-visible ES:BP pointer.
      * Host pointers to font arrays are useless for DOS code,

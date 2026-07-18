@@ -33,6 +33,9 @@ bool drop_bios_callback(CPU*, bios_callback_params_t*);
 void bios_intcall(CPU*, uint8_t, const char*); // sync call
 
 bool bios_teletype(CPU* cpu, uint8_t ch, uint8_t page);
+void bios_15h_event_wait_arm(uint32_t flag_lin, uint32_t usec);
+void bios_15h_event_wait_cancel(void);
+void bios_15h_event_wait_tick(void);
 bool bios_16h_store_key(uint16_t ax); // shared with INT 9
 void bios_10h_install_rom_fonts(CPU*); // INT 10h support
 

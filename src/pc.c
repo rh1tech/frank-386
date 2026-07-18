@@ -765,6 +765,56 @@ void pc_vga_step(void *o)
 
 void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
 {
+	/*
+	 * Порядок слайса: сначала CPU-burst, затем обслуживание устройств.
+	 *
+	 * Вложенные нативные вызовы гостевого кода (bios_intcall(): CON-вывод
+	 * посимвольно, INT 16h-опросы) крутят pc_step() до native_done;
+	 * типичный вложенный обработчик - считанные инструкции (трап-страница
+	 * возвращает в нативный код сразу). Завершившийся установкой
+	 * native_done burst выходит, НЕ заходя в платформенную преамбулу
+	 * (USB-poll, DMA, FDC, редрав) - иначе она исполнялась бы на каждый
+	 * символ вывода (двухпорядковый регресс скорости нативного CON
+	 * против гостевого DOS).
+	 *
+	 * Ранний выход рейт-лимитирован (~1 мс): во время долгих НАТИВНЫХ
+	 * фаз (kernel-init, обвязка DOS) внешний цикл стоит, и устройства
+	 * живут только на вложенных pc_step()'ах - безусловный пропуск
+	 * преамбулы замораживал бы PIT-тик (0x46C) и опрос клавиатуры
+	 * (keycheck() конфига ждал бы вечно и клавишу, и таймаут). Раз в
+	 * миллисекунду преамбула проходит даже под штормом коротких
+	 * вложенных вызовов. Выход - только по ПЕРЕХОДУ native_done внутри
+	 * данного burst'а: залипший флаг внешнего потока не морит устройства.
+	 *
+	 * Задержка доставки поднятых устройствами IRQ - один слайс, как и
+	 * была (сдвиг фазы); редрав после burst'а показывает свежий vram.
+	 * Отложенный INT 15h/AH=83h завершается в девайс-блоке - тем же
+	 * миллисекундным гарантированным тактом.
+	 */
+	static uint32_t last_device_service;
+	bool was_native_done = pc->cpu->native_done;
+	if (!pc->paused) {
+		if (max_ops > 4096) max_ops = 4096;
+		if (pc->adlib_enabled) {
+			int i = 0;
+			do  {
+				cpu_step(pc->cpu, max_ops > 10 ? 10 : max_ops);
+				adlib_core0(pc->adlib);
+			} while ( ++i < max_ops / 10 );
+		} else {
+			cpu_step(pc->cpu, max_ops);
+		}
+		if (pc->cpu->native_done && !was_native_done &&
+		    (uint32_t)(get_uticks() - last_device_service) < 1000u)
+			return;
+	}
+
+	last_device_service = get_uticks();
+	{
+		/* Завершение отложенного INT 15h/AH=83h (см. bios_15h.c). */
+		extern void bios_15h_event_wait_tick(void);
+		bios_15h_event_wait_tick();
+	}
 	/* reset_request is handled in main.c via load_bios_and_reset() */
 	int refresh = vga_step(pc->vga);
 	i8254_update_irq(pc->pit);
@@ -781,17 +831,6 @@ void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
 			    pc->full_update != 0);
 		if (pc->full_update == 2)
 			pc->full_update = 0;
-	}
-	if (pc->paused) return;
-	if (max_ops > 4096) max_ops = 4096;
-	if (pc->adlib_enabled) {
-		int i = 0;
-		do  {
-			cpu_step(pc->cpu, max_ops > 10 ? 10 : max_ops);
-			adlib_core0(pc->adlib);
-		} while ( ++i < max_ops / 10 );
-	} else {
-		cpu_step(pc->cpu, max_ops);
 	}
 
 #if 0
@@ -1357,7 +1396,12 @@ void bios_post(PC *pc) {
 	equipment |= 0x0001;                                  /* diskette subsystem present */
 	if (pc->fpu_enabled)
 		equipment |= 0x0002;                          /* math coprocessor installed */
-	equipment |= 0x0020;                                  /* initial video: 80x25 color */
+	/* Биты 5-4 (initial video mode) = 00b: дисплейный адаптер с
+	   собственным BIOS (EGA/VGA). Значение 10b ("CGA 80x25") включает
+	   snow-checking у детект-библиотек эпохи: equipment word читается
+	   раньше INT 10h/AH=1Ah, и Norton SI пословно ждёт ретрейс 3DAh
+	   на всю отрисовку (кадр на слово). Реальный POST с VGA-картой
+	   ставит здесь 00b. */
 	if (pc->enable_serial)
 		equipment |= 0x0200;                              /* one serial port */
     if (pc->mouse_enabled)

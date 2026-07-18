@@ -1374,13 +1374,14 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
     {"\377YESNO  ", -1, 4}                      /* 35 */
   };
   int fd, i, subf_tbl_ndx;
-  char *filename = filenam == NULL ? "\\COUNTRY.SYS" : filenam;
+  const char* filename = filenam == NULL ? "\\COUNTRY.SYS" : filenam;
   BOOL rc = FALSE;
   BYTE FAR *ptable;
   dos_far_ptr CharMapFn;
 
   /* upstream: open(filename) из собственного буфера, не из SDA */
-  strcpy((char *)szBuf, filename);
+  if (szBuf != filename) // for case "\\COUNTRY.SYS", in other case, filename == filenam == szBuf
+    strcpy((char *)szBuf, filename);
   if ((fd = open(x86_SZ_BUF, 0)) < 0)
   {
     if (filenam == NULL)

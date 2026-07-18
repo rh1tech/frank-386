@@ -3,6 +3,40 @@
 #include "286/cpu.h"
 #include "bios.h"
 
+/*
+ * INT 15h/AH=83h: отложенное взведение флага события. Армируется из
+ * обработчика, завершается bios_15h_event_wait_tick() (девайс-блок
+ * pc_step()). Один активный интервал, как у оригинала (40:A0).
+ */
+uint32_t get_uticks(void);
+
+static uint32_t event_wait_flag_lin;
+static uint32_t event_wait_deadline;
+static bool     event_wait_armed;
+
+void bios_15h_event_wait_arm(uint32_t flag_lin, uint32_t usec)
+{
+    event_wait_flag_lin = flag_lin;
+    event_wait_deadline = get_uticks() + usec;
+    event_wait_armed = true;
+}
+
+void bios_15h_event_wait_cancel(void)
+{
+    event_wait_armed = false;
+}
+
+void bios_15h_event_wait_tick(void)
+{
+    if (!event_wait_armed)
+        return;
+    if ((int32_t)(get_uticks() - event_wait_deadline) < 0)
+        return;
+    event_wait_armed = false;
+    pstore8(event_wait_flag_lin, pload8(event_wait_flag_lin) | 0x80);
+    pstore8(0x4A0, 0x00);
+}
+
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
 
 #define EBDA_MOUSE_HANDLER_OFF  0x22
@@ -609,7 +643,24 @@ bool bios_15h(CPU* cpu) {
             goto ok;
         }
         case 0x83: {
+            /*
+             * SET EVENT WAIT INTERVAL - асинхронный контракт: возврат
+             * НЕМЕДЛЕННЫЙ, бит 7 байта по ES:BX взводится ПОЗЖЕ, по
+             * истечении CX:DX микросекунд. SeaBIOS делает это периодикой
+             * RTC (src/clock.c, handle_1583 -> IRQ8); здесь завершение
+             * проверяет bios_15h_event_wait_tick() из девайс-блока
+             * pc_step() с миллисекундной каденцией - точность выше
+             * 976-мкс гранулы RTC оригинала не требуется. Синхронная
+             * реализация (заснуть на весь интервал внутри трапа и
+             * взвести флаг до возврата) ломает вызывающих, которые
+             * МЕРЯЮТ что-то, опрашивая флаг: цикл подсчёта ретрейсов
+             * 3DAh у Norton SysInfo видел уже взведённый флаг, получал
+             * нулевой счёт и ретраил замер вечно, вымораживая гостя
+             * sleep_us'ом каждого ретрая.
+             * Байт 40:A0 - "wait active", как у оригинала.
+             */
             if (CPU_AL == 0x01) {
+                bios_15h_event_wait_cancel();
                 pstore8(0x4A0, 0x00);
                 cf = 0; CPU_AH = 0x00;
                 goto ok;
@@ -618,10 +669,7 @@ bool bios_15h(CPU* cpu) {
             if (pload8(0x4A0) & 0x01) { cf = 1; CPU_AH = 0x83; goto ok; }
             uint32_t usec = ((uint32_t)CPU_CX << 16) | CPU_DX;
             pstore8(0x4A0, 0x01);
-            sleep_us(usec); /// TODO: ensure
-            uint32_t addr = (uint32_t)CPU_ES * 16 + CPU_BX;
-            pstore8(addr, pload8(addr) | 0x80);  /* set bit 7 of flag byte */
-            pstore8(0x4A0, 0x00);
+            bios_15h_event_wait_arm((uint32_t)CPU_ES * 16 + CPU_BX, usec);
             cf = 0; CPU_AH = 0x00;
             goto ok;
         }
