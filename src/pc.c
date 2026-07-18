@@ -1409,9 +1409,14 @@ void bios_post(PC *pc) {
 	equipment |= (1u << 6);                               /* two diskette drives, encoded count-1 */
 	pstore16(0x410, equipment);
 
-	uint16_t conventional_kb = phys_mem_size > 640u * 1024u
-		? 640u
-		: (uint16_t)(phys_mem_size >> 10);
+	/* SeaBIOS post.c: SET_BDA(mem_size_kb, ebda_seg / (1024/16)) - размер
+	   conventional памяти ВЫВОДИТСЯ из адреса EBDA, а не берётся как 640.
+	   При ebda_seg = 0x9FC0 это 639 КБ: иначе INT 12h отдаёт DOS тот КБ,
+	   в котором лежит EBDA. */
+	uint16_t ebda_kb = (uint16_t)(ebda_phys >> 10);      /* 0x9FC00 -> 639 */
+	uint16_t conventional_kb = (uint16_t)(phys_mem_size >> 10);
+	if (conventional_kb > ebda_kb)
+		conventional_kb = ebda_kb;
 	pstore16(0x413, conventional_kb);                    /* INT 12h value */
 
 //	pstore8 (0x417, 0x00);                               /* keyboard flags */
@@ -1441,7 +1446,9 @@ void bios_post(PC *pc) {
 	pstore16(0x460, 0x0607);                             /* cursor shape */
 //	pstore8 (0x462, 0x00);                               /* active page */
 	pstore16(0x463, 0x03D4);                             /* color CRTC base */
-	pstore8 (0x465, 0x60);                               /* video_ctl: cursor emulation on, no blink */
+	/* 40:65 - это video_msr (тень порта 3x8h), его проставит set-mode.
+	   Значение video_ctl 0x60 пишется ниже по своему адресу 40:87. */
+	pstore8 (0x465, 0x29);                               /* video_msr: mode 3 */
 //	pstore8 (0x466, 0x00);                               /* CGA palette */
 
 //	pstore8 (0x46B, 0x00);                               /* ctrl-break flag */
@@ -1451,7 +1458,13 @@ void bios_post(PC *pc) {
 //	pstore16(0x472, 0x0000);                             /* reset flag */
 //	pstore8 (0x474, 0x00);                               /* last HDD status */
 	pstore8 (0x475, hdcount > 0 ? hdcount : 0);           /* fixed disk count */
-	pstore8 (0x476, 0xC0);                               /* HDD control byte */
+	/* SeaBIOS block.c: drive_control_byte = 0xC0 | ((heads > 8) << 3). */
+	{
+		uint8_t ctrl = 0xC0;
+		if (hdcount > 0 && ata_get_heads(0) > 8)
+			ctrl |= 0x08;
+		pstore8 (0x476, ctrl);                           /* HDD control byte */
+	}
 //	pstore8 (0x477, 0x00);                               /* HDD I/O port offset */
 //	pstore8 (0x478, 0x00);                               /* LPT timeouts */
 //	pstore8 (0x479, 0x00);
@@ -1464,10 +1477,13 @@ void bios_post(PC *pc) {
 	pstore16(0x482, 0x003E);                             /* keyboard buffer end */
 	pstore8 (0x484, 24);                                 /* rows minus one */
 	pstore16(0x485, 16);                                 /* char height */
-//	pstore8 (0x487, 0x00);                               /* video control */
-	pstore8 (0x488, 0xF9);                               /* switches */
-//	pstore8 (0x489, 0x00);                               /* VGA flags */
-	pstore8 (0x48E, 0x77);                               /* fdd */
+	pstore8 (0x487, 0x60);                               /* video_ctl: 256K, cursor emulation on */
+	pstore8 (0x488, 0xF9);                               /* video_switches */
+	pstore8 (0x489, 0x51);                               /* modeset_ctl (SeaBIOS vgainit.c:144) */
+	/* 40:8E = disk_interrupt_flag, 40:8F = floppy_harddisk_info.
+	   0x77 (два дисковода) относится к 40:8F - SeaBIOS block.c:297. */
+	pstore8 (0x48E, 0x00);                               /* disk_interrupt_flag */
+	pstore8 (0x48F, 0x77);                               /* floppy_harddisk_info */
 	pstore8(0x496, 0x10);   /* KF1: bit4 = enhanced (101/102-key) keyboard */
 	pstore8(0x497, 0x00);   /* LED flags */
 

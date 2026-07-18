@@ -24,7 +24,10 @@ bool bios_08h(CPU* cpu)
     ticks++;
     if (ticks >= TICKS_PER_DAY) {
         ticks = 0;
-        pstore8(0x0470, 1);   /* midnight rollover flag */
+        /* SeaBIOS clock.c: timer_rollover инкрементируется, а не
+           взводится в 1 - иначе счёт суток теряется, если INT 1Ah/AH=00h
+           не читали больше суток. */
+        pstore8(0x0470, (uint8_t)(pload8(0x0470) + 1));
     }
     pstore32(0x046C, ticks);
 

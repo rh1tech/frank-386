@@ -165,15 +165,27 @@
 /*
  * EGA/VGA BIOS Data Area fields used by alternate-select services.
  */
-#define BIOS10_BDA_VIDEO_CTL           0x465
-#define BIOS10_BDA_VIDEO_MODE_OPTIONS  0x487
-#define BIOS10_BDA_VIDEO_DISPLAY_DATA  0x489
+/* Имена и адреса строго по seabios/src/std/bda.h:
+ *   40:65 video_msr    - тень Mode-Select Register порта 3x8h
+ *   40:87 video_ctl    - бит0 cursor emulation, бит1 grayscale?, бит7 no_clear
+ *   40:89 modeset_ctl  - биты 7/4 scan lines, бит1 grayscale summing
+ * Прежние имена VIDEO_CTL/VIDEO_MODE_OPTIONS/VIDEO_DISPLAY_DATA были
+ * смещены на одно поле и приводили к чтению/записи не тех байт. */
+#define BIOS10_BDA_VIDEO_MSR           0x465
+#define BIOS10_BDA_VIDEO_CTL           0x487
+#define BIOS10_BDA_MODESET_CTL         0x489
 
 /*
- * Bit 7 is BIOS-private here: it records that AH=12h/BL=30h explicitly
- * selected a text scan-line mode, so the next mode set should apply it.
+ * BIOS-private flag: AH=12h/BL=30h explicitly selected a text scan-line
+ * mode, so the next mode set should apply it.
+ *
+ * Живёт в modeset_ctl (40:89) бит 6 - он не используется ни SeaBIOS
+ * (vgainit.c: modeset_ctl = 0x51), ни этим BIOS.  Раньше флаг занимал
+ * video_ctl бит 7, который SeaBIOS отводит под no_clear (vgabios.c:303),
+ * из-за чего set-mode с mode|0x80 ложно взводил флаг, а обычный set-mode
+ * (video_ctl = 0x60) стирал выбор BL=30h до того, как он применялся.
  */
-#define BIOS10_VMO_SCANLINE_SELECTED   0x80
+#define BIOS10_MC_SCANLINE_SELECTED    0x40
 
 /*
  * BDA 40:89 scan-line selection bits.
@@ -183,12 +195,12 @@
  *   bits 7,4 = 01b -> 400 scan lines
  *   bits 7,4 = 10b -> 200 scan lines
  */
-#define BIOS10_VDD_VGA_ACTIVE          0x01
-#define BIOS10_VDD_SCANLINE_MASK       0x90
-#define BIOS10_VDD_SCANLINE_350        0x00
-#define BIOS10_VDD_SCANLINE_400        0x10
-#define BIOS10_VDD_SCANLINE_200        0x80
-#define BIOS10_VMO_GRAYSCALE_SUMMING   0x02
+#define BIOS10_MC_VGA_ACTIVE           0x01
+#define BIOS10_MC_SCANLINE_MASK        0x90
+#define BIOS10_MC_SCANLINE_350         0x00
+#define BIOS10_MC_SCANLINE_400         0x10
+#define BIOS10_MC_SCANLINE_200         0x80
+#define BIOS10_MC_GRAYSCALE_SUMMING    0x02
 
 /*
  * Convert the logical cursor shape stored in BDA to the physical shape
@@ -651,12 +663,12 @@ static uint32_t bios_10h_text_cell(uint8_t mode,
  */
 static uint8_t bios_10h_selected_scanline_char_height(void)
 {
-    switch (read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) & BIOS10_VDD_SCANLINE_MASK) {
-    case BIOS10_VDD_SCANLINE_200:
+    switch (read86(BIOS10_BDA_MODESET_CTL) & BIOS10_MC_SCANLINE_MASK) {
+    case BIOS10_MC_SCANLINE_200:
         return 8;
-    case BIOS10_VDD_SCANLINE_350:
+    case BIOS10_MC_SCANLINE_350:
         return 14;
-    case BIOS10_VDD_SCANLINE_400:
+    case BIOS10_MC_SCANLINE_400:
     default:
         return 16;
     }
@@ -679,8 +691,12 @@ static uint8_t bios_10h_selected_scanline_char_height(void)
  */
 static void bios_10h_apply_selected_text_scanlines(CPU* cpu)
 {
-    if (!(read86(BIOS10_BDA_VIDEO_MODE_OPTIONS) & BIOS10_VMO_SCANLINE_SELECTED))
+    uint8_t mctl = read86(BIOS10_BDA_MODESET_CTL);
+    if (!(mctl & BIOS10_MC_SCANLINE_SELECTED))
         return;
+    /* Одноразовая политика: гасим флаг сразу, чтобы следующий set-mode
+       вернулся к таблице режимов. */
+    write86(BIOS10_BDA_MODESET_CTL, mctl & ~BIOS10_MC_SCANLINE_SELECTED);
 
     uint8_t height = bios_10h_selected_scanline_char_height();
 
@@ -749,16 +765,14 @@ static bool bios_10h_00h(CPU* cpu)
        video_ctl - это BDA 0x487 (vgabios.c:303: 0x60 = 256K, адаптер
        активен; бит 7 = no_clear). Пишем канонические IBM-значения
        3x8 по номеру режима. */
-    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, no_clear ? 0xE0 : 0x60);
+    write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xE0 : 0x60);
     {
         static const uint8_t crt_msr[8] =
             { 0x2C, 0x28, 0x2D, 0x29, 0x2A, 0x2E, 0x1E, 0x29 };
-        write86(0x465, (mode < 8) ? crt_msr[mode] : 0x29);
+        write86(BIOS10_BDA_VIDEO_MSR, (mode < 8) ? crt_msr[mode] : 0x29);
     }
     write86(0x488, 0xF9);                               /* video_switches */
     write86(0x48A, 0x08);                               /* dcc_index: VGA color */
-    write86(BIOS10_BDA_VIDEO_DISPLAY_DATA,
-            read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) & 0x7F);  /* modeset_ctl: clear bit7 */
     if (m->text) {
         /* Плоскость 2 - общая планарная память: легальные записи
            графических режимов (Mode X/Y и т.п.) стирают знакогенератор.
@@ -771,6 +785,12 @@ static bool bios_10h_00h(CPU* cpu)
         bios_10h_apply_selected_text_scanlines(cpu);
         bios_10h_program_cursor_shape(cpu, readw86(0x460));
     }
+
+    /* SeaBIOS vgabios.c:305 - бит7 modeset_ctl (запрос 200 строк) гасится
+       на set-mode.  Делаем это ПОСЛЕ текстового пути: иначе выбор
+       AH=12h/BL=30h AL=00h стирался раньше, чем применялся. */
+    write86(BIOS10_BDA_MODESET_CTL,
+            read86(BIOS10_BDA_MODESET_CTL) & 0x7F);
 
     if (!no_clear) {
         if (m->text) {
@@ -2183,7 +2203,7 @@ static bool bios_10h_1B00h(CPU* cpu)
     write86 (info + 0x2E, 0);
     write86 (info + 0x31, BIOS10_EGA_INFO_MEM_256K);
     write86 (info + 0x32, 0x00);
-    write86 (info + 0x33, read86(BIOS10_BDA_VIDEO_DISPLAY_DATA));
+    write86 (info + 0x33, read86(BIOS10_BDA_MODESET_CTL));
     CPU_AL = 0x1B;
     cf = 0;
     return true;
@@ -2459,24 +2479,23 @@ mode set, not immediately.
 */
 static bool bios_10h_1230h(CPU* cpu)
 {
-    uint8_t data = read86(BIOS10_BDA_VIDEO_DISPLAY_DATA) & ~BIOS10_VDD_SCANLINE_MASK;
-    uint8_t opts = read86(BIOS10_BDA_VIDEO_MODE_OPTIONS) | BIOS10_VMO_SCANLINE_SELECTED;
+    uint8_t data = read86(BIOS10_BDA_MODESET_CTL) & ~BIOS10_MC_SCANLINE_MASK;
+    data |= BIOS10_MC_SCANLINE_SELECTED;
     switch (CPU_AL) {
     case 0x00:
-        data |= BIOS10_VDD_SCANLINE_200;
+        data |= BIOS10_MC_SCANLINE_200;
         break;
     case 0x01:
-        data |= BIOS10_VDD_SCANLINE_350;
+        data |= BIOS10_MC_SCANLINE_350;
         break;
     case 0x02:
-        data |= BIOS10_VDD_SCANLINE_400;
+        data |= BIOS10_MC_SCANLINE_400;
         break;
     default:
         cf = 1;
         return true;
     }
-    write86(BIOS10_BDA_VIDEO_DISPLAY_DATA, data);
-    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, opts);
+    write86(BIOS10_BDA_MODESET_CTL, data);
     CPU_AL = 0x12;
     cf = 0;
     return true;
@@ -2527,16 +2546,16 @@ BL = 33h
 AL = 00h enable grayscale summing
 AL = 01h disable grayscale summing
 
-SeaBIOS stores this in BDA 40:87 bit 1.
+SeaBIOS stores this in BDA 40:89 (modeset_ctl) bit 1 - vgabios.c:930.
 */
 static bool bios_10h_1233h(CPU* cpu)
 {
-    uint8_t opts = read86(BIOS10_BDA_VIDEO_MODE_OPTIONS);
+    uint8_t mctl = read86(BIOS10_BDA_MODESET_CTL);
     if (CPU_AL & 0x01)
-        opts &= ~BIOS10_VMO_GRAYSCALE_SUMMING;
+        mctl &= ~BIOS10_MC_GRAYSCALE_SUMMING;
     else
-        opts |= BIOS10_VMO_GRAYSCALE_SUMMING;
-    write86(BIOS10_BDA_VIDEO_MODE_OPTIONS, opts);
+        mctl |= BIOS10_MC_GRAYSCALE_SUMMING;
+    write86(BIOS10_BDA_MODESET_CTL, mctl);
     CPU_AL = 0x12;
     cf = 0;
     return true;
@@ -3467,7 +3486,7 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
     /* POST-значения видео-полей BDA (SeaBIOS vgainit.c): modeset_ctl -
        базовые опции 0x51, dcc_index - VGA color 0x08. Читаются
        библиотеками определения адаптера напрямую из BDA. */
-    write86(0x489, 0x51);
+    write86(BIOS10_BDA_MODESET_CTL, 0x51);
     write86(0x48A, 0x08);
 
     /*
