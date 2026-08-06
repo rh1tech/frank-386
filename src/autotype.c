@@ -20,6 +20,10 @@ extern PC *pc;
 #define K_BACKSLASH 43
 #define K_DOT 52
 #define K_MINUS 12
+#define K_UP    103
+#define K_DOWN  108
+#define K_LEFT  105
+#define K_RIGHT 106
 
 static const uint8_t k_digit[10] = { 11, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
 
@@ -40,6 +44,13 @@ static int ascii_to_key(char c) {
     case '.':  return K_DOT;
     case '-':  return K_MINUS;
     case 0x1b: return K_ESC;
+    /* Arrow keys, for driving in-game menus. Deliberately punctuation no
+     * DOS command line needs - not letters, which would shadow real
+     * input ('v' for Down would break typing "vc"). */
+    case '^': return K_UP;
+    case '!': return K_DOWN;
+    case '<': return K_LEFT;
+    case '>': return K_RIGHT;
     default:   return -1;   /* skip rather than mistype */
     }
 }

@@ -42,6 +42,7 @@ typedef enum {
     SETTING_DSS,
     SETTING_MOUSE,
     SETTING_NES_MOUSE,
+    SETTING_NES_JOYSTICK,
     SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
@@ -97,7 +98,7 @@ static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_redirector;
-static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_mpu401;
+static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y;
 
 // UI dimensions
@@ -136,6 +137,7 @@ void settingsui_open(void) {
     orig_dss = config_get_dss();
     orig_mouse = config_get_mouse();
     orig_nes_mouse = config_get_nes_mouse();
+    orig_nes_joystick = config_get_nes_joystick();
     orig_cpu_freq = config_get_cpu_freq();
     orig_psram_freq = config_get_psram_freq();
     orig_flash_freq = config_get_flash_freq();
@@ -262,7 +264,17 @@ static void cycle_option(int direction) {
 
         case SETTING_NES_MOUSE:
             config_set_nes_mouse(config_get_nes_mouse() ? 0 : 1);
-            if (config_get_nes_mouse()) config_set_mouse(0);
+            /* One pad, one role: mouse emulation and the game port cannot
+             * both be driven from it. */
+            if (config_get_nes_mouse()) {
+                config_set_mouse(0);
+                config_set_nes_joystick(0);
+            }
+            break;
+
+        case SETTING_NES_JOYSTICK:
+            config_set_nes_joystick(config_get_nes_joystick() ? 0 : 1);
+            if (config_get_nes_joystick()) config_set_nes_mouse(0);
             break;
 
         case SETTING_MOUSE_INVERT_Y:
@@ -330,6 +342,7 @@ static void draw_settings_menu(void) {
         "Disney Sound Source:",
         "PS/2 or USB Mouse:",
         "NES Mouse:",
+        "NES Joystick:",
         "Invert Mouse Y:",
         "RP2350 Freq:",
         "CPU Voltage:",
@@ -391,6 +404,9 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_NES_MOUSE:
                 snprintf(value, sizeof(value), "< %s >", config_get_nes_mouse() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_NES_JOYSTICK:
+                snprintf(value, sizeof(value), "< %s >", config_get_nes_joystick() ? "Enabled" : "Disabled");
                 break;
             case SETTING_MOUSE_INVERT_Y:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");

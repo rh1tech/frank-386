@@ -4,6 +4,7 @@
 #include "misc.h"
 #include "profile_subsys.h"
 #include "codeprofile.h"
+#include "gameport.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -315,11 +316,13 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 			return sb16_dsp_read(pc->sb16, addr);
 		}
 		return 0xFF;
-	case 0x201:
-		/* Gameport / Joystick - return "no joystick" state
-		 * Bits 7-4: buttons (1 = not pressed)
-		 * Bits 3-0: axes timeout (0 = timed out, no joystick)
-		 * Return 0xF0 to indicate axes have timed out (no joystick present) */
+	case 0x200: case 0x201: case 0x202: case 0x203:
+	case 0x204: case 0x205: case 0x206: case 0x207:
+		/* Analog game port. When no joystick is configured this returns
+		 * 0xF0 - axes timed out, no buttons - which is exactly what an
+		 * empty adapter reads, so probing games behave as before. */
+		if (pc->joystick_enabled)
+			return gameport_read();
 		return 0xf0;
 	case 0x27A: // Covox Speech Thing
 		return 0;
@@ -635,6 +638,13 @@ static void pc_io_write(void *o, int addr, u8 val)
     case 0x37A:
 		if (pc->dss_enabled)
 			dss_out(addr, val);
+		return;
+	/* Game port: any write fires the axis one-shots. The value written
+	 * is irrelevant on real hardware and is ignored here too. */
+	case 0x200: case 0x201: case 0x202: case 0x203:
+	case 0x204: case 0x205: case 0x206: case 0x207:
+		if (pc->joystick_enabled)
+			gameport_write();
 		return;
 	/* LPT status/control ports are read-only - writes ignored */
 	case 0x379: case 0x279:

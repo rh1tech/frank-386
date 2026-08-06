@@ -57,6 +57,7 @@
 #include "autotype.h"
 #include "bbprofile.h"
 #include "diskcache.h"
+#include "gameport.h"
 
 #if FEATURE_AUDIO_PWM
 #include <hardware/pwm.h>
@@ -469,6 +470,48 @@ static void poll_keyboard(void) {
                 ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
             }
         }
+    }
+#endif
+
+#ifdef GAMEPORT_TEST
+    /* TEST RIG: no NES pad on C2, so sweep a synthetic stick instead.
+     * Left -> centre -> right -> centre, one step per second, button 1
+     * held on every fourth step. */
+    if (pc && !pc->paused) {
+        static uint32_t last_us;
+        static int phase;
+        const uint32_t now = time_us_32();
+        if (now - last_us > 1000000u) {
+            last_us = now;
+            phase = (phase + 1) & 3;
+        }
+        static const int sweep[4] = { -1, 0, 1, 0 };
+        gameport_set(sweep[phase], sweep[(phase + 1) & 3], (phase == 3) ? 1 : 0);
+    }
+#endif
+
+    /*
+     * NES gamepad -> DOS analog joystick (game port at 0x201).
+     *
+     * The pad is read every poll rather than only when it moves: the game
+     * port is level-sensing, not event-driven, so the emulated stick has
+     * to hold its position for as long as the button is held.
+     */
+#ifdef NESPAD_GPIO_CLK
+    if (pc && !pc->paused && config_get_nes_joystick()) {
+        nespad_read();
+        const uint32_t pad = nespad_state;
+        int jx = 0, jy = 0;
+        if (pad & DPAD_LEFT)  jx = -1;
+        if (pad & DPAD_RIGHT) jx =  1;
+        if (pad & DPAD_UP)    jy = -1;
+        if (pad & DPAD_DOWN)  jy =  1;
+        /* A and B are the two buttons every DOS game expects; SNES pads
+         * also offer X/Y, mapped alongside so either pair works. */
+        uint8_t jb = 0;
+        if (pad & (DPAD_A | DPAD_Y)) jb |= 0x01;
+        if (pad & (DPAD_B | DPAD_X)) jb |= 0x02;
+        gameport_set(jx, jy, jb);
     }
 #endif
 
@@ -1000,6 +1043,10 @@ static bool init_emulator(void) {
     pc->mpu401_enabled = config_get_mpu401();
     pc->dss_enabled = config_get_dss();
     pc->mouse_enabled = config_get_mouse() || config_get_nes_mouse();
+    pc->joystick_enabled = config_get_nes_joystick();
+#ifdef GAMEPORT_TEST
+    pc->joystick_enabled = 1;   /* TEST RIG */
+#endif
     DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, MPU401=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
               pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mpu401_enabled,
               pc->tandy_enabled, pc->covox_enabled, pc->dss_enabled, pc->mouse_enabled);

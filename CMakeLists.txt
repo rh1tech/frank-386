@@ -285,6 +285,7 @@ set(EMU_CORE_SOURCES
     src/ini.c
     src/profile_subsys.c
     src/codeprofile.c
+    src/gameport.c
     $<$<STREQUAL:${BOARD},C2>:${CMAKE_CURRENT_LIST_DIR}/src/diskcache.c>
     src/pcsample.c
     src/bbprofile.c
@@ -444,6 +445,13 @@ else()
 endif()
 if(FAST_FETCH)
     target_compile_definitions(${BUILD_NAME} PRIVATE FAST_FETCH=1)
+endif()
+
+# Temporary rig: force the game port on and drive it from a synthetic
+# stick, so 0x201 can be verified on a board with no NES pad header.
+option(GAMEPORT_TEST "Force the game port on with a synthetic stick" OFF)
+if(GAMEPORT_TEST)
+    target_compile_definitions(${BUILD_NAME} PRIVATE GAMEPORT_TEST=1)
 endif()
 
 option(DISK_CACHE "C2: cache SD blocks in the slave's PSRAM" OFF)
