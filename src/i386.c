@@ -947,6 +947,19 @@ static bool IRAM_ATTR peek8_slow(CPUI386 *cpu, u8 *val)
 	return true;
 }
 
+/*
+ * Gated because it costs ~12 KB of RAM.
+ *
+ * The win is board-independent, but master SRAM is not: C2 sits at 88.9%
+ * with it and the emulator stops booting around 91% when pc_new() can no
+ * longer allocate. M1/M2/PC/Z2 were at 88.3% before this change and 90.7%
+ * after — still building, but close enough to a threshold I have actually
+ * hit that enabling it on boards I cannot boot-test would be careless.
+ *
+ * ON for C2, where it is measured. Other boards keep their previous
+ * footprint byte for byte; enable FAST_FETCH per board once tested.
+ */
+#if FAST_FETCH
 static inline __attribute__((always_inline))
 bool peek8(CPUI386 *cpu, u8 *val)
 {
@@ -960,6 +973,9 @@ bool peek8(CPUI386 *cpu, u8 *val)
 	}
 	return peek8_slow(cpu, val);
 }
+#else
+#define peek8 peek8_slow
+#endif
 
 static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
 {

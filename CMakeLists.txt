@@ -435,6 +435,17 @@ option(PC_SAMPLE "Sample core-0 PC to find interpreter hot spots" OFF)
 
 # Basic-block discovery and reuse profiling. Stage 1 of the JIT.
 # SD block cache in the slave RP2350's PSRAM (C2 only). See src/diskcache.h.
+# Inline the instruction-fetch fast path. Worth +5.6% but costs ~12 KB of
+# RAM, so it is on only for the board it was measured and boot-tested on.
+if(BOARD STREQUAL "C2")
+    option(FAST_FETCH "Inline the instruction-fetch fast path" ON)
+else()
+    option(FAST_FETCH "Inline the instruction-fetch fast path" OFF)
+endif()
+if(FAST_FETCH)
+    target_compile_definitions(${BUILD_NAME} PRIVATE FAST_FETCH=1)
+endif()
+
 option(DISK_CACHE "C2: cache SD blocks in the slave's PSRAM" OFF)
 if(DISK_CACHE AND BOARD STREQUAL "C2")
     target_compile_definitions(${BUILD_NAME} PRIVATE DISK_CACHE=1)

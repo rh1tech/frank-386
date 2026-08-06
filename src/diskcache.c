@@ -90,6 +90,8 @@ void __not_in_flash_func(dc_fill)(uint32_t sector, uint32_t count, const uint8_t
         if (!linkf_write_burst(dc_word(slot), (const uint32_t *)(src + i * 512u),
                                DC_SEC_WORDS)) {
             g_dc[DC_FAIL]++;
+            g_dc[6] = lba;
+            g_dc[7] = (count << 16) | i;
             dc_on = false;
             return;
         }

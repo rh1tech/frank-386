@@ -163,13 +163,18 @@ bool __not_in_flash_func(linkf_read_burst)(uint32_t word_addr, uint32_t *dst,
     return true;
 }
 
+/* Set when a burst gives up, so the failure point is visible over SWD
+ * rather than having to be inferred. */
+volatile uint32_t g_lf_fail_word __attribute__((used));
+
 bool __not_in_flash_func(linkf_write_burst)(uint32_t word_addr,
                                             const uint32_t *src, uint32_t words)
 {
-    if (!lf_put(linkf_req(LINKF_OP_WRITE_BURST, word_addr))) return false;
-    if (!lf_put(words)) return false;
-    for (uint32_t i = 0; i < words; i++)
-        if (!lf_put(src[i])) return false;
+    if (!lf_put(linkf_req(LINKF_OP_WRITE_BURST, word_addr))) { g_lf_fail_word = 0xF0000000u; return false; }
+    if (!lf_put(words)) { g_lf_fail_word = 0xF0000001u; return false; }
+    for (uint32_t i = 0; i < words; i++) {
+        if (!lf_put(src[i])) { g_lf_fail_word = i; return false; }
+    }
     return true;
 }
 
@@ -205,6 +210,27 @@ uint32_t __not_in_flash_func(linkf_measure_rtt)(uint32_t iters) {
  *   [2] replies sent        [3] serve-loop entered */
 volatile uint32_t g_slave_diag[4] __attribute__((used));
 
+/*
+ * Bounded wait for one received word.
+ *
+ * Without this the slave blocks forever when the master abandons a burst
+ * part-way, and the master's next request is then swallowed as leftover
+ * burst payload — every later word arrives shifted and the slave starts
+ * parsing disk contents as opcodes. Timing out and dropping back to the
+ * request loop means a master that goes quiet re-aligns both sides for
+ * free.
+ *
+ * The bound only has to exceed the wire time for one word (20 cycles at
+ * clkdiv 1.0), so anything in the millisecond range is generous.
+ */
+static inline bool __not_in_flash_func(lf_wait_rx)(PIO pio, uint sm) {
+    uint32_t spins = 400000u;
+    while (pio_sm_is_rx_fifo_empty(pio, sm)) {
+        if (--spins == 0) return false;
+    }
+    return true;
+}
+
 void __not_in_flash_func(linkf_serve)(uint32_t *base, uint32_t words) {
     PIO  pio   = lf_pio;
     uint sm_rx = lf_sm_rx, sm_tx = lf_sm_tx;
@@ -228,7 +254,7 @@ void __not_in_flash_func(linkf_serve)(uint32_t *base, uint32_t words) {
             break;
 
         case LINKF_OP_WRITE32: {
-            while (pio_sm_is_rx_fifo_empty(pio, sm_rx)) tight_loop_contents();
+            if (!lf_wait_rx(pio, sm_rx)) { g_slave_diag[4]++; break; }
             const uint32_t val = pio->rxf[sm_rx];
             if (addr < words) base[addr] = val;
             break;  /* posted — no reply */
@@ -240,7 +266,7 @@ void __not_in_flash_func(linkf_serve)(uint32_t *base, uint32_t words) {
             break;
 
         case LINKF_OP_READ_BURST: {
-            while (pio_sm_is_rx_fifo_empty(pio, sm_rx)) tight_loop_contents();
+            if (!lf_wait_rx(pio, sm_rx)) { g_slave_diag[4]++; break; }
             uint32_t n = pio->rxf[sm_rx];
             for (uint32_t i = 0; i < n; i++) {
                 const uint32_t a = addr + i;
@@ -251,10 +277,10 @@ void __not_in_flash_func(linkf_serve)(uint32_t *base, uint32_t words) {
         }
 
         case LINKF_OP_WRITE_BURST: {
-            while (pio_sm_is_rx_fifo_empty(pio, sm_rx)) tight_loop_contents();
+            if (!lf_wait_rx(pio, sm_rx)) { g_slave_diag[4]++; break; }
             uint32_t n = pio->rxf[sm_rx];
             for (uint32_t i = 0; i < n; i++) {
-                while (pio_sm_is_rx_fifo_empty(pio, sm_rx)) tight_loop_contents();
+                if (!lf_wait_rx(pio, sm_rx)) { g_slave_diag[4]++; break; }
                 const uint32_t v = pio->rxf[sm_rx];
                 const uint32_t a = addr + i;
                 if (a < words) base[a] = v;
