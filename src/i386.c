@@ -910,7 +910,19 @@ prefetch_fill(CPUI386 *cpu, uword paddr)
 #define PREFETCH_HIT(paddr) \
 	(likely(((uword)(paddr) - cpu->prefetch_base) < 16u))
 
-static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
+/*
+ * Instruction fetch is 21% of core-0 time, and peek8 was being called
+ * out of line from 473 sites — one call, prologue and return per
+ * instruction *byte*. IRAM_ATTR is __not_in_flash(), an explicit
+ * section attribute, and GCC will not inline a function that carries
+ * one, so the `static` here was never enough.
+ *
+ * The split below inlines only the hit path: two compares and a byte
+ * load, ~20 bytes per site. Everything else — prefetch refill, page
+ * miss, the full TLB walk — stays out of line in peek8_slow, which is
+ * the original function unchanged.
+ */
+static bool IRAM_ATTR peek8_slow(CPUI386 *cpu, u8 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
@@ -933,6 +945,20 @@ static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
 		*val = load8(cpu, &res);
 	}
 	return true;
+}
+
+static inline __attribute__((always_inline))
+bool peek8(CPUI386 *cpu, u8 *val)
+{
+	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
+	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
+		uword paddr = cpu->ifetch.xaddr ^ laddr;
+		if (likely(PREFETCH_HIT(paddr))) {
+			*val = cpu->prefetch[paddr & 15];
+			return true;
+		}
+	}
+	return peek8_slow(cpu, val);
 }
 
 static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
