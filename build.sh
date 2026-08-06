@@ -33,6 +33,7 @@ PINCLK="OFF"
 CODEPROF="OFF"
 PCSAMPLE="OFF"
 BBPROF="OFF"
+DISKCACHE="OFF"
 AUTOTYPE=""
 CLEAN=0
 
@@ -139,6 +140,10 @@ while [[ $# -gt 0 ]]; do
             BBPROF="ON"
             shift
             ;;
+        --disk-cache)
+            DISKCACHE="ON"
+            shift
+            ;;
         --autotype)
             AUTOTYPE="$2"
             shift 2
@@ -197,6 +202,7 @@ CMAKE_ARGS+=("-DPIN_CLOCKS=$PINCLK")
 CMAKE_ARGS+=("-DCODE_PROFILE=$CODEPROF")
 CMAKE_ARGS+=("-DPC_SAMPLE=$PCSAMPLE")
 CMAKE_ARGS+=("-DBB_PROFILE=$BBPROF")
+CMAKE_ARGS+=("-DDISK_CACHE=$DISKCACHE")
 CMAKE_ARGS+=("-DAUTOTYPE=$AUTOTYPE")
 
 CMAKE_ARGS+=("-DFORCE_HDMI=$HDMI")

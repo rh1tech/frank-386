@@ -28,6 +28,7 @@
 
 #include "link_fast.h"
 #include "link_pins.h"
+#include "psram_init.h"
 
 #ifndef CPU_CLOCK_MHZ
 #define CPU_CLOCK_MHZ 252
@@ -63,15 +64,16 @@ static void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz) {
 }
 
 /*
- * The served region.
+ * The served region: the slave's own 8 MB PSRAM, XIP-mapped at
+ * 0x11000000.
  *
- * RP2350A has 520 KB of SRAM. This firmware is tiny, so most of it is
- * available; 256 KB is claimed here as a round number that leaves plenty
- * of headroom for the sound subsystem to move in later. Growing it is a
- * one-line change once the latency number justifies the work.
+ * SRAM would be faster to reach locally, but the master is going to
+ * spend its round trips on the wire, not on the slave's memory type —
+ * and the disk cache needs capacity, not latency. 8 MB holds 2048 blocks
+ * of 4 KB, which is what the master's tag array can index.
  */
-#define SERVED_BYTES (256u * 1024u)
-static uint32_t served[SERVED_BYTES / 4] __attribute__((aligned(4)));
+#define SERVED_BYTES (8u * 1024u * 1024u)
+static uint32_t *served = (uint32_t *)0x11000000u;
 
 int main(void) {
     vreg_disable_voltage_limit();
@@ -91,10 +93,17 @@ int main(void) {
            (unsigned long)(clock_get_hz(clk_sys) / 1000000u),
            (unsigned)(SERVED_BYTES / 1024u));
 
-    /* A recognisable pattern so the master can tell a real reply from a
-     * floating bus or a zeroed FIFO. served[i] == i ^ 0x5A5A0000 is
-     * wrong in an obvious way if bytes are dropped or lanes swapped. */
-    for (uint32_t i = 0; i < SERVED_BYTES / 4; i++) {
+    /* PSRAM must be up before anything is served out of it. */
+    psram_init(S_PSRAM_CS_PIN);
+    if (!psram_test()) {
+        printf("  PSRAM test FAILED - cache will return garbage\n");
+    } else {
+        printf("  PSRAM 8 MB OK\n");
+    }
+
+    /* A recognisable pattern in the first pages so the master can tell a
+     * real reply from a floating bus or a zeroed FIFO. */
+    for (uint32_t i = 0; i < 4096u; i++) {
         served[i] = i ^ 0x5A5A0000u;
     }
 

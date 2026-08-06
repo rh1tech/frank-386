@@ -50,6 +50,21 @@
 #define LINKF_OP_WRITE32   0x2u   /* arg = word address; data word follows,
                                    * posted — no reply */
 #define LINKF_OP_PING      0x3u   /* replies with LINKF_PING_MAGIC         */
+/*
+ * Burst transfers. arg = first word address; a count word follows the
+ * request, then the payload streams with no per-word handshake.
+ *
+ * Single-word access costs a full round trip (89 cycles) for four bytes
+ * — about 22 MB/s, which is enough to beat the SD card but wastes most
+ * of the wire. A burst pays the round trip once: after that the PIO
+ * streams at one byte per five system clocks, ~100 MB/s at 504 MHz, so
+ * a 4 KB disk block moves in ~41 us instead of ~180 us.
+ *
+ * The master can always drain faster than the wire delivers, so the RX
+ * FIFO cannot overflow mid-burst.
+ */
+#define LINKF_OP_READ_BURST  0x4u
+#define LINKF_OP_WRITE_BURST 0x5u
 
 #define LINKF_PING_MAGIC   0xA5A5F00Du
 
@@ -93,6 +108,16 @@ void linkf_write32(uint32_t word_addr, uint32_t value);
 
 /* Liveness probe. */
 bool linkf_ping(uint32_t timeout_loops);
+
+/* Bulk transfer of `words` 32-bit words. Both return false on timeout.
+ * `words` must be >= 1. */
+bool linkf_read_burst(uint32_t word_addr, uint32_t *dst, uint32_t words,
+                      uint32_t timeout_loops);
+bool linkf_write_burst(uint32_t word_addr, const uint32_t *src, uint32_t words);
+
+/* True once linkf_init() has run and the peer has answered. */
+bool linkf_is_up(void);
+void linkf_set_up(bool up);
 
 /* Average round-trip latency over `iters` pings, in core cycles.
  * Returns 0 if the slave did not answer. This is the number the whole

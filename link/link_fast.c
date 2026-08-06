@@ -101,14 +101,24 @@ bool linkf_init(PIO pio, uint tx_data_base, uint rx_data_base, float clkdiv) {
 /* Master side                                                         */
 /* ------------------------------------------------------------------ */
 
-static inline void __not_in_flash_func(lf_put)(uint32_t w) {
-    while (pio_sm_is_tx_fifo_full(lf_pio, lf_sm_tx)) tight_loop_contents();
+/*
+ * Bounded. The original spun forever on a full TX FIFO, which turns a
+ * peer that has stopped draining into a hung emulator with no
+ * diagnosis — the master simply stops, mid-boot, with the video sync
+ * gone. Returning false lets the caller disable the link and carry on.
+ */
+static inline bool __not_in_flash_func(lf_put)(uint32_t w) {
+    uint32_t spins = 2000000u;
+    while (pio_sm_is_tx_fifo_full(lf_pio, lf_sm_tx)) {
+        if (--spins == 0) return false;
+    }
     lf_pio->txf[lf_sm_tx] = w;
+    return true;
 }
 
 bool __not_in_flash_func(linkf_read32)(uint32_t word_addr, uint32_t *out,
                                        uint32_t timeout_loops) {
-    lf_put(linkf_req(LINKF_OP_READ32, word_addr));
+    if (!lf_put(linkf_req(LINKF_OP_READ32, word_addr))) return false;
 
     while (pio_sm_is_rx_fifo_empty(lf_pio, lf_sm_rx)) {
         if (--timeout_loops == 0) return false;
@@ -118,19 +128,49 @@ bool __not_in_flash_func(linkf_read32)(uint32_t word_addr, uint32_t *out,
 }
 
 void __not_in_flash_func(linkf_write32)(uint32_t word_addr, uint32_t value) {
-    lf_put(linkf_req(LINKF_OP_WRITE32, word_addr));
-    lf_put(value);
+    (void)(lf_put(linkf_req(LINKF_OP_WRITE32, word_addr)) &&
+           lf_put(value));
 }
 
 bool __not_in_flash_func(linkf_ping)(uint32_t timeout_loops) {
     uint32_t v = 0;
-    lf_put(linkf_req(LINKF_OP_PING, 0));
+    if (!lf_put(linkf_req(LINKF_OP_PING, 0))) return false;
 
     while (pio_sm_is_rx_fifo_empty(lf_pio, lf_sm_rx)) {
         if (--timeout_loops == 0) return false;
     }
     v = lf_pio->rxf[lf_sm_rx];
     return v == LINKF_PING_MAGIC;
+}
+
+static bool lf_up;
+bool linkf_is_up(void) { return lf_up; }
+void linkf_set_up(bool up) { lf_up = up; }
+
+bool __not_in_flash_func(linkf_read_burst)(uint32_t word_addr, uint32_t *dst,
+                                           uint32_t words, uint32_t timeout_loops)
+{
+    if (!lf_put(linkf_req(LINKF_OP_READ_BURST, word_addr))) return false;
+    if (!lf_put(words)) return false;
+
+    for (uint32_t i = 0; i < words; i++) {
+        uint32_t spins = timeout_loops;
+        while (pio_sm_is_rx_fifo_empty(lf_pio, lf_sm_rx)) {
+            if (--spins == 0) return false;
+        }
+        dst[i] = lf_pio->rxf[lf_sm_rx];
+    }
+    return true;
+}
+
+bool __not_in_flash_func(linkf_write_burst)(uint32_t word_addr,
+                                            const uint32_t *src, uint32_t words)
+{
+    if (!lf_put(linkf_req(LINKF_OP_WRITE_BURST, word_addr))) return false;
+    if (!lf_put(words)) return false;
+    for (uint32_t i = 0; i < words; i++)
+        if (!lf_put(src[i])) return false;
+    return true;
 }
 
 /* DWT cycle counter — the same one profile_subsys.h uses. Declared
@@ -198,6 +238,29 @@ void __not_in_flash_func(linkf_serve)(uint32_t *base, uint32_t words) {
             pio->txf[sm_tx] = LINKF_PING_MAGIC;
             g_slave_diag[2]++;
             break;
+
+        case LINKF_OP_READ_BURST: {
+            while (pio_sm_is_rx_fifo_empty(pio, sm_rx)) tight_loop_contents();
+            uint32_t n = pio->rxf[sm_rx];
+            for (uint32_t i = 0; i < n; i++) {
+                const uint32_t a = addr + i;
+                while (pio_sm_is_tx_fifo_full(pio, sm_tx)) tight_loop_contents();
+                pio->txf[sm_tx] = (a < words) ? base[a] : 0u;
+            }
+            break;
+        }
+
+        case LINKF_OP_WRITE_BURST: {
+            while (pio_sm_is_rx_fifo_empty(pio, sm_rx)) tight_loop_contents();
+            uint32_t n = pio->rxf[sm_rx];
+            for (uint32_t i = 0; i < n; i++) {
+                while (pio_sm_is_rx_fifo_empty(pio, sm_rx)) tight_loop_contents();
+                const uint32_t v = pio->rxf[sm_rx];
+                const uint32_t a = addr + i;
+                if (a < words) base[a] = v;
+            }
+            break;  /* posted - no reply */
+        }
 
         default:
             /* Unknown opcode. Answering anyway keeps the strict

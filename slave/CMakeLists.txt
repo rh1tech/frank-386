@@ -54,17 +54,22 @@ pico_sdk_init()
 add_executable(frank-386-slave
     src/main.c
     ${REPO_ROOT}/link/link_fast.c
+    ${REPO_ROOT}/drivers/psram/psram_init.c
 )
 
 target_include_directories(frank-386-slave PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${REPO_ROOT}/link
+    ${REPO_ROOT}/drivers/psram
+    ${REPO_ROOT}/src
 )
 
 pico_generate_pio_header(frank-386-slave ${REPO_ROOT}/link/link_bus.pio)
 
 target_compile_definitions(frank-386-slave PRIVATE
     CPU_CLOCK_MHZ=${CPU_SPEED}
+    PSRAM_MAX_FREQ_MHZ=133
+    BOARD_C2=1
     CPU_VOLTAGE=${CPU_VOLTAGE}
     PICO_ON_DEVICE=1
 )

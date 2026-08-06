@@ -56,6 +56,7 @@
 #include "pcsample.h"
 #include "autotype.h"
 #include "bbprofile.h"
+#include "diskcache.h"
 
 #if FEATURE_AUDIO_PWM
 #include <hardware/pwm.h>
@@ -941,6 +942,21 @@ static bool init_emulator(void) {
         }
     }
 #endif
+
+    /*
+     * Bring up the slave's sector cache.
+     *
+     * Placed here, not in init_hardware(): the link's PIO divider is
+     * derived from clk_sys when the state machines are configured, and
+     * config.ini raises this board from 378 to 504 MHz during hardware
+     * init. This is also the call site where the remote-memory tier was
+     * known to work, which matters because an earlier placement inside
+     * init_hardware() hung the boot.
+     *
+     * Harmless with no slave attached: the cache stays disabled and
+     * every access goes to the card as before.
+     */
+    dc_init();
 
     // Create PC instance
     DBG_PRINT("\nCreating PC instance...\n");
