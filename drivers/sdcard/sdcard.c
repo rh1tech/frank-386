@@ -14,6 +14,7 @@
 
 #include "ff.h"
 #include "diskio.h"
+#include "profile_subsys.h"
 
 
 /*--------------------------------------------------------------------------
@@ -423,7 +424,7 @@ DSTATUS disk_status (
 /* Read sector(s)                                                        */
 /*-----------------------------------------------------------------------*/
 
-DRESULT disk_read (
+static DRESULT disk_read_impl (
 	BYTE drv,		/* Physical drive number (0) */
 	BYTE *buff,		/* Pointer to the data buffer to store read data */
 	LBA_t sector,	/* Start sector number (LBA) */
@@ -509,7 +510,7 @@ int xmit_datablock (	/* 1:OK, 0:Error */
 /* Write sector(s)                                                       */
 /*-----------------------------------------------------------------------*/
 
-DRESULT disk_write (
+static DRESULT disk_write_impl (
 	BYTE drv,			/* Physical drive number (0) */
 	const BYTE *buff,	/* Ponter to the data to write */
 	LBA_t sector,		/* Start sector number (LBA) */
@@ -628,4 +629,34 @@ DRESULT disk_ioctl (
 	deselect();
 
 	return res;
+}
+/*
+ * Timed wrappers around the two FatFS entry points.
+ *
+ * Every byte the emulator reads from a disk image passes through here,
+ * so this is the one place that can answer "how much of core 0 goes to
+ * blocking SD I/O?" without instrumenting each f_read site in ide.c,
+ * fdd.c and disk.c. It measures the card transfer, not FatFS's own
+ * bookkeeping on top of it, so treat the figure as a lower bound.
+ */
+DRESULT disk_read (BYTE drv, BYTE *buff, LBA_t sector, UINT count)
+{
+	PROF_T(t_disk);
+	DRESULT r = disk_read_impl(drv, buff, sector, count);
+#if SUBSYS_PROFILE
+	PROF_ADD(t_disk, disk);
+	g_prof.disk_ops++;
+#endif
+	return r;
+}
+
+DRESULT disk_write (BYTE drv, const BYTE *buff, LBA_t sector, UINT count)
+{
+	PROF_T(t_disk);
+	DRESULT r = disk_write_impl(drv, buff, sector, count);
+#if SUBSYS_PROFILE
+	PROF_ADD(t_disk, disk);
+	g_prof.disk_ops++;
+#endif
+	return r;
 }

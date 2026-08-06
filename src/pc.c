@@ -2,6 +2,8 @@
 #include "ide.h"
 #include "dss.h"
 #include "misc.h"
+#include "profile_subsys.h"
+#include "codeprofile.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,6 +180,7 @@ void debug_write(const char *fmt, ...) {
 
 static __always_inline u8 _pc_io_read(void *o, int addr)
 {
+	cp_io_read();
 	PC *pc = o;
 	u8 val;
 
@@ -448,6 +451,7 @@ inline static void out_ems(const uint16_t port, const uint8_t data) {
 
 static void pc_io_write(void *o, int addr, u8 val)
 {
+	cp_io_write();
 	debug_write("W8: %ph -> %02Xh\n", addr, val);
 	PC *pc = o;
 	switch(addr) {
@@ -745,6 +749,8 @@ void pc_vga_step(void *o)
 
 void __not_in_flash_func(pc_step)(PC *pc)
 {
+	PROF_T(t_total);
+	PROF_T(t_dev);
 	/* reset_request is handled in main.c via load_bios_and_reset() */
 	int refresh = vga_step(pc->vga);
 	i8254_update_irq(pc->pit);
@@ -755,6 +761,7 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	i8257_dma_run(pc->isa_dma);
 	i8257_dma_run(pc->isa_hdma);
 	if (pc->fdc) fdc_tick(pc->fdc);
+	PROF_ADD(t_dev, devices);
 #if !defined(BUILD_ESP32) && !defined(RP2350_BUILD)
 	pc->poll(pc->redraw_data);
 	if (refresh) {
@@ -764,12 +771,20 @@ void __not_in_flash_func(pc_step)(PC *pc)
 			pc->full_update = 0;
 	}
 #else
-	if (pc->poll) pc->poll(pc->redraw_data);
-	if (refresh && pc->redraw) {
-		vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
-			    pc->full_update != 0);
-		if (pc->full_update == 2)
-			pc->full_update = 0;
+	{
+		PROF_T(t_poll);
+		if (pc->poll) pc->poll(pc->redraw_data);
+		PROF_ADD(t_poll, poll);
+	}
+	{
+		PROF_T(t_refresh);
+		if (refresh && pc->redraw) {
+			vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
+				    pc->full_update != 0);
+			if (pc->full_update == 2)
+				pc->full_update = 0;
+		}
+		PROF_ADD(t_refresh, refresh);
 	}
 #endif
 #ifdef USEKVM
@@ -779,16 +794,32 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	cpui386_step(pc->cpu, 512);
 #elif defined(RP2350_BUILD)
 	if (pc->adlib_enabled) {
+		/* The OPL2 stream is produced here, ten instructions at a
+		 * time, because core 1 has no room for it. Timing the two
+		 * separately is the whole point of this profile: moving the
+		 * chips to the C2 slave removes the adlib bucket *and* lets
+		 * this collapse back to one 4096-instruction call. */
 		for (int i = 0; i < 409; ++i) {
+			PROF_T(t_cpu);
 			cpui386_step(pc->cpu, 10);
+			PROF_ADD(t_cpu, cpu);
+			PROF_T(t_adlib);
 			adlib_core0(pc->adlib);
+			PROF_ADD(t_adlib, adlib);
 		}
 	} else {
+		PROF_T(t_cpu);
 		cpui386_step(pc->cpu, 4096);
+		PROF_ADD(t_cpu, cpu);
 	}
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif
+#endif
+#if SUBSYS_PROFILE
+	PROF_ADD(t_total, total);
+	if (++g_prof.steps >= PROF_REPORT_STEPS)
+		prof_report();
 #endif
 
 #ifdef I386_PROFILE
