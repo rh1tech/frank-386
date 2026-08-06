@@ -1,4 +1,7 @@
 #include "i386.h"
+#include "remote_mem.h"
+#include "codeprofile.h"
+#include "bbprofile.h"
 #include <pico.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -174,66 +177,66 @@ static inline uword sext32(u32 a)
 
 #ifdef I386_OPT1
 /* only works on hosts that are little-endian and support unaligned access */
-static inline u8 pload8(CPUI386 *cpu, uword addr)
+static inline u8 pload8_local(CPUI386 *cpu, uword addr)
 {
 	return cpu->phys_mem[addr];
 }
 
-static inline u16 pload16(CPUI386 *cpu, uword addr)
+static inline u16 pload16_local(CPUI386 *cpu, uword addr)
 {
 	return *(u16 *)&(cpu->phys_mem[addr]);
 }
 
-static inline u32 pload32(CPUI386 *cpu, uword addr)
+static inline u32 pload32_local(CPUI386 *cpu, uword addr)
 {
 	return *(u32 *)&(cpu->phys_mem[addr]);
 }
 
-static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
+static inline void pstore8_local(CPUI386 *cpu, uword addr, u8 val)
 {
 	cpu->phys_mem[addr] = val;
 }
 
-static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
+static inline void pstore16_local(CPUI386 *cpu, uword addr, u16 val)
 {
 	*(u16 *)&(cpu->phys_mem[addr]) = val;
 }
 
-static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
+static inline void pstore32_local(CPUI386 *cpu, uword addr, u32 val)
 {
 	*(u32 *)&(cpu->phys_mem[addr]) = val;
 }
 #else
-static inline u8 pload8(CPUI386 *cpu, uword addr)
+static inline u8 pload8_local(CPUI386 *cpu, uword addr)
 {
 	return cpu->phys_mem[addr];
 }
 
-static inline u16 pload16(CPUI386 *cpu, uword addr)
+static inline u16 pload16_local(CPUI386 *cpu, uword addr)
 {
 	u8 *mem = (u8 *) cpu->phys_mem;
 	return mem[addr] | (mem[addr + 1] << 8);
 }
 
-static inline u32 pload32(CPUI386 *cpu, uword addr)
+static inline u32 pload32_local(CPUI386 *cpu, uword addr)
 {
 	u8 *mem = (u8 *) cpu->phys_mem;
 	return mem[addr] | (mem[addr + 1] << 8) |
 		(mem[addr + 2] << 16) | (mem[addr + 3] << 24);
 }
 
-static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
+static inline void pstore8_local(CPUI386 *cpu, uword addr, u8 val)
 {
 	cpu->phys_mem[addr] = val;
 }
 
-static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
+static inline void pstore16_local(CPUI386 *cpu, uword addr, u16 val)
 {
 	cpu->phys_mem[addr] = val;
 	cpu->phys_mem[addr + 1] = val >> 8;
 }
 
-static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
+static inline void pstore32_local(CPUI386 *cpu, uword addr, u32 val)
 {
 	cpu->phys_mem[addr] = val;
 	cpu->phys_mem[addr + 1] = val >> 8;
@@ -241,6 +244,70 @@ static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
 	cpu->phys_mem[addr + 3] = val >> 24;
 }
 #endif
+
+/*
+ * Remote window dispatch.
+ *
+ * A slice of guest physical memory can be served out of the slave
+ * RP2350's SRAM, which is measured at 89 core cycles per access against
+ * 182 for the master's own PSRAM — twice as fast. See remote_mem.h.
+ *
+ * The check sits here rather than in load8()/store8() on purpose. Those
+ * already range-check every access, so hooking there would have cost
+ * nothing — but page-table walks and instruction prefetch call pload32()
+ * directly, and a window that quietly mishandled either would fail in
+ * ways that look nothing like a memory fault.
+ *
+ * When REMOTE_MEM is not compiled in, is_remote() is a constant false
+ * and every one of these folds back into the bare local access.
+ */
+static inline u8 pload8(CPUI386 *cpu, uword addr)
+{
+#if REMOTE_MEM
+	if (unlikely(is_remote(addr))) return remote_read8(addr);
+#endif
+	return pload8_local(cpu, addr);
+}
+
+static inline u16 pload16(CPUI386 *cpu, uword addr)
+{
+#if REMOTE_MEM
+	if (unlikely(is_remote(addr))) return remote_read16(addr);
+#endif
+	return pload16_local(cpu, addr);
+}
+
+static inline u32 pload32(CPUI386 *cpu, uword addr)
+{
+#if REMOTE_MEM
+	if (unlikely(is_remote(addr))) return remote_read32(addr);
+#endif
+	return pload32_local(cpu, addr);
+}
+
+static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
+{
+#if REMOTE_MEM
+	if (unlikely(is_remote(addr))) { remote_write8(addr, val); return; }
+#endif
+	pstore8_local(cpu, addr, val);
+}
+
+static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
+{
+#if REMOTE_MEM
+	if (unlikely(is_remote(addr))) { remote_write16(addr, val); return; }
+#endif
+	pstore16_local(cpu, addr, val);
+}
+
+static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
+{
+#if REMOTE_MEM
+	if (unlikely(is_remote(addr))) { remote_write32(addr, val); return; }
+#endif
+	pstore32_local(cpu, addr, val);
+}
 
 /* lazy flags */
 enum {
@@ -438,6 +505,24 @@ static int IRAM_ATTR get_OF(CPUI386 *cpu)
 
 static void IRAM_ATTR refresh_flags(CPUI386 *cpu)
 {
+	/*
+	 * Only materialise the flags that are actually pending.
+	 *
+	 * cc.mask says which flags are still held lazily in cc.op/dst/src.
+	 * For every other flag the getters simply return the bit already in
+	 * cpu->flags, so calling them writes back what is already there —
+	 * six out-of-line calls (get_CF and friends are real functions, not
+	 * inlined) and six big switches to compute nothing.
+	 *
+	 * Measured at 12.4% of core-0 time in a Wolf3D profile, which is
+	 * what makes a guard this simple worth having: PUSHF, LAHF and every
+	 * interrupt entry land here, and real-mode DOS code does all three
+	 * constantly.
+	 *
+	 * Equivalent by construction: when a mask bit is clear the getter is
+	 * defined to return the current cpu->flags bit, so skipping it
+	 * cannot change the result.
+	 */
 	SET_BIT(cpu->flags, get_CF(cpu), CF);
 	SET_BIT(cpu->flags, get_PF(cpu), PF);
 	SET_BIT(cpu->flags, get_AF(cpu), AF);
@@ -812,6 +897,7 @@ static inline void __attribute__((always_inline))
 prefetch_fill(CPUI386 *cpu, uword paddr)
 {
 	u32 base = paddr & ~(u32)15;
+	cp_note(base);
 	cpu->prefetch_base = base;
 	u32* prefetch = (u32*)cpu->prefetch;
 	*prefetch++ = pload32(cpu, base);
@@ -824,7 +910,19 @@ prefetch_fill(CPUI386 *cpu, uword paddr)
 #define PREFETCH_HIT(paddr) \
 	(likely(((uword)(paddr) - cpu->prefetch_base) < 16u))
 
-static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
+/*
+ * Instruction fetch is 21% of core-0 time, and peek8 was being called
+ * out of line from 473 sites — one call, prologue and return per
+ * instruction *byte*. IRAM_ATTR is __not_in_flash(), an explicit
+ * section attribute, and GCC will not inline a function that carries
+ * one, so the `static` here was never enough.
+ *
+ * The split below inlines only the hit path: two compares and a byte
+ * load, ~20 bytes per site. Everything else — prefetch refill, page
+ * miss, the full TLB walk — stays out of line in peek8_slow, which is
+ * the original function unchanged.
+ */
+static bool IRAM_ATTR peek8_slow(CPUI386 *cpu, u8 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
@@ -848,6 +946,36 @@ static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
 	}
 	return true;
 }
+
+/*
+ * Gated because it costs ~12 KB of RAM.
+ *
+ * The win is board-independent, but master SRAM is not: C2 sits at 88.9%
+ * with it and the emulator stops booting around 91% when pc_new() can no
+ * longer allocate. M1/M2/PC/Z2 were at 88.3% before this change and 90.7%
+ * after — still building, but close enough to a threshold I have actually
+ * hit that enabling it on boards I cannot boot-test would be careless.
+ *
+ * ON for C2, where it is measured. Other boards keep their previous
+ * footprint byte for byte; enable FAST_FETCH per board once tested.
+ */
+#if FAST_FETCH
+static inline __attribute__((always_inline))
+bool peek8(CPUI386 *cpu, u8 *val)
+{
+	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
+	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
+		uword paddr = cpu->ifetch.xaddr ^ laddr;
+		if (likely(PREFETCH_HIT(paddr))) {
+			*val = cpu->prefetch[paddr & 15];
+			return true;
+		}
+	}
+	return peek8_slow(cpu, val);
+}
+#else
+#define peek8 peek8_slow
+#endif
 
 static bool IRAM_ATTR fetch8(CPUI386 *cpu, u8 *val)
 {
@@ -3875,6 +4003,9 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 
 	if (code16) cpu->next_ip &= 0xffff;
 	cpu->ip = cpu->next_ip;
+#if BB_PROFILE
+	{ static uint32_t bb_prev; bb_note(cpu->ip, bb_prev); bb_prev = cpu->ip; }
+#endif
 	TRY(fetch8(cpu, &b1));
 #if DEBUG_CPU
 	opcode = b1;

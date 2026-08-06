@@ -1,0 +1,157 @@
+;
+; FRANK Core 2 — dual-RP2350 test firmware
+;
+; Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+; https://github.com/rh1tech/frank
+; SPDX-License-Identifier: GPL-3.0-or-later
+;
+; link_bus.pio — 8-bit source-synchronous parallel link between the
+; RP2350B master (U3) and the RP2350A slave (U6).
+;
+; Both buses on the board share one pin layout, which is what lets a
+; single pair of programs drive either direction on either chip:
+;
+;     DATA_BASE + 0 .. DATA_BASE + 7   data D0..D7
+;     DATA_BASE + 8                    CLK
+;     DATA_BASE + 9                    VALID   (driven from SIO, not PIO)
+;
+; Wire timing at clkdiv = 1.0 (one PIO cycle == one sys_clk cycle):
+;
+;     cycle:   0     1     2     3     4     0     1
+;     DATA:  <--------- byte N -------------><--- byte N+1 ...
+;     CLK:   ____________/‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾‾\________/‾‾
+;                           ^ RX samples here (t=3)
+;
+; 5 sys_clk cycles per byte: 2 low, 3 high. Both numbers are forced.
+;
+; The receiver samples one cycle after it *observes* the rising edge —
+; `wait 1 pin` completes on the edge and `in pins` runs the cycle after —
+; so the sample always lands at (rising edge + 1). And the receive loop
+; only inspects the low phase during a single cycle of each iteration,
+; so a low phase shorter than 2 cycles is intermittently missed, which
+; drops a byte and desynchronises the 32-bit word framing.
+;
+; Those two facts together rule out a 4-cycle period. 2 low + 2 high puts
+; the sample at t=3 with the next data change at t=4: 3 cycles of setup
+; but only 1 cycle (3.97 ns at 252 MHz) of hold. That is what produced
+; ~139k byte errors per 8 MiB at full rate on the first assembled board.
+; Shrinking the low phase to 1 cycle to centre the sample fixes the hold
+; margin and breaks edge detection instead — the throughput runs still
+; report a number because ring DMA never checks how many bytes actually
+; arrived, while every verified transfer fails outright.
+;
+; 5 cycles gives 3 setup and 2 hold: the worst case doubles from 1 cycle
+; to 2, and the low phase keeps the 2 cycles the receiver needs. The cost
+; is top speed — sys_clk/5 rather than sys_clk/4.
+;
+; At 252 MHz that is 50.4 MB/s (48.1 MiB/s) per direction, both
+; directions concurrently for 100.8 MB/s (96.1 MiB/s) aggregate.
+;
+; Raising the SM clock divider slows the link down proportionally, which
+; is what the speed sweep in the test firmware walks. Note that only
+; integer dividers are jitter-free; fractional ones make the period
+; alternate between N and N+1 cycles, eating into the margins above.
+
+; ---------------------------------------------------------------------
+; link_tx — drive 8 data lines plus a clock.
+;
+; Config: autopull ON, threshold 32, shift right (LSB-first, so byte 0
+; of each little-endian word goes out first). OUT pin base = DATA_BASE
+; with 8 pins; side-set pin = DATA_BASE + 8.
+;
+; When the TX FIFO runs dry the `out` stalls with side-set 0 still
+; applied, so the clock parks low and the high phase can never stretch.
+; That is what makes the two-instruction receive loop below safe.
+; ---------------------------------------------------------------------
+.program link_tx
+.side_set 1
+
+.wrap_target
+    out pins, 8      side 0 [1]    ; drive byte, clock low  (2 cycles)
+    nop              side 1 [2]    ; clock high             (3 cycles)
+.wrap
+
+; ---------------------------------------------------------------------
+; link_rx — sample 8 data lines on the rising edge of the incoming clock.
+;
+; Config: autopush ON, threshold 32, shift right. IN pin base =
+; DATA_BASE with 9 pins, so the clock is readable as `pin 8`.
+;
+; The loop is three instructions against a four-cycle byte period, so
+; there is always one cycle of slack and the SM re-synchronises to the
+; incoming clock on every single byte. Explicitly waiting for the low
+; phase makes a double-sample impossible even if the transmitter stalls,
+; and it is what locks the sample to the middle of the eye given the
+; transmitter's 1-low/3-high clock.
+; ---------------------------------------------------------------------
+.program link_rx
+
+.wrap_target
+    wait 1 pin 8                  ; rising edge
+    in   pins, 8                  ; latch D0..D7
+    wait 0 pin 8                  ; falling edge — re-arm
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
+/* Cycles of SM clock consumed per byte by the programs above. */
+#define LINK_PIO_CYCLES_PER_BYTE 5
+
+/* Configure a transmit state machine.
+ *
+ * data_base — first of the 8 data GPIOs; CLK is assumed at data_base+8.
+ * clkdiv    — SM clock divider; 1.0 gives sys_clk/5 bytes per second. */
+/* Returns PICO_OK, or PICO_ERROR_BAD_ALIGNMENT if the pins are outside
+ * this PIO instance's 32-GPIO window (see pio_set_gpio_base). */
+static inline int link_tx_program_init(PIO pio, uint sm, uint offset,
+                                       uint data_base, float clkdiv) {
+    const uint clk_pin = data_base + 8;
+
+    for (uint i = 0; i < 8; i++) {
+        pio_gpio_init(pio, data_base + i);
+        /* Fast slew + 12 mA drive: these lines swing every 4 sys_clk
+         * cycles into ~10 pF of trace, and the 33R series resistor on
+         * CLK is sized for a strong driver. */
+        gpio_set_drive_strength(data_base + i, GPIO_DRIVE_STRENGTH_12MA);
+        gpio_set_slew_rate(data_base + i, GPIO_SLEW_RATE_FAST);
+    }
+    pio_gpio_init(pio, clk_pin);
+    gpio_set_drive_strength(clk_pin, GPIO_DRIVE_STRENGTH_12MA);
+    gpio_set_slew_rate(clk_pin, GPIO_SLEW_RATE_FAST);
+
+    pio_sm_set_consecutive_pindirs(pio, sm, data_base, 9, true);
+
+    pio_sm_config c = link_tx_program_get_default_config(offset);
+    sm_config_set_out_pins(&c, data_base, 8);
+    sm_config_set_sideset_pins(&c, clk_pin);
+    sm_config_set_out_shift(&c, true /* shift right */, true /* autopull */, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    return pio_sm_init(pio, sm, offset, &c);
+}
+
+/* Configure a receive state machine. data_base is the first of the 8
+ * data GPIOs; the clock must sit at data_base+8 so the program can
+ * reach it as `pin 8`. */
+static inline int link_rx_program_init(PIO pio, uint sm, uint offset,
+                                       uint data_base, float clkdiv) {
+    for (uint i = 0; i < 9; i++) {
+        pio_gpio_init(pio, data_base + i);
+        gpio_set_input_hysteresis_enabled(data_base + i, true);
+    }
+    pio_sm_set_consecutive_pindirs(pio, sm, data_base, 9, false);
+
+    pio_sm_config c = link_rx_program_get_default_config(offset);
+    sm_config_set_in_pins(&c, data_base);
+    /* Nine pins, not eight: the program reads the clock as `pin 8`. */
+    sm_config_set_in_pin_count(&c, 9);
+    sm_config_set_in_shift(&c, true /* shift right */, true /* autopush */, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv(&c, clkdiv);
+
+    return pio_sm_init(pio, sm, offset, &c);
+}
+%}

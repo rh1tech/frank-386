@@ -2,6 +2,9 @@
 #include "ide.h"
 #include "dss.h"
 #include "misc.h"
+#include "profile_subsys.h"
+#include "codeprofile.h"
+#include "gameport.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -178,6 +181,7 @@ void debug_write(const char *fmt, ...) {
 
 static __always_inline u8 _pc_io_read(void *o, int addr)
 {
+	cp_io_read();
 	PC *pc = o;
 	u8 val;
 
@@ -312,11 +316,13 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 			return sb16_dsp_read(pc->sb16, addr);
 		}
 		return 0xFF;
-	case 0x201:
-		/* Gameport / Joystick - return "no joystick" state
-		 * Bits 7-4: buttons (1 = not pressed)
-		 * Bits 3-0: axes timeout (0 = timed out, no joystick)
-		 * Return 0xF0 to indicate axes have timed out (no joystick present) */
+	case 0x200: case 0x201: case 0x202: case 0x203:
+	case 0x204: case 0x205: case 0x206: case 0x207:
+		/* Analog game port. When no joystick is configured this returns
+		 * 0xF0 - axes timed out, no buttons - which is exactly what an
+		 * empty adapter reads, so probing games behave as before. */
+		if (pc->joystick_enabled)
+			return gameport_read();
 		return 0xf0;
 	case 0x27A: // Covox Speech Thing
 		return 0;
@@ -380,6 +386,14 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 		if (pc->adlib_enabled)
 			return adlib_read(pc->adlib, addr);
 		return 0xFFFF;
+	/* Game port. Games normally use IN AL, but a 16-bit read must not
+	 * silently return 0 - that reads as "axes already timed out" and the
+	 * stick looks stuck at one extreme. */
+	case 0x200: case 0x201: case 0x202: case 0x203:
+	case 0x204: case 0x205: case 0x206: case 0x207:
+		if (pc->joystick_enabled)
+			return 0xff00u | gameport_read();
+		return 0xfff0u;
 	default:
 		return 0;
 	}
@@ -448,6 +462,7 @@ inline static void out_ems(const uint16_t port, const uint8_t data) {
 
 static void pc_io_write(void *o, int addr, u8 val)
 {
+	cp_io_write();
 	debug_write("W8: %ph -> %02Xh\n", addr, val);
 	PC *pc = o;
 	switch(addr) {
@@ -632,6 +647,13 @@ static void pc_io_write(void *o, int addr, u8 val)
 		if (pc->dss_enabled)
 			dss_out(addr, val);
 		return;
+	/* Game port: any write fires the axis one-shots. The value written
+	 * is irrelevant on real hardware and is ignored here too. */
+	case 0x200: case 0x201: case 0x202: case 0x203:
+	case 0x204: case 0x205: case 0x206: case 0x207:
+		if (pc->joystick_enabled)
+			gameport_write();
+		return;
 	/* LPT status/control ports are read-only - writes ignored */
 	case 0x379: case 0x279:
 	case 0x27a:
@@ -745,6 +767,8 @@ void pc_vga_step(void *o)
 
 void __not_in_flash_func(pc_step)(PC *pc)
 {
+	PROF_T(t_total);
+	PROF_T(t_dev);
 	/* reset_request is handled in main.c via load_bios_and_reset() */
 	int refresh = vga_step(pc->vga);
 	i8254_update_irq(pc->pit);
@@ -755,6 +779,7 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	i8257_dma_run(pc->isa_dma);
 	i8257_dma_run(pc->isa_hdma);
 	if (pc->fdc) fdc_tick(pc->fdc);
+	PROF_ADD(t_dev, devices);
 #if !defined(BUILD_ESP32) && !defined(RP2350_BUILD)
 	pc->poll(pc->redraw_data);
 	if (refresh) {
@@ -764,12 +789,20 @@ void __not_in_flash_func(pc_step)(PC *pc)
 			pc->full_update = 0;
 	}
 #else
-	if (pc->poll) pc->poll(pc->redraw_data);
-	if (refresh && pc->redraw) {
-		vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
-			    pc->full_update != 0);
-		if (pc->full_update == 2)
-			pc->full_update = 0;
+	{
+		PROF_T(t_poll);
+		if (pc->poll) pc->poll(pc->redraw_data);
+		PROF_ADD(t_poll, poll);
+	}
+	{
+		PROF_T(t_refresh);
+		if (refresh && pc->redraw) {
+			vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
+				    pc->full_update != 0);
+			if (pc->full_update == 2)
+				pc->full_update = 0;
+		}
+		PROF_ADD(t_refresh, refresh);
 	}
 #endif
 #ifdef USEKVM
@@ -779,16 +812,32 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	cpui386_step(pc->cpu, 512);
 #elif defined(RP2350_BUILD)
 	if (pc->adlib_enabled) {
+		/* The OPL2 stream is produced here, ten instructions at a
+		 * time, because core 1 has no room for it. Timing the two
+		 * separately is the whole point of this profile: moving the
+		 * chips to the C2 slave removes the adlib bucket *and* lets
+		 * this collapse back to one 4096-instruction call. */
 		for (int i = 0; i < 409; ++i) {
+			PROF_T(t_cpu);
 			cpui386_step(pc->cpu, 10);
+			PROF_ADD(t_cpu, cpu);
+			PROF_T(t_adlib);
 			adlib_core0(pc->adlib);
+			PROF_ADD(t_adlib, adlib);
 		}
 	} else {
+		PROF_T(t_cpu);
 		cpui386_step(pc->cpu, 4096);
+		PROF_ADD(t_cpu, cpu);
 	}
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif
+#endif
+#if SUBSYS_PROFILE
+	PROF_ADD(t_total, total);
+	if (++g_prof.steps >= PROF_REPORT_STEPS)
+		prof_report();
 #endif
 
 #ifdef I386_PROFILE

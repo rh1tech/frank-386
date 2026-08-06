@@ -43,8 +43,23 @@
  */
 
 // Default to M1 if no config specified
-#if !defined(BOARD_M1) && !defined(BOARD_M2) && !defined(BOARD_PC) && !defined(BOARD_Z2)
+#if !defined(BOARD_M1) && !defined(BOARD_M2) && !defined(BOARD_PC) && \
+    !defined(BOARD_Z2) && !defined(BOARD_C2)
 #define BOARD_M1
+#endif
+
+/*
+ * Input capability flags.
+ *
+ * Every board except C2 has a PS/2 keyboard and mouse header. C2 has no
+ * PS/2 at all — GPIO0/1 are the debug UART (J2) and GPIO2/3 are unrouted
+ * — so USB HID is the only input path there. Code that touches the PS/2
+ * driver is guarded on BOARD_HAS_PS2 rather than on the board name, so
+ * adding a future PS/2-less board does not mean revisiting every call
+ * site again.
+ */
+#ifndef BOARD_C2
+#define BOARD_HAS_PS2 1
 #endif
 
 //=============================================================================
@@ -324,6 +339,109 @@ static inline uint get_psram_pin(void) {
 #endif // BOARD_PC
 
 //=============================================================================
+// FRANK Core 2 Layout Configuration (dual RP2350)
+//=============================================================================
+/*
+ * C2 is the master half (U3, RP2350B) of the FRANK Core 2 / Core 2U
+ * board. Every assignment below comes from the KiCad netlist via
+ * frank_core2/firmware/common/frank_core2_board.h.
+ *
+ * The HDMI, microSD and I2S pins happen to be identical to M2, so those
+ * paths need no new code. What differs:
+ *
+ *   - No PS/2 and no NES pad. USB HID is the only input.
+ *   - No analog VGA DAC; HDMI is forced (see FORCE_HDMI in CMakeLists).
+ *   - LD1 is a WS2812B on GPIO46, not a plain LED.
+ *   - GPIO20..42 belong to the inter-processor link and must not be
+ *     claimed by anything else. That is why the M2 NES pad pins (20, 21,
+ *     26) and PWM audio pins are absent here.
+ */
+#ifdef BOARD_C2
+
+// HDMI Pins (J5) — same layout as M2
+#define HDMI_PIN_CLKN 12
+#define HDMI_PIN_CLKP 13
+#define HDMI_PIN_D0N  14
+#define HDMI_PIN_D0P  15
+#define HDMI_PIN_D1N  16
+#define HDMI_PIN_D1P  17
+#define HDMI_PIN_D2N  18
+#define HDMI_PIN_D2P  19
+
+#define HDMI_BASE_PIN HDMI_PIN_CLKN
+
+// microSD (J7) on SPI0 — SDIO pin names from the schematic in comments
+#define SDCARD_PIN_CLK    6   // SD CLK
+#define SDCARD_PIN_CMD    7   // SD CMD
+#define SDCARD_PIN_D0     4   // SD DAT0
+#define SDCARD_PIN_D3     5   // SD DAT3/CD
+
+#define SDCARD_PIN_SPI0_SCK   SDCARD_PIN_CLK
+#define SDCARD_PIN_SPI0_MOSI  SDCARD_PIN_CMD
+#define SDCARD_PIN_SPI0_MISO  SDCARD_PIN_D0
+#define SDCARD_PIN_SPI0_CS    SDCARD_PIN_D3
+
+// TDA1387T I2S DAC (U8): DATA = GPIO9, SCLK = GPIO10, LRCK = GPIO11
+#define I2S_DATA_PIN       9
+#define I2S_CLOCK_PIN_BASE 10
+
+/* VGA is not populated on this board. vga_hw.c still references
+ * VGA_BASE_PIN at compile time, but every use is behind SELECT_VGA,
+ * which FORCE_HDMI pins to false. Alias it to the HDMI base so the
+ * driver compiles without a C2-specific #ifdef in it. */
+#define VGA_BASE_PIN HDMI_BASE_PIN
+
+/* Status LED LD1 is a WS2812B via 330R (R11). Deliberately NOT
+ * PICO_DEFAULT_LED_PIN — SDK helpers would drive it as a level. */
+#define M_LED_WS2812_PIN 46
+
+/*
+ * Inter-processor link pins (see boards/frank_core2_master.h and
+ * frank_core2/firmware/common/frank_core2_board.h).
+ *
+ * Two 8-bit source-synchronous buses plus three SIO control wires.
+ * Nothing else may claim GPIO20..42.
+ */
+#define M_LINK_A_DATA_BASE   20   /* GPIO20..27, master -> slave (TX) */
+#define M_LINK_A_CLK         28   /* == DATA_BASE + 8 */
+#define M_LINK_A_VALID       29   /* == DATA_BASE + 9 */
+
+#define M_LINK_B_DATA_BASE   30   /* GPIO30..37, slave -> master (RX) */
+#define M_LINK_B_CLK         38
+#define M_LINK_B_VALID       39
+
+#define M_LINK_FS            40   /* frame sync / reset request, out */
+#define M_LINK_DB_OUT        41   /* DB_MS, out */
+#define M_LINK_DB_IN         42   /* DB_SM, in  */
+
+/*
+ * PIO instance for the link.
+ *
+ * Link bus B lands on GPIO30..39, so the instance needs
+ * pio_set_gpio_base(16). That is a per-instance setting, and it makes
+ * every pin below 16 unreachable on that instance — so the link cannot
+ * share with anything down there.
+ *
+ * PIO2 is always the I2S DAC (audio.c hardcodes pio2, GPIO9..11). The
+ * video path takes a different instance depending on the output:
+ *
+ *   HDMI build — hdmi.c uses PIO_VIDEO = pio1 (GPIO12..19) => link on PIO0
+ *   VGA  build — vga_hw.h defines VGA_PIO = pio0 (GPIO12..19) => link on PIO1
+ *
+ * Getting this wrong is quiet: pio_sm_init() rejects the configuration
+ * with PICO_ERROR_BAD_ALIGNMENT and the link simply never answers, which
+ * reads as a dead slave rather than a PIO clash.
+ */
+#ifdef FORCE_VGA
+#define LINK_PIO_MASTER      pio1
+#else
+#define LINK_PIO_MASTER      pio0
+#endif
+#define LINK_PIO_GPIO_BASE   16
+
+#endif // BOARD_C2
+
+//=============================================================================
 // Common PIO Assignments
 //=============================================================================
 
@@ -389,8 +507,23 @@ static inline uint get_psram_pin(void) {
 // SD Card SPI bus (use hardware SPI0 or PIO)
 #define SDCARD_SPI_BUS spi0
 
-// Enable PIO-based SD card for better performance
+/*
+ * Enable PIO-based SD card for better performance.
+ *
+ * Not on C2: sdcard.c hardcodes pio1 for its SPI program, and on that
+ * board every PIO instance is spoken for. With VGA selected the video
+ * path takes pio0 and the I2S DAC takes pio2, so a PIO-based SD card
+ * leaves nothing for the inter-processor link — pio_set_gpio_base()
+ * then fails with PICO_ERROR_INVALID_STATE and the link silently never
+ * answers, which reads as a dead slave.
+ *
+ * Nothing is lost by dropping it here. The C2 microSD sits on GPIO4..7,
+ * which are exactly the hardware SPI0 pins (RX/CSn/SCK/TX), so the
+ * non-PIO path in sdcard.c drives it directly.
+ */
+#ifndef BOARD_C2
 #define SDCARD_PIO 1
+#endif
 
 //=============================================================================
 // Debug Configuration

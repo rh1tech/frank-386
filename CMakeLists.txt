@@ -14,20 +14,41 @@ endif()
 # ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
-# Set board to Pico 2 (RP2350)
-set(PICO_BOARD pico2 CACHE STRING "Pico board type")
+# Board configuration variant (M1, M2, PC, Z2 or C2)
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+# Alias for backwards compatibility
+if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
+    set(BOARD ${BOARD_VARIANT})
+endif()
+
+if(BOARD STREQUAL "C2")
+    # FRANK Core 2 master is an RP2350B. The stock pico2 definition
+    # declares PICO_RP2350A 1, capping NUM_BANK0_GPIOS at 30 and
+    # switching off PIO's movable GPIO window — the link bus (GPIO20..42),
+    # the WS2812 (GPIO46) and PSRAM CS (GPIO47) would alias down into
+    # 0..29. Our own header sets PICO_RP2350A 0 / PICO_PIO_USE_GPIO_BASE 1.
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards CACHE PATH "" FORCE)
+    set(PICO_BOARD "frank_core2_master" CACHE STRING "Pico board type" FORCE)
+    # USB HID host is the only input path on C2 — no PS/2, no NES pad header.
+    set(USB_HID_ENABLED ON CACHE BOOL "USB HID host" FORCE)
+    # HDMI is the default video output; there is no analog VGA DAC to
+    # auto-detect, so the pin probe is skipped either way. -DFORCE_VGA=ON
+    # drives VGA timing out of GPIO12..19 instead, for bench debug.
+    if(NOT FORCE_VGA)
+        set(FORCE_HDMI ON CACHE BOOL "Force HDMI" FORCE)
+    endif()
+    # The TDA1387T I2S DAC sits on GPIO9..11 — the same pins the M2 PWM
+    # path would drive. I2S is not optional here.
+    set(AUDIO_TYPE "I2S" CACHE STRING "Audio output" FORCE)
+else()
+    # Set board to Pico 2 (RP2350)
+    set(PICO_BOARD pico2 CACHE STRING "Pico board type")
+endif()
 
 set(BUILD_NAME "386")
 
 # Firmware version string (set by release.sh or manually)
 # FIRMWARE_VERSION is derived from version.txt after parsing (see below)
-
-# Board configuration variant (M1, M2, PC or Z2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC or Z2")
-# Alias for backwards compatibility
-if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
-    set(BOARD ${BOARD_VARIANT})
-endif()
 
 # CPU overclock configuration (252, 378, 504 MHz)
 # 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
@@ -48,11 +69,18 @@ option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
 # Force HDMI output (skip VGA/HDMI pin auto-detection)
 option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 
+# Force VGA output (skip auto-detection). Takes precedence over FORCE_HDMI.
+option(FORCE_VGA "Force VGA output instead of HDMI" OFF)
+
 # Debug output (disabled by default for cleaner console)
 option(DEBUG_ENABLED "Enable verbose debug output" OFF)
 
 # Profiling (for performance analysis)
 option(PROFILE_ENABLED "Enable i386 instruction profiling" OFF)
+
+# Coarse per-subsystem cycle accounting on core 0 (docs/C2_SPLIT_PLAN.md).
+# Distinct from PROFILE_ENABLED, which profiles instructions.
+option(SUBSYS_PROFILE "Enable core-0 subsystem cycle profiling" OFF)
 
 if(BOARD STREQUAL "M1")
     SET(BUILD_NAME "m1p2-${BUILD_NAME}")
@@ -60,6 +88,8 @@ elseif(BOARD STREQUAL "PC")
     SET(BUILD_NAME "PCp2-${BUILD_NAME}")
 elseif(BOARD STREQUAL "Z2")
     SET(BUILD_NAME "z0p2-${BUILD_NAME}")
+elseif(BOARD STREQUAL "C2")
+    SET(BUILD_NAME "c2p2-${BUILD_NAME}")
 else()  # M2
     SET(BUILD_NAME "m2p2-${BUILD_NAME}")
 endif()
@@ -253,6 +283,15 @@ set(EMU_CORE_SOURCES
 
     # Configuration
     src/ini.c
+    src/profile_subsys.c
+    src/codeprofile.c
+    src/gameport.c
+    $<$<STREQUAL:${BOARD},C2>:${CMAKE_CURRENT_LIST_DIR}/src/diskcache.c>
+    src/pcsample.c
+    src/bbprofile.c
+    src/autotype.c
+    $<$<STREQUAL:${BOARD},C2>:${CMAKE_CURRENT_LIST_DIR}/src/remote_mem.c>
+    $<$<STREQUAL:${BOARD},C2>:${CMAKE_CURRENT_LIST_DIR}/link/link_fast.c>
 
     # access to sd-card using W/A with network-like driver (mapdrive.com)
     src/netredirect.c
@@ -284,7 +323,11 @@ target_include_directories(${BUILD_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/hdmi
     ${CMAKE_CURRENT_LIST_DIR}/drivers/audio
     ${CMAKE_CURRENT_LIST_DIR}/drivers/nespad
+    ${CMAKE_CURRENT_LIST_DIR}/link
 )
+if(BOARD STREQUAL "C2")
+    pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/link/link_bus.pio)
+endif()
 # Only include usbhid directory when USB HID is enabled (to avoid tusb_config.h conflicts)
 if(USB_HID_ENABLED)
     target_include_directories(${BUILD_NAME} PRIVATE
@@ -360,9 +403,78 @@ if(FORCE_HDMI)
     target_compile_definitions(video_driver PRIVATE FORCE_HDMI=1)
 endif()
 
+# Force VGA output (wins over FORCE_HDMI in vga_hw_init)
+if(FORCE_VGA)
+    target_compile_definitions(${BUILD_NAME} PRIVATE FORCE_VGA=1)
+    target_compile_definitions(video_driver PRIVATE FORCE_VGA=1)
+endif()
+
 # Add I386_PROFILE if profiling enabled
 if(PROFILE_ENABLED)
     target_compile_definitions(${BUILD_NAME} PRIVATE I386_PROFILE=1)
+endif()
+
+# Guest memory served by the slave RP2350 (C2 only). See src/remote_mem.h.
+option(REMOTE_MEM "C2: serve a window of guest RAM from the slave's SRAM" OFF)
+
+# Ignore cpu_freq/psram_freq from the SD card's config.ini. Needed for any
+# clock-scaling measurement, since config.ini otherwise pins this board to
+# 504 MHz regardless of what the build asked for.
+option(PIN_CLOCKS "Ignore config.ini clock settings" OFF)
+
+# Guest code footprint measurement, for JIT cache sizing. See codeprofile.h.
+option(CODE_PROFILE "Measure the guest code working set" OFF)
+
+# Statistical PC sampling of core 0 via SysTick. See src/pcsample.c.
+# Scripted keystrokes for unattended benchmarking. See src/autotype.h.
+set(AUTOTYPE "" CACHE STRING "Keys to type into the guest after boot")
+if(NOT AUTOTYPE STREQUAL "")
+    target_compile_definitions(${BUILD_NAME} PRIVATE AUTOTYPE_STR="${AUTOTYPE}")
+endif()
+
+option(PC_SAMPLE "Sample core-0 PC to find interpreter hot spots" OFF)
+
+# Basic-block discovery and reuse profiling. Stage 1 of the JIT.
+# SD block cache in the slave RP2350's PSRAM (C2 only). See src/diskcache.h.
+# Inline the instruction-fetch fast path. Worth +5.6% but costs ~12 KB of
+# RAM, so it is on only for the board it was measured and boot-tested on.
+if(BOARD STREQUAL "C2")
+    option(FAST_FETCH "Inline the instruction-fetch fast path" ON)
+else()
+    option(FAST_FETCH "Inline the instruction-fetch fast path" OFF)
+endif()
+if(FAST_FETCH)
+    target_compile_definitions(${BUILD_NAME} PRIVATE FAST_FETCH=1)
+endif()
+
+option(DISK_CACHE "C2: cache SD blocks in the slave's PSRAM" OFF)
+if(DISK_CACHE AND BOARD STREQUAL "C2")
+    target_compile_definitions(${BUILD_NAME} PRIVATE DISK_CACHE=1)
+    target_compile_definitions(sdcard PRIVATE DISK_CACHE=1)
+endif()
+
+option(BB_PROFILE "Profile guest basic blocks" OFF)
+if(BB_PROFILE)
+    target_compile_definitions(${BUILD_NAME} PRIVATE BB_PROFILE=1)
+endif()
+if(PC_SAMPLE)
+    target_compile_definitions(${BUILD_NAME} PRIVATE PC_SAMPLE=1)
+endif()
+if(CODE_PROFILE)
+    target_compile_definitions(${BUILD_NAME} PRIVATE CODE_PROFILE=1)
+endif()
+if(PIN_CLOCKS)
+    target_compile_definitions(${BUILD_NAME} PRIVATE PIN_CLOCKS=1)
+endif()
+if(REMOTE_MEM AND BOARD STREQUAL "C2")
+    target_compile_definitions(${BUILD_NAME} PRIVATE REMOTE_MEM=1)
+endif()
+
+# Subsystem cycle profiling. sdcard needs it too: the timed disk_read /
+# disk_write wrappers live there.
+if(SUBSYS_PROFILE)
+    target_compile_definitions(${BUILD_NAME} PRIVATE SUBSYS_PROFILE=1)
+    target_compile_definitions(sdcard PRIVATE SUBSYS_PROFILE=1)
 endif()
 
 # Compiler optimizations for performance
@@ -401,9 +513,20 @@ target_link_libraries(${BUILD_NAME}
 
 # USB configuration: USB HID uses Host mode which disables CDC
 if(USB_HID_ENABLED)
-    message(STATUS "USB HID enabled: Using UART for stdio (USB is Host mode for keyboard)")
     pico_enable_stdio_usb(${BUILD_NAME} 0)
-    pico_enable_stdio_uart(${BUILD_NAME} 0)
+    if(BOARD STREQUAL "C2")
+        # C2 has a dedicated debug UART header (J2: GPIO0 TX, GPIO1 RX,
+        # 115200). With USB in host mode it is the only console there is,
+        # and bring-up on a board whose slave cannot be reset by the
+        # master is not something to attempt blind.
+        message(STATUS "USB HID enabled: console on UART0 (J2, GPIO0/1)")
+        pico_enable_stdio_uart(${BUILD_NAME} 1)
+    else()
+        # Other boards route GPIO0/1 to PS/2 or a gamepad, so there is no
+        # UART to fall back on — stdio is simply off.
+        message(STATUS "USB HID enabled: no console (USB is Host mode for keyboard)")
+        pico_enable_stdio_uart(${BUILD_NAME} 0)
+    endif()
 else()
     # USB Serial console (when USB HID is disabled)
     pico_enable_stdio_usb(${BUILD_NAME} 1)

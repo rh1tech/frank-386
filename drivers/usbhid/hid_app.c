@@ -9,6 +9,7 @@
 #include "tusb.h"
 #include "usbhid.h"
 #include "debug.h"
+#include "usbgamepad.h"
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"  // for time_us_32()
@@ -264,6 +265,9 @@ static void process_generic_report(uint8_t dev_addr, uint8_t instance, uint8_t c
             prev_kbd_report = *(hid_keyboard_report_t const *)report;
         } else if (rpt_info->usage == HID_USAGE_DESKTOP_MOUSE) {
             process_mouse_report((hid_mouse_report_t const *)report);
+        } else if (rpt_info->usage == HID_USAGE_DESKTOP_JOYSTICK ||
+                   rpt_info->usage == HID_USAGE_DESKTOP_GAMEPAD) {
+            usbgamepad_report(instance, report, len);
         }
     }
 }
@@ -284,6 +288,15 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance, uint8_t const *desc_re
     } else if (itf_protocol == HID_ITF_PROTOCOL_MOUSE) {
         mouse_connected = 1;
         DBG_PRINT("  USB Mouse connected!\n");
+    }
+
+    /* Record VID/PID so a gamepad report can be matched to its layout
+     * map. Harmless for keyboards and mice, which never reach the
+     * gamepad decoder. */
+    {
+        uint16_t vid = 0, pid = 0;
+        tuh_vid_pid_get(dev_addr, &vid, &pid);
+        usbgamepad_set_ids(instance, vid, pid);
     }
 
     // Parse generic report descriptor for non-boot protocol devices
@@ -311,6 +324,8 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
         mouse_connected = 0;
         DBG_PRINT("  USB Mouse disconnected\n");
     }
+
+    usbgamepad_umount(instance);
 }
 
 // Invoked when report is received

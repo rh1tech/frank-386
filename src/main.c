@@ -22,6 +22,10 @@
 
 #include "hardware/structs/qmi.h"
 
+#ifdef LIB_PICO_STDIO_UART
+#include "hardware/uart.h"
+#endif
+
 #include "board_config.h"
 #include "psram_init.h"
 #include "vga_hw.h"
@@ -31,6 +35,7 @@
 #ifdef USB_HID_ENABLED
 #include "usbkbd_wrapper.h"
 #include "usbmouse_wrapper.h"
+#include "usbgamepad.h"
 #endif
 #ifdef NESPAD_GPIO_CLK
 #include "nespad.h"
@@ -46,6 +51,14 @@
 #include "settingsui.h"
 #include "config_save.h"
 #include "vga_osd.h"
+#include "profile_subsys.h"
+#include "remote_mem.h"
+#include "codeprofile.h"
+#include "pcsample.h"
+#include "autotype.h"
+#include "bbprofile.h"
+#include "diskcache.h"
+#include "gameport.h"
 
 #if FEATURE_AUDIO_PWM
 #include <hardware/pwm.h>
@@ -70,6 +83,65 @@
 PC *pc = NULL;
 static PCConfig config;
 volatile bool initialized = false;
+
+/*
+ * Interpreter throughput, always compiled.
+ *
+ * SUBSYS_PROFILE cannot answer "is this faster?" — it puts two DWT reads
+ * inside the 409-iteration AdLib loop and measurably slows the machine,
+ * so any absolute number from it is worthless. This counter touches the
+ * hot path once per pc_step(), i.e. once per 4096 guest instructions,
+ * which is free.
+ *
+ * g_mips is thousandths of a MIP (1650 == 1.650 MIPS), sampled over the
+ * last window. Read it over SWD; it needs no console.
+ */
+volatile uint32_t g_mips __attribute__((used));
+volatile uint32_t g_mips_clk __attribute__((used));
+/*
+ * Cumulative average since emulation started.
+ *
+ * The windowed figure swings ~10% as the Wolf3D demo's scene complexity
+ * changes, which would drown any single-digit optimisation. The
+ * cumulative average over a deterministic boot path (autotype drives the
+ * same keys, the demo is recorded playback) is repeatable to well under
+ * a percent, so it is the one to A/B against.
+ */
+volatile uint32_t g_mips_avg __attribute__((used));
+static uint32_t tp_steps;
+static uint64_t tp_t0;
+static uint64_t tp_t_start;
+static uint64_t tp_cyc_start, tp_cyc0;
+
+static inline void throughput_tick(void) {
+    /*
+     * Count instructions actually retired, not pc_step() calls.
+     *
+     * A pc_step() on a halted guest returns immediately without running
+     * its 4096-instruction budget, so estimating from step counts made
+     * an idle DOS prompt look like 9 MIPS. cpu->cycle is incremented per
+     * decoded instruction in cpu_exec1, which is exact and immune to
+     * that. Read once per 2000 steps, so it costs nothing.
+     */
+    if (++tp_steps < 2000u) return;
+    tp_steps = 0;
+
+    const uint64_t now = time_us_64();
+    const uint64_t cyc = (uint64_t)(unsigned long)cpui386_get_cycle(pc->cpu);
+
+    if (tp_t_start == 0) { tp_t_start = now; tp_cyc_start = cyc; tp_t0 = now; tp_cyc0 = cyc; return; }
+
+    const uint64_t all_us = now - tp_t_start;
+    if (all_us) g_mips_avg = (uint32_t)(((cyc - tp_cyc_start) * 1000ull) / all_us);
+
+    const uint64_t win_us = now - tp_t0;
+    if (win_us) g_mips = (uint32_t)(((cyc - tp_cyc0) * 1000ull) / win_us);
+    g_mips_clk = clock_get_hz(clk_sys) / 1000000u;
+
+    tp_t0 = now; tp_cyc0 = cyc;
+    cp_report((uint32_t)(win_us / 1000ull));
+    bb_report();
+}
 
 // Framebuffer for VGA output (in PSRAM)
 static uint8_t *framebuffer = NULL;
@@ -349,10 +421,12 @@ static bool process_keycode(int is_down, int keycode) {
 }
 
 static void poll_keyboard(void) {
+    int is_down, keycode;
+
+#ifdef BOARD_HAS_PS2
     // Poll PS/2 keyboard
     ps2kbd_tick();
 
-    int is_down, keycode;
     while (ps2kbd_get_key(&is_down, &keycode)) {
         if (process_keycode(is_down, keycode)) {
             if (pc && pc->kbd) {
@@ -373,6 +447,7 @@ static void poll_keyboard(void) {
             }
         }
     }
+#endif // BOARD_HAS_PS2
 
 #ifdef USB_HID_ENABLED
     // Poll USB keyboard
@@ -396,6 +471,43 @@ static void poll_keyboard(void) {
                 ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
             }
         }
+    }
+#endif
+
+    /*
+     * NES gamepad -> DOS analog joystick (game port at 0x201).
+     *
+     * The pad is read every poll rather than only when it moves: the game
+     * port is level-sensing, not event-driven, so the emulated stick has
+     * to hold its position for as long as the button is held.
+     */
+#ifdef NESPAD_GPIO_CLK
+    if (pc && !pc->paused && config_get_nes_joystick()) {
+        nespad_read();
+        const uint32_t pad = nespad_state;
+        int jx = 0, jy = 0;
+        if (pad & DPAD_LEFT)  jx = -1;
+        if (pad & DPAD_RIGHT) jx =  1;
+        if (pad & DPAD_UP)    jy = -1;
+        if (pad & DPAD_DOWN)  jy =  1;
+        /* A and B are the two buttons every DOS game expects; SNES pads
+         * also offer X/Y, mapped alongside so either pair works. */
+        uint8_t jb = 0;
+        if (pad & (DPAD_A | DPAD_Y)) jb |= 0x01;
+        if (pad & (DPAD_B | DPAD_X)) jb |= 0x02;
+        gameport_set(jx, jy, jb);
+    }
+#endif
+
+#ifdef USB_HID_ENABLED
+    /* USB gamepad -> the same emulated game port. Checked after the NES
+     * pad so that on boards with both, whichever is actually moving
+     * wins the last word each poll. */
+    if (pc && !pc->paused && config_get_usb_joystick() && usbgamepad_connected()) {
+        int jx = 0, jy = 0;
+        uint8_t jb = 0;
+        usbgamepad_get(&jx, &jy, &jb);
+        gameport_set(jx, jy, jb);
     }
 #endif
 
@@ -554,6 +666,27 @@ static int load_config_from_sd(const char *filename) {
 // Clock Configuration
 //=============================================================================
 
+/*
+ * Re-derive the console UART's baud divisors from the current clock.
+ *
+ * uart_init() computes them once, from whatever clk_peri happened to be
+ * at the time — 150 MHz, straight out of the SDK's runtime init. Every
+ * later set_sys_clock_khz() drags clk_peri with it and leaves those
+ * divisors stale, so the console turns to line noise at exactly the
+ * moment the firmware starts overclocking. On C2 the UART is the only
+ * debug surface there is, and losing it one line into the boot makes the
+ * board very hard to bring up.
+ *
+ * uart_set_baudrate() recomputes against the live clock, so calling it
+ * after each clock change is all it takes. Cheap enough to be
+ * unconditional.
+ */
+void console_reclock(void) {
+#ifdef LIB_PICO_STDIO_UART
+    uart_set_baudrate(uart_default, PICO_DEFAULT_UART_BAUD_RATE);
+#endif
+}
+
 // Flash timing configuration for overclocking
 void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int cfg_flash) {
     const int clock_hz = cpu_mhz * 1000000;
@@ -591,6 +724,7 @@ static void configure_clocks(void) {
 
     // Set system clock
     set_sys_clock_khz(CPU_CLOCK_MHZ * 1000, false);
+    console_reclock();
 
     DBG_PRINT("System clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
@@ -637,6 +771,7 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
             set_flash_timings(cpu_mhz, cfg_flash);
             set_sys_clock_khz(cpu_mhz * 1000, false);
         }
+        console_reclock();
     }
 
     // Re-initialize PSRAM with the new frequency
@@ -734,11 +869,22 @@ static bool init_hardware(void) {
         if (!SELECT_VGA && cur_mhz > cfg_cpu) {
             cfg_cpu = cur_mhz;  // preserve HDMI-boosted clock
         }
+#ifdef PIN_CLOCKS
+        /* Ignore the SD card's cpu_freq/psram_freq so a clock-scaling
+         * A/B actually varies the clock. config.ini raises this board to
+         * 504 MHz, which would silently flatten every arm of the test. */
+        (void)cfg_cpu; (void)cfg_flash;
+        reconfigure_clocks(CPU_CLOCK_MHZ, PSRAM_MAX_FREQ_MHZ, psram_pin, FLASH_MAX_FREQ_MHZ);
+        DBG_PRINT("  Clocks pinned to build settings: CPU %d, PSRAM %d\n",
+                  CPU_CLOCK_MHZ, PSRAM_MAX_FREQ_MHZ);
+#else
         if (cfg_cpu != CPU_CLOCK_MHZ || cfg_psram != PSRAM_MAX_FREQ_MHZ || cfg_flash != FLASH_MAX_FREQ_MHZ) {
             reconfigure_clocks(cfg_cpu, cfg_psram, psram_pin, cfg_flash);
         }
+#endif
     }
 
+#ifdef BOARD_HAS_PS2
     // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
     DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
@@ -752,6 +898,9 @@ static bool init_hardware(void) {
 
     // Initialize PS/2 mouse device (reset, detect IntelliMouse, enable streaming)
     ps2_mouse_init_device();
+#else
+    DBG_PRINT("PS/2 not present on this board; USB HID is the only input\n");
+#endif
 
     // Initialize USB HID keyboard (if enabled)
 #ifdef USB_HID_ENABLED
@@ -809,6 +958,45 @@ static bool init_emulator(void) {
         DBG_PRINT("  Adjusted memory: %ld MB\n", config.mem_size / (1024 * 1024));
     }
 
+#if REMOTE_MEM
+    /* Claim a window of the slave's SRAM immediately above local RAM.
+     * Measured at 89 cycles per access against 182 for the master's own
+     * PSRAM, so this region is twice as fast as the memory below it.
+     *
+     * Done before pc_new() because it extends phys_mem_size, and that is
+     * what lets load/store pass these addresses through to the
+     * dispatch in pload/pstore. */
+    {
+        uint32_t rbytes = remote_mem_init((uint32_t)config.mem_size,
+                                          REMOTE_MEM_BYTES);
+        if (rbytes) {
+            g_bench[5] = remote_mem_selftest();
+            g_bench[4] = remote_mem_rtt();
+            config.mem_size += rbytes;
+            DBG_PRINT("  Remote tier: +%lu KB (total %ld MB)\n",
+                      (unsigned long)(rbytes / 1024u),
+                      config.mem_size / (1024 * 1024));
+        } else {
+            DBG_PRINT("  Remote tier unavailable; PSRAM only\n");
+        }
+    }
+#endif
+
+    /*
+     * Bring up the slave's sector cache.
+     *
+     * Placed here, not in init_hardware(): the link's PIO divider is
+     * derived from clk_sys when the state machines are configured, and
+     * config.ini raises this board from 378 to 504 MHz during hardware
+     * init. This is also the call site where the remote-memory tier was
+     * known to work, which matters because an earlier placement inside
+     * init_hardware() hung the boot.
+     *
+     * Harmless with no slave attached: the cache stays disabled and
+     * every access goes to the card as before.
+     */
+    dc_init();
+
     // Create PC instance
     DBG_PRINT("\nCreating PC instance...\n");
     pc = pc_new(vga_redraw, platform_poll, NULL, NULL, &config);
@@ -851,6 +1039,7 @@ static bool init_emulator(void) {
     pc->mpu401_enabled = config_get_mpu401();
     pc->dss_enabled = config_get_dss();
     pc->mouse_enabled = config_get_mouse() || config_get_nes_mouse();
+    pc->joystick_enabled = config_get_nes_joystick() || config_get_usb_joystick();
     DBG_PRINT("  Audio: PC Speaker=%d, Adlib=%d, SB16=%d, MPU401=%d, Tandy=%d, Covox=%d, DSS=%d, Mouse=%d\n",
               pc->pcspk_enabled, pc->adlib_enabled, pc->sb16_enabled, pc->mpu401_enabled,
               pc->tandy_enabled, pc->covox_enabled, pc->dss_enabled, pc->mouse_enabled);
@@ -896,10 +1085,17 @@ static void __not_in_flash_func(core1_entry)(void) {
     sleep_ms(100);
     vga_initialized = true;
 
-    // Initialize I2S Audio
+    // Initialize audio. Boards without an I2S DAC (Olimex PC) define no
+    // I2S pins at all, so the pin report has to follow the audio type
+    // rather than being printed unconditionally.
+#if FEATURE_AUDIO_I2S
     DBG_PRINT("Initializing I2S Audio...\n");
     DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
            I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
+#else
+    DBG_PRINT("Initializing PWM Audio...\n");
+    DBG_PRINT("  LEFT: GPIO%d, RIGHT: GPIO%d\n", PWM_LEFT_PIN, PWM_RIGHT_PIN);
+#endif
     audio_set_enabled(false);
     audio_init();
     audio_set_volume(config_get_volume());
@@ -961,6 +1157,8 @@ static void show_welcome_screen(void) {
     osd_print_center(wy + 10, "Platform: Olimex PICO-PC", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #elif defined(BOARD_Z2)
     osd_print_center(wy + 10, "Platform: RP2350-PiZero", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
+#elif defined(BOARD_C2)
+    osd_print_center(wy + 10, "Platform: FRANK Core 2", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #else
     osd_print_center(wy + 10, "Platform: Unknown", OSD_ATTR(OSD_LIGHTGREEN, OSD_BLUE));
 #endif
@@ -970,9 +1168,17 @@ static void show_welcome_screen(void) {
     // Animate plasma background for 7 seconds (700 frames at ~10ms each)
     // Window area is skipped by osd_draw_plasma_background, so it won't flicker
     for (int frame = 0; frame < 700; frame++) {
-        ps2kbd_tick();
         int is_down = 0, keycode = 0;
+#ifdef BOARD_HAS_PS2
+        ps2kbd_tick();
         ps2kbd_get_key(&is_down, &keycode);
+#endif
+#ifdef USB_HID_ENABLED
+        if (!is_down) {
+            usbkbd_tick();
+            usbkbd_get_key(&is_down, &keycode);
+        }
+#endif
         if (is_down) break;
         osd_draw_plasma_background(frame * 3, wx, wy, ww, wh);
         sleep_ms(10);
@@ -1026,6 +1232,8 @@ int main(void) {
     DBG_PRINT("  Board: M1\n");
 #elif defined(BOARD_M2)
     DBG_PRINT("  Board: M2\n");
+#elif defined(BOARD_C2)
+    DBG_PRINT("  Board: C2 (FRANK Core 2 master)\n");
 #else
     DBG_PRINT("  Board: Unknown\n");
 #endif
@@ -1048,6 +1256,16 @@ int main(void) {
             sleep_ms(1000);
         }
     }
+
+    // Start the core-0 cycle counter before emulation begins.
+    prof_init();
+    ps_init(clock_get_hz(clk_sys), 10000u);   /* 10 kHz PC sampling */
+    prof_mem_bench();
+#if defined(SUBSYS_PROFILE) && defined(BOARD_C2) && !REMOTE_MEM
+    /* Skipped when REMOTE_MEM is on: init_emulator() has already brought
+     * the link up, and a second linkf_init() would re-claim the PIO. */
+    prof_link_bench();
+#endif
 
     initialized = true;
 
@@ -1100,9 +1318,12 @@ int main(void) {
             continue;
         }
 
+        autotype_tick();
+
         // Run CPU steps - batch multiple steps for efficiency
         for (int i = 0; i < 10; i++) {
             pc_step(pc);
+            throughput_tick();
         }
 
         // Poll keyboard less frequently (every 20 iterations ~5ms)
