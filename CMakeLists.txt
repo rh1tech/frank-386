@@ -447,13 +447,6 @@ if(FAST_FETCH)
     target_compile_definitions(${BUILD_NAME} PRIVATE FAST_FETCH=1)
 endif()
 
-# Temporary rig: force the game port on and drive it from a synthetic
-# stick, so 0x201 can be verified on a board with no NES pad header.
-option(GAMEPORT_TEST "Force the game port on with a synthetic stick" OFF)
-if(GAMEPORT_TEST)
-    target_compile_definitions(${BUILD_NAME} PRIVATE GAMEPORT_TEST=1)
-endif()
-
 option(DISK_CACHE "C2: cache SD blocks in the slave's PSRAM" OFF)
 if(DISK_CACHE AND BOARD STREQUAL "C2")
     target_compile_definitions(${BUILD_NAME} PRIVATE DISK_CACHE=1)

@@ -386,6 +386,14 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 		if (pc->adlib_enabled)
 			return adlib_read(pc->adlib, addr);
 		return 0xFFFF;
+	/* Game port. Games normally use IN AL, but a 16-bit read must not
+	 * silently return 0 - that reads as "axes already timed out" and the
+	 * stick looks stuck at one extreme. */
+	case 0x200: case 0x201: case 0x202: case 0x203:
+	case 0x204: case 0x205: case 0x206: case 0x207:
+		if (pc->joystick_enabled)
+			return 0xff00u | gameport_read();
+		return 0xfff0u;
 	default:
 		return 0;
 	}

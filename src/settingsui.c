@@ -43,6 +43,7 @@ typedef enum {
     SETTING_MOUSE,
     SETTING_NES_MOUSE,
     SETTING_NES_JOYSTICK,
+    SETTING_USB_JOYSTICK,
     SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
@@ -277,6 +278,12 @@ static void cycle_option(int direction) {
             if (config_get_nes_joystick()) config_set_nes_mouse(0);
             break;
 
+        case SETTING_USB_JOYSTICK:
+            /* Not exclusive with the NES pad: both feed the same
+             * emulated stick, so either can drive it. */
+            config_set_usb_joystick(config_get_usb_joystick() ? 0 : 1);
+            break;
+
         case SETTING_MOUSE_INVERT_Y:
             config_set_mouse_invert_y(config_get_mouse_invert_y() ? 0 : 1);
             break;
@@ -343,6 +350,7 @@ static void draw_settings_menu(void) {
         "PS/2 or USB Mouse:",
         "NES Mouse:",
         "NES Joystick:",
+        "USB Joystick:",
         "Invert Mouse Y:",
         "RP2350 Freq:",
         "CPU Voltage:",
@@ -407,6 +415,9 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_NES_JOYSTICK:
                 snprintf(value, sizeof(value), "< %s >", config_get_nes_joystick() ? "Enabled" : "Disabled");
+                break;
+            case SETTING_USB_JOYSTICK:
+                snprintf(value, sizeof(value), "< %s >", config_get_usb_joystick() ? "Enabled" : "Disabled");
                 break;
             case SETTING_MOUSE_INVERT_Y:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");
@@ -566,6 +577,7 @@ bool settingsui_handle_key(int keycode, bool is_down) {
 void settingsui_animate(void) {
     if (settings_state == SETTINGS_CLOSED) return;
     plasma_frame++;
+
     // Only update plasma background, not the window content
     osd_draw_plasma_background(plasma_frame * 3, MENU_X, MENU_Y, MENU_W, MENU_H);
 }
