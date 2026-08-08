@@ -1065,6 +1065,9 @@ static void hdmi_boost_clock(void) {
     sleep_ms(50);
     set_flash_timings(HDMI_SYS_CLOCK_MHZ, FLASH_MAX_FREQ_MHZ);
     set_sys_clock_khz(HDMI_SYS_CLOCK_MHZ * 1000, false);
+    /* clk_peri moved with clk_sys; the UART's divisors did not. */
+    extern void console_reclock(void);
+    console_reclock();
     // Immediately reinit PSRAM for the new clock speed.
     // Without this, PSRAM runs at ~177 MHz (overclocked) until
     // reconfigure_clocks runs much later, causing intermittent hangs.
@@ -1085,7 +1088,12 @@ void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
         spread8_lut[i] = spread8(i);
     }
-    #ifdef FORCE_HDMI
+    #if defined(FORCE_VGA)
+        /* Skip the pin probe and commit to VGA. Wins over FORCE_HDMI so a
+         * board that defaults to HDMI can still be built for VGA without
+         * unpicking its board block. */
+        SELECT_VGA = true;
+    #elif defined(FORCE_HDMI)
         SELECT_VGA = false;
     #else
         uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);

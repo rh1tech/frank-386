@@ -222,6 +222,9 @@ bool cpu_pending_trap(void);
 void cpu_pending_trap_set(bool v);
 
 CPU *cpu_new(int gen, CPU_CB **cb);
+#ifdef I386_MODE
+unsigned long cpui386_get_cycle(const CPU *cpu);
+#endif
 inline static void enable_fpu(CPU *cpu) {
 	cpu->ext_accessors->enable_fpu(cpu);
 }

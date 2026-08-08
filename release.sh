@@ -103,8 +103,10 @@ AUDIO_TYPES=("I2S" "PWM")
 CPU_SPEED="378"    # Stable overclock for releases
 PSRAM_SPEED="133"  # Stable PSRAM speed for releases
 
-# Count total builds: M1/M2/Z2 get I2S+PWM (6), PC gets PWM only (1) = 7
-TOTAL_BUILDS=7
+# Count total builds: M1/M2/Z2 get I2S+PWM (6), PC gets PWM only (1),
+# C2 gets one build (its audio, video and USB configuration are all
+# forced by the board block in CMakeLists) = 8
+TOTAL_BUILDS=8
 BUILD_COUNT=0
 
 echo ""
@@ -122,7 +124,7 @@ build_variant() {
     local BOARD_LC=$(echo "$BOARD" | tr '[:upper:]' '[:lower:]')
     local AUDIO_LC=$(echo "$AUDIO" | tr '[:upper:]' '[:lower:]')
 
-    local OUTPUT_NAME="frank-386_${BOARD_LC}_${AUDIO_LC}_${VERSION}.uf2"
+    local OUTPUT_NAME="${3:-frank-386_${BOARD_LC}_${AUDIO_LC}_${VERSION}.uf2}"
 
     echo ""
     echo -e "${CYAN}[$BUILD_COUNT/$TOTAL_BUILDS] Building: $OUTPUT_NAME${NC}"
@@ -183,6 +185,12 @@ for BOARD in "${BOARDS[@]}"; do
     done
 done
 
+# FRANK Core 2 (dual RP2350). Only one variant exists: CMakeLists forces
+# I2S audio (the TDA1387T sits on the pins M2 would use for PWM), HDMI
+# output, and USB HID as the sole input path. Passing an explicit output
+# name keeps it from being labelled with an audio choice it does not have.
+build_variant "C2" "I2S" "frank-386_c2_${VERSION}.uf2"
+
 # ============================================================================
 # Clean up
 # ============================================================================
@@ -194,6 +202,6 @@ echo -e "${GREEN}Release build complete!${NC}"
 echo ""
 echo "Release files in: $RELEASE_DIR/"
 echo ""
-ls -la "$RELEASE_DIR"/frank-386_*_*_${VERSION}.uf2 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
+ls -la "$RELEASE_DIR"/frank-386_*${VERSION}.uf2 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}'
 echo ""
 echo -e "Version: ${CYAN}${MAJOR}.$(printf '%02d' $MINOR)${NC}"

@@ -2,6 +2,8 @@
 #include "i386.h"
 #include "bios/bios.h"
 #include "fdos/fdos.h"
+#include "codeprofile.h"
+#include "bbprofile.h"
 #include <pico.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -416,6 +418,7 @@ static inline uword sext32(u32 a)
 {
 	return (sword) (s32) a;
 }
+
 
 /* lazy flags */
 enum {
@@ -958,6 +961,7 @@ static inline void __attribute__((always_inline))
 prefetch_fill(CPUI386 *cpu, uword paddr)
 {
 	u32 base = paddr & ~(u32)15;
+	cp_note(base);
 	cpu->prefetch_base = base;
 	register u32* prefetch = (u32*)cpu->prefetch;
 	register u32* src = (u32*)(PC_RAM + base);
@@ -971,7 +975,19 @@ prefetch_fill(CPUI386 *cpu, uword paddr)
 #define PREFETCH_HIT(paddr) \
 	(likely(((uword)(paddr) - cpu->prefetch_base) < 16u))
 
-static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
+/*
+ * Instruction fetch is 21% of core-0 time, and peek8 was being called
+ * out of line from 473 sites — one call, prologue and return per
+ * instruction *byte*. IRAM_ATTR is __not_in_flash(), an explicit
+ * section attribute, and GCC will not inline a function that carries
+ * one, so the `static` here was never enough.
+ *
+ * The split below inlines only the hit path: two compares and a byte
+ * load, ~20 bytes per site. Everything else — prefetch refill, page
+ * miss, the full TLB walk — stays out of line in peek8_slow, which is
+ * the original function unchanged.
+ */
+static bool IRAM_ATTR peek8_slow(CPUI386 *cpu, u8 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
@@ -999,6 +1015,24 @@ static bool IRAM_ATTR peek8(CPUI386 *cpu, u8 *val)
 	}
 	return true;
 }
+
+#if FAST_FETCH
+static inline __attribute__((always_inline))
+bool peek8(CPUI386 *cpu, u8 *val)
+{
+	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
+	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
+		uword paddr = cpu->ifetch.xaddr ^ laddr;
+		if (likely(PREFETCH_HIT(paddr))) {
+			*val = cpu->prefetch[paddr & 15];
+			return true;
+		}
+	}
+	return peek8_slow(cpu, val);
+}
+#else
+#define peek8 peek8_slow
+#endif
 
 static bool IRAM_ATTR fetch16(CPUI386 *cpu, u16 *val)
 {
@@ -4043,6 +4077,9 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 
 	if (code16) cpu->next_ip &= 0xffff;
 	cpu->ip = cpu->next_ip;
+#if BB_PROFILE
+	{ static uint32_t bb_prev; bb_note(cpu->ip, bb_prev); bb_prev = cpu->ip; }
+#endif
 	TRY(fetch8(cpu, &b1));
 #if DEBUG_CPU
 	opcode = b1;
@@ -5353,6 +5390,13 @@ static bool no_handler(CPU* cpu) {
     cpu_err_msg(cpu, "ERROR: no handler defined");
 while(1); // remove it
     return true;
+}
+#endif
+
+#ifdef I386_MODE
+unsigned long cpui386_get_cycle(const CPU *cpu)
+{
+    return (unsigned long)((const CPUI386 *)cpu)->cycle;
 }
 #endif
 

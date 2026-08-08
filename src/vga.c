@@ -33,6 +33,7 @@
 #include <assert.h>
 
 #include "vga.h"
+#include "codeprofile.h"
 #include "pci.h"
 
 #ifdef BUILD_ESP32
@@ -1622,6 +1623,7 @@ static const uint32_t mask16[16] __not_in_flash("mask16") = {
 //#define TARGET_FMT_plx "%x"
 void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
 {
+	cp_vga_write();
     if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M)) {
         vga_mem_write(s, addr, val16);
         vga_mem_write(s, addr + 1, val16 >> 8);
@@ -1668,6 +1670,7 @@ void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
 
 void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
 {
+	cp_vga_write();
     if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M)) {
         vga_mem_write(s, addr, val);
         vga_mem_write(s, addr + 1, val >> 8);
@@ -1760,6 +1763,7 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
 
 void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 {
+	cp_vga_write();
     uint32_t val = val8;
 
     int memory_map_mode, plane, write_mode, b, func_select, mask;
@@ -1902,6 +1906,7 @@ void IRAM_ATTR vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 
 uint8_t __not_in_flash_func(vga_mem_read)(VGAState *s, uint32_t addr)
 {
+	cp_vga_read();
     int memory_map_mode, plane;
     uint32_t ret;
 

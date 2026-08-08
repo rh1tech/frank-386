@@ -73,6 +73,7 @@ typedef struct PC {
 	int mpu401_enabled;
 	int dss_enabled;
 	int mouse_enabled;
+	int joystick_enabled;   /* analog game port at 0x201 */
 
 	IDEIFState *ide;
 	IDEIFState *ide2;

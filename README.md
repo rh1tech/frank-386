@@ -1,5 +1,7 @@
 # FRANK 386
 
+Official page: **[frank.rh1.tech](https://frank.rh1.tech/)** — hub for all FRANK boards and firmware.
+
 i386 PC Emulator for RP2350 (Raspberry Pi Pico 2) with VGA/HDMI output, SD card storage, PS/2 and USB keyboard/mouse, NES gamepad, and audio output.
 
 Based on [Tiny386](https://github.com/hchunhui/tiny386) by Chunhui He.
@@ -17,6 +19,16 @@ Based on [Tiny386](https://github.com/hchunhui/tiny386) by Chunhui He.
 - USB keyboard and mouse input (via native USB Host)
 - NES gamepad support with mouse emulation mode
 - Boots DOS, Windows 3.x, **Windows 95**, Linux, and more
+
+## Screenshots
+
+### FRANK 386 in Action
+
+![Screenshot 1](screenshots/screen1.png)
+![Screenshot 2](screenshots/screen2.png)
+![Screenshot 3](screenshots/screen3.png)
+![Screenshot 4](screenshots/screen4.png)
+![Screenshot 5](screenshots/screen5.png)
 
 ## Supported Boards
 

@@ -63,6 +63,14 @@ void config_set_mouse(int enabled);
 
 int config_get_nes_mouse(void);
 void config_set_nes_mouse(int enabled);
+/* NES pad as a DOS analog joystick on the game port (0x201). Mutually
+ * exclusive with nes_mouse: one pad cannot be both at once. */
+int config_get_nes_joystick(void);
+void config_set_nes_joystick(int enabled);
+/* USB gamepad as a DOS analog joystick on the same game port. Can run
+ * alongside the NES pad: both feed the one emulated stick. */
+int config_get_usb_joystick(void);
+void config_set_usb_joystick(int enabled);
 
 int config_get_cpu_freq(void);
 void config_set_cpu_freq(int mhz);
