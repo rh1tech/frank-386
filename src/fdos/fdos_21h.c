@@ -919,6 +919,25 @@ bool fdos_21h(CPU* _cpu) {
 dispatch:                       /* re-entry point for AH=5Dh AL=00h
                                    (remote server call), matching the
                                    original inthndlr.c dispatch: label */
+    /*
+     * Match FreeDOS int21_service(): file/path/network functions clear
+     * carry before dispatch and start a fresh extended-error record.
+     * Without resetting CritErrCode here, AH=59h can return an error from
+     * an older DOS call instead of the failure that immediately preceded
+     * it.  Volkov Commander relies on AH=59h after AX=4300h when probing a
+     * not-yet-existing copy destination.
+     */
+    if ((R_AH >= 0x38 && R_AH <= 0x4f) ||
+        (R_AH >= 0x56 && R_AH <= 0x5c) ||
+        (R_AH >= 0x5e && R_AH <= 0x60) ||
+        (R_AH >= 0x65 && R_AH <= 0x6a) ||
+        R_AH == 0x6c)
+    {
+      R_CF = 0;
+      if (R_AH != 0x59)
+        internal_data->CritErrCode = SUCCESS;
+    }
+
     switch (R_AH) {
       /* Read Keyboard With Echo                                      */
       case 0x01:
@@ -1200,14 +1219,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         long result = DosOpen(R_FP_DS_DX, O_LEGACY | O_RDWR | O_CREAT | O_TRUNC, R_CL);
         if (result < SUCCESS)
         {
-          R_CF = 1;
-          R_AX = (UWORD)(-result);
+          rc = (int)result;
+          goto error_exit;
         }
-        else
-        {
-          R_CF = 0;
-          R_AX = (UWORD)result;
-        }
+        R_CF = 0;
+        R_AX = (UWORD)result;
       }
         break;
 
@@ -1222,14 +1238,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         long result = DosOpen(R_FP_DS_DX, O_LEGACY | O_OPEN | R_AL, 0);
         if (result < SUCCESS)
         {
-          R_CF = 1;
-          R_AX = (UWORD)(-result);
+          rc = (int)result;
+          goto error_exit;
         }
-        else
-        {
-          R_CF = 0;
-          R_AX = (UWORD)result;
-        }
+        R_CF = 0;
+        R_AX = (UWORD)result;
       }
         break;
 
@@ -1241,11 +1254,10 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            return a value the caller cares about on success). */
         int result = DosClose(R_BX);
         if (result < SUCCESS) {
-          R_CF = 1;
-          R_AX = (UWORD)(-result);
-        } else {
-          R_CF = 0;
+          rc = result;
+          goto error_exit;
         }
+        R_CF = 0;
       }
         break;
 
@@ -1259,14 +1271,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         long result = DosRead(R_BX, R_CX, R_FP_DS_DX);
         if (result < SUCCESS)
         {
-          R_CF = 1;
-          R_AX = (UWORD)(-result);
+          rc = (int)result;
+          goto error_exit;
         }
-        else
-        {
-          R_CF = 0;
-          R_AX = (UWORD)result;
-        }
+        R_CF = 0;
+        R_AX = (UWORD)result;
       }
         break;
 
@@ -1279,14 +1288,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         long result = DosWrite(R_BX, R_CX, R_FP_DS_DX);
         if (result < SUCCESS)
         {
-          R_CF = 1;
-          R_AX = (UWORD)(-result);
+          rc = (int)result;
+          goto error_exit;
         }
-        else
-        {
-          R_CF = 0;
-          R_AX = (UWORD)result;
-        }
+        R_CF = 0;
+        R_AX = (UWORD)result;
       }
         break;
  
