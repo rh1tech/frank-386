@@ -896,6 +896,14 @@ void cpu_far_call(CPU* cpu, UWORD seg, UWORD off)
   SET_CS(seg);
   SET_IP(off);
   while (!params.done) {
+    /* See bios_intcall(): bail out when a terminate is pending so we
+       do not spin with a latched native_done.  A guest reached through
+       this far-call (e.g. a driver entry issuing LMSW PE=1) that gets
+       aborted by request_terminate() never RETFs back to the trap
+       address, so params.done would never be set.  terminate_flag is
+       left armed for the enclosing exec_run_process() to consume. */
+    if (terminate_requested())
+      break;
     pc_step(pc, 4096); /// ???
     /*
     if (CPU_CS == params.expected_cs && CPU_IP == params.expected_ip) {

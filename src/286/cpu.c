@@ -6,6 +6,14 @@
 #include "bios/bios.h"
 #include "fdos/fdos.h"
 
+/*
+ * Platform notification is deliberately asynchronous: the CPU core must not
+ * sleep while reporting an unsupported guest instruction.
+ */
+extern void emulator_unsupported_cpu_feature(const char *mnemonic,
+                                             uint16_t cs, uint16_t ip);
+extern void request_terminate(uint8_t exit_code, uint8_t exit_type);
+
 #define IRAM_ATTR __not_in_flash()
 #define INLINE __always_inline
 
@@ -1266,10 +1274,84 @@ static void IRAM_ATTR i286_step(CPU* cpu, int execloops) {
                 CPU_CS = pop(cpu);
                 break;
 #else
+            case 0x0F: {
                 /*
-                            case 0xF: // 286 protected mode
-                            break;
-                */
+                 * The 286 core is real-mode-only.  In native BIOS/FDOS mode we
+                 * can nevertheless decode the 0F 01 system group far enough to
+                 * fail cleanly when a guest tries to enter protected mode.
+                 *
+                 * Do not change guest-BIOS behaviour: request_terminate() is a
+                 * native FDOS process-lifecycle hook and cannot safely unwind
+                 * an arbitrary guest DOS.
+                 */
+                if (cpu->bios || getmem8(CPU_CS, CPU_IP) != 0x01)
+                    break;
+
+                StepIP(1);       /* consume 01 */
+                modregrm(cpu);   /* consume ModR/M + displacement */
+
+                switch (reg) {
+                case 0: /* SGDT m16&24 */
+                    if (mode < 3) {
+                        getea(cpu, rm);
+                        writew86(ea + 0, 0xFFFF); /* real-mode placeholder */
+                        writew86(ea + 2, 0x0000);
+                        writew86(ea + 4, 0x0000);
+                    }
+                    break;
+
+                case 1: /* SIDT m16&24 */
+                    if (mode < 3) {
+                        getea(cpu, rm);
+                        writew86(ea + 0, 0x03FF); /* real-mode IVT */
+                        writew86(ea + 2, 0x0000);
+                        writew86(ea + 4, 0x0000);
+                    }
+                    break;
+
+                case 2: /* LGDT m16&24 */
+                case 3: /* LIDT m16&24 */
+                    /*
+                     * Consume the operand but do not install hidden PM state.
+                     * Native FDOS remains in real mode; a following LMSW PE=1
+                     * is the point where execution must be stopped.
+                     */
+                    break;
+
+                case 4: /* SMSW r/m16 */
+                    writerm16(cpu, rm, 0x0000); /* PE=0, real mode */
+                    break;
+
+                case 6: { /* LMSW r/m16 */
+                    uint16_t msw = readrm16(cpu, rm);
+                    if (msw & 0x0001u) {
+                        emulator_unsupported_cpu_feature(
+                            "LMSW: Protected Mode is not implemented",
+                            CPU_CS, firstip);
+
+                        /*
+                         * CheckIt 3.0 disables the 8042 keyboard interface
+                         * immediately before entering protected mode (OUT 64h,
+                         * ADh) and reenables it only on its normal PM-exit path
+                         * (OUT 64h, AEh).  Forced termination at LMSW skips
+                         * that cleanup, leaving IRQ1 suppressed by i8042.
+                         *
+                         * Restore only that controller gate here.  Do not
+                         * fabricate a key, touch the keyboard scan-enable
+                         * state, or alter AUX state.
+                         */
+                        cpu->cb.io_write8(cpu->cb.io, 0x64, 0xAE);
+
+                        request_terminate(0xFF, 0);
+                    }
+                    break;
+                }
+
+                default:
+                    break;
+                }
+                break;
+            }
 #endif
 
             case 0x10: /* 10 ADC Eb Gb */

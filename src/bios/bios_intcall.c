@@ -20,6 +20,8 @@ static bool intcall_waiter(CPU* cpu, bios_callback_params_t* params) {
 
 extern struct PC* pc;
 void pc_step(struct PC* pc, size_t max_ops);
+/* proto.h (fdos) not included here - forward-declare the terminate probe. */
+extern bool terminate_requested(void);
 
 void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     u16 cs = CPU_CS;
@@ -71,6 +73,17 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     cpu_intcall(cpu, intnum);
     cpu->native_done = false;
     while(!params.done) {
+        /* Break the nested guest burst when a terminate is pending.
+           request_terminate() (e.g. LMSW PE=1) latches terminate_flag
+           and native_done, but this loop only ends on params.done -
+           which our intcall_waiter sets when the guest returns to the
+           trap address.  An aborted guest thread never gets there, so
+           native_done stays true, i286_step() bails at the top running
+           zero instructions, and the loop spins forever.  Leave
+           terminate_flag set: the signal cascades up to the owning
+           exec_run_process(), which performs the process teardown. */
+        if (terminate_requested())
+            break;
         pc_step(pc, 4096); /// TODO: a lot of?
     }
     cpu->native_done = old_native_done;

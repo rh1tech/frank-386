@@ -45,6 +45,7 @@
 #include "audio.h"
 
 #include "pc.h"
+#include "i8259.h"
 #include "ini.h"
 #include "debug.h"
 #include "diskui.h"
@@ -153,6 +154,78 @@ static FATFS fatfs;
 
 // Flag to track if VGA is initialized (for error display)
 static volatile bool vga_initialized = false;
+
+/* Timed, non-blocking CPU feature warning. */
+static uint64_t cpu_feature_warning_until_us = 0;
+
+/*
+ * Native BIOS initializes both PIC IMRs to 00h (all IRQs enabled).  A guest
+ * that is forcibly terminated during a protected-mode transition cannot run
+ * its own cleanup and may leave both PICs masked.  Restore the native BIOS
+ * interrupt-mask state when dismissing this specific warning.
+ */
+static void cpu_feature_warning_recover_pic(void)
+{
+    if (!pc || !pc->pic)
+        return;
+
+    i8259_ioport_write(pc->pic, 0x21, 0x00);
+    i8259_ioport_write(pc->pic, 0xA1, 0x00);
+}
+
+void emulator_unsupported_cpu_feature(const char *mnemonic,
+                                      uint16_t cs, uint16_t ip)
+{
+    char where[48];
+
+    printf("WARNING: unsupported 80286 feature at %04X:%04X: %s\n",
+           cs, ip, mnemonic ? mnemonic : "unknown");
+
+    if (!vga_initialized)
+        return;
+
+    osd_init();
+    osd_clear();
+
+    const int box_w = 66;
+    const int box_h = 10;
+    const int box_x = (OSD_COLS - box_w) / 2;
+    const int box_y = (OSD_ROWS - box_h) / 2;
+    const uint8_t attr = OSD_ATTR(OSD_BLACK, OSD_YELLOW);
+
+    osd_fill(box_x, box_y, box_w, box_h, ' ', attr);
+    osd_draw_box_titled(box_x, box_y, box_w, box_h,
+                        " Unsupported 80286 feature ", attr);
+    osd_print(box_x + 3, box_y + 2,
+              mnemonic ? mnemonic : "Unsupported instruction", attr);
+    snprintf(where, sizeof(where), "Guest instruction at %04X:%04X", cs, ip);
+    osd_print(box_x + 3, box_y + 4, where, attr);
+    osd_print(box_x + 3, box_y + 6,
+              "Program terminated.", attr);
+    osd_print(box_x + 3, box_y + 7,
+              "Emulator continues, if state is not corrupted.", attr);
+    osd_show();
+
+    cpu_feature_warning_until_us = time_us_64() + 4000000ull;
+}
+
+static void cpu_feature_warning_tick(void)
+{
+    if (!cpu_feature_warning_until_us)
+        return;
+    if (time_us_64() < cpu_feature_warning_until_us)
+        return;
+
+    cpu_feature_warning_until_us = 0;
+    cpu_feature_warning_recover_pic();
+
+    /*
+     * Do not hide an OSD subsequently taken over by a normal UI.
+     * Otherwise this warning expires independently of emulation.
+     */
+    if (!diskui_is_open() && !settingsui_is_open())
+        osd_hide();
+}
 
 //=============================================================================
 // Error Display
@@ -344,12 +417,72 @@ static void vga_redraw(void *opaque, int x, int y, int w, int h) {
 // Keyboard Polling
 //=============================================================================
 
-// Track modifier key state for Win+F12 hotkey
+// Host-side modifier state. These hotkeys must remain available even when
+// the guest CPU, PIC, 8042, or interrupt state is no longer usable.
 static bool win_key_pressed = false;
+static bool ctrl_key_pressed = false;
+static bool alt_key_pressed = false;
 
-// Process a single keycode, handling disk UI and settings UI hotkeys
+/*
+ * process_keycode() receives Linux/evdev keycodes from both keyboard
+ * wrappers.  usbkbd_wrapper.c maps these explicitly; ps2kbd_wrapper uses
+ * the same keycode space.  Keep the few host-hotkey codes local instead of
+ * relying on KEY_* names that are not exported by this build's headers.
+ */
+enum {
+    HOST_KEY_LEFTCTRL  = 29,
+    HOST_KEY_LEFTALT   = 56,
+    HOST_KEY_RIGHTCTRL = 97,
+    HOST_KEY_RIGHTALT  = 100,
+    HOST_KEY_DELETE    = 111
+};
+
+static __attribute__((noreturn)) void hard_reboot(void)
+{
+    /*
+     * Full RP2350 reboot, not a guest CPU/BIOS reset.  Keep the existing
+     * fast-reboot magic used by the other watchdog restart paths.
+     */
+    *(uint32_t *)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52;
+    watchdog_reboot(0, 0, 0);
+
+    while (true)
+        tight_loop_contents();
+}
+
+// Process a single keycode, handling host and UI hotkeys
 // Returns true if key should be passed to emulator, false if consumed
 static bool process_keycode(int is_down, int keycode) {
+    /*
+     * Track Ctrl/Alt before any modal OSD handling.  Ctrl+Alt+Del is a
+     * host-side emergency reset and must work even while the guest is wedged.
+     */
+    if (keycode == HOST_KEY_LEFTCTRL || keycode == HOST_KEY_RIGHTCTRL)
+        ctrl_key_pressed = is_down;
+    if (keycode == HOST_KEY_LEFTALT || keycode == HOST_KEY_RIGHTALT)
+        alt_key_pressed = is_down;
+
+    if (is_down && keycode == HOST_KEY_DELETE &&
+        ctrl_key_pressed && alt_key_pressed) {
+        hard_reboot();
+    }
+
+    /*
+     * Treat the unsupported-CPU warning as a modal OSD for keyboard input:
+     * dismiss it on the first key press and consume that press so it does not
+     * leak through to the guest application underneath the OSD.
+     *
+     * Ignore key releases.  Otherwise release of a key that was already held
+     * before the warning appeared could close the dialog immediately.
+     */
+    if (cpu_feature_warning_until_us && is_down) {
+        cpu_feature_warning_until_us = 0;
+        cpu_feature_warning_recover_pic();
+        if (!diskui_is_open() && !settingsui_is_open())
+            osd_hide();
+        return false;
+    }
+
     // Track Win key state
     if (keycode == KEY_LEFTMETA) {
         win_key_pressed = is_down;
@@ -545,6 +678,14 @@ static void poll_keyboard(void) {
 
 static void platform_poll(void *opaque) {
     (void)opaque;
+
+    /*
+     * platform_poll() is called from pc_step(), including the nested pc_step()
+     * loops used by native FDOS/FCOM.  A native command processor can own the
+     * C stack indefinitely, so main()'s outer loop is not guaranteed to run
+     * while an OSD warning is visible.
+     */
+    cpu_feature_warning_tick();
     poll_keyboard();
     // VGA update is handled by Core 1, don't call here to avoid contention
     if (pc && pc->reset_request) {
