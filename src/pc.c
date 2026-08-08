@@ -262,7 +262,7 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 		val = vga_ioport_read(pc->vga, addr);
 		return val;
 	case 0x92:
-		return pc->port92;
+		return pc->port92 | 0x02;
 	case 0x60:
 		val = kbd_read_data(pc->i8042, addr);
 		return val;
@@ -551,8 +551,9 @@ static void pc_io_write(void *o, int addr, u8 val)
 	case 0x402:
 		return;
 	case 0x92:
-		pc->port92 = val;
-		cpu_set_a20(pc->cpu, (val >> 1) & 1);
+		/* Fast A20 gate is hard-wired on; preserve all other port bits. */
+		pc->port92 = val | 0x02;
+		cpu_set_a20(pc->cpu, 1);
 		return;
 	case 0x60:
 		kbd_write_data(pc->i8042, addr, val);

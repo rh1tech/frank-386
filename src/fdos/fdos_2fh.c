@@ -343,79 +343,43 @@ ret:
     return res;
 }
 
-static inline void xms_move_to(register uint32_t destination, register uint32_t source, register uint32_t length) {
+static inline void xms_move_to(uint32_t destination, uint32_t source, uint32_t length) {
     dpb_watch_check_chain("xms_move_to 1");
-    if (((destination | source) & 1u) == 0) {
-        uint16_t *dest_ptr = (uint16_t *)xms_ptr(destination);
-        while (length >= 2) {
-            *dest_ptr++ = readw86(source);
-            source += 2;
-            length -= 2;
-        }
-        destination = (uint32_t)((uint8_t *)dest_ptr - xms_ptr(0));
-    } else {
-        uint8_t *dest_ptr = xms_ptr(destination);
-        while (length && ((destination | source) & 1u)) {
-            *dest_ptr++ = read86(source++);
-            destination++;
-            length--;
-        }
-        if (length >= 2) {
-            uint16_t *dest16 = (uint16_t *)dest_ptr;
-            while (length >= 2) {
-                *dest16++ = readw86(source);
-                source += 2;
-                length -= 2;
-            }
-            dest_ptr = (uint8_t *)dest16;
-        }
-        if (length)
-            *dest_ptr = read86(source);
-        return;
-    }
-    if (length)
-        *xms_ptr(destination) = read86(source);
+    uint8_t *dst = xms_ptr(destination);
+    while (length--)
+        *dst++ = read86(source++);
     dpb_watch_check_chain("xms_move_to 2");
 }
  
-static inline void xms_move_from(register uint32_t source, register uint32_t destination, register uint32_t length) {
+static inline void xms_move_from(uint32_t source, uint32_t destination, uint32_t length) {
     dpb_watch_check_chain("xms_move_from 1");
-    if (((source | destination) & 1u) == 0) {
-        const uint16_t *source_ptr = (const uint16_t *)xms_ptr(source);
-        while (length >= 2) {
-            writew86(destination, *source_ptr++);
-            destination += 2;
-            length -= 2;
-        }
-        source = (uint32_t)((const uint8_t *)source_ptr - xms_ptr(0));
-    } else {
-        const uint8_t *source_ptr = xms_ptr(source);
-        while (length && ((source | destination) & 1u)) {
-            write86(destination++, *source_ptr++);
-            source++;
-            length--;
-        }
-        if (length >= 2) {
-            const uint16_t *source16 = (const uint16_t *)source_ptr;
-            while (length >= 2) {
-                writew86(destination, *source16++);
-                destination += 2;
-                length -= 2;
-            }
-            source_ptr = (const uint8_t *)source16;
-        }
-        if (length)
-            write86(destination, *source_ptr);
-        return;
-    }
-    if (length)
-        write86(destination, *xms_ptr(source));
+    const uint8_t *src = xms_ptr(source);
+    while (length--)
+        write86(destination++, *src++);
     dpb_watch_check_chain("xms_move_from 2");
 }
 
 static inline void xms_move_mem_to_mem(uint32_t destination, uint32_t source, uint32_t length) {
     dpb_watch_check_chain("xms_move_mem_to_mem 1");
-    memmove(X86_RAM_BASE + destination, X86_RAM_BASE + source, length);
+
+    /* Handle-0 operands are guest real-mode addresses.  They must go through
+       the normal memory accessors: a raw PC_RAM/X86_RAM_BASE memmove bypasses
+       EMS page-frame banking (and any other mapped low-memory window).
+
+       Preserve memmove semantics for overlapping conventional-memory ranges. */
+    if (destination > source && destination - source < length) {
+        source += length;
+        destination += length;
+        while (length--) {
+            --source;
+            --destination;
+            write86(destination, read86(source));
+        }
+    } else {
+        while (length--)
+            write86(destination++, read86(source++));
+    }
+
     dpb_watch_check_chain("xms_move_mem_to_mem 2");
 }
 
@@ -536,10 +500,9 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             break;
         case GLOBAL_DISABLE_A20:
         case LOCAL_DISABLE_A20:
-            // Local Disable A20
-            CPU_AX = 1; // Success
-            CPU_BL = 0;
-            cpu_set_a20(cpu, 0);
+            /* A20 is permanently enabled on this emulated machine. */
+            CPU_AX = 0;
+            CPU_BL = 0x82;   /* A20 error */
             break;
         case QUERY_A20:
             /* 07h: AX = 1 if A20 is enabled, 0 if disabled (cpu_get_a20()
@@ -615,6 +578,8 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
              * per-handle base inside the pool. Real-mode (handle==0) sides
              * are seg:off far pointers. */
             uint8_t err = 0;
+            if (move_data.length & 1u)
+                err = 0xA7; /* XMS 2.0: move length must be even */
             if (move_data.source_handle) {
                 const uint16_t h = move_data.source_handle;
                 if (h > XMS_HANDLES || !emb_handles[h].used)
@@ -757,24 +722,27 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             break;
         }
         case RELEASE_UMB: {
-            // Release Upper Memory Block (Function 11h)
-            // Stub: Release Upper Memory Block
+            // Release Upper Memory Block (Function 11h), DX = UMB segment.
+            bool released = false;
             for (int i = 0; i < UMB_BLOCKS_COUNT; ++i)
-                if (umb_blocks[i].segment == CPU_BX && umb_blocks[i].allocated_paragraphs > 0) {
+                if (umb_blocks[i].segment == CPU_DX && umb_blocks[i].allocated_paragraphs > 0) {
                     int par = umb_blocks[i].allocated_paragraphs;
                     while (par > 0 && i < UMB_BLOCKS_COUNT) {
                         umb_blocks[i].allocated_paragraphs = 0;
                         par -= umb_blocks[i++].size;
                         umb_blocks_allocated--;
                     }
-                    CPU_AX = 0x0001; // Success
-                    CPU_BL = 0;
-                    return 0xCB; // Early return to avoid fall-through
+                    released = true;
+                    break;
                 }
 
-            CPU_AX = 0x0000; // Failure
-            CPU_DX = 0x0000;
-            CPU_BL = 0xB2; // Error code
+            if (released) {
+                CPU_AX = 0x0001; // Success
+                CPU_BL = 0;
+            } else {
+                CPU_AX = 0x0000; // Failure
+                CPU_BL = 0xB2; // Invalid UMB segment
+            }
             break;
         }
         case LOCK_EMB: { // 0Ch, DX = handle -> DX:BX = 32-bit physical address

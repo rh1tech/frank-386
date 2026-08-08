@@ -157,7 +157,7 @@ struct CPU {
 	bool intr;
 
 	int gen;
-	u32 a20_mask;  /* 0xFFFFFFFF = A20 on, 0xFFEFFFFF = A20 off */
+	u32 a20_mask;  /* A20 is modeled as permanently enabled */
 	CPU_ext_accessors_t* ext_accessors;
 	CPU_CB cb;
 

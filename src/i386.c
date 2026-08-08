@@ -5532,12 +5532,17 @@ static void cpu_debug(CPUI386 *cpu)
 
 void IRAM_ATTR cpu_set_a20(CPU* cpu, int enabled)
 {
-	cpu->a20_mask = enabled ? 0xFFFFFFFFu : 0xFFEFFFFFu;
+	/* This machine models A20 as permanently enabled.  Some software still
+	 * probes the legacy gate through the KBC or port 92h; disable requests
+	 * are therefore ignored at the CPU level. */
+	(void)enabled;
+	cpu->a20_mask = 0xFFFFFFFFu;
 }
 
 int IRAM_ATTR cpu_get_a20(CPU* cpu)
 {
-	return cpu->a20_mask >> 20 & 1;
+	(void)cpu;
+	return 1;
 }
 
 #ifdef I386_MODE

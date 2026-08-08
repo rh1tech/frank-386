@@ -124,9 +124,9 @@ static bool ps2_mouse_cmd(CPU* cpu, uint8_t cmd, uint8_t *param,
 static bool bios_15h_24h(CPU* cpu) {
     switch (CPU_AL) {
     case 0x00:              /* disable A20 */
-        cpu_set_a20(cpu, 0);
-        CPU_AH = 0x00;
-        cf = 0;
+        /* A20 is permanently enabled on this emulated machine. */
+        CPU_AH = 0x86;
+        cf = 1;
         return true;
     case 0x01:              /* enable A20 */
         cpu_set_a20(cpu, 1);
