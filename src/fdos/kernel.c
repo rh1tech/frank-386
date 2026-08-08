@@ -300,20 +300,30 @@ void keycheck(void)
     cpu_restore_regs(cpu, &saved);
 }
 
+/* FreeDOS CON returns an extended key as two bytes: 00h first, then the
+ * scan code on the next read. */
+static BYTE con_scan_code;
+
 static void ConIntr(request FAR *rq) {
     CPU_regs saved;
     switch (rq->r_command) {
     case C_INIT:
+        con_scan_code = 0;
+        /* Original FreeDOS ConInit derives _kbdType from BDA 0040:0096 bit 4. */
+        kbdType = read86(0x496) & 0x10;
         rq_done(rq);
         break;
+
     case C_IFLUSH:
-        /* drain the BIOS keyboard buffer */
+        /* Original ConInpFlush also forgets a pending second byte. */
+        con_scan_code = 0;
         cpu_save_regs(cpu, &saved);
         while (1) {
-            CPU_AH = 0x01;          /* INT 16h: check keystroke */
+            CPU_AH = (BYTE)(0x01 + kbdType);
             bios_intcall(cpu, 0x16, "CON INTR");
-            if (zf) break;          /* ZF=1: buffer empty */
-            CPU_AH = 0x00;          /* INT 16h: read and discard */
+            if (zf)
+                break;
+            CPU_AH = kbdType;
             bios_intcall(cpu, 0x16, "CON INTR");
         }
         cpu_restore_regs(cpu, &saved);
@@ -321,38 +331,78 @@ static void ConIntr(request FAR *rq) {
         break;
 
     case C_NDREAD:
-        /* non-destructive peek: S_BUSY if no key, else set r_ndbyte */
+        /* A saved extended scan code is already a byte waiting at CON. */
+        if (con_scan_code) {
+            rq->r_ndbyte = con_scan_code;
+            rq_done(rq);
+            break;
+        }
+
         cpu_save_regs(cpu, &saved);
-        CPU_AH = 0x01;              /* INT 16h AH=01h: check keystroke */
+        CPU_AH = (BYTE)(0x01 + kbdType);
         bios_intcall(cpu, 0x16, "C_NDREAD");
-        if (zf) {
-            /* no key in buffer */
+        if (zf || CPU_AX == 0) {
             rq->r_status = S_DONE | S_BUSY;
         } else {
-            rq->r_ndbyte = CPU_AL;
+            BYTE ch = CPU_AL;
+            /* Enhanced INT 16h uses E0h for extended keys; DOS CON exposes 00h. */
+            if (ch == 0xE0 && CPU_AH != 0)
+                ch = 0;
+            rq->r_ndbyte = ch;
             rq_done(rq);
         }
         cpu_restore_regs(cpu, &saved);
         break;
 
     case C_ISTAT:
-        /* input status: S_BUSY if no key waiting */
+        if (con_scan_code) {
+            rq_done(rq);
+            break;
+        }
+
         cpu_save_regs(cpu, &saved);
-        CPU_AH = 0x01;
+        CPU_AH = (BYTE)(0x01 + kbdType);
         bios_intcall(cpu, 0x16, "C_ISTAT");
         rq->r_status = zf ? (S_DONE | S_BUSY) : S_DONE;
         cpu_restore_regs(cpu, &saved);
         break;
 
     case C_INPUT:
-        /* blocking read: wait until a key is available */
+        /* Match FreeDOS ConRead/KbdRdChar: satisfy the requested byte count and
+         * preserve AH of an extended key for the following byte/read. */
         cpu_save_regs(cpu, &saved);
-        CPU_AH = 0x00;              /* INT 16h AH=00h: read keystroke */
-        bios_intcall(cpu, 0x16, "C_INPUT");    /* returns false (re-enters) until key ready */
         if (rq->r_count > 0 && EFFECTIVE(rq->r_trans)) {
-            BYTE* p = (BYTE*)ARM_PTR(rq->r_trans);
-            *p = CPU_AL;
-            rq->r_count = 1;
+            BYTE *p = (BYTE *)ARM_PTR(rq->r_trans);
+            UWORD want = rq->r_count;
+            UWORD done = 0;
+
+            while (done < want) {
+                BYTE ch;
+
+                if (con_scan_code) {
+                    ch = con_scan_code;
+                    con_scan_code = 0;
+                } else {
+                    do {
+                        CPU_AH = kbdType;
+                        bios_intcall(cpu, 0x16, "C_INPUT");
+                    } while (CPU_AX == 0);
+
+                    if (CPU_AX == 0x7200) {
+                        /* Original FreeDOS maps Ctrl-PrintScreen to ^P. */
+                        ch = 0x10;
+                    } else {
+                        ch = CPU_AL;
+                        if (ch == 0xE0 && CPU_AH != 0)
+                            ch = 0;
+                        if (ch == 0 && CPU_AH != 0)
+                            con_scan_code = CPU_AH;
+                    }
+                }
+
+                p[done++] = ch;
+            }
+            rq->r_count = done;
         } else {
             rq->r_count = 0;
         }

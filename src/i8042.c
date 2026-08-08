@@ -931,3 +931,33 @@ PS2MouseState *ps2_mouse_init(void (*update_irq)(void *, int), void *update_arg)
     ps2_reset(&s->common);
     return s;
 }
+
+void i8042_bios_post_init(KBDState *s)
+{
+    if (!s || !s->kbd || !s->mouse)
+        return;
+
+    /* SeaBIOS ps2_keyboard_setup() finishes with keyboard scanning on,
+     * controller translation on, keyboard IRQ enabled, and AUX disabled.
+     * This backend already feeds translated set-1 keycodes internally, so
+     * establish the corresponding controller-visible state directly. */
+    s->write_cmd = 0;
+    s->mode = KBD_MODE_KBD_INT | KBD_MODE_DISABLE_MOUSE | KBD_MODE_KCC;
+    s->status = KBD_STAT_SELFTEST | KBD_STAT_UNLOCKED;
+    s->pending = 0;
+
+    s->kbd->common.write_cmd = -1;
+    s->kbd->common.queue.rptr = 0;
+    s->kbd->common.queue.wptr = 0;
+    s->kbd->common.queue.count = 0;
+    s->kbd->scan_enabled = 1;
+    s->kbd->translate = 1;
+    s->kbd->delay = false;
+
+    s->mouse->common.write_cmd = -1;
+    s->mouse->common.queue.rptr = 0;
+    s->mouse->common.queue.wptr = 0;
+    s->mouse->common.queue.count = 0;
+
+    kbd_update_irq(s);
+}

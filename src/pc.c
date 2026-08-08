@@ -1408,6 +1408,9 @@ void bios_post(PC *pc) {
     const uint32_t ebda_phys = (uint32_t)ebda_seg << 4;
     reset_umb();
 
+    /* Match the controller-visible keyboard state left by SeaBIOS POST. */
+    i8042_bios_post_init(pc->i8042);
+
     /* Native-режим: в F000 никто ничего не грузил -> там мусор из PSRAM,
      * который SysInfo/CheckIt показывают как "Copyright notice".
      * Чистим сегмент целиком, дальше кладём нормальный ROM-identity. */

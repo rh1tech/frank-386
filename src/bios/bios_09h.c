@@ -127,19 +127,41 @@ static char scan_to_ascii(uint8_t scan, bool shift, bool ctrl, bool caps)
  * Continues scan code processing. */
 static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
 {
-    uint8_t raw, scan;
+    /* SeaBIOS INT 15h/AH=4Fh contract:
+     *   CF clear -> the intercept handler consumed the byte; BIOS stops here.
+     *   CF set   -> continue with AL, which the handler may have modified.
+     */
     if (!cf) {
-        /* intercepted: use modified scan from AL */
-        raw = CPU_AL;
-    } else {
-        /* not intercepted: restore original scan from scratch */
-        raw = read86(IRQ1_SCRATCH);
+        cpu_portout8(0x64, 0xAE);
+        cpu_portout8(0x20, 0x20);
+        CPU_AX = (u16)(*(u32*)params->data);
+        return true;
     }
-    scan = raw & 0x7Fu;
+
+    uint8_t raw = CPU_AL;
+
+    /* SeaBIOS passes E0/E1 through INT 15h/4Fh as well, and only records
+     * the prefix after the intercept handler allows it through. */
+    if (raw == 0xE0 || raw == 0xE1) {
+        uint8_t f1 = read86(BDA_KBD_FLAG1);
+        f1 &= (uint8_t)~(KF1_LAST_E0 | KF1_LAST_E1);
+        f1 |= (raw == 0xE0) ? KF1_LAST_E0 : KF1_LAST_E1;
+        write86(BDA_KBD_FLAG1, f1);
+        cpu_portout8(0x64, 0xAE);
+        cpu_portout8(0x20, 0x20);
+        CPU_AX = (u16)(*(u32*)params->data);
+        return true;
+    }
+
+    uint8_t scan = raw & 0x7Fu;
     //printf("[09] scan: %02xh raw: %02xh\n", scan, raw);
 
     if (scan == 0) {
+        /* SeaBIOS compatibility: some old programs leave the keyboard
+         * interface disabled and expect the BIOS IRQ1 handler to enable it. */
+        cpu_portout8(0x64, 0xAE);
         cpu_portout8(0x20, 0x20);
+        CPU_AX = (u16)(*(u32*)params->data);
         return true;
     }
 
@@ -249,6 +271,10 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
     }
 
 eoi_return:
+    /* SeaBIOS does this after every processed IRQ1: some old programs
+     * expect the BIOS keyboard ISR to turn the keyboard interface back on. */
+    cpu_portout8(0x64, 0xAE);
+
     /* Clear E0/E1 prefix flags */
     write86(BDA_KBD_FLAG1, read86(BDA_KBD_FLAG1) & (uint8_t)~(KF1_LAST_E0 | KF1_LAST_E1));
     cpu_portout8(0x20, 0x20);
@@ -278,20 +304,14 @@ bool bios_09h(CPU* cpu)
 
     uint8_t code = cpu_portin8(0x60);
     ///printf("[09p1] code=%02X st=%02X csip=%04X:%04X\n", code, cpu_portin8(0x64), CPU_CS, CPU_IP);
-    /* E0/E1 prefix: store in kbd_flag1 (BDA 0x496), SeaBIOS-compatible */
-    if (code == 0xE0 || code == 0xE1) {
-        uint8_t f1 = read86(BDA_KBD_FLAG1);
-        f1 &= (uint8_t)~(KF1_LAST_E0 | KF1_LAST_E1);
-        f1 |= (code == 0xE0) ? KF1_LAST_E0 : KF1_LAST_E1;
-        write86(BDA_KBD_FLAG1, f1);
-        cpu_portout8(0x20, 0x20);
-        return true;
-    }
-    /* Save raw code (with break bit) in scratch for phase2 */
+
+    /* Save raw code for diagnostics/fallback and invoke INT 15h/4Fh for
+     * every keyboard byte, including E0/E1 prefixes, as SeaBIOS does. */
     write86(IRQ1_SCRATCH, code);
     set_bios_callback(cpu, &params, false);
     ax = CPU_AX;
     CPU_AX = 0x4F00 | code; // prepare for int 15h 4Fh
+    cf = 1;                // SeaBIOS enters the intercept with CF set
     SET_CS ( IRQ1_STUB_CS );
     SET_IP ( IRQ1_STUB_IP );
     return false;

@@ -33,5 +33,6 @@ KBDState *i8042_init(PS2KbdState **pkbd,
                      void (*system_reset_request)(void *sys));
 
 void i8042_set_cpu(void *cpu);
+void i8042_bios_post_init(KBDState *s);
 
 #endif /* I8042_H */

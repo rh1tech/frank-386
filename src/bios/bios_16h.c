@@ -125,7 +125,12 @@ bool bios_16h(CPU* cpu)
         return true;
 
     case 0x0A: /* GET KEYBOARD ID (SeaBIOS handle_160a) */
-        CPU_BX = 0xAB83;  /* standard AT enhanced keyboard ID */
+        CPU_BX = 0x83AB;  /* SeaBIOS: PS/2 ID bytes AB 83 are returned as BX=83ABh */
+        return true;
+
+    case 0x6F: /* keyboard extension probe (SeaBIOS handle_166f) */
+        if (CPU_AL == 0x08)
+            CPU_AH = 0x02;  /* unsupported extension: normal keyboard */
         return true;
 
     case 0x12: /* get extended shift flags */
