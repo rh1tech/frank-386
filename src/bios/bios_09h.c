@@ -6,6 +6,7 @@
 #define printf(...) bios_printf(cpu, __VA_ARGS__)
 
 #define BDA_KBD_FLAGS1  0x417u
+#define BDA_KBD_FLAGS2  0x418u   /* upper byte of SeaBIOS kbd_flag0 */
 #define BDA_KBD_FLAG1   0x496u   /* kbd_flag1: KF1_LAST_E0, KF1_LAST_E1, KF1_RCTRL, KF1_RALT */
 
 #define KBD_FLAG_RSHIFT  0x01u
@@ -16,6 +17,14 @@
 #define KBD_FLAG_NUM     0x20u
 #define KBD_FLAG_CAPS    0x40u
 #define KBD_FLAG_INS     0x80u
+
+/* BDA 40:18, upper byte of SeaBIOS kbd_flag0 (KF0_* >> 8). */
+#define KBD_FLAG2_LCTRL   0x01u
+#define KBD_FLAG2_LALT    0x02u
+#define KBD_FLAG2_PAUSE   0x08u
+#define KBD_FLAG2_SCROLL  0x10u
+#define KBD_FLAG2_NUM     0x20u
+#define KBD_FLAG2_CAPS    0x40u
 
 /* kbd_flag1 bits (BDA 0x496, SeaBIOS KF1_*) */
 #define KF1_LAST_E1  0x01u
@@ -130,15 +139,25 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
     /* SeaBIOS INT 15h/AH=4Fh contract:
      *   CF clear -> the intercept handler consumed the byte; BIOS stops here.
      *   CF set   -> continue with AL, which the handler may have modified.
+     *
+     * SeaBIOS performs this call on a separate bregs object.  Capture the only
+     * two defined results first, then restore the interrupted register image so
+     * a guest INT 15h hook cannot leak BX/CX/DX/SI/DI/BP/segments/FLAGS into
+     * the interrupted application.
      */
-    if (!cf) {
+    const bool intercepted = !cf;
+    const uint8_t raw = CPU_AL;
+    CPU_regs *saved = (CPU_regs *)params->data;
+    if (saved)
+        cpu_restore_regs(cpu, saved);
+
+    if (intercepted) {
+        /* SeaBIOS handle_09(): some old programs expect the ISR to
+         * turn the keyboard interface back on after process_key(). */
         cpu_portout8(0x64, 0xAE);
         cpu_portout8(0x20, 0x20);
-        CPU_AX = (u16)(*(u32*)params->data);
         return true;
     }
-
-    uint8_t raw = CPU_AL;
 
     /* SeaBIOS passes E0/E1 through INT 15h/4Fh as well, and only records
      * the prefix after the intercept handler allows it through. */
@@ -149,7 +168,6 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
         write86(BDA_KBD_FLAG1, f1);
         cpu_portout8(0x64, 0xAE);
         cpu_portout8(0x20, 0x20);
-        CPU_AX = (u16)(*(u32*)params->data);
         return true;
     }
 
@@ -157,11 +175,8 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
     //printf("[09] scan: %02xh raw: %02xh\n", scan, raw);
 
     if (scan == 0) {
-        /* SeaBIOS compatibility: some old programs leave the keyboard
-         * interface disabled and expect the BIOS IRQ1 handler to enable it. */
         cpu_portout8(0x64, 0xAE);
         cpu_portout8(0x20, 0x20);
-        CPU_AX = (u16)(*(u32*)params->data);
         return true;
     }
 
@@ -187,7 +202,15 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
             if (!is_up) { flags |= KBD_FLAG_CTRL;  flags1 |= KF1_RCTRL; }
             else         { flags &= (uint8_t)~KBD_FLAG_CTRL; flags1 &= (uint8_t)~KF1_RCTRL; }
         } else {
-            if (!is_up) flags |= KBD_FLAG_CTRL; else flags &= (uint8_t)~KBD_FLAG_CTRL;
+            uint8_t flags2 = read86(BDA_KBD_FLAGS2);
+            if (!is_up) {
+                flags |= KBD_FLAG_CTRL;
+                flags2 |= KBD_FLAG2_LCTRL;
+            } else {
+                flags &= (uint8_t)~KBD_FLAG_CTRL;
+                flags2 &= (uint8_t)~KBD_FLAG2_LCTRL;
+            }
+            write86(BDA_KBD_FLAGS2, flags2);
         }
         write86(BDA_KBD_FLAGS1, flags);
         write86(BDA_KBD_FLAG1, flags1);
@@ -197,18 +220,44 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
             if (!is_up) { flags |= KBD_FLAG_ALT;  flags1 |= KF1_RALT; }
             else         { flags &= (uint8_t)~KBD_FLAG_ALT; flags1 &= (uint8_t)~KF1_RALT; }
         } else {
-            if (!is_up) flags |= KBD_FLAG_ALT; else flags &= (uint8_t)~KBD_FLAG_ALT;
+            uint8_t flags2 = read86(BDA_KBD_FLAGS2);
+            if (!is_up) {
+                flags |= KBD_FLAG_ALT;
+                flags2 |= KBD_FLAG2_LALT;
+            } else {
+                flags &= (uint8_t)~KBD_FLAG_ALT;
+                flags2 &= (uint8_t)~KBD_FLAG2_LALT;
+            }
+            write86(BDA_KBD_FLAGS2, flags2);
         }
         write86(BDA_KBD_FLAGS1, flags);
         write86(BDA_KBD_FLAG1, flags1);
         goto eoi_return;
-    case 0x3A: /* Caps Lock */
-        if (!is_up) { flags ^= KBD_FLAG_CAPS; write86(BDA_KBD_FLAGS1, flags); }
+    case 0x3A: { /* Caps Lock */
+        uint8_t flags2 = read86(BDA_KBD_FLAGS2);
+        if (!is_up) {
+            flags ^= KBD_FLAG_CAPS;
+            flags2 |= KBD_FLAG2_CAPS;
+        } else {
+            flags2 &= (uint8_t)~KBD_FLAG2_CAPS;
+        }
+        write86(BDA_KBD_FLAGS1, flags);
+        write86(BDA_KBD_FLAGS2, flags2);
         goto eoi_return;
-    case 0x45: /* Num Lock */
+    }
+    case 0x45: { /* Num Lock */
         if (flags1 & KF1_LAST_E1) goto eoi_return;  /* Pause key — ignore */
-        if (!is_up) { flags ^= KBD_FLAG_NUM; write86(BDA_KBD_FLAGS1, flags); }
+        uint8_t flags2 = read86(BDA_KBD_FLAGS2);
+        if (!is_up) {
+            flags ^= KBD_FLAG_NUM;
+            flags2 |= KBD_FLAG2_NUM;
+        } else {
+            flags2 &= (uint8_t)~KBD_FLAG2_NUM;
+        }
+        write86(BDA_KBD_FLAGS1, flags);
+        write86(BDA_KBD_FLAGS2, flags2);
         goto eoi_return;
+    }
     case 0x46: /* Scroll Lock */
         if (flags1 & KF1_LAST_E0) {
             /* E0+46 = Ctrl+Break */
@@ -220,9 +269,18 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
                 write86(0x471, 0x80);  /* break_flag */
             }
             goto eoi_return;
+        } else {
+            uint8_t flags2 = read86(BDA_KBD_FLAGS2);
+            if (!is_up) {
+                flags ^= KBD_FLAG_SCROLL;
+                flags2 |= KBD_FLAG2_SCROLL;
+            } else {
+                flags2 &= (uint8_t)~KBD_FLAG2_SCROLL;
+            }
+            write86(BDA_KBD_FLAGS1, flags);
+            write86(BDA_KBD_FLAGS2, flags2);
+            goto eoi_return;
         }
-        if (!is_up) { flags ^= KBD_FLAG_SCROLL; write86(BDA_KBD_FLAGS1, flags); }
-        goto eoi_return;
     case 0x52: /* Insert */
         if (!is_up && !(flags1 & KF1_LAST_E0)) {
             flags ^= KBD_FLAG_INS;
@@ -271,23 +329,27 @@ static bool bios_09h_phase2(CPU* cpu, bios_callback_params_t* params)
     }
 
 eoi_return:
-    /* SeaBIOS does this after every processed IRQ1: some old programs
-     * expect the BIOS keyboard ISR to turn the keyboard interface back on. */
+    /* SeaBIOS handle_09(): some old programs expect ISR to turn the
+     * keyboard interface back on after process_key(). */
     cpu_portout8(0x64, 0xAE);
 
     /* Clear E0/E1 prefix flags */
     write86(BDA_KBD_FLAG1, read86(BDA_KBD_FLAG1) & (uint8_t)~(KF1_LAST_E0 | KF1_LAST_E1));
     cpu_portout8(0x20, 0x20);
-    CPU_AX = (u16)(*(u32*)params->data);
     return true;
 }
 
-static u32 ax;
+/*
+ * SeaBIOS process_key() invokes INT 15h/4Fh through a separate bregs frame.
+ * Keep the interrupted program's register image separate from the intercept
+ * call as well; only CF and AL are results of the 4Fh contract.
+ */
+static CPU_regs irq1_saved_regs;
 static bios_callback_params_t params = {
     .callback = bios_09h_phase2,
     .expected_cs = 0xFFE0,
     .expected_ip = 0x00FF,
-    .data = &ax,
+    .data = &irq1_saved_regs,
     .owner = "INT 09H"
 };
 
@@ -295,9 +357,25 @@ static bios_callback_params_t params = {
  * Returns false → main loop continues execution at stub (CS:IP set here). */
 bool bios_09h(CPU* cpu)
 {
-    /* Check OBF (Output Buffer Full) in i8042 status register.
-     * If clear — spurious IRQ1, nothing to read. */
-    if (!(cpu_portin8(0x64) & 0x01)) {
+    /* SeaBIOS handle_09(): reject AUX data, but do not require OBF.
+     * Chained legacy handlers may already have consumed the keyboard byte. */
+    uint8_t status = cpu_portin8(0x64);
+    if (status & 0x20u) {
+        cpu_portout8(0x20, 0x20);
+        return true;
+    }
+
+    /*
+     * A real hardware INT 09h enters through intcall86(), which clears IF.
+     * Prince 1.4 is different: its IRQ1 hook reads port 60h, executes STI,
+     * then chains to the previous INT 09h with PUSHF/CALL FAR.  Therefore the
+     * chained BIOS entry has OBF clear but IF set.
+     *
+     * Do not replay the i8042 last-byte latch for an OBF-clear entry that
+     * still has IF clear.  That is a spurious/duplicate hardware entry;
+     * replaying the stale byte can inject a phantom key into the BIOS buffer.
+     */
+    if (!(status & 0x01u) && !ifl) {
         cpu_portout8(0x20, 0x20);
         return true;
     }
@@ -308,10 +386,24 @@ bool bios_09h(CPU* cpu)
     /* Save raw code for diagnostics/fallback and invoke INT 15h/4Fh for
      * every keyboard byte, including E0/E1 prefixes, as SeaBIOS does. */
     write86(IRQ1_SCRATCH, code);
+    cpu_save_regs(cpu, &irq1_saved_regs);
     set_bios_callback(cpu, &params, false);
-    ax = CPU_AX;
-    CPU_AX = 0x4F00 | code; // prepare for int 15h 4Fh
-    cf = 1;                // SeaBIOS enters the intercept with CF set
+
+    /*
+     * Approximate SeaBIOS' zero-initialized bregs input without replacing the
+     * real-mode stack used by INT itself.  AH/AL and CF are the only defined
+     * inputs to INT 15h/4Fh; SP/SS must remain live for the interrupt frame.
+     */
+    CPU_BX = 0;
+    CPU_CX = 0;
+    CPU_DX = 0;
+    CPU_SI = 0;
+    CPU_DI = 0;
+    CPU_BP = 0;
+    SET_DS(0);
+    SET_ES(0);
+    CPU_AX = 0x4F00 | code;
+    cf = 1;
     SET_CS ( IRQ1_STUB_CS );
     SET_IP ( IRQ1_STUB_IP );
     return false;

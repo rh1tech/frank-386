@@ -198,9 +198,13 @@ bool bios_74h(CPU* cpu)
     if ((st & (KBC_ST_OBF | KBC_ST_AUX_OBF)) == (KBC_ST_OBF | KBC_ST_AUX_OBF)) {
         uint8_t b = cpu_portin8(KBC_DATA);
 
+        /* ACK/RESEND/self-test bytes are not packet data. */
+        if (m.pkt_idx == 0 && (b == 0xFA || b == 0xFE || b == 0xAA)) {
+            /* ignore asynchronous mouse command response */
+        }
         /* ресинхронизация: бит3 первого байта пакета всегда 1 */
-        if (m.pkt_idx == 0 && !(b & 0x08)) {
-            /* ACK (0xFA) / RESEND / мусор — игнорируем */
+        else if (m.pkt_idx == 0 && !(b & 0x08)) {
+            /* мусор — игнорируем */
         } else {
             m.pkt[m.pkt_idx++] = b;
 
@@ -237,11 +241,22 @@ static void kbc_wait_ibe(CPU* cpu)
             return;
 }
 
-static int kbc_wait_obf(CPU* cpu)
+static int kbc_wait_aux_obf(CPU* cpu)
 {
-    for (int i = 0; i < 10000; i++)
-        if (cpu_portin8(KBC_STATUS) & KBC_ST_OBF)
+    for (int i = 0; i < 10000; i++) {
+        uint8_t st = cpu_portin8(KBC_STATUS);
+        if ((st & (KBC_ST_OBF | KBC_ST_AUX_OBF)) ==
+            (KBC_ST_OBF | KBC_ST_AUX_OBF))
             return 1;
+
+        /*
+         * Do not consume a pending keyboard byte while waiting for a mouse
+         * reply.  Leave it queued for IRQ1 and let IRQ12 discard any delayed
+         * mouse ACK asynchronously if necessary.
+         */
+        if ((st & KBC_ST_OBF) && !(st & KBC_ST_AUX_OBF))
+            return 0;
+    }
     return 0;
 }
 
@@ -257,13 +272,13 @@ static void kbc_data(CPU* cpu, uint8_t d)
     cpu_portout8(KBC_DATA, d);
 }
 
-/* послать байт мыши и съесть ACK */
+/* послать байт мыши и съесть ACK, только если это действительно AUX */
 static void aux_send(CPU* cpu, uint8_t d)
 {
     kbc_cmd(cpu, 0xD4);          /* следующий байт — в aux-порт */
     kbc_data(cpu, d);
-    if (kbc_wait_obf(cpu))
-        (void)cpu_portin8(KBC_DATA);   /* ACK (0xFA) */
+    if (kbc_wait_aux_obf(cpu))
+        (void)cpu_portin8(KBC_DATA);   /* mouse ACK (normally 0xFA) */
 }
 
 static void mouse_hw_init(CPU* cpu)
@@ -273,7 +288,17 @@ static void mouse_hw_init(CPU* cpu)
 
     /* command byte: разрешить IRQ12 (bit1) и снять disable-aux (bit5) */
     kbc_cmd(cpu, 0x20);
-    uint8_t cb = kbc_wait_obf(cpu) ? cpu_portin8(KBC_DATA) : 0x45;
+    /*
+     * 0x20 returns the controller command byte through the controller output
+     * buffer, not through the AUX device, so wait for ordinary OBF here.
+     */
+    uint8_t cb = 0x45;
+    for (int i = 0; i < 10000; i++) {
+        if (cpu_portin8(KBC_STATUS) & KBC_ST_OBF) {
+            cb = cpu_portin8(KBC_DATA);
+            break;
+        }
+    }
     cb |=  0x02;    /* enable aux (IRQ12) interrupt */
     cb &= ~0x20;    /* aux clock enable */
     cb |=  0x01;    /* keep keyboard IRQ1 on */
