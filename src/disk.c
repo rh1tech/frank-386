@@ -315,6 +315,26 @@ uint8_t ata_is_cdrom(uint8_t drivenum) {
     return ata[drivenum].iscdrom;
 }
 
+int8_t ata_hdd_slot(uint8_t bios_index) {
+    for (uint8_t slot = 0; slot < 4; slot++) {
+        if (!ata[slot].name || ata[slot].iscdrom)
+            continue;
+        if (bios_index == 0)
+            return (int8_t)slot;
+        bios_index--;
+    }
+    return -1;
+}
+
+uint8_t ata_hdd_count(void) {
+    uint8_t count = 0;
+    for (uint8_t slot = 0; slot < 4; slot++) {
+        if (ata[slot].name && !ata[slot].iscdrom)
+            count++;
+    }
+    return count;
+}
+
 const char* fdd_get_filename(int i) {
     if (i >= 2) return NULL;
     return fdd[i].name;

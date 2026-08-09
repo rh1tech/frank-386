@@ -211,6 +211,11 @@ STATIC WORD diskchange(CPU *cpu, ddt *pddt)
   return tdelay(pddt, 37ul) ? M_DONT_KNOW : M_NOT_CHANGED;
 }
 
+STATIC int LBA_Transfer_raw(CPU* cpu,
+    ddt *pddt, UWORD mode, dos_far_ptr buffer,
+    ULONG LBA_address, unsigned totaltodo,
+    UWORD *transferred);
+
 STATIC int LBA_Transfer(CPU* cpu,
     ddt *pddt, UWORD mode, dos_far_ptr buffer,
     ULONG LBA_address, unsigned totaltodo,
@@ -476,7 +481,7 @@ STATIC WORD dskerr(COUNT code)
       - LBA_FORMAT uses the already implemented INT 13h/AH=05h backend
         directly instead of upstream's fl_format() assembly wrapper.
 */
-STATIC int LBA_Transfer(CPU* cpu,
+STATIC int LBA_Transfer_raw(CPU* cpu,
     ddt *pddt, UWORD mode, dos_far_ptr buffer,
     ULONG LBA_address, unsigned totaltodo,
     UWORD *transferred)
@@ -647,6 +652,31 @@ STATIC int LBA_Transfer(CPU* cpu,
 }
 
 /*
+ * LBA_Transfer_raw() issues bios_13h() directly. The BIOS handler uses the
+ * live CPU register set and int13_set_status() writes the FLAGS word at
+ * SS:SP+4, assuming a real guest INT 13h frame. Block-driver callers are
+ * native C calls nested inside another DOS/driver operation, so those side
+ * effects must not escape into the caller.
+ */
+STATIC int LBA_Transfer(CPU* cpu,
+    ddt *pddt, UWORD mode, dos_far_ptr buffer,
+    ULONG LBA_address, unsigned totaltodo,
+    UWORD *transferred)
+{
+  CPU_regs saved_regs;
+  const uint32_t outer_flags_addr = ((uint32_t)CPU_SS << 4) + CPU_SP + 4u;
+  const UWORD outer_flags = readw86(outer_flags_addr);
+
+  cpu_save_regs(cpu, &saved_regs);
+  int ret = LBA_Transfer_raw(cpu, pddt, mode, buffer, LBA_address,
+                             totaltodo, transferred);
+  cpu_restore_regs(cpu, &saved_regs);
+  writew86(outer_flags_addr, outer_flags);
+
+  return ret;
+}
+
+/*
     C_INPUT / C_OUTPUT / C_OUTVFY - migrated from blockio() in dsk.c.
 */
 STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
@@ -689,28 +719,8 @@ STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
   }
   start += pddt->ddt_offset;
 
-  /*
-   * LBA_Transfer() services the DOS block driver by calling bios_13h()
-   * directly. Those BIOS handlers operate on the live CPU register set
-   * and int13_set_status() also updates the FLAGS word at SS:SP+4, as it
-   * normally would for a real INT 13h frame. Here, however, SS:SP belongs
-   * to the outer DOS INT 21h caller. Letting an internal disk transfer leak
-   * those changes back to the application corrupts DS/ES/general registers
-   * and can even alter the outer interrupt's return flags.
-   *
-   * Keep the native block-driver shortcut, but make it observationally
-   * equivalent to an internal BIOS call: preserve both the live guest
-   * registers and the outer interrupt-frame FLAGS around the transfer.
-   */
-  CPU_regs saved_regs;
-  const uint32_t outer_flags_addr = ((uint32_t)CPU_SS << 4) + CPU_SP + 4u;
-  const UWORD outer_flags = readw86(outer_flags_addr);
-
-  cpu_save_regs(cpu, &saved_regs);
   ret = (WORD)LBA_Transfer(cpu, pddt, action, rq->r_trans,
                            start, rq->r_count, &done);
-  cpu_restore_regs(cpu, &saved_regs);
-  writew86(outer_flags_addr, outer_flags);
 
   rq->r_count = done;
 

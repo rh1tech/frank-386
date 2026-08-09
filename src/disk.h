@@ -29,6 +29,10 @@ void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename, 
 struct VGAState;
 void disk_set_vga(struct VGAState *vga);
 uint8_t ata_is_cdrom(uint8_t drivenum);
+/* Map dense BIOS HDD index (0 = 80h) to physical ATA slot 0..3. */
+int8_t ata_hdd_slot(uint8_t bios_index);
+/* Number of actual HDD images in ATA slots (CD-ROMs excluded). */
+uint8_t ata_hdd_count(void);
 uint16_t fdd_get_cyls(uint8_t drivenum);
 uint16_t fdd_get_heads(uint8_t drivenum);
 uint16_t fdd_get_sects(uint8_t drivenum);

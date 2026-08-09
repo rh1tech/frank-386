@@ -41,11 +41,37 @@
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
+/*
+ * Native FreeDOS calls the BIOS handlers directly instead of executing a
+ * guest INT instruction.  int13_set_status() nevertheless updates the FLAGS
+ * word of a normal INT 13h frame at SS:SP+4.  During these direct calls there
+ * is no such frame, so that write corrupts the live FreeDOS stack.
+ *
+ * Keep the return registers and CPU flags produced by INT 13h, but preserve
+ * the caller's stack word and segment registers.  This mirrors the isolation
+ * already used by the runtime block-driver path in dsk.c.
+ */
+static bool init_bios_13h(CPU *cpu)
+{
+  const uint16_t saved_ds = CPU_DS;
+  const uint16_t saved_es = CPU_ES;
+  const uint32_t outer_flags_addr =
+      ((uint32_t)CPU_SS << 4) + CPU_SP + 4u;
+  const uint16_t outer_flags = readw86(outer_flags_addr);
+
+  const bool ret = bios_13h(cpu);
+
+  SET_DS(saved_ds);
+  SET_ES(saved_es);
+  writew86(outer_flags_addr, outer_flags);
+  return ret;
+}
+
 void BIOS_drive_reset(CPU* cpu, unsigned drive)
 {
     CPU_DL = drive | 0x80;
     CPU_AH = 0;
-    bios_13h(cpu);
+    init_bios_13h(cpu);
 }
 
 /*
@@ -89,7 +115,7 @@ static COUNT init_getdriveparm(CPU* cpu, UBYTE drive, bpb * pbpbarray)
     return 5;
   CPU_AH = 0x08;
   CPU_DL = drive;
-  bios_13h(cpu); // GET DRIVE PARAMETERS
+  init_bios_13h(cpu); // GET DRIVE PARAMETERS
   type = CPU_BL - 1;
   if (cf)
     type = 0;                   /* return 320-360 for XTs */
@@ -116,7 +142,7 @@ static COUNT init_readdasd(CPU* cpu, UBYTE drive)
 {
   CPU_AH = 0x15;
   CPU_DL = drive;
-  bios_13h(cpu); // GET DISK TYPE
+  init_bios_13h(cpu); // GET DISK TYPE
   if (!cf)
     switch (CPU_AH)
     {
@@ -141,6 +167,7 @@ STATIC void push_ddt(ddt *pddt)
 
 STATIC void make_ddt (CPU* cpu, ddt *pddt, int Unit, int driveno, int flags)
 {
+  memset(pddt, 0, sizeof(*pddt));
   pddt->ddt_next = MK_FP(0, 0xffff);
   pddt->ddt_logdriveno = Unit;
   pddt->ddt_driveno = driveno;
@@ -158,7 +185,7 @@ static int BIOS_nrdrives(CPU* cpu)
 {
   CPU_AH = 0x08;
   CPU_DL = 0x80;
-  bios_13h(cpu); // GET DRIVE PARAMETERS
+  init_bios_13h(cpu); // GET DRIVE PARAMETERS
   if (cf)
   {
     printf("no hard disks detected\n");
@@ -230,7 +257,7 @@ STATIC int LBA_Get_Drive_Parameters(CPU* cpu, int drive, struct DriveParamS *dri
       and https://www.bttr-software.de/forum/forum_entry.php?id=21275 */
   cf = 1;  /* ensure carry is set to force error if unsupported */
 
-  bios_13h(cpu);
+  init_bios_13h(cpu);
 
   if ((cf) || CPU_BX != 0xaa55 || !(CPU_CX & 0x01))
   {
@@ -258,7 +285,7 @@ STATIC int LBA_Get_Drive_Parameters(CPU* cpu, int drive, struct DriveParamS *dri
   SET_DS (FP_SEG(lba_bios_parameters));
   CPU_AH = 0x48;
   CPU_DL = drive;
-  bios_13h(cpu);
+  init_bios_13h(cpu);
 
   if (cf)
   {
@@ -314,7 +341,7 @@ StandardBios:   /* get disk geometry, and if LBA is not enabled, also size */
   CPU_AH = 0x08;
   CPU_DL = drive;
 
-  bios_13h(cpu);
+  init_bios_13h(cpu);
 
   if (cf) 
   {
@@ -470,7 +497,9 @@ int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
       CPU_DH = chs.Head;
       SET_ES ( FP_SEG(buffer));
     }                           /* end of retries */
-    bios_13h(cpu);
+    init_bios_13h(cpu);
+    if (InitKernelConfig.Verbose >= 1)
+      printf("BIOS13 returned CF=%u\n", cf ? 1u : 0u);
     if (cf == 0)
       break;
 
@@ -778,6 +807,8 @@ static void DosDefinePartition(
   ddt nddt;
   ddt *pddt = &nddt;
   struct CHS chs;
+
+  memset(&nddt, 0, sizeof(nddt));
 
   if (nUnits >= NDEV)
   {

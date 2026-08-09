@@ -1324,16 +1324,17 @@ static void point2zero(u32 intno) {
 
 static void install_dpte(int idx, uint32_t addr)
 {
-    if (!ata_is_inserted(idx) || ata_is_cdrom(idx)) {
+    int8_t slot = ata_hdd_slot((uint8_t)idx);
+    if (slot < 0) {
         for (int i = 0; i < 16; i++)
             pstore8(addr + i, 0x00);
         return;
     }
 	// Primary IDE: 0x1F0, Secondary: 0x170
-    uint16_t iobase  = (idx < 2) ? 0x01F0 : 0x0170;
-    uint16_t ctlbase = (idx < 2) ? 0x03F6 : 0x0376;
-//    uint8_t  devhead = (idx & 1) ? 0xB0 : 0xA0; // slave/master
-	uint8_t  devhead = (idx & 1) ? 0xF0 : 0xE0; // With LBA
+    uint16_t iobase  = (slot < 2) ? 0x01F0 : 0x0170;
+    uint16_t ctlbase = (slot < 2) ? 0x03F6 : 0x0376;
+//    uint8_t  devhead = (slot & 1) ? 0xB0 : 0xA0; // slave/master
+	uint8_t  devhead = (slot & 1) ? 0xF0 : 0xE0; // With LBA
 
     uint8_t buf[16] = {0};
     buf[0]  = (uint8_t)(iobase & 0xFF);
@@ -1366,8 +1367,9 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
 {
     // Вектор INT 41h = 0x104, INT 46h = 0x118
     uint32_t vec = (idx == 0) ? 0x41 * 4 : 0x46 * 4;
+    int8_t slot = ata_hdd_slot((uint8_t)idx);
 
-    if (!ata_is_inserted(idx) || ata_is_cdrom(idx)) {
+    if (slot < 0) {
         // Нет диска — вектор указывает на нули, не на fake BIOS
         // Просто обнулить таблицу и поставить вектор
         for (int i = 0; i < 16; i++)
@@ -1376,9 +1378,9 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
         pstore16(vec + 2, 0x0000);
         return;
 	} else {
-        uint16_t cyls  = ata_get_cyls(idx);
-        uint16_t heads = ata_get_heads(idx);
-        uint16_t sects = ata_get_sects(idx);
+        uint16_t cyls  = ata_get_cyls((uint8_t)slot);
+        uint16_t heads = ata_get_heads((uint8_t)slot);
+        uint16_t sects = ata_get_sects((uint8_t)slot);
 
         // Fixed Disk Parameter Table, 16 bytes (INT 41h/46h format)
         pstore16(addr + 0x00, cyls);          /* max cylinders */
@@ -1530,11 +1532,12 @@ void bios_post(PC *pc) {
 //	pstore8 (0x471, 0x00);                               /* break flag */
 //	pstore16(0x472, 0x0000);                             /* reset flag */
 //	pstore8 (0x474, 0x00);                               /* last HDD status */
-	pstore8 (0x475, hdcount > 0 ? hdcount : 0);           /* fixed disk count */
+	pstore8 (0x475, ata_hdd_count());                         /* fixed disk count */
 	/* SeaBIOS block.c: drive_control_byte = 0xC0 | ((heads > 8) << 3). */
 	{
 		uint8_t ctrl = 0xC0;
-		if (hdcount > 0 && ata_get_heads(0) > 8)
+        int8_t first_hdd = ata_hdd_slot(0);
+		if (first_hdd >= 0 && ata_get_heads((uint8_t)first_hdd) > 8)
 			ctrl |= 0x08;
 		pstore8 (0x476, ctrl);                           /* HDD control byte */
 	}

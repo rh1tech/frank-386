@@ -42,6 +42,7 @@ typedef struct BiosDisk_s {
     FIL *f;
     uint8_t bios_drive;     /* Original BIOS DL value: 00h/01h for FDD, 80h..83h for HDD. */
     uint8_t hdd;            /* Non-zero for fixed disks. */
+    uint8_t ata_slot;       /* Physical ATA slot 0..3 for HDDs. */
     uint16_t cyls;          /* Geometry supplied by disk.c, not guessed from file size. */
     uint16_t heads;
     uint16_t sects;
@@ -100,6 +101,7 @@ static bool int13_get_disk(uint8_t drive, BiosDisk *d)
     d->f = NULL;
     d->bios_drive = drive;
     d->hdd = (drive & 0x80) ? 1 : 0;
+    d->ata_slot = 0xFF;
     d->cyls = 0;
     d->heads = 0;
     d->sects = 0;
@@ -112,14 +114,16 @@ static bool int13_get_disk(uint8_t drive, BiosDisk *d)
         d->f = fdd_is_inserted(drive) ? fdd_get_file(drive) : NULL;
         return true;
     }
-    /* HDD: DL=80h..83h, CD-ROM images are not INT 13h CHS disks. */
+    /* HDD BIOS numbers are dense regardless of populated ATA slots. */
     uint8_t hdd = drive & 0x7F;
-    if (hdd >= 4 || !ata_is_inserted(hdd) || ata_is_cdrom(hdd))
+    int8_t slot = ata_hdd_slot(hdd);
+    if (slot < 0)
         return false;
-    d->cyls = ata_get_cyls(hdd);
-    d->heads = ata_get_heads(hdd);
-    d->sects = ata_get_sects(hdd);
-    d->f = ata_get_file(hdd);
+    d->ata_slot = (uint8_t)slot;
+    d->cyls = ata_get_cyls(d->ata_slot);
+    d->heads = ata_get_heads(d->ata_slot);
+    d->sects = ata_get_sects(d->ata_slot);
+    d->f = ata_get_file(d->ata_slot);
     return d->f && d->cyls && d->heads && d->sects;
 }
 
@@ -1003,11 +1007,6 @@ static bool bios_13h_48h(CPU* cpu)
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
-    if ((drive & 0x7F) > 1) {
-        /* DPTE только для 0x80 и 0x81; остальные не поддерживаются */
-        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
-        return true;
-    }
     if (caller_size < 0x1A) {
         int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
         return true;
@@ -1031,9 +1030,16 @@ static bool bios_13h_48h(CPU* cpu)
     // --- v2.x DPTE pointer (0x1E байт) ---
     if (caller_size >= 0x1E) {
         ret_size = 0x1E;
-        uint32_t dpte_addr = ((drive & 0x7F) == 0) ? DPTE_ADDR_0 : DPTE_ADDR_1;
-        writew86(p + 0x1A, (uint16_t)(dpte_addr & 0x000F));          // offset
-        writew86(p + 0x1C, (uint16_t)((dpte_addr >> 4) & 0xFFFF));   // segment
+        uint8_t bios_hdd = drive & 0x7F;
+        if (bios_hdd < 2) {
+            uint32_t dpte_addr = bios_hdd ? DPTE_ADDR_1 : DPTE_ADDR_0;
+            writew86(p + 0x1A, (uint16_t)(dpte_addr & 0x000F));          // offset
+            writew86(p + 0x1C, (uint16_t)((dpte_addr >> 4) & 0xFFFF));   // segment
+        } else {
+            /* INT 41h/46h provide DPTEs only for the first two BIOS HDDs. */
+            writew86(p + 0x1A, 0xFFFF);
+            writew86(p + 0x1C, 0xFFFF);
+        }
     }
 
     // --- v3.0 Device Path (0x42 байт) ---
@@ -1057,13 +1063,13 @@ static bool bios_13h_48h(CPU* cpu)
         }
 
         // iface_path: u64 (8 байт) начиная с +30h (SeaBIOS: offset of iface_path in int13dpt_s)
-        uint16_t iobase = ((drive & 0x7F) < 2) ? 0x01F0 : 0x0170;
+        uint16_t iobase = (d.ata_slot < 2) ? 0x01F0 : 0x0170;
         writew86(p + 0x30, iobase);
         writew86(p + 0x32, 0x0000);
         writedw86(p + 0x34, 0x00000000);
 
         // device_path: u64 (8 байт) начиная с +38h (SeaBIOS: phoenix.device_path)
-        uint8_t devnum = (drive & 1) ? 1 : 0;
+        uint8_t devnum = d.ata_slot & 1u;
         write86 (p + 0x38, devnum);
         write86 (p + 0x39, 0x00);
         writew86(p + 0x3A, 0x0000);

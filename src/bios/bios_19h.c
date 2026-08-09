@@ -211,7 +211,8 @@ bool bios_19h(CPU* cpu) {
         boot_from(cpu, 0x00, false);
         return false;
     }
-    if (ata_is_inserted(0) && !ata_is_cdrom(0) && read_boot_sector(ata_get_file(0))) {
+    int8_t boot_hdd = ata_hdd_slot(0);
+    if (boot_hdd >= 0 && read_boot_sector(ata_get_file((uint8_t)boot_hdd))) {
         boot_from(cpu, 0x80, false);
         return false;
     }
