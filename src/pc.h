@@ -107,6 +107,7 @@ typedef struct {
 	long vga_mem_size;
 	const char *ata[4];
 	int iscd[4];
+	int raw_sd_hdd;
 	const char *fdd[2];
 	int redirector;
 	int width;

@@ -40,12 +40,15 @@
 
 typedef struct BiosDisk_s {
     FIL *f;
-    uint8_t bios_drive;     /* Original BIOS DL value: 00h/01h for FDD, 80h..83h for HDD. */
+    uint8_t bios_drive;     /* Original BIOS DL value. */
     uint8_t hdd;            /* Non-zero for fixed disks. */
-    uint8_t ata_slot;       /* Physical ATA slot 0..3 for HDDs. */
-    uint16_t cyls;          /* Geometry supplied by disk.c, not guessed from file size. */
+    uint8_t hdd_index;      /* Dense BIOS HDD index: 0 == 80h. */
+    uint8_t raw_sd;         /* Whole physical SD card backend. */
+    uint8_t ata_slot;       /* Physical ATA slot 0..3, 0xFF for raw SD/FDD. */
+    uint16_t cyls;
     uint16_t heads;
     uint16_t sects;
+    uint32_t total_sectors; /* Exact EDD/range size; CHS may be only a translation. */
 } BiosDisk;
 
 
@@ -101,10 +104,13 @@ static bool int13_get_disk(uint8_t drive, BiosDisk *d)
     d->f = NULL;
     d->bios_drive = drive;
     d->hdd = (drive & 0x80) ? 1 : 0;
+    d->hdd_index = 0xFF;
+    d->raw_sd = 0;
     d->ata_slot = 0xFF;
     d->cyls = 0;
     d->heads = 0;
     d->sects = 0;
+    d->total_sectors = 0;
 
     if (!d->hdd) { /* FDD: DL=00h..01h */
         if (drive >= 2) return false;
@@ -112,19 +118,24 @@ static bool int13_get_disk(uint8_t drive, BiosDisk *d)
         d->heads = fdd_get_heads(drive);
         d->sects = fdd_get_sects(drive);
         d->f = fdd_is_inserted(drive) ? fdd_get_file(drive) : NULL;
+        d->total_sectors = (uint32_t)d->cyls * d->heads * d->sects;
         return true;
     }
-    /* HDD BIOS numbers are dense regardless of populated ATA slots. */
+
+    bios_hdd_info_t info;
     uint8_t hdd = drive & 0x7F;
-    int8_t slot = ata_hdd_slot(hdd);
-    if (slot < 0)
+    if (!bios_hdd_get_info(hdd, &info))
         return false;
-    d->ata_slot = (uint8_t)slot;
-    d->cyls = ata_get_cyls(d->ata_slot);
-    d->heads = ata_get_heads(d->ata_slot);
-    d->sects = ata_get_sects(d->ata_slot);
-    d->f = ata_get_file(d->ata_slot);
-    return d->f && d->cyls && d->heads && d->sects;
+
+    d->hdd_index = hdd;
+    d->raw_sd = info.raw_sd;
+    d->ata_slot = info.ata_slot < 0 ? 0xFF : (uint8_t)info.ata_slot;
+    d->cyls = info.cyls;
+    d->heads = info.heads;
+    d->sects = info.sects;
+    d->total_sectors = info.total_sectors;
+    d->f = info.ata_slot >= 0 ? ata_get_file((uint8_t)info.ata_slot) : NULL;
+    return d->cyls && d->heads && d->sects && d->total_sectors;
 }
 
 /* Decode classic CHS registers into an LBA offset inside the backing image.
@@ -152,7 +163,7 @@ static bool int13_chs_to_lba(CPU* cpu, const BiosDisk *d, uint32_t *lba)
  */
 static bool int13_check_range(const BiosDisk *d, uint32_t lba, uint16_t count)
 {
-    uint32_t total = (uint32_t)d->cyls * d->heads * d->sects;
+    uint32_t total = d->total_sectors;
     return count && lba < total && count <= (total - lba);
 }
 
@@ -161,7 +172,7 @@ static bool int13_check_range(const BiosDisk *d, uint32_t lba, uint16_t count)
  */
 static uint32_t int13_total_sectors(const BiosDisk *d)
 {
-    return (uint32_t)d->cyls * d->heads * d->sects;
+    return d->total_sectors;
 }
 
 /* Common sector transfer path used by both CHS calls and EDD packet calls.
@@ -178,44 +189,67 @@ static bool int13_transfer_lba(CPU* cpu, const BiosDisk *d, uint32_t lba, uint16
         return true;
     }
 
-    if (f_lseek(d->f, lba * 512u) != FR_OK) {
-        int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
-        return true;
-    }
+    if (d->raw_sd) {
+        uint8_t *buf = disk_sector_buffer();
 
-    /*
-     * FatFs already buffers the underlying file.  Keep only a tiny native
-     * staging buffer for the guest-memory byte interface instead of placing
-     * a whole sector on the core0 stack.  Re-entrancy is not required here:
-     * the transfer is synchronous and each chunk is consumed before the next
-     * f_read()/f_write().
-     */
-    uint8_t buf[16];
-
-    for (uint16_t i = 0; i < count; i++) {
-        uint32_t mem = addr + (uint32_t)i * 512u;
-
-        for (uint16_t off = 0; off < 512; off += sizeof(buf)) {
-            UINT done = 0;
+        for (uint16_t i = 0; i < count; i++) {
+            uint32_t mem = addr + (uint32_t)i * 512u;
 
             if (write) {
-                for (uint16_t j = 0; j < sizeof(buf); j++)
-                    buf[j] = read86(mem + off + j);
-
-                if (f_write(d->f, buf, sizeof(buf), &done) != FR_OK ||
-                    done != sizeof(buf)) {
+                for (uint16_t j = 0; j < 512; j++)
+                    buf[j] = read86(mem + j);
+                if (!bios_hdd_write(d->hdd_index, lba + i, buf, 1)) {
                     CPU_AL = (uint8_t)i;
                     int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
                     return true;
                 }
             } else {
-                if (f_read(d->f, buf, sizeof(buf), &done) != FR_OK ||
-                    done != sizeof(buf)) {
+                if (!bios_hdd_read(d->hdd_index, lba + i, buf, 1)) {
                     CPU_AL = (uint8_t)i;
                     int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
                     return true;
                 }
+                if (!verify) {
+                    for (uint16_t j = 0; j < 512; j++)
+                        write86(mem + j, buf[j]);
+                }
+            }
+        }
 
+        if (write && !bios_hdd_sync(d->hdd_index)) {
+            int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+            return true;
+        }
+
+        CPU_AL = (uint8_t)count;
+        int13_set_status(cpu, drive, INT13_ST_OK);
+        return true;
+    }
+
+    if (!d->f || f_lseek(d->f, lba * 512u) != FR_OK) {
+        int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
+        return true;
+    }
+
+    uint8_t buf[16];
+    for (uint16_t i = 0; i < count; i++) {
+        uint32_t mem = addr + (uint32_t)i * 512u;
+        for (uint16_t off = 0; off < 512; off += sizeof(buf)) {
+            UINT done = 0;
+            if (write) {
+                for (uint16_t j = 0; j < sizeof(buf); j++)
+                    buf[j] = read86(mem + off + j);
+                if (f_write(d->f, buf, sizeof(buf), &done) != FR_OK || done != sizeof(buf)) {
+                    CPU_AL = (uint8_t)i;
+                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+                    return true;
+                }
+            } else {
+                if (f_read(d->f, buf, sizeof(buf), &done) != FR_OK || done != sizeof(buf)) {
+                    CPU_AL = (uint8_t)i;
+                    int13_set_status(cpu, drive, INT13_ST_CONTROLLER);
+                    return true;
+                }
                 if (!verify) {
                     for (uint16_t j = 0; j < sizeof(buf); j++)
                         write86(mem + off + j, buf[j]);
@@ -265,7 +299,7 @@ static bool int13_rw_chs(CPU* cpu, uint8_t write, uint8_t verify)
         return true;
     }
     
-    if (!d.f) {
+    if (!d.raw_sd && !d.f) {
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
@@ -431,6 +465,10 @@ static bool bios_13h_05h(CPU* cpu)
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
+    if (d.hdd) {
+        int13_set_status(cpu, drive, INT13_ST_BAD_COMMAND);
+        return true;
+    }
     if (!d.f) {
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
@@ -563,7 +601,7 @@ static bool bios_13h_0Ch(CPU* cpu)
     uint32_t lba;
     uint8_t drive = CPU_DL;
 
-    if (!int13_get_disk(drive, &d) || !d.f) {
+    if (!int13_get_disk(drive, &d)) {
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }
@@ -573,7 +611,7 @@ static bool bios_13h_0Ch(CPU* cpu)
         return true;
     }
 
-    if (f_lseek(d.f, lba * 512u) != FR_OK) {
+    if (!d.raw_sd && (!d.f || f_lseek(d.f, lba * 512u) != FR_OK)) {
         int13_set_status(cpu, drive, INT13_ST_SEEK_FAILED);
         return true;
     }
@@ -640,7 +678,7 @@ static bool bios_13h_15h(CPU* cpu)
     }
 
     if (drive & 0x80) {
-        uint32_t sectors = (uint32_t)d.cyls * d.heads * d.sects;
+        uint32_t sectors = int13_total_sectors(&d);
         // TODO: SeaBIOS: why?
         //uint32_t sectors = (uint32_t)(d.cyls - 1) * d.heads * d.sects;
         CPU_AH = 0x03;
@@ -803,7 +841,7 @@ static bool bios_13h_42h(CPU* cpu)
         return true;
     }
 
-    uint32_t total = (uint32_t)d.cyls * d.heads * d.sects;
+    uint32_t total = int13_total_sectors(&d);
     if (lba >= total) {                            /* SeaBIOS: explicit range check */
         int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
@@ -849,7 +887,7 @@ static bool bios_13h_43h(CPU* cpu)
         return true;
     }
 
-    uint32_t total = (uint32_t)d.cyls * d.heads * d.sects;
+    uint32_t total = int13_total_sectors(&d);
     if (lba >= total) {                            /* SeaBIOS: explicit range check */
         int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
@@ -894,7 +932,7 @@ static bool bios_13h_44h(CPU* cpu)
         return true;
     }
 
-    uint32_t total = (uint32_t)d.cyls * d.heads * d.sects;
+    uint32_t total = int13_total_sectors(&d);
     if (lba >= total) {
         int13_set_status(cpu, drive, INT13_ST_SECTOR_NF);
         return true;
@@ -1028,7 +1066,7 @@ static bool bios_13h_48h(CPU* cpu)
     writew86(p + 0x18, 512);           // bytes per sector
 
     // --- v2.x DPTE pointer (0x1E байт) ---
-    if (caller_size >= 0x1E) {
+    if (caller_size >= 0x1E && !d.raw_sd) {
         ret_size = 0x1E;
         uint8_t bios_hdd = drive & 0x7F;
         if (bios_hdd < 2) {
@@ -1043,7 +1081,7 @@ static bool bios_13h_48h(CPU* cpu)
     }
 
     // --- v3.0 Device Path (0x42 байт) ---
-    if (caller_size >= 0x42) {
+    if (caller_size >= 0x42 && !d.raw_sd) {
         ret_size = 0x42;
 
         writew86(p + 0x1E, 0xBEDD);    // key

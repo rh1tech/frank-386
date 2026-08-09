@@ -18,6 +18,13 @@ static int read_boot_sector(FIL *f)
     return readw86(BOOT_ADDR + 510) == 0xAA55;
 }
 
+static int read_bios_hdd_boot_sector(uint8_t bios_index)
+{
+    if (!bios_hdd_read(bios_index, 0, PC_RAM + BOOT_ADDR, 1))
+        return 0;
+    return readw86(BOOT_ADDR + 510) == 0xAA55;
+}
+
 static uint32_t read_le32(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
@@ -211,8 +218,7 @@ bool bios_19h(CPU* cpu) {
         boot_from(cpu, 0x00, false);
         return false;
     }
-    int8_t boot_hdd = ata_hdd_slot(0);
-    if (boot_hdd >= 0 && read_boot_sector(ata_get_file((uint8_t)boot_hdd))) {
+    if (bios_hdd_count() && read_bios_hdd_boot_sector(0)) {
         boot_from(cpu, 0x80, false);
         return false;
     }

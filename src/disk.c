@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <hardware/gpio.h>
 #include "i386.h"
+#include "disk.h"
 #include "ff.h"
+#include "diskio.h"
 #include "mem.h"
 #include "ems.h"
 #include "vga.h"
@@ -17,6 +19,9 @@ extern FATFS fs;
 int hdcount = 0;
 
 static uint8_t sectorbuffer[512];
+
+static uint8_t raw_sd_hdd_enabled = 0;
+static uint32_t raw_sd_hdd_sectors = 0;
 
 struct struct_fdd {
     FIL fil;
@@ -54,8 +59,8 @@ void disk_set_cmos_callback(void (*cb)(uint8_t, uint8_t)) { disk_cmos_update_cb 
 static void (*disk_fdc_mediachange_cb)(int drive) = NULL;
 void disk_set_fdc_mediachange_callback(void (*cb)(int drive)) { disk_fdc_mediachange_cb = cb; }
 
-static void (*disk_cdrom_change_cb)(int drive, const char *filename) = NULL;
-void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename)) { disk_cdrom_change_cb = cb; }
+static void (*disk_cdrom_change_cb)(int drive, const char *filename, int was_present) = NULL;
+void disk_set_cdrom_change_callback(void (*cb)(int drive, const char *filename, int was_present)) { disk_cdrom_change_cb = cb; }
 
 /* Установить FDPT (Fixed Disk Parameter Table) и INT 41h/46h векторы.
  * Вызывается при каждом INT 13h для HDD — перезаписывает то что мог
@@ -142,7 +147,7 @@ void ejectdisk(uint8_t drivenum, bool is_fdd) {
         ata[drivenum].sects = 0;
         ata[drivenum].drive_type = 0;
         if (disk_cdrom_change_cb)
-            disk_cdrom_change_cb(drivenum, NULL);
+            disk_cdrom_change_cb(drivenum, NULL, 1);
         return;
     }
     if (drivenum < 4 && ata[drivenum].name) {
@@ -169,6 +174,7 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
     /* CD-ROMs are read-only; regular disks need write access */
     BYTE fmode = is_cd ? FA_READ : (FA_READ | FA_WRITE);
     FIL* pf = is_fdd ? &fdd[drivenum].fil : &ata[drivenum].fil;
+    const int cd_was_present = (!is_fdd && is_cd && pf->obj.fs) ? 1 : 0;
     if (pf->obj.fs) {
         /* Eject whatever is currently in the drive before inserting new image */
         if (is_fdd)
@@ -210,7 +216,7 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
         ata[drivenum].heads      = 0;
         ata[drivenum].sects      = 0;
         if (disk_cdrom_change_cb)
-            disk_cdrom_change_cb(drivenum, path);
+            disk_cdrom_change_cb(drivenum, path, cd_was_present);
         return 1;
     }
     // Validate size constraints (non-CD-ROM only)
@@ -333,6 +339,107 @@ uint8_t ata_hdd_count(void) {
             count++;
     }
     return count;
+}
+
+void disk_set_raw_sd_hdd(uint8_t enabled) {
+    raw_sd_hdd_enabled = 0;
+    raw_sd_hdd_sectors = 0;
+
+    if (!enabled)
+        return;
+
+    DWORD sectors = 0;
+    if (disk_ioctl(0, GET_SECTOR_COUNT, &sectors) == RES_OK && sectors) {
+        raw_sd_hdd_sectors = (uint32_t)sectors;
+        raw_sd_hdd_enabled = 1;
+    }
+}
+
+uint8_t disk_raw_sd_hdd_enabled(void) {
+    return raw_sd_hdd_enabled;
+}
+
+uint8_t bios_hdd_count(void) {
+    return (uint8_t)(ata_hdd_count() + (raw_sd_hdd_enabled ? 1u : 0u));
+}
+
+bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
+    if (!info)
+        return false;
+
+    memset(info, 0, sizeof(*info));
+    info->ata_slot = -1;
+
+    uint8_t ata_count = ata_hdd_count();
+    if (bios_index < ata_count) {
+        int8_t slot = ata_hdd_slot(bios_index);
+        if (slot < 0)
+            return false;
+
+        info->ata_slot = slot;
+        info->cyls = ata[(uint8_t)slot].cyls;
+        info->heads = ata[(uint8_t)slot].heads;
+        info->sects = ata[(uint8_t)slot].sects;
+        info->total_sectors = ata[(uint8_t)slot].usable_size / 512u;
+        return info->cyls && info->heads && info->sects && info->total_sectors;
+    }
+
+    if (raw_sd_hdd_enabled && bios_index == ata_count) {
+        const uint32_t track = 255u * 63u;
+        uint32_t cyls = (raw_sd_hdd_sectors + track - 1u) / track;
+        if (cyls == 0) cyls = 1;
+        if (cyls > 0xFFFFu) cyls = 0xFFFFu;
+
+        info->raw_sd = 1;
+        info->cyls = (uint16_t)cyls;
+        info->heads = 255;
+        info->sects = 63;
+        info->total_sectors = raw_sd_hdd_sectors;
+        return true;
+    }
+
+    return false;
+}
+
+bool bios_hdd_read(uint8_t bios_index, uint32_t lba, void *buf, uint16_t count) {
+    bios_hdd_info_t info;
+    if (!count || !bios_hdd_get_info(bios_index, &info)) return false;
+    if (lba >= info.total_sectors || count > info.total_sectors - lba) return false;
+
+    if (info.raw_sd)
+        return disk_read(0, (BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+
+    FIL *f = &ata[(uint8_t)info.ata_slot].fil;
+    UINT done = 0;
+    UINT bytes = (UINT)count * 512u;
+    if (f_lseek(f, (FSIZE_t)lba * 512u) != FR_OK) return false;
+    return f_read(f, buf, bytes, &done) == FR_OK && done == bytes;
+}
+
+bool bios_hdd_write(uint8_t bios_index, uint32_t lba, const void *buf, uint16_t count) {
+    bios_hdd_info_t info;
+    if (!count || !bios_hdd_get_info(bios_index, &info)) return false;
+    if (lba >= info.total_sectors || count > info.total_sectors - lba) return false;
+
+    if (info.raw_sd)
+        return disk_write(0, (const BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+
+    FIL *f = &ata[(uint8_t)info.ata_slot].fil;
+    UINT done = 0;
+    UINT bytes = (UINT)count * 512u;
+    if (f_lseek(f, (FSIZE_t)lba * 512u) != FR_OK) return false;
+    return f_write(f, buf, bytes, &done) == FR_OK && done == bytes;
+}
+
+bool bios_hdd_sync(uint8_t bios_index) {
+    bios_hdd_info_t info;
+    if (!bios_hdd_get_info(bios_index, &info)) return false;
+    if (info.raw_sd) return disk_ioctl(0, CTRL_SYNC, NULL) == RES_OK;
+    return f_sync(&ata[(uint8_t)info.ata_slot].fil) == FR_OK;
+}
+
+uint8_t *disk_sector_buffer(void) {
+    return sectorbuffer;
 }
 
 const char* fdd_get_filename(int i) {

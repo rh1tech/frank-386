@@ -23,6 +23,7 @@ static int cfg_cpu_gen = 4;
 static int cfg_fpu = 0;
 static int cfg_redirector = 1;
 static char cfg_bios[32] = "";  /* empty = Native BIOS */
+static int cfg_raw_sd_hdd = 0;
 static bool cfg_changed = false;
 
 // Hardware settings (use build-time defaults)
@@ -89,6 +90,15 @@ void config_set_redirector(int enabled) {
 
 const char *config_get_bios_file(void) {
     return cfg_bios[0] ? cfg_bios : NULL;
+}
+
+int config_get_raw_sd_hdd(void) { return cfg_raw_sd_hdd; }
+void config_set_raw_sd_hdd(int enabled) {
+    enabled = !!enabled;
+    if (cfg_raw_sd_hdd != enabled) {
+        cfg_raw_sd_hdd = enabled;
+        cfg_changed = true;
+    }
 }
 
 void config_set_bios_file(const char *filename) {
@@ -310,6 +320,8 @@ bool config_save_all(void) {
 
     // Disks (must be in [pc] section)
     write_line(&fp, "\n; Disk images\n");
+    snprintf(line, sizeof(line), "raw_sd_hdd=%d\n", cfg_raw_sd_hdd);
+    write_line(&fp, line);
     for (int i = 0; i < 2; i++) {
         const char *fname = fdd_get_filename(i);
         if (fname && fname[0]) {

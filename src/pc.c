@@ -1171,6 +1171,8 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 		}
 	}
 
+	disk_set_raw_sd_hdd(conf->raw_sd_hdd);
+
 	/* CD-ROM E: always present on ide2/drive0 (secondary master).
 	 * Only attach if cdc= didn't already claim that slot (ata[2]). */
 	if (!ide_has_drive(pc->ide2, 0))
@@ -1324,13 +1326,14 @@ static void point2zero(u32 intno) {
 
 static void install_dpte(int idx, uint32_t addr)
 {
-    int8_t slot = ata_hdd_slot((uint8_t)idx);
-    if (slot < 0) {
+    bios_hdd_info_t info;
+    if (!bios_hdd_get_info((uint8_t)idx, &info) || info.ata_slot < 0) {
         for (int i = 0; i < 16; i++)
             pstore8(addr + i, 0x00);
         return;
     }
 	// Primary IDE: 0x1F0, Secondary: 0x170
+    int8_t slot = info.ata_slot;
     uint16_t iobase  = (slot < 2) ? 0x01F0 : 0x0170;
     uint16_t ctlbase = (slot < 2) ? 0x03F6 : 0x0376;
 //    uint8_t  devhead = (slot & 1) ? 0xB0 : 0xA0; // slave/master
@@ -1367,9 +1370,9 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
 {
     // Вектор INT 41h = 0x104, INT 46h = 0x118
     uint32_t vec = (idx == 0) ? 0x41 * 4 : 0x46 * 4;
-    int8_t slot = ata_hdd_slot((uint8_t)idx);
+    bios_hdd_info_t info;
 
-    if (slot < 0) {
+    if (!bios_hdd_get_info((uint8_t)idx, &info)) {
         // Нет диска — вектор указывает на нули, не на fake BIOS
         // Просто обнулить таблицу и поставить вектор
         for (int i = 0; i < 16; i++)
@@ -1378,9 +1381,9 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
         pstore16(vec + 2, 0x0000);
         return;
 	} else {
-        uint16_t cyls  = ata_get_cyls((uint8_t)slot);
-        uint16_t heads = ata_get_heads((uint8_t)slot);
-        uint16_t sects = ata_get_sects((uint8_t)slot);
+        uint16_t cyls  = info.cyls;
+        uint16_t heads = info.heads;
+        uint16_t sects = info.sects;
 
         // Fixed Disk Parameter Table, 16 bytes (INT 41h/46h format)
         pstore16(addr + 0x00, cyls);          /* max cylinders */
@@ -1532,13 +1535,13 @@ void bios_post(PC *pc) {
 //	pstore8 (0x471, 0x00);                               /* break flag */
 //	pstore16(0x472, 0x0000);                             /* reset flag */
 //	pstore8 (0x474, 0x00);                               /* last HDD status */
-	pstore8 (0x475, ata_hdd_count());                         /* fixed disk count */
+	pstore8 (0x475, bios_hdd_count());                         /* fixed disk count */
 	/* SeaBIOS block.c: drive_control_byte = 0xC0 | ((heads > 8) << 3). */
 	{
 		uint8_t ctrl = 0xC0;
-        int8_t first_hdd = ata_hdd_slot(0);
-		if (first_hdd >= 0 && ata_get_heads((uint8_t)first_hdd) > 8)
-			ctrl |= 0x08;
+        bios_hdd_info_t first_hdd;
+        if (bios_hdd_get_info(0, &first_hdd) && first_hdd.heads > 8)
+            ctrl |= 0x08;
 		pstore8 (0x476, ctrl);                           /* HDD control byte */
 	}
 //	pstore8 (0x477, 0x00);                               /* HDD I/O port offset */
@@ -1881,6 +1884,8 @@ int parse_conf_ini(void* user, const char* section,
 			conf->mem_size = parse_mem_size(value);
 		} else if (NAME("cpu")) {
 			conf->cpu_gen = atoi(value);
+		} else if (NAME("raw_sd_hdd")) {
+            conf->raw_sd_hdd = atoi(value) != 0;
 		} else if (NAME("hda")) {
 			conf->ata[0] = strdup(value);
 			conf->iscd[0] = 0;

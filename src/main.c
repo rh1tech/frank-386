@@ -736,6 +736,7 @@ static void load_default_config(void) {
         config.ata[i] = NULL;
         config.iscd[i] = 0;
     }
+    config.raw_sd_hdd = 0;
     config.fdd[0] = NULL;
     config.fdd[1] = NULL;
 
@@ -1188,6 +1189,7 @@ static bool init_emulator(void) {
     config_set_fpu(config.fpu);
     config_set_redirector(config.redirector);
     config_set_bios_file(config.bios);
+    config_set_raw_sd_hdd(config.raw_sd_hdd);
     // Hardware settings are loaded from [frank-386] section via parse_frank_386_ini
     config_clear_changes();
 
