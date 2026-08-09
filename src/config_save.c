@@ -276,11 +276,44 @@ bool config_hw_changed(void) { return cfg_hw_changed; }
 bool config_has_changes(void) { return cfg_changed; }
 void config_clear_changes(void) { cfg_changed = false; cfg_hw_changed = false; }
 
-// Write a line to file
+// Write text using DOS-compatible CRLF line endings.
 static bool write_line(FIL *fp, const char *line) {
-    UINT bw;
-    FRESULT res = f_write(fp, line, strlen(line), &bw);
-    return (res == FR_OK && bw == strlen(line));
+    const char *p = line;
+
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        const char *end = nl ? nl : p + strlen(p);
+        UINT len = (UINT)(end - p);
+        UINT bw;
+
+        if (len) {
+            FRESULT res = f_write(fp, p, len, &bw);
+            if (res != FR_OK || bw != len)
+                return false;
+        }
+
+        if (!nl)
+            break;
+
+        // Preserve an existing CRLF; otherwise convert LF to CRLF.
+        if (nl == p || nl[-1] != '\r') {
+            static const char cr = '\r';
+            FRESULT res = f_write(fp, &cr, 1, &bw);
+            if (res != FR_OK || bw != 1)
+                return false;
+        }
+
+        {
+            static const char lf = '\n';
+            FRESULT res = f_write(fp, &lf, 1, &bw);
+            if (res != FR_OK || bw != 1)
+                return false;
+        }
+
+        p = nl + 1;
+    }
+
+    return true;
 }
 
 bool config_save_all(void) {

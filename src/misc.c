@@ -303,24 +303,31 @@ CMOS *cmos_init(long mem_size, int irq, void *pic, void (*set_irq)(void *pic, in
 	c->data[11] = 0x02;
 	c->data[12] = 0x00;
 	c->data[13] = 0x80;
-	if (mem_size >= 1024 * 1024) {
-		if (mem_size >= 64 * 1024 * 1024) {
-			mem_size -= 16 * 1024 * 1024;
-			c->data[0x35] = mem_size >> 24;
-			c->data[0x34] = mem_size >> 16;
-		} else {
-			mem_size -= 1024 * 1024;
-			uint32_t ext_kb = mem_size >> 10;
-			c->data[0x31] = ext_kb >> 8;
-			c->data[0x30] = ext_kb & 0xff;
-		}
-	}
-	/* old AT extended memory field */
-	c->data[0x16] = c->data[0x31];
-	c->data[0x15] = c->data[0x30];
-	// extended memory above 16MB mirror
-	c->data[0x17] = c->data[0x35];
-	c->data[0x18] = c->data[0x34];
+	/* Standard AT CMOS memory fields.
+	 * 15h/16h: base memory in KiB (normally 640 KiB)
+	 * 17h/18h: extended memory above 1 MiB in KiB, capped at 65535
+	 * 30h/31h: mirror of 17h/18h
+	 * 34h/35h: memory above 16 MiB in 64-KiB units
+	 */
+	uint32_t total_kb = mem_size > 0 ? (uint32_t)mem_size >> 10 : 0;
+	uint32_t base_kb = total_kb < 640u ? total_kb : 640u;
+	uint32_t ext_kb = total_kb > 1024u ? total_kb - 1024u : 0u;
+	if (ext_kb > 0xffffu)
+		ext_kb = 0xffffu;
+
+	c->data[0x15] = (uint8_t)(base_kb & 0xff);
+	c->data[0x16] = (uint8_t)(base_kb >> 8);
+	c->data[0x17] = (uint8_t)(ext_kb & 0xff);
+	c->data[0x18] = (uint8_t)(ext_kb >> 8);
+	c->data[0x30] = c->data[0x17];
+	c->data[0x31] = c->data[0x18];
+
+	uint32_t above16_64k =
+		mem_size > 16 * 1024 * 1024 ? ((uint32_t)mem_size - 16u * 1024u * 1024u) >> 16 : 0u;
+	if (above16_64k > 0xffffu)
+		above16_64k = 0xffffu;
+	c->data[0x34] = (uint8_t)(above16_64k & 0xff);
+	c->data[0x35] = (uint8_t)(above16_64k >> 8);
 	return c;
 }
 

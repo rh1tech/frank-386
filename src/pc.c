@@ -1427,6 +1427,8 @@ void bios_post(PC *pc) {
 		ext_ram = 0xFFFF;
 	cmos_write(pc->cpu, 0x17, (uint8_t)(ext_ram & 0xFF)); // low byte extended memory KB
 	cmos_write(pc->cpu, 0x18, (uint8_t)((ext_ram >> 8) & 0xFF)); // high byte
+	/* 17h/18h are inside the standard CMOS checksum range 10h..2Dh. */
+	cmos_update_checksum(pc->cmos);
 // fast IRET cases:
 	for (int i = 0; i < 256; ++i) { // initially all them just pointed to IRET
 		point2iret(i);
