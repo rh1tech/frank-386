@@ -4,9 +4,9 @@ if(WIN32)
 else()
     set(USERHOME $ENV{HOME})
 endif()
-set(sdkVersion 2.3.0)
+set(sdkVersion 2.2.0)
 set(toolchainVersion 14_2_Rel1)
-set(picotoolVersion 2.3.0)
+set(picotoolVersion 2.2.0)
 set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
 if (EXISTS ${picoVscode})
     include(${picoVscode})
@@ -389,6 +389,9 @@ add_executable(${BUILD_NAME}
     ${EMU_CORE_SOURCES}
 )
 
+configure_file(memmap.ld.in memmap.ld @ONLY)
+pico_set_linker_script(${BUILD_NAME} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
+
 target_include_directories(${BUILD_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     ${CMAKE_CURRENT_LIST_DIR}/src
@@ -430,22 +433,10 @@ if(CPU_TARGET STREQUAL "386")
 endif()
 
 # --- Нативный стек core0 -----------------------------------------------
-# По умолчанию PicoSDK даёт core0 всего PICO_STACK_SIZE=0x800 (2КБ) на
-# верху SCRATCH_Y; сразу под ним - SCRATCH_X со стеком core1, поэтому
-# переполнение молча разрушает контекст core1. Замеры -fstack-usage
-# цепочки fcom -> nested COMMAND -> DosExec -> INT 21h -> FatFs дают
-# пик 3-3.5КБ. Поднимаем до 3КБ: вместе с __scratch_y-данными
-# видеодрайверов (VGA: spread8_lut = 1КБ) банк занят ровно целиком;
-# при превышении линкер честно откажет, тихого перекрытия не будет.
-# Крупные временные буферы дополнительно выносятся из кадров в
-# kstack-арену ядра (src/fdos/kernel.c).
-#
-# 0xBE0 - точный максимум: в SCRATCH_Y уже лежат данные ОБОИХ
-# видеодрайверов (VGA spread8_lut = 1024Б + hdmi dma_lines/DMA_BUF_ADDR
-# = 32Б, итого 1056Б); 4096 - 1056 = 3040 = 0xBE0. Любое новое
-# __scratch_y-данное снова уронит линковку - это желаемое поведение,
-# правьте размер здесь осознанно.
-target_compile_definitions(${BUILD_NAME} PRIVATE PICO_STACK_SIZE=0xBE0)
+target_compile_definitions(${BUILD_NAME} PRIVATE
+    PICO_STACK_SIZE=0x1000
+    PICO_CORE1_STACK_SIZE=0xBE0
+)
 
 # Точная карта кадров для дальнейшей разгрузки стека: родные .su-файлы
 # ARM-тулчейна (build/**/*.su после сборки).

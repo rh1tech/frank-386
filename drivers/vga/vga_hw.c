@@ -717,7 +717,7 @@ void __time_critical_func(pre_render_line)(void) {
 }
 
 // Dispatch to appropriate renderer based on current mode
-static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_buffer) {
+static void __scratch_y("render_line") render_line(uint32_t line, uint32_t *output_buffer) {
     pre_render_line();
     // --- Верхнее поле ---
     if (line < (uint32_t)active_start) {
