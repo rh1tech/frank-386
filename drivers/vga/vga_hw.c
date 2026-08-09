@@ -645,13 +645,18 @@ static void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint16_t v) 
 static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *output_buffer) {
     uint16_t *out16 = (uint16_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
 
-    uint32_t char_row = line >> 4;
-    uint32_t glyph_line = line & 15;
+    int char_height = vga_get_char_height(vga_state);
+    if (char_height <= 0 || char_height > 32)
+        char_height = 16;
+
+    uint32_t char_row = line / (uint32_t)char_height;
+    uint32_t glyph_line = line % (uint32_t)char_height;
+    uint32_t text_rows = (uint32_t)(active_end - active_start) / (uint32_t)char_height;
 
     int cols = text_cols;
     int double_h = (cols == 40);  // 40 columns => 2x horizontal scaling
 
-    if (char_row < 25) {
+    if (char_row < text_rows) {
         // Use snapped start address for the frame (prevents mid-frame tearing).
         const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
         const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
@@ -1302,7 +1307,7 @@ void vga_hw_set_palette(const uint8_t *palette_data) {
 
 // Update EGA 16-color palette from AC palette registers
 // palette16_data is 48 bytes (16 entries × 3 bytes RGB, each 0-63)
-void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
+void __scratch_y("vga_hw_set_palette16") vga_hw_set_palette16(const uint8_t *palette16_data) {
     for (int i = 0; i < 16; i++) {
         uint8_t r6 = palette16_data[i * 3 + 0];
         uint8_t g6 = palette16_data[i * 3 + 1];

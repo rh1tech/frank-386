@@ -1761,7 +1761,7 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
     return false;
 }
 
-void __scratch_y("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
+void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 {
 	cp_vga_write();
     uint32_t val = val8;
@@ -2374,7 +2374,7 @@ int __time_critical_func(vga_get_text_cols)(VGAState *s) {
 }
 
 /* Get current VGA mode: 0=blank, 1=text, 2=graphics */
-int __scratch_y("vga_get_mode") vga_get_mode(VGAState *s)
+int __not_in_flash("vga_get_mode") vga_get_mode(VGAState *s)
 {
     if (!(s->ar_index & 0x20)) {
         return 0;  // blank

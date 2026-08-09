@@ -3472,7 +3472,6 @@ ok:
 #include "font8x14.h"
 #include "font8x16.h"
 
-/* Реверс битов в байте: бит 7 <-> бит 0. */
 static inline uint8_t bios_10h_bitrev8(uint8_t b)
 {
     b = (uint8_t)(((b & 0xF0u) >> 4) | ((b & 0x0Fu) << 4));
@@ -3495,12 +3494,11 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
      * so copy compact ROM font tables into emulated F000:xxxx area.
      */
     /*
-     * Заголовки font_8x8/font_8x14/font_8x16 хранят строки глифов
-     * LSB-влево. ROM-шрифт - гостевой ABI: INT 10h/AX=1130h выдаёт на
-     * него указатели, AX=111xh копирует его в знакогенератор, и всё это
-     * в стандартном порядке VGA - бит 7 слева. Реверс выполняется один
-     * раз здесь, при материализации; дальше по цепочке байты стандартные
-     * (в т.ч. для программ, читающих ROM напрямую).
+     * The built-in font tables are not all stored in the same bit order.
+     * font_8x8 is already in the order expected by the current text renderer,
+     * while font_8x16 is the bit-reversed form of the legacy vgafont16 table
+     * used by the working 25-line path.  Normalize only the 8x16 ROM image
+     * here; do not reverse the 8x8 image used by the working 50-line mode.
      */
     for (uint32_t ch = 0; ch < 256; ch++) {
         for (uint32_t y = 0; y < 16; y++)
@@ -3509,11 +3507,11 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
 
         for (uint8_t y = 0; y < 14; y++)
             pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X14_OFF + ch * 14 + y,
-                    bios_10h_bitrev8(font_8x14[ch * 14 + y]));
+                    font_8x14[ch * 14 + y]);
 
         for (uint8_t y = 0; y < 8; y++)
             pstore8(((uint32_t)BIOS_FONT_SEG << 4) + BIOS_FONT8X8_OFF + ch * 8 + y,
-                    bios_10h_bitrev8(font_8x8[ch * 8 + y]));
+                    font_8x8[ch * 8 + y]);
     }
 }
 

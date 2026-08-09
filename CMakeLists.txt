@@ -329,6 +329,8 @@ set(EMU_CORE_SOURCES
     src/fdos/fdos_29h.c
     src/fdos/fdos_2fh.c
 
+    src/dos_api.c
+
     # Peripheral chips
     src/i8042.c      # Keyboard controller
     src/i8254.c      # Timer
