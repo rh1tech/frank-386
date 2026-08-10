@@ -468,7 +468,6 @@ int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
     {
       if (InitKernelConfig.Verbose >= 1) printf("LBA mode\n");
       pdap->number_of_blocks = 1;
-      pdap->reserved_2 = 0;
       pdap->buffer_address = buffer;
       pdap->block_address_high = 0;       /* clear high part */
       pdap->block_address = LBA_address;  /* clear high part */

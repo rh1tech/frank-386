@@ -523,9 +523,25 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
         if (map_cluster(fnp, mode) != SUCCESS)
           break;
 
-        if (clus2phys(fnp->f_cluster, wf_dpb) !=
-            currentblock + sectors_to_xfer)
-          break;
+        {
+          ULONG nextblock = clus2phys(fnp->f_cluster, wf_dpb);
+          if (nextblock != currentblock + sectors_to_xfer)
+          {
+            #if 0
+            printf("FATJUMP fd=%d off=%lu rel=%lu cl=%lu run=%u blk=%lu nextblk=%lu fat32=%u data=%u xdata=%lu\n",
+                   fd, (unsigned long)fnp->f_offset,
+                   (unsigned long)fnp->f_cluster_offset,
+                   (unsigned long)fnp->f_cluster,
+                   (unsigned)sectors_to_xfer,
+                   (unsigned long)currentblock,
+                   (unsigned long)nextblock,
+                   ISFAT32(wf_dpb) ? 1u : 0u,
+                   (unsigned)wf_dpb->dpb_data,
+                   (unsigned long)wf_dpb->dpb_xdata);
+            #endif
+            break;
+          }
+        }
 
         sectors_to_xfer += wf_dpb->dpb_clsmask + 1;
 
@@ -1459,6 +1475,15 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
   {
     /* get next cluster in the chain */
     cluster = next_cluster(fnp->f_dpb, fnp->f_cluster);
+    #if 0
+    if (relcluster == 1)
+      dos_printf("FATMAP fd=%u off=%lu rel=%lu saved=%lu cur=%lu next=%lu xsize=%lu spc=%u\r\n",
+                 (unsigned)fnp->f_sft_idx, (unsigned long)fnp->f_offset,
+                 (unsigned long)relcluster, (unsigned long)fnp->f_cluster_offset,
+                 (unsigned long)fnp->f_cluster, (unsigned long)cluster,
+                 (unsigned long)f_dpb->dpb_xsize,
+                 (unsigned)(f_dpb->dpb_clsmask + 1));
+    #endif
 /*
     printf("map_cluster next off=%lu size=%lu rel=%lu cur=%lu next=%lu dpb_size=%u phys=%lu\n",
            fnp->f_offset, fnp->f_dir.dir_size,
@@ -1470,7 +1495,14 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
              ? clus2phys(cluster, fnp->f_dpb) : 0UL);
 */
     if (cluster <= 1) /* 1/error or 0/FREE chain into the void */
+    {
+      if (mode == XFR_READ)
+        printf("FATFAIL fd=%u off=%lu rel=%lu saved=%lu cur=%lu next=%lu reason=invalid\n",
+               (unsigned)fnp->f_sft_idx, (unsigned long)fnp->f_offset,
+               (unsigned long)relcluster, (unsigned long)fnp->f_cluster_offset,
+               (unsigned long)fnp->f_cluster, (unsigned long)cluster);
       return DE_SEEK;
+    }
 
     /* If this is a read and the next is a LAST_CLUSTER,               */
     /* then we are going to read past EOF, return zero read            */
@@ -1479,7 +1511,13 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
     if (cluster == LONG_LAST_CLUSTER)
     {
       if (mode == XFR_READ)
+      {
+        printf("FATFAIL fd=%u off=%lu rel=%lu saved=%lu cur=%lu next=%lu reason=eoc\n",
+               (unsigned)fnp->f_sft_idx, (unsigned long)fnp->f_offset,
+               (unsigned long)relcluster, (unsigned long)fnp->f_cluster_offset,
+               (unsigned long)fnp->f_cluster, (unsigned long)cluster);
         return DE_SEEK;
+      }
 
       /* mode == XFR_WRITE */
       cluster = extend(fnp);

@@ -506,6 +506,7 @@ STATIC int LBA_Transfer_raw(CPU* cpu,
   /// parameter table maintenance - not needed for a fixed disk image.
 
   pdap->packet_size = sizeof(struct _bios_LBA_address_packet);
+  pdap->reserved_1 = 0;
 
   for (; totaltodo != 0;)
   {

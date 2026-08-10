@@ -230,8 +230,7 @@ struct _bios_LBA_address_packet
 {
   unsigned char packet_size;    /* size of this packet...set to 16  */
   unsigned char reserved_1;     /* set to 0...unused                */
-  unsigned char number_of_blocks;       /* 0 < number_of_blocks < 128       */
-  unsigned char reserved_2;     /* set to 0...unused                */
+  UWORD number_of_blocks;       /* EDD DAP +02h: 16-bit sector count */
   dos_far_ptr buffer_address;    /* addr of transfer buffer          */
   unsigned long block_address;  /* LBA address                      */
   unsigned long block_address_high;     /* high bytes of LBA addr...unused  */

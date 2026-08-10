@@ -257,11 +257,34 @@ static int      diag_alarm_num = -1;
 static uint32_t diag_last_hb;
 static int      diag_ticks;
 static int      diag_reported;
+static volatile uint32_t diag_native_depth;
+
+void diag_native_code_enter(void)
+{
+    diag_native_depth++;
+}
+
+void diag_native_code_leave(void)
+{
+    if (diag_native_depth != 0)
+        diag_native_depth--;
+}
 
 void diag_alarm_c(uint32_t *frame)
 {
     timer_hw->intr = 1u << diag_alarm_num;
     timer_hw->alarm[diag_alarm_num] = timer_hw->timerawl + DIAG_TICK_US;
+
+    /* Native ARM ELF code legitimately runs outside pc_step().  While its
+       IRQs are alive, this alarm itself is the heartbeat; if it wedges with
+       IRQs masked, core1 still observes a stuck diag_hb and reports it. */
+    if (diag_native_depth != 0) {
+        diag_hb++;
+        diag_last_hb = diag_hb;
+        diag_ticks = 0;
+        diag_reported = 0;
+        return;
+    }
 
     if (diag_hb != diag_last_hb) {
         diag_last_hb = diag_hb;
