@@ -54,6 +54,544 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 
 #define LOAD_HIGH 0x80          /* mode bit: try UMB first (see DosUmbLink()) */
 
+
+/* Minimal ARM ELF32 loader support.  Native execution is deliberately not
+   wired yet: this stage only recognizes an ELF passed to EXEC, allocates one
+   DOS-owned guest-memory block, lays out SHF_ALLOC sections after a 100h-byte
+   native-stack reservation, and applies the relocations used by the existing
+   Murmulator OS2 ELF loader. */
+#define ELF32_MAGIC             0x464c457fu
+#define ELFCLASS32              1u
+#define ELFDATA2LSB             1u
+#define EV_CURRENT              1u
+#define ET_REL                  1u
+#define EM_ARM                  40u
+#define EF_ARM_ABI_FLOAT_HARD   0x00000400u
+#define SHN_UNDEF               0u
+#define SHN_ABS                 0xfff1u
+#define SHT_PROGBITS            1u
+#define SHT_SYMTAB              2u
+#define SHT_NOBITS              8u
+#define SHT_REL                 9u
+#define SHF_ALLOC               0x2u
+#define R_ARM_ABS32             2u
+#define R_ARM_REL32             3u
+#define R_ARM_THM_PC22          10u
+#define R_ARM_THM_JUMP24        30u
+#define R_ARM_THM_ALU_ABS_G0_NC 102u
+#define ARM_ELF_STACK_SIZE      0x100u
+
+#pragma pack(push, 1)
+typedef struct arm_elf32_ehdr {
+  ULONG magic;
+  UBYTE elf_class;
+  UBYTE data;
+  UBYTE ident_version;
+  UBYTE abi;
+  UBYTE abi_version;
+  UBYTE pad[7];
+  UWORD type;
+  UWORD machine;
+  ULONG version;
+  ULONG entry;
+  ULONG phoff;
+  ULONG shoff;
+  ULONG flags;
+  UWORD ehsize;
+  UWORD phentsize;
+  UWORD phnum;
+  UWORD shentsize;
+  UWORD shnum;
+  UWORD shstrndx;
+} arm_elf32_ehdr;
+
+typedef struct arm_elf32_shdr {
+  ULONG name;
+  ULONG type;
+  ULONG flags;
+  ULONG addr;
+  ULONG offset;
+  ULONG size;
+  ULONG link;
+  ULONG info;
+  ULONG addralign;
+  ULONG entsize;
+} arm_elf32_shdr;
+
+typedef struct arm_elf32_sym {
+  ULONG name;
+  ULONG value;
+  ULONG size;
+  UBYTE info;
+  UBYTE other;
+  UWORD shndx;
+} arm_elf32_sym;
+
+typedef struct arm_elf32_rel {
+  ULONG offset;
+  ULONG info;
+} arm_elf32_rel;
+#pragma pack(pop)
+
+/* Metadata reads must still pass through DosRWSft(), whose destination is a
+   guest far pointer.  RelocBuf is existing synchronous task.c scratch space
+   and is large enough for the largest ELF record above (52-byte Ehdr). */
+#define ElfScratch ((BYTE *)RelocBuf)
+
+static int arm_elf_read_meta(COUNT fd, ULONG file_off, void *dst, UWORD len)
+{
+  LONG pos = SftSeek(fd, (LONG)file_off, SEEK_SET);
+  LONG got;
+
+  if (pos < 0)
+    return DE_INVLDFMT;
+  got = DosRWSft(fd, len,
+                 x86_FAR_PTR(DOS_PSP, ElfScratch), XFR_READ);
+  if (got != len)
+    return DE_INVLDFMT;
+  memcpy(dst, ElfScratch, len);
+  return SUCCESS;
+}
+
+static dos_far_ptr arm_elf_guest_ptr(UWORD base_seg, ULONG off)
+{
+  return MK_FP((UWORD)(base_seg + (UWORD)(off >> 4)), (UWORD)(off & 0x0fu));
+}
+
+static ULONG arm_elf_align_up(ULONG v, ULONG a)
+{
+  ULONG rem, add;
+
+  if (a <= 1)
+    return v;
+
+  /*
+   * Keep the loader permissive like the Murmulator OS2 implementation:
+   * do not reject an otherwise loadable file solely because sh_addralign
+   * is not a power of two.  Align arithmetically and reject only overflow.
+   */
+  rem = v % a;
+  if (rem == 0)
+    return v;
+  add = a - rem;
+  if (v > 0xfffffffful - add)
+    return 0xfffffffful;
+  return v + add;
+}
+
+/* Return the offset assigned to section sec_num inside the single guest block.
+   The first allocatable section is always at least 100h bytes after the block
+   base, leaving that prefix for the future native ARM stack. */
+static int arm_elf_section_layout(COUNT fd, const arm_elf32_ehdr *eh,
+                                  UWORD sec_num, ULONG *sec_off,
+                                  arm_elf32_shdr *wanted,
+                                  ULONG *image_end)
+{
+  ULONG cursor = ARM_ELF_STACK_SIZE;
+  UWORD i;
+
+  if (sec_num >= eh->shnum)
+    return DE_INVLDFMT;
+
+  for (i = 0; i < eh->shnum; ++i) {
+    arm_elf32_shdr sh;
+    ULONG aligned;
+    int rc = arm_elf_read_meta(fd,
+        eh->shoff + (ULONG)i * eh->shentsize, &sh, sizeof(sh));
+    if (rc != SUCCESS) {
+      dos_printf("ARM ELF: cannot read section header %u at file offset %lu\r\n",
+                 (unsigned)i, eh->shoff + (ULONG)i * eh->shentsize);
+      return rc;
+    }
+
+    if (!(sh.flags & SHF_ALLOC)) {
+      if (i == sec_num && wanted)
+        *wanted = sh;
+      continue;
+    }
+
+    aligned = arm_elf_align_up(cursor, sh.addralign);
+    if (aligned == 0xfffffffful || aligned > 0xfffffffful - sh.size) {
+      dos_printf("ARM ELF: section %u layout overflow: flags=%08lx size=%lu align=%lu cursor=%lu\r\n",
+                 (unsigned)i, sh.flags, sh.size, sh.addralign, cursor);
+      return DE_INVLDFMT;
+    }
+    cursor = aligned;
+
+    if (i == sec_num) {
+      if (sec_off)
+        *sec_off = cursor;
+      if (wanted)
+        *wanted = sh;
+    }
+    cursor += sh.size;
+  }
+
+  if (image_end)
+    *image_end = cursor;
+  return SUCCESS;
+}
+
+static int arm_elf_read_section(COUNT fd, UWORD base_seg, ULONG dst_off,
+                                ULONG file_off, ULONG size)
+{
+  ULONG done = 0;
+  LONG pos = SftSeek(fd, (LONG)file_off, SEEK_SET);
+
+  if (pos < 0)
+    return DE_INVLDFMT;
+
+  while (done < size) {
+    UWORD chunk = (UWORD)min((ULONG)CHUNK, size - done);
+    LONG got = DosRWSft(fd, chunk,
+                        arm_elf_guest_ptr(base_seg, dst_off + done), XFR_READ);
+    if (got != chunk)
+      return DE_INVLDFMT;
+    done += chunk;
+  }
+  return SUCCESS;
+}
+
+static void arm_elf_resolve_thm_pc22(UWORD *addr, UWORD *addr_ref,
+                                     ULONG sym_val)
+{
+  UWORD instr0 = addr[0], instr1 = addr[1];
+  ULONG s = (instr0 >> 10) & 1u;
+  ULONG j1 = (instr1 >> 13) & 1u;
+  ULONG j2 = (instr1 >> 11) & 1u;
+  ULONG imm10 = instr0 & 0x03ffu;
+  ULONG imm11 = instr1 & 0x07ffu;
+  ULONG i1 = (~(j1 ^ s)) & 1u;
+  ULONG i2 = (~(j2 ^ s)) & 1u;
+  LONG offset = (LONG)((i1 << 23) | (i2 << 22) |
+                       (imm10 << 12) | (imm11 << 1));
+  ULONG new_offset;
+
+  if (s)
+    offset |= (LONG)0xff800000ul;
+  new_offset = (ULONG)(offset + (LONG)sym_val - (LONG)(uintptr_t)addr_ref);
+  s = new_offset >> 31;
+  i1 = (new_offset >> 23) & 1u;
+  i2 = (new_offset >> 22) & 1u;
+  imm10 = (new_offset >> 12) & 0x03ffu;
+  imm11 = (new_offset >> 1) & 0x07ffu;
+  j1 = (~(i1 ^ s)) & 1u;
+  j2 = (~(i2 ^ s)) & 1u;
+  addr[0] = (UWORD)(0xf000u | (s << 10) | imm10);
+  addr[1] = (UWORD)((0x1au << 11) | (j1 << 13) | (j2 << 11) | imm11);
+}
+
+static int arm_elf_resolve_thm_jump24(UWORD *addr, UWORD *addr_ref,
+                                      ULONG sym_val)
+{
+  UWORD instr0 = addr[0], instr1 = addr[1];
+  ULONG s = (instr0 >> 10) & 1u;
+  ULONG j1 = (instr1 >> 13) & 1u;
+  ULONG j2 = (instr1 >> 11) & 1u;
+  ULONG imm10 = instr0 & 0x03ffu;
+  ULONG imm11 = instr1 & 0x07ffu;
+  ULONG i1 = (~(j1 ^ s)) & 1u;
+  ULONG i2 = (~(j2 ^ s)) & 1u;
+  LONG addend = (LONG)((s << 24) | (i1 << 23) | (i2 << 22) |
+                       (imm10 << 12) | (imm11 << 1));
+  LONG rel;
+  ULONG urel;
+
+  if (s)
+    addend |= (LONG)0xff000000ul;
+  rel = addend + (LONG)(sym_val & ~1ul) -
+        ((LONG)(uintptr_t)addr_ref + 4);
+  if (rel < -(1L << 24) || rel > ((1L << 24) - 2))
+    return DE_INVLDFMT;
+
+  urel = (ULONG)rel;
+  s = (urel >> 24) & 1u;
+  i1 = (urel >> 23) & 1u;
+  i2 = (urel >> 22) & 1u;
+  imm10 = (urel >> 12) & 0x03ffu;
+  imm11 = (urel >> 1) & 0x07ffu;
+  j1 = (~(i1 ^ s)) & 1u;
+  j2 = (~(i2 ^ s)) & 1u;
+  addr[0] = (UWORD)(0xf000u | (s << 10) | imm10);
+  addr[1] = (UWORD)((0x1cu << 11) | (j1 << 13) | (j2 << 11) | imm11);
+  return SUCCESS;
+}
+
+static void arm_elf_resolve_thm_alu_abs_g0_nc(UWORD *addr, ULONG value)
+{
+  UWORD instr0 = addr[0], instr1 = addr[1];
+  ULONG imm4 = instr0 & 0x000fu;
+  ULONG ibit = (instr0 >> 10) & 1u;
+  ULONG imm3 = (instr1 >> 12) & 7u;
+  ULONG imm8 = instr1 & 0x00ffu;
+  ULONG addend = (imm4 << 12) | (ibit << 11) | (imm3 << 8) | imm8;
+  ULONG imm16 = (value + addend) & 0xffffu;
+
+  instr0 = (UWORD)((instr0 & ~0x040fu) |
+                   ((imm16 >> 12) & 0x0fu) |
+                   (((imm16 >> 11) & 1u) << 10));
+  instr1 = (UWORD)((instr1 & ~0x70ffu) |
+                   (((imm16 >> 8) & 7u) << 12) |
+                   (imm16 & 0xffu));
+  addr[0] = instr0;
+  addr[1] = instr1;
+}
+
+static COUNT arm_elf_reject(COUNT rc, const char *reason)
+{
+  dos_printf("ARM ELF: %s\r\n", reason);
+  return rc;
+}
+
+static int arm_elf_symbol_addr(COUNT fd, const arm_elf32_ehdr *eh,
+                               UWORD base_seg, const arm_elf32_shdr *symtab,
+                               ULONG sym_index, ULONG *sym_addr)
+{
+  arm_elf32_sym sym;
+  ULONG sec_off;
+  arm_elf32_shdr sec;
+  ULONG entsize = symtab->entsize ? symtab->entsize : sizeof(sym);
+  int rc;
+
+  if (entsize < sizeof(sym) || sym_index >= symtab->size / entsize)
+    return DE_INVLDFMT;
+  rc = arm_elf_read_meta(fd, symtab->offset + sym_index * entsize,
+                         &sym, sizeof(sym));
+  if (rc != SUCCESS)
+    return rc;
+  if (sym.shndx == SHN_UNDEF) {
+    dos_printf("ARM ELF: undefined symbol index %lu (API binding not implemented yet)\r\n",
+               sym_index);
+    return DE_INVLDFMT;
+  }
+  if (sym.shndx == SHN_ABS) {
+    *sym_addr = sym.value;
+    return SUCCESS;
+  }
+  if (sym.shndx >= eh->shnum)
+    return DE_INVLDFMT;
+
+  rc = arm_elf_section_layout(fd, eh, sym.shndx, &sec_off, &sec, NULL);
+  if (rc != SUCCESS || !(sec.flags & SHF_ALLOC) || sym.value > sec.size)
+    return DE_INVLDFMT;
+  *sym_addr = (ULONG)(uintptr_t)ARM_PTR(arm_elf_guest_ptr(base_seg, sec_off)) +
+              sym.value;
+  return SUCCESS;
+}
+
+static int arm_elf_apply_relocations(COUNT fd, const arm_elf32_ehdr *eh,
+                                     UWORD base_seg)
+{
+  UWORD i;
+
+  for (i = 0; i < eh->shnum; ++i) {
+    arm_elf32_shdr relsec, target, symtab;
+    ULONG target_off;
+    ULONG j, rel_entsize;
+    int rc = arm_elf_read_meta(fd,
+        eh->shoff + (ULONG)i * eh->shentsize, &relsec, sizeof(relsec));
+    if (rc != SUCCESS)
+      return rc;
+    if (relsec.type != SHT_REL)
+      continue;
+    if (relsec.info >= eh->shnum || relsec.link >= eh->shnum)
+      return DE_INVLDFMT;
+
+    rc = arm_elf_section_layout(fd, eh, (UWORD)relsec.info,
+                                &target_off, &target, NULL);
+    if (rc != SUCCESS || !(target.flags & SHF_ALLOC))
+      return DE_INVLDFMT;
+    rc = arm_elf_read_meta(fd,
+        eh->shoff + relsec.link * eh->shentsize, &symtab, sizeof(symtab));
+    if (rc != SUCCESS || symtab.type != SHT_SYMTAB)
+      return DE_INVLDFMT;
+
+    rel_entsize = relsec.entsize ? relsec.entsize : sizeof(arm_elf32_rel);
+    if (rel_entsize < sizeof(arm_elf32_rel))
+      return DE_INVLDFMT;
+
+    for (j = 0; j < relsec.size / rel_entsize; ++j) {
+      arm_elf32_rel rel;
+      ULONG sym_addr;
+      ULONG sym_index;
+      UBYTE type;
+      BYTE *place;
+      ULONG paddr;
+
+      rc = arm_elf_read_meta(fd, relsec.offset + j * rel_entsize,
+                             &rel, sizeof(rel));
+      if (rc != SUCCESS)
+        return rc;
+      if (rel.offset > target.size || target.size - rel.offset < 4)
+        return DE_INVLDFMT;
+
+      sym_index = rel.info >> 8;
+      type = (UBYTE)(rel.info & 0xffu);
+      rc = arm_elf_symbol_addr(fd, eh, base_seg, &symtab, sym_index, &sym_addr);
+      if (rc != SUCCESS)
+        return rc;
+
+      place = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg,
+                                                target_off + rel.offset));
+      paddr = (ULONG)(uintptr_t)place;
+      switch (type) {
+        case R_ARM_ABS32:
+          *(ULONG *)place += sym_addr;
+          break;
+        case R_ARM_REL32:
+          *(ULONG *)place = sym_addr + *(ULONG *)place - paddr;
+          break;
+        case R_ARM_THM_PC22:
+          arm_elf_resolve_thm_pc22((UWORD *)place, (UWORD *)place, sym_addr);
+          break;
+        case R_ARM_THM_JUMP24:
+          rc = arm_elf_resolve_thm_jump24((UWORD *)place,
+                                          (UWORD *)place, sym_addr);
+          if (rc != SUCCESS) {
+            dos_printf("ARM ELF: Thumb JUMP24 relocation out of range "
+                       "(section %u, offset %lu)\r\n",
+                       (unsigned)relsec.info, rel.offset);
+            return rc;
+          }
+          break;
+        case R_ARM_THM_ALU_ABS_G0_NC:
+          if ((uintptr_t)place & 1u)
+            return DE_INVLDFMT;
+          arm_elf_resolve_thm_alu_abs_g0_nc((UWORD *)place, sym_addr);
+          break;
+        default:
+          dos_printf("ARM ELF: unsupported relocation type %u "
+                     "(section %u, offset %lu, symbol %lu)\r\n",
+                     (unsigned)type, (unsigned)relsec.info,
+                     rel.offset, sym_index);
+          return DE_INVLDFMT;
+      }
+    }
+  }
+  return SUCCESS;
+}
+
+STATIC int ExecMemAlloc(UWORD size, seg * para, UWORD * asize);
+
+static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd)
+{
+  arm_elf32_ehdr eh;
+  ULONG image_end = 0;
+  ULONG paras_long;
+  UWORD alloc_mcb, asize = 0, load_seg;
+  UWORD i;
+  int rc;
+
+  if ((mode & 0x7f) == EXEC_OVERLAY)
+    return arm_elf_reject(DE_INVLDFMT, "EXEC overlay mode is not supported");
+
+  rc = arm_elf_read_meta(fd, 0, &eh, sizeof(eh));
+  if (rc != SUCCESS)
+    return arm_elf_reject((COUNT)rc, "cannot read ELF header");
+
+  if (eh.magic != ELF32_MAGIC)
+    return arm_elf_reject(DE_INVLDFMT, "bad ELF magic");
+  if (eh.elf_class != ELFCLASS32)
+    return arm_elf_reject(DE_INVLDFMT, "not ELF32");
+  if (eh.data != ELFDATA2LSB)
+    return arm_elf_reject(DE_INVLDFMT, "ELF is not little-endian");
+  if (eh.ident_version != EV_CURRENT || eh.version != EV_CURRENT)
+    return arm_elf_reject(DE_INVLDFMT, "unsupported ELF version");
+  if (eh.abi != 0)
+    return arm_elf_reject(DE_INVLDFMT, "unsupported ELF OS ABI");
+  if (eh.type != ET_REL) {
+    dos_printf("ARM ELF: unsupported ELF type %u; ET_REL required\r\n",
+               (unsigned)eh.type);
+    return DE_INVLDFMT;
+  }
+  if (eh.machine != EM_ARM) {
+    dos_printf("ARM ELF: unsupported machine %u; EM_ARM required\r\n",
+               (unsigned)eh.machine);
+    return DE_INVLDFMT;
+  }
+  if (eh.flags & EF_ARM_ABI_FLOAT_HARD)
+    return arm_elf_reject(DE_INVLDFMT, "hard-float ABI is not supported");
+  if (eh.ehsize < sizeof(eh))
+    return arm_elf_reject(DE_INVLDFMT, "ELF header is too small");
+  if (eh.shentsize != sizeof(arm_elf32_shdr))
+    return arm_elf_reject(DE_INVLDFMT, "unexpected section-header size");
+  if (eh.shnum == 0)
+    return arm_elf_reject(DE_INVLDFMT, "ELF has no section table");
+
+  /* A layout query for section zero also computes the complete image size. */
+  rc = arm_elf_section_layout(fd, &eh, 0, NULL, NULL, &image_end);
+  if (rc != SUCCESS)
+    return arm_elf_reject((COUNT)rc, "invalid section layout");
+  if (image_end < ARM_ELF_STACK_SIZE)
+    return arm_elf_reject(DE_INVLDFMT, "empty allocatable image");
+
+  paras_long = (image_end + 15u) >> 4;
+  if (paras_long == 0 || paras_long > 0xffffu)
+    return arm_elf_reject(DE_NOMEM, "image does not fit DOS guest memory");
+
+  rc = ExecMemAlloc((UWORD)paras_long, &alloc_mcb, &asize);
+  if (rc != SUCCESS) {
+    dos_printf("ARM ELF: cannot allocate %lu bytes of guest memory\r\n",
+               paras_long << 4);
+    return (COUNT)rc;
+  }
+  load_seg = alloc_mcb + 1;
+  memset(ARM_PTR(MK_FP(load_seg, 0)), 0, ARM_ELF_STACK_SIZE);
+
+  for (i = 0; i < eh.shnum; ++i) {
+    arm_elf32_shdr sh;
+    ULONG sec_off;
+
+    rc = arm_elf_section_layout(fd, &eh, i, &sec_off, &sh, NULL);
+    if (rc != SUCCESS) {
+      dos_printf("ARM ELF: invalid layout for section %u\r\n", (unsigned)i);
+      goto fail;
+    }
+    if (!(sh.flags & SHF_ALLOC) || sh.size == 0)
+      continue;
+
+    if (sh.type == SHT_NOBITS) {
+      memset(ARM_PTR(arm_elf_guest_ptr(load_seg, sec_off)), 0, sh.size);
+    } else {
+      /* As in the Murmulator OS2 loader, any SHF_ALLOC section with file
+         contents is copied verbatim.  This also keeps ARM-specific allocatable
+         section types (.ARM.exidx, init arrays, etc.) loadable. */
+      rc = arm_elf_read_section(fd, load_seg, sec_off, sh.offset, sh.size);
+      if (rc != SUCCESS) {
+        dos_printf("ARM ELF: cannot read section %u (%lu bytes at file offset %lu)\r\n",
+                   (unsigned)i, sh.size, sh.offset);
+        goto fail;
+      }
+    }
+  }
+
+  rc = arm_elf_apply_relocations(fd, &eh, load_seg);
+  if (rc != SUCCESS) {
+    /* Detailed relocation failures are printed at the point where possible. */
+    dos_printf("ARM ELF: relocation failed, DOS error %d\r\n", (int)rc);
+    goto fail;
+  }
+
+  DosCloseSft(fd, FALSE);
+
+  /* No ARM transfer yet.  For EXEC_LOAD expose the reserved native stack top
+     as a guest address; EXEC_LOADNGO currently returns to the caller after the
+     successful load, intentionally leaving this DOS-owned allocation resident. */
+  exp->exec.stack = arm_elf_guest_ptr(load_seg, ARM_ELF_STACK_SIZE);
+  exp->exec.start_addr = MK_FP(0, 0);
+  dos_printf("ARM ELF: loaded at %04x:0000, %lu bytes; execution not implemented yet\r\n",
+             load_seg, image_end);
+  CfgDbgPrintf(("ARM ELF loaded: seg=%04x stack=%04x:%04x size=%lu\n",
+                load_seg, FP_SEG(exp->exec.stack), FP_OFF(exp->exec.stack),
+                image_end));
+  return SUCCESS;
+
+fail:
+  DosMemFree(alloc_mcb);
+  DosCloseSft(fd, FALSE);
+  return (COUNT)rc;
+}
+
 ULONG SftGetFsize(int sft_idx)
 {
   dos_far_ptr s = idx_to_sft(sft_idx);
@@ -1206,6 +1744,12 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   if (rc == sizeof(exe_header) &&
       (ExeHeader.exSignature == MAGIC || ExeHeader.exSignature == OLD_MAGIC))
     rc = DosExeLoader(lp, &TempExeBlock, mode, fd);
+  else if (rc >= 4 &&
+           ((const UBYTE *)&ExeHeader)[0] == 0x7f &&
+           ((const UBYTE *)&ExeHeader)[1] == 'E' &&
+           ((const UBYTE *)&ExeHeader)[2] == 'L' &&
+           ((const UBYTE *)&ExeHeader)[3] == 'F')
+    rc = DosArmElfLoader(&TempExeBlock, mode, fd);
   else if (rc != 0)
     rc = DosComLoader(lp, &TempExeBlock, mode, fd);
   else

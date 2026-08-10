@@ -6765,6 +6765,14 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
   build_tail(g, args);
   strcpy(g->program, g->filename);
 
+  /*
+   * INT 21h/AH=0Ah leaves the entered command visible on the current
+   * console row.  Terminate the parent command line before EXEC: exec_program()
+   * is synchronous, so doing this after it returns is already too late for
+   * the child's first output.
+   */
+  dos_puts(cpu, command_psp, g, "\r\n");
+
   /* Explicit drive/path names are never searched through PATH. */
   if (path_is_explicit(g->program)) {
     fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->program);
