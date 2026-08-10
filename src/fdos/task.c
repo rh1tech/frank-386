@@ -655,7 +655,7 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
       else
         weak_init = i;
     } else if (arm_elf_symbol_name_is(fd, meta, &sym,
-                                      "__required_m_api_verion")) {
+                                      "__required_dos_api_verion")) {
       if (bind == STB_GLOBAL)
         *req_idx = i;
     } else if (arm_elf_symbol_name_is(fd, meta, &sym, "_fini")) {
@@ -1573,7 +1573,7 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
     meta->required_api_version =
         ((arm_elf_req_ver_fn)(uintptr_t)meta->required_api_addr)();
   if (meta->required_api_version > M_API_VERSION) {
-    dos_printf("ARM ELF: application requires M-API version %ld; provided %u\r\n",
+    dos_printf("ARM ELF: application requires DOS-API version %ld; provided %u\r\n",
                meta->required_api_version, (unsigned)M_API_VERSION);
     return -2;
   }

@@ -37,7 +37,6 @@ typedef struct CPUI386 {
 	const char *bios;
 	bool native_done;
 
-#if PREFETCH_ENABLED
 /* Prefetch buffer: holds 4 bytes fetched as one 32-bit aligned read.
  * cpu->prefetch_base is the physical address of the aligned 4-byte slot currently
  * in the buffer (always a multiple of 4).  (u32)-1 means "invalid / empty".
@@ -45,7 +44,6 @@ typedef struct CPUI386 {
  * the current 4-byte slot */
 	u32 prefetch_base;
 	u8  prefetch[16] __attribute__((aligned(4)));
-#endif
 
 	cpu_int_hook_t* int_hooks[CPU_INT_COUNT];
 
