@@ -109,7 +109,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
 uint8_t tud_msc_get_maxlun_cb(void)
 {
-    return USBMSC_LUN_COUNT - 1u;
+    return USBMSC_LUN_COUNT;
 }
 
 void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
