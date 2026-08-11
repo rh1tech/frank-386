@@ -32,12 +32,33 @@ extern "C" {
 // RHPort max speed: Full-Speed (12 Mbps)
 #define BOARD_TUH_MAX_SPEED OPT_MODE_FULL_SPEED
 
-// Enable Host mode (disables Device mode including CDC stdio!)
+#ifndef BOARD_TUD_RHPORT
+#define BOARD_TUD_RHPORT 0
+#endif
+#ifndef BOARD_TUD_MAX_SPEED
+#define BOARD_TUD_MAX_SPEED OPT_MODE_DEFAULT_SPEED
+#endif
+
+// Compile both roles; config.ini selects which role is initialized at boot.
 #define CFG_TUH_ENABLED 1
-#define CFG_TUD_ENABLED 0
+#define CFG_TUD_ENABLED 1
+
+#ifndef CFG_TUSB_OS
+#define CFG_TUSB_OS OPT_OS_NONE
+#endif
+#ifndef CFG_TUSB_DEBUG
+#define CFG_TUSB_DEBUG 0
+#endif
+#ifndef CFG_TUSB_MEM_SECTION
+#define CFG_TUSB_MEM_SECTION
+#endif
+#ifndef CFG_TUSB_MEM_ALIGN
+#define CFG_TUSB_MEM_ALIGN __attribute__((aligned(4)))
+#endif
 
 // Default is max speed that hardware controller supports
 #define CFG_TUH_MAX_SPEED BOARD_TUH_MAX_SPEED
+#define CFG_TUD_MAX_SPEED BOARD_TUD_MAX_SPEED
 
 //--------------------------------------------------------------------
 // HOST CONFIGURATION
@@ -59,6 +80,18 @@ extern "C" {
 #define CFG_TUH_CDC 0
 #define CFG_TUH_VENDOR 0
 #define CFG_TUH_MSC 0
+
+//--------------------------------------------------------------------
+// DEVICE CONFIGURATION
+//--------------------------------------------------------------------
+
+#define CFG_TUD_ENDPOINT0_SIZE 64
+#define CFG_TUD_CDC 0
+#define CFG_TUD_MSC 1
+#define CFG_TUD_HID 0
+#define CFG_TUD_MIDI 0
+#define CFG_TUD_VENDOR 0
+#define CFG_TUD_MSC_EP_BUFSIZE 512
 
 //--------------------------------------------------------------------
 // HID BUFFER SIZE

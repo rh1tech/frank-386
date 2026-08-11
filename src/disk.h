@@ -51,6 +51,16 @@ bool bios_hdd_write(uint8_t bios_index, uint32_t lba, const void *buf, uint16_t 
 bool bios_hdd_sync(uint8_t bios_index);
 uint8_t *disk_sector_buffer(void);
 
+/* Direct physical-slot sector access for USB MSC. Slots are fixed:
+ * 0=A, 1=B, 2=C ... 5=F; no BIOS/DOS dense-drive mapping is applied. */
+bool disk_raw_slot_info(uint8_t slot, uint32_t *block_count,
+                        uint16_t *block_size, bool *writable);
+bool disk_raw_slot_read(uint8_t slot, uint32_t lba, uint32_t offset,
+                        void *buf, uint32_t bytes);
+bool disk_raw_slot_write(uint8_t slot, uint32_t lba, uint32_t offset,
+                         const void *buf, uint32_t bytes);
+bool disk_raw_slot_sync(uint8_t slot);
+
 uint16_t fdd_get_cyls(uint8_t drivenum);
 uint16_t fdd_get_heads(uint8_t drivenum);
 uint16_t fdd_get_sects(uint8_t drivenum);

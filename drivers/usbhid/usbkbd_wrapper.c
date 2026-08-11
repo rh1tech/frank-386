@@ -5,6 +5,7 @@
 
 #include "usbkbd_wrapper.h"
 #include "usbhid.h"
+#include "config_save.h"
 
 #ifdef USB_HID_ENABLED
 
@@ -136,15 +137,19 @@ static int hid_to_linux_keycode(uint8_t hid_code) {
 }
 
 void usbkbd_init(void) {
-    usbhid_init();
+    if (config_get_usb_mode() == USB_MODE_HOST)
+        usbhid_init();
 }
 
 void usbkbd_tick(void) {
-    usbhid_task();
+    if (config_get_usb_mode() == USB_MODE_HOST)
+        usbhid_task();
 }
 
 int usbkbd_get_key(int *is_down, int *keycode) {
     uint8_t hid_keycode;
+    if (config_get_usb_mode() != USB_MODE_HOST)
+        return 0;
     int down;
 
     if (!usbhid_get_key_action(&hid_keycode, &down)) {
@@ -162,7 +167,8 @@ int usbkbd_get_key(int *is_down, int *keycode) {
 }
 
 int usbkbd_connected(void) {
-    return usbhid_keyboard_connected();
+    return config_get_usb_mode() == USB_MODE_HOST
+         ? usbhid_keyboard_connected() : 0;
 }
 
 #else // !USB_HID_ENABLED - stub implementations

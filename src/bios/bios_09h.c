@@ -365,20 +365,10 @@ bool bios_09h(CPU* cpu)
         return true;
     }
 
-    /*
-     * A real hardware INT 09h enters through intcall86(), which clears IF.
-     * Prince 1.4 is different: its IRQ1 hook reads port 60h, executes STI,
-     * then chains to the previous INT 09h with PUSHF/CALL FAR.  Therefore the
-     * chained BIOS entry has OBF clear but IF set.
-     *
-     * Do not replay the i8042 last-byte latch for an OBF-clear entry that
-     * still has IF clear.  That is a spurious/duplicate hardware entry;
-     * replaying the stale byte can inject a phantom key into the BIOS buffer.
-     */
-    if (!(status & 0x01u) && !ifl) {
-        cpu_portout8(0x20, 0x20);
-        return true;
-    }
+    /* A chained INT 09h handler may already have read port 60h, clearing
+     * OBF, and is not required to execute STI before chaining.  The i8042
+     * backend keeps the last keyboard byte readable for this DOS-compatible
+     * chaining pattern, so OBF/IF cannot be used to reject the BIOS entry. */
 
     uint8_t code = cpu_portin8(0x60);
     ///printf("[09p1] code=%02X st=%02X csip=%04X:%04X\n", code, cpu_portin8(0x64), CPU_CS, CPU_IP);

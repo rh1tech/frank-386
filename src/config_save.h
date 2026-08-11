@@ -38,6 +38,11 @@ void config_set_bios_file(const char *filename);
 int config_get_raw_sd_hdd(void);
 void config_set_raw_sd_hdd(int enabled);
 
+#define USB_MODE_HOST   0
+#define USB_MODE_DEVICE 1
+int config_get_usb_mode(void);
+void config_set_usb_mode(int mode);
+
 // Hardware settings (saved in [frank-386] section)
 int config_get_pcspeaker(void);
 void config_set_pcspeaker(int enabled);

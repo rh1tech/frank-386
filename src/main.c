@@ -36,6 +36,7 @@
 #include "usbkbd_wrapper.h"
 #include "usbmouse_wrapper.h"
 #include "usbgamepad.h"
+#include "usbmsc_device.h"
 #endif
 #ifdef NESPAD_GPIO_CLK
 #include "nespad.h"
@@ -679,6 +680,11 @@ static void poll_keyboard(void) {
 static void platform_poll(void *opaque) {
     (void)opaque;
 
+#ifdef USB_HID_ENABLED
+    if (config_get_usb_mode() == USB_MODE_DEVICE)
+        usbmsc_device_task();
+#endif
+
     /*
      * platform_poll() is called from pc_step(), including the nested pc_step()
      * loops used by native FDOS/FCOM.  A native command processor can own the
@@ -1066,8 +1072,10 @@ static bool init_hardware(void) {
 
     // Initialize USB HID keyboard (if enabled)
 #ifdef USB_HID_ENABLED
-    DBG_PRINT("Initializing USB HID keyboard...\n");
-    usbkbd_init();
+    if (config_get_usb_mode() == USB_MODE_HOST) {
+        DBG_PRINT("Initializing USB HID host...\n");
+        usbkbd_init();
+    }
 #endif
 
     // Initialize NES/SNES gamepad (if pins defined for this board)
@@ -1431,7 +1439,6 @@ int main(void) {
             sleep_ms(1000);
         }
     }
-
     // Start the core-0 cycle counter before emulation begins.
     prof_init();
     ps_init(clock_get_hz(clk_sys), 10000u);   /* 10 kHz PC sampling */
@@ -1464,6 +1471,17 @@ int main(void) {
 
     DBG_PRINT("\nStarting emulation...\n");
 #endif
+#ifdef USB_HID_ENABLED
+    /* Start the device stack only when we are ready to service it continuously.
+     * TinyUSB enumeration requires tud_task() to run promptly after tud_init();
+     * starting it before the profiler/welcome screen leaves EP0 requests
+     * unattended for seconds and the host can reject enumeration. */
+    if (config_get_usb_mode() == USB_MODE_DEVICE) {
+        DBG_PRINT("Initializing USB MSC device...\n");
+        usbmsc_device_init();
+    }
+#endif
+
 #if THROTTLING
     // Frame rate throttling for audio sync
     // Target ~60fps to match audio processing rate (16666us per frame)
@@ -1476,6 +1494,10 @@ int main(void) {
     static int last_vga_mode = -1;
     // Main emulation loop (Core 0)
     while (true) {
+#ifdef USB_HID_ENABLED
+        if (config_get_usb_mode() == USB_MODE_DEVICE)
+            usbmsc_device_task();
+#endif
         // Skip CPU execution when paused (disk UI or settings UI active)
         if (pc->paused) {
             // Still poll keyboard to handle UI input

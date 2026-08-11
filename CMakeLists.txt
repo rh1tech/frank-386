@@ -29,8 +29,7 @@ if(BOARD STREQUAL "C2")
     # 0..29. Our own header sets PICO_RP2350A 0 / PICO_PIO_USE_GPIO_BASE 1.
     set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards CACHE PATH "" FORCE)
     set(PICO_BOARD "frank_core2_master" CACHE STRING "Pico board type" FORCE)
-    # USB HID host is the only input path on C2 — no PS/2, no NES pad header.
-    set(USB_HID_ENABLED ON CACHE BOOL "USB HID host" FORCE)
+    # USB HOST is the only keyboard input path on C2 — no PS/2 header.
     # HDMI is the default video output; there is no analog VGA DAC to
     # auto-detect, so the pin probe is skipped either way. -DFORCE_VGA=ON
     # drives VGA timing out of GPIO12..19 instead, for bench debug.
@@ -85,8 +84,8 @@ set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" ON)
 
-# USB HID keyboard support (disabled by default to keep USB CDC for debug)
-option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
+# USB role is selected at runtime (HOST by default, DEVICE via config.ini).
+# Both TinyUSB roles are compiled into every firmware image.
 
 # Force HDMI output (skip VGA/HDMI pin auto-detection)
 option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
@@ -410,12 +409,9 @@ target_include_directories(${BUILD_NAME} PRIVATE
 if(BOARD STREQUAL "C2")
     pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/link/link_bus.pio)
 endif()
-# Only include usbhid directory when USB HID is enabled (to avoid tusb_config.h conflicts)
-if(USB_HID_ENABLED)
-    target_include_directories(${BUILD_NAME} PRIVATE
-        ${CMAKE_CURRENT_LIST_DIR}/drivers/usbhid
-    )
-endif()
+target_include_directories(${BUILD_NAME} PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/drivers/usbhid
+)
 
 if(AUDIO_TYPE STREQUAL "I2S")
     target_compile_definitions(${BUILD_NAME} PRIVATE FEATURE_AUDIO_I2S=1)
@@ -683,25 +679,14 @@ target_link_libraries(${BUILD_NAME}
     usbhid
 )
 
-# USB configuration: USB HID uses Host mode which disables CDC
-if(USB_HID_ENABLED)
-    pico_enable_stdio_usb(${BUILD_NAME} 0)
-    if(BOARD STREQUAL "C2")
-        # C2 has a dedicated debug UART header (J2: GPIO0 TX, GPIO1 RX,
-        # 115200). With USB in host mode it is the only console there is,
-        # and bring-up on a board whose slave cannot be reset by the
-        # master is not something to attempt blind.
-        message(STATUS "USB HID enabled: console on UART0 (J2, GPIO0/1)")
-        pico_enable_stdio_uart(${BUILD_NAME} 1)
-    else()
-        # Other boards route GPIO0/1 to PS/2 or a gamepad, so there is no
-        # UART to fall back on — stdio is simply off.
-        message(STATUS "USB HID enabled: no console (USB is Host mode for keyboard)")
-        pico_enable_stdio_uart(${BUILD_NAME} 0)
-    endif()
+# The native USB controller is owned by TinyUSB in either runtime role,
+# therefore USB CDC stdio cannot share it.
+pico_enable_stdio_usb(${BUILD_NAME} 0)
+if(BOARD STREQUAL "C2")
+    # C2 has a dedicated debug UART header (J2: GPIO0 TX, GPIO1 RX).
+    pico_enable_stdio_uart(${BUILD_NAME} 1)
 else()
-    # USB Serial console (when USB HID is disabled)
-    pico_enable_stdio_usb(${BUILD_NAME} 1)
+    # Other boards route GPIO0/1 to PS/2 or a gamepad.
     pico_enable_stdio_uart(${BUILD_NAME} 0)
 endif()
 
@@ -716,7 +701,7 @@ message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
 message(STATUS "  Audio Type:     ${AUDIO_TYPE}")
-message(STATUS "  USB HID:        ${USB_HID_ENABLED}")
+message(STATUS "  USB:            runtime HOST/DEVICE")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
 message(STATUS "  Build Name:     ${BUILD_NAME}")
 message(STATUS "")
