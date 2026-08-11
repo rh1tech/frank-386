@@ -1584,7 +1584,14 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
   result = ((arm_elf_main_fn)(uintptr_t)meta->main_addr)(
       meta->argc, (char **)(uintptr_t)meta->argv_addr);
 
-  if (meta->fini_addr != 0)
+  /* A DOS terminate request made from native code through bios_intcall()
+     is semantically noreturn even though the native bridge itself must
+     unwind back to this frame.  In particular AH=31h has already turned
+     the process into a TSR: running _fini() here would tear down state
+     that is explicitly meant to remain resident.  The same rule also
+     preserves normal INT 21h/4Ch semantics for native applications that
+     choose to terminate through DOS rather than by returning from main(). */
+  if (!terminate_requested() && meta->fini_addr != 0)
     ((arm_elf_fini_fn)(uintptr_t)meta->fini_addr)(fini_ctx);
 
   return result;
@@ -1662,8 +1669,15 @@ static COUNT exec_run_process(const struct exec_process_start *start)
                                       arm_elf_run_body);
     diag_native_code_leave();
 
-    term_exit_code = (UBYTE)exit_code;
-    term_exit_type = 0;
+    /* Returning from main() is the native equivalent of INT 21h/4Ch,
+       but only if the application has not already requested termination
+       through DOS.  AH=31h, for example, has set exit type 3 and resized
+       the MCB; overwriting that status here would make exec_release_child()
+       free a process which DOS has just made resident. */
+    if (!terminate_requested()) {
+      term_exit_code = (UBYTE)exit_code;
+      term_exit_type = 0;
+    }
   }
   else if (start->kind == EXEC_PROCESS_NATIVE_COMMAND)
   {
