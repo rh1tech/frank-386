@@ -489,41 +489,31 @@ static bool process_keycode(int is_down, int keycode) {
         win_key_pressed = is_down;
     }
 
-    // Check for Win+F12 hotkey to toggle disk UI
+    // Win+F12: enter Disk Manager, or switch to it from Settings.
     if (is_down && keycode == KEY_F12 && win_key_pressed) {
-        if (!diskui_is_open() && !settingsui_is_open()) {
-            // Open disk UI and pause emulation
+        if (settingsui_is_open()) {
+            settingsui_close();
+            diskui_open();
+        } else if (!diskui_is_open()) {
             diskui_open();
             if (pc) {
                 pc->paused = 1;
                 audio_set_enabled(false);
             }
-        } else if (diskui_is_open()) {
-            // Close disk UI and resume emulation
-            diskui_close();
-            if (pc) {
-                pc->paused = 0;
-                audio_set_enabled(true);
-            }
         }
         return false;  // Don't pass to emulator
     }
 
-    // Check for Win+F11 hotkey to toggle settings UI
+    // Win+F11: enter Settings, or switch to it from Disk Manager.
     if (is_down && keycode == KEY_F11 && win_key_pressed) {
-        if (!settingsui_is_open() && !diskui_is_open()) {
-            // Open settings UI and pause emulation
+        if (diskui_is_open()) {
+            diskui_close();
+            settingsui_open();
+        } else if (!settingsui_is_open()) {
             settingsui_open();
             if (pc) {
                 pc->paused = 1;
                 audio_set_enabled(false);
-            }
-        } else if (settingsui_is_open()) {
-            // Close settings UI and resume emulation
-            settingsui_close();
-            if (pc) {
-                pc->paused = 0;
-                audio_set_enabled(true);
             }
         }
         return false;  // Don't pass to emulator
@@ -533,8 +523,15 @@ static bool process_keycode(int is_down, int keycode) {
     if (diskui_is_open()) {
         diskui_handle_key(keycode, is_down);
 
-        // Check if disk UI was closed by Escape
+        // Leaving the OSD session in DEVICE mode always detaches the
+        // exported image and reboots. F11/F12 page switches do not exit OSD.
         if (!diskui_is_open() && pc && pc->paused) {
+#ifdef USB_HID_ENABLED
+            if (config_get_usb_mode() == USB_MODE_DEVICE) {
+                usbmsc_device_shutdown();
+                hard_reboot();
+            }
+#endif
             pc->paused = 0;
             audio_set_enabled(true);
         }
@@ -545,8 +542,14 @@ static bool process_keycode(int is_down, int keycode) {
     if (settingsui_is_open()) {
         settingsui_handle_key(keycode, is_down);
 
-        // Check if settings UI was closed by Escape
+        // Same OSD-session exit rule regardless of the page used last.
         if (!settingsui_is_open() && pc && pc->paused) {
+#ifdef USB_HID_ENABLED
+            if (config_get_usb_mode() == USB_MODE_DEVICE) {
+                usbmsc_device_shutdown();
+                hard_reboot();
+            }
+#endif
             pc->paused = 0;
             audio_set_enabled(true);
         }

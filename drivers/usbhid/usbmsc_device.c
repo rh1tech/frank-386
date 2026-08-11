@@ -105,6 +105,19 @@ void usbmsc_device_task(void)
     tud_task();
 }
 
+void usbmsc_device_shutdown(void)
+{
+    tud_disconnect();
+
+    if (usb_disk.fp && usb_disk.fp->obj.fs) {
+        if (usb_disk.fp->flag & FA_WRITE)
+            (void)f_sync(usb_disk.fp);
+        (void)f_close(usb_disk.fp);
+    }
+
+    usb_disk.fp = NULL;
+}
+
 uint8_t const *tud_descriptor_device_cb(void)
 {
     static tusb_desc_device_t const desc = {

@@ -7,6 +7,7 @@ extern "C" {
 
 void usbmsc_device_init(void);
 void usbmsc_device_task(void);
+void usbmsc_device_shutdown(void);
 
 #ifdef __cplusplus
 }
