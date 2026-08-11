@@ -28,7 +28,8 @@ static int fcom_write(CPU *cpu, UWORD command_psp, UWORD offset, UWORD count);
 static int fcom_chk_cbreak(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, int mode);
 static void build_tail(struct fcom_guest *g, const char *args);
-static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g);
+static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
+                     UBYTE exec_mode);
 static int execute_command_line(CPU *cpu, UWORD command_psp, struct fcom_guest *g, char *line);
 static int execute_batch_file(CPU *cpu, UWORD command_psp,
                               struct fcom_guest *g,
@@ -6361,7 +6362,7 @@ static int run_builtin(CPU *cpu, UWORD command_psp,
      */
     strcpy(g->filename, "COMMAND.COM");
     build_tail(g, args);
-    int rc = exec_once(cpu, command_psp, g);
+    int rc = exec_once(cpu, command_psp, g, 0);
     if (rc < 0)
       dos_puts(cpu, command_psp, g, "Unable to start COMMAND.COM\r\n");
     return 1;
@@ -6675,7 +6676,8 @@ static void capture_exec_status(CPU *cpu, UWORD command_psp,
   g->exit_reason = CPU_AH;
 }
 
-static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
+static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
+                     UBYTE exec_mode)
 {
   memset(&g->exec_block, 0, sizeof(g->exec_block));
   g->exec_block.exec.env_seg = 0;                 /* inherit process-0 environment */
@@ -6691,7 +6693,7 @@ static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
   CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, filename);
   SET_ES(command_psp);
   CPU_BX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, exec_block);
-  CPU_AX = 0x4b00;
+  CPU_AX = 0x4b00 | exec_mode;
   fcom_intcall(cpu, command_psp, 0x21, "FCOM EXEC");
   {
     int rc = int21_failed(cpu) ? -(int)CPU_AX : 0;
@@ -6701,7 +6703,7 @@ static int exec_once(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
 }
 
 static int exec_program(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
-                        const char *name)
+                        const char *name, UBYTE exec_mode)
 {
   static const char *const suffixes[] = { "", ".COM", ".EXE" };
   unsigned first = has_extension(name) ? 0u : 1u;
@@ -6725,9 +6727,9 @@ static int exec_program(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
      * explicitly named .COM/.EXE and the final .EXE attempt for a bare name.
      */
     if (i + 1u == last)
-      return exec_once(cpu, command_psp, g);
+      return exec_once(cpu, command_psp, g, exec_mode);
 
-    rc = exec_once(cpu, command_psp, g);
+    rc = exec_once(cpu, command_psp, g, exec_mode);
     if (rc == 0)
       return 0;
 
@@ -6759,7 +6761,7 @@ struct fcom_exec_search_workspace {
 static struct fcom_exec_search_workspace fcom_exec_search;
 
 static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
-                         const char *args)
+                         const char *args, UBYTE exec_mode)
 {
 
   build_tail(g, args);
@@ -6775,12 +6777,14 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
 
   /* Explicit drive/path names are never searched through PATH. */
   if (path_is_explicit(g->program)) {
-    fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->program);
+    fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->program,
+                                       exec_mode);
     goto resolved;
   }
 
   /* DOS shells search the current directory before PATH. */
-  fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->program);
+  fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->program,
+                                     exec_mode);
   if (fcom_exec_search.rc == 0 ||
       (fcom_exec_search.rc != -2 && fcom_exec_search.rc != -3))
     goto resolved;
@@ -6809,7 +6813,8 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
         make_path_candidate(g->text, sizeof(g->text),
                             fcom_exec_search.dir,
                             fcom_exec_search.len, g->program)) {
-      fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->text);
+      fcom_exec_search.rc = exec_program(cpu, command_psp, g, g->text,
+                                         exec_mode);
       if (fcom_exec_search.rc == 0 ||
           (fcom_exec_search.rc != -2 && fcom_exec_search.rc != -3))
         goto resolved;
@@ -7375,7 +7380,7 @@ static int builtin_loadhigh(CPU *cpu, UWORD command_psp,
            command.c:206 "loadhigh/loadfix don't do batch files" */
         strncpy(g->filename, fnam, sizeof(g->filename) - 1);
         g->filename[sizeof(g->filename) - 1] = '\0';
-        exec_rc = exec_external(cpu, command_psp, g, rest);
+        exec_rc = exec_external(cpu, command_psp, g, rest, 0x80);
         if (exec_rc == -2 || exec_rc == -3)
           rc = LH_ERR_FILE_NOT_FOUND;
         else if (exec_rc < 0)
@@ -8782,7 +8787,7 @@ int execute_command_core(CPU *cpu, UWORD command_psp,
    * Direct return is intentional.  The large command-dispatch frame must end
    * before an external program enters synchronous DosExec().
    */
-  return exec_external(cpu, command_psp, g, args);
+  return exec_external(cpu, command_psp, g, args, 0);
 }
 
 
