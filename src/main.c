@@ -683,11 +683,6 @@ static void poll_keyboard(void) {
 static void platform_poll(void *opaque) {
     (void)opaque;
 
-#ifdef USB_HID_ENABLED
-    if (config_get_usb_mode() == USB_MODE_DEVICE)
-        usbmsc_device_task();
-#endif
-
     /*
      * platform_poll() is called from pc_step(), including the nested pc_step()
      * loops used by native FDOS/FCOM.  A native command processor can own the
@@ -1508,10 +1503,6 @@ int main(void) {
     static int last_vga_mode = -1;
     // Main emulation loop (Core 0)
     while (true) {
-#ifdef USB_HID_ENABLED
-        if (config_get_usb_mode() == USB_MODE_DEVICE)
-            usbmsc_device_task();
-#endif
         // Skip CPU execution when paused (disk UI or settings UI active)
         if (pc->paused) {
             // Still poll keyboard to handle UI input

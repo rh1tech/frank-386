@@ -45,6 +45,7 @@ BOOL fill(REG struct buffer FAR * bp, ULONG blkno, COUNT dsk);
 BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mode);
 /* *** Changed on 9/4/00  BER */
 UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mode);
+VOID fdos_disk_enable_guest_int13(VOID);
 /* *** End of change */
 void AllocateHMASpace (size_t lowbuffer, size_t highbuffer);
 

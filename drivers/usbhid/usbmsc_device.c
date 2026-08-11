@@ -100,7 +100,7 @@ void usbmsc_device_init(void)
     tud_init(BOARD_TUD_RHPORT);
 }
 
-void usbmsc_device_task(void)
+void __not_in_flash_func(usbmsc_device_task)(void)
 {
     tud_task();
 }

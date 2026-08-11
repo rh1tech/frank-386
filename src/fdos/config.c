@@ -1677,12 +1677,18 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
       strncasecmp(driver_name, "BLUEMAX.SYS", 12) == 0 ||
       strncasecmp(driver_name, "NETROOM.SYS", 12) == 0) {
     printf("Using host XMS manager; install guest device-chain placeholder instead of: %s\n", szBuf);
-    return InstallFakeMemMgr("XMSXXXX0", "HIMEM   ", mode) ? SUCCESS : DE_NOMEM;
+    BOOL installed = InstallFakeMemMgr("XMSXXXX0", "HIMEM   ", mode);
+    if (installed)
+      fdos_disk_enable_guest_int13();
+    return installed ? SUCCESS : DE_NOMEM;
   }
 #ifndef I386_MODE
   if (strncasecmp(driver_name, "EMM386.EXE", 11) == 0) {
     printf("Using host EMM manager; install guest device-chain placeholder instead of: %s\n", szBuf);
-    return InstallFakeMemMgr("EMMXXXX0", "EMM386  ", mode) ? SUCCESS : DE_NOMEM;
+    BOOL installed = InstallFakeMemMgr("EMMXXXX0", "EMM386  ", mode);
+    if (installed)
+      fdos_disk_enable_guest_int13();
+    return installed ? SUCCESS : DE_NOMEM;
   }
 #endif
 
@@ -1706,6 +1712,13 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
     return result;
   }
   dpb_watch_check_chain("LoadDevice");
+
+  /*
+   * Guest driver code now exists and may install or depend on interrupt hooks.
+   * From here on DOS block I/O must enter through the current IVT[13h],
+   * including disk traffic issued while this driver's INIT request runs.
+   */
+  fdos_disk_enable_guest_int13();
 
   strcpy(szBuf, pLine);
   /* uppercase the device driver command */

@@ -55,6 +55,48 @@
    Migrated from dsk.c (#define hd(x) ((x) & DF_FIXED)). */
 #define hd(x)   ((x) & DF_FIXED)
 
+/*
+ * During early kernel bootstrap no guest driver can have hooked INT 13h yet,
+ * so the native BIOS may be called directly.  Once the first CONFIG.SYS
+ * driver is loaded, all runtime disk traffic must honor the current IVT[13h].
+ */
+static BOOL disk_guest_int13 = FALSE;
+
+VOID fdos_disk_enable_guest_int13(VOID)
+{
+  disk_guest_int13 = TRUE;
+}
+
+STATIC void fdos_bios_13h(CPU *cpu, const char *owner)
+{
+  if (disk_guest_int13)
+  {
+    bios_intcall(cpu, 0x13, owner);
+  }
+  else
+  {
+    /*
+     * Native bios_13h() shares the implementation used by a real guest
+     * INT 13h and therefore updates the caller's FLAGS at SS:SP+4.
+     * Early DOS bootstrap is allowed to call it directly, but there is no
+     * interrupt frame in that case.  Build a private six-byte frame below
+     * the current guest stack so bios_13h() never overwrites live DOS state
+     * (rwblock_workspace starts exactly at the current SS:SP).
+     */
+    const UWORD saved_sp = CPU_SP;
+    const UWORD frame_sp = (UWORD)(saved_sp - 6u);
+    const uint32_t frame = ((uint32_t)CPU_SS << 4) + frame_sp;
+
+    CPU_SP = frame_sp;
+    writew86(frame + 0u, CPU_IP);
+    writew86(frame + 2u, CPU_CS);
+    writew86(frame + 4u, cpu_getflags(cpu));
+    bios_13h(cpu);
+    CPU_SP = saved_sp;
+  }
+}
+
+
 #pragma pack(push, 1)
 struct FS_info {
   ULONG serialno;
@@ -191,7 +233,7 @@ STATIC WORD diskchange(CPU *cpu, ddt *pddt)
     cpu_save_regs(cpu, &saved);
     CPU_AH = 0x16;
     CPU_DL = pddt->ddt_driveno;
-    bios_13h(cpu);
+    fdos_bios_13h(cpu, "DOS diskchange INT13");
 
     if (!cf && CPU_AH == 0x00)
       result = M_NOT_CHANGED;
@@ -472,9 +514,9 @@ STATIC WORD dskerr(COUNT code)
     crossing track boundaries in CHS mode.
 
     Migrated from LBA_Transfer() in dsk.c. Differences from the original:
-      - fl_lba_ReadWrite()/fl_read()/fl_write()/fl_verify() (asm helpers
-        that issue INT 13h) are replaced by direct bios_13h(cpu) calls,
-        the same way Read1LBASector() above already does it.
+      - the old asm INT 13h helpers are expressed in C. During early bootstrap
+        they may call the native BIOS directly; after the first CONFIG.SYS
+        driver is loaded they always enter through the current guest IVT[13h].
       - play_dj() (floppy A:/B: drive-swap "door jingle") and the INT 1Eh
         diskette-parameter-table poke are floppy-only concerns; they are
         left as a TODO since this iteration targets a fixed disk image.
@@ -552,7 +594,7 @@ STATIC int LBA_Transfer_raw(CPU* cpu,
         CPU_DL = driveno;
         CPU_SI = FP_OFF(x86_dap);
         SET_DS(FP_SEG(x86_dap));
-        bios_13h(cpu);
+        fdos_bios_13h(cpu, "DOS LBA INT13");
         error_code = cf ? CPU_AH : 0;
 
         if (error_code == 0 && !(pddt->ddt_descflags & DF_WRTVERIFY) &&
@@ -564,7 +606,7 @@ STATIC int LBA_Transfer_raw(CPU* cpu,
           CPU_DL = driveno;
           CPU_SI = FP_OFF(x86_dap);
           SET_DS(FP_SEG(x86_dap));
-          bios_13h(cpu);
+          fdos_bios_13h(cpu, "DOS LBA verify INT13");
           error_code = cf ? CPU_AH : 0;
         }
       }
@@ -601,7 +643,7 @@ STATIC int LBA_Transfer_raw(CPU* cpu,
         CPU_DH = chs.Head;
         CPU_DL = driveno;
         SET_ES(FP_SEG(transfer_far));
-        bios_13h(cpu);
+        fdos_bios_13h(cpu, "DOS CHS INT13");
         error_code = cf ? CPU_AH : 0;
 
         if (error_code == 0 && mode == LBA_WRITE_VERIFY)
@@ -614,7 +656,7 @@ STATIC int LBA_Transfer_raw(CPU* cpu,
           CPU_DH = chs.Head;
           CPU_DL = driveno;
           SET_ES(FP_SEG(transfer_far));
-          bios_13h(cpu);
+          fdos_bios_13h(cpu, "DOS CHS verify INT13");
           error_code = cf ? CPU_AH : 0;
         }
       }
@@ -622,7 +664,9 @@ STATIC int LBA_Transfer_raw(CPU* cpu,
       if (error_code == 0)
         break;
 
-      BIOS_drive_reset(cpu, driveno);
+      CPU_AH = 0x00;
+      CPU_DL = driveno;
+      fdos_bios_13h(cpu, "DOS reset INT13");
     }                           /* end of retries */
 
     if (error_code)
@@ -653,11 +697,10 @@ STATIC int LBA_Transfer_raw(CPU* cpu,
 }
 
 /*
- * LBA_Transfer_raw() issues bios_13h() directly. The BIOS handler uses the
- * live CPU register set and int13_set_status() writes the FLAGS word at
- * SS:SP+4, assuming a real guest INT 13h frame. Block-driver callers are
- * native C calls nested inside another DOS/driver operation, so those side
- * effects must not escape into the caller.
+ * The early-bootstrap path may call the native BIOS through fdos_bios_13h();
+ * that dispatcher supplies a private synthetic INT frame.  After the first
+ * driver is loaded it uses bios_intcall() and the real guest IVT[13h] chain.
+ * Neither path is therefore allowed to touch the caller's SS:SP workspace.
  */
 STATIC int LBA_Transfer(CPU* cpu,
     ddt *pddt, UWORD mode, dos_far_ptr buffer,
@@ -665,14 +708,11 @@ STATIC int LBA_Transfer(CPU* cpu,
     UWORD *transferred)
 {
   CPU_regs saved_regs;
-  const uint32_t outer_flags_addr = ((uint32_t)CPU_SS << 4) + CPU_SP + 4u;
-  const UWORD outer_flags = readw86(outer_flags_addr);
 
   cpu_save_regs(cpu, &saved_regs);
   int ret = LBA_Transfer_raw(cpu, pddt, mode, buffer, LBA_address,
                              totaltodo, transferred);
   cpu_restore_regs(cpu, &saved_regs);
-  writew86(outer_flags_addr, outer_flags);
 
   return ret;
 }
@@ -875,7 +915,7 @@ STATIC int fl_setmediatype(CPU *cpu, UBYTE drive, UWORD tracks, UWORD sectors)
   CPU_CH = (UBYTE)((tracks - 1) & 0xFF);
   CPU_CL = (UBYTE)((sectors & 0x3F) | (((tracks - 1) >> 2) & 0xC0));
   CPU_DL = drive;
-  bios_13h(cpu);
+  fdos_bios_13h(cpu, "DOS set media INT13");
   ret = cf ? CPU_AH : 0;
   cpu_restore_regs(cpu, &saved);
   return ret;
@@ -891,7 +931,7 @@ STATIC int fl_setdisktype(CPU *cpu, UBYTE drive, UBYTE type)
   CPU_AH = 0x17;
   CPU_AL = type;
   CPU_DL = drive;
-  bios_13h(cpu);
+  fdos_bios_13h(cpu, "DOS set disk type INT13");
   ret = cf ? CPU_AH : 0;
   cpu_restore_regs(cpu, &saved);
   return ret;
@@ -913,7 +953,7 @@ STATIC int fl_read(CPU *cpu, UBYTE drive, UWORD head, UWORD track,
   CPU_DL = drive;
   CPU_BX = FP_OFF(buffer);
   SET_ES(FP_SEG(buffer));
-  bios_13h(cpu);
+  fdos_bios_13h(cpu, "DOS floppy read INT13");
   ret = cf ? CPU_AH : 0;
   cpu_restore_regs(cpu, &saved);
   return ret;
