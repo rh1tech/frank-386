@@ -746,9 +746,6 @@ extern int _dp12;
 
 extern boolean automapactive;
 extern boolean menuactive;
-#if (APPVER_DOOMREV >= AV_DR_DM12)
-extern boolean bodyqueslot;
-#endif
 extern boolean nodrawers;
 extern boolean noblit;
 extern boolean viewactive;

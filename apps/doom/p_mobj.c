@@ -17,6 +17,7 @@
 
 // P_mobj.c
 
+#include <string.h>
 #include "DoomDef.h"
 #include "P_local.h"
 #include "sounds.h"

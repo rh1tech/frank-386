@@ -17,6 +17,7 @@
 
 // P_tick.c
 
+#include <string.h>
 #include "DoomDef.h"
 #include "P_local.h"
 

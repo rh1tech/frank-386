@@ -501,4 +501,4 @@ void	T_MoveFloor(floormove_t *floor);
 ===============================================================================
 */
 
-boolean EV_Teleport(line_t *line, int side, mobj_t *thing);
+int EV_Teleport(line_t *line, int side, mobj_t *thing);

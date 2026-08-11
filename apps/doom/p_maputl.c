@@ -17,6 +17,7 @@
 
 // P_maputl.c
 
+#include <stdlib.h>
 #include "DoomDef.h"
 #if (APPVER_DOOMREV < AV_DR_DM12)
 extern int _wp1, _wp2, _wp3, _wp4;

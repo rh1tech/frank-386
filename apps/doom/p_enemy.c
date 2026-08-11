@@ -17,9 +17,12 @@
 
 // P_enemy.c
 
+#include <stdlib.h>
 #include "DoomDef.h"
 #include "P_local.h"
 #include "soundst.h"
+
+void A_Fall (mobj_t *actor);
 
 extern int _wp1, _wp2, _wp3, _wp4, _wp5, _wp6, _wp7, _wp8, _wp9, _wp10, _wp11, _wp12;
 extern int _wp13, _wp14;

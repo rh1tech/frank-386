@@ -23,6 +23,8 @@
 #ifndef __DOOMDATA__
 #define __DOOMDATA__
 
+#include <stdint.h>
+
 #ifndef __BYTEBOOL__
 #define __BYTEBOOL__
 typedef enum {false, true} boolean;
@@ -44,23 +46,23 @@ ML_SSECTORS, ML_NODES, ML_SECTORS , ML_REJECT, ML_BLOCKMAP};
 
 typedef struct
 {
-	short		x,y;
+	int16_t		x,y;
 } mapvertex_t;
 
 typedef struct
 {
-	short		textureoffset;
-	short		rowoffset;
+	int16_t		textureoffset;
+	int16_t		rowoffset;
 	char		toptexture[8], bottomtexture[8], midtexture[8];
-	short		sector;				// on viewer's side
+	int16_t		sector;				// on viewer's side
 } mapsidedef_t;
 
 typedef struct
 {
-	short		v1, v2;
-	short		flags;
-	short		special, tag;
-	short		sidenum[2];			// sidenum[1] will be -1 if one sided
+	int16_t		v1, v2;
+	int16_t		flags;
+	int16_t		special, tag;
+	int16_t		sidenum[2];			// sidenum[1] will be -1 if one sided
 } maplinedef_t;
 
 #define	ML_BLOCKING			1
@@ -84,24 +86,24 @@ typedef struct
 
 typedef	struct
 {
-	short		floorheight, ceilingheight;
+	int16_t		floorheight, ceilingheight;
 	char		floorpic[8], ceilingpic[8];
-	short		lightlevel;
-	short		special, tag;
+	int16_t		lightlevel;
+	int16_t		special, tag;
 } mapsector_t;
 
 typedef struct
 {
-	short		numsegs;
-	short		firstseg;			// segs are stored sequentially
+	int16_t		numsegs;
+	int16_t		firstseg;			// segs are stored sequentially
 } mapsubsector_t;
 
 typedef struct
 {
-	short		v1, v2;
-	short		angle;		
-	short		linedef, side;
-	short		offset;
+	int16_t		v1, v2;
+	int16_t		angle;		
+	int16_t		linedef, side;
+	int16_t		offset;
 } mapseg_t;
 
 enum {BOXTOP,BOXBOTTOM,BOXLEFT,BOXRIGHT};	// bbox coordinates
@@ -109,17 +111,17 @@ enum {BOXTOP,BOXBOTTOM,BOXLEFT,BOXRIGHT};	// bbox coordinates
 #define	NF_SUBSECTOR	0x8000
 typedef struct
 {
-	short		x,y,dx,dy;			// partition line
-	short		bbox[2][4];			// bounding box for each child
-	unsigned short	children[2];		// if NF_SUBSECTOR its a subsector
+	int16_t		x,y,dx,dy;			// partition line
+	int16_t		bbox[2][4];			// bounding box for each child
+	uint16_t	children[2];		// if NF_SUBSECTOR its a subsector
 } mapnode_t;
 
 typedef struct
 {
-	short		x,y;
-	short		angle;
-	short		type;
-	short		options;
+	int16_t		x,y;
+	int16_t		angle;
+	int16_t		type;
+	int16_t		options;
 } mapthing_t;
 
 #define	MTF_EASY		1
@@ -137,21 +139,21 @@ typedef struct
 
 typedef struct
 {
-	short	originx;
-	short	originy;
-	short	patch;
-	short	stepdir;
-	short	colormap;
+	int16_t	originx;
+	int16_t	originy;
+	int16_t	patch;
+	int16_t	stepdir;
+	int16_t	colormap;
 } mappatch_t;
 
 typedef struct
 {
 	char		name[8];
-	boolean		masked;	
-	short		width;
-	short		height;
-	void		**columndirectory;	// OBSOLETE
-	short		patchcount;
+	int32_t		masked;	
+	int16_t		width;
+	int16_t		height;
+	int32_t		columndirectory;	// OBSOLETE
+	int16_t		patchcount;
 	mappatch_t	patches[1];
 } maptexture_t;
 
@@ -179,11 +181,11 @@ typedef post_t	column_t;
 // patches are used for sprites and all masked pictures
 typedef struct
 {
-	short		width;				// bounding box size
-	short		height;
-	short		leftoffset;			// pixels to the left of origin
-	short		topoffset;			// pixels below the origin
-	int			columnofs[8];		// only [width] used
+	int16_t		width;				// bounding box size
+	int16_t		height;
+	int16_t		leftoffset;			// pixels to the left of origin
+	int16_t		topoffset;			// pixels below the origin
+	int32_t			columnofs[8];		// only [width] used
 									// the [0] is &columnofs[width]
 } patch_t;
 
@@ -207,6 +209,19 @@ typedef struct
 
 
 
+
+/* WAD/on-disk layout must not depend on the compiler ABI. */
+_Static_assert(sizeof(mapvertex_t) == 4, "mapvertex_t WAD layout");
+_Static_assert(sizeof(mapsidedef_t) == 30, "mapsidedef_t WAD layout");
+_Static_assert(sizeof(maplinedef_t) == 14, "maplinedef_t WAD layout");
+_Static_assert(sizeof(mapsector_t) == 26, "mapsector_t WAD layout");
+_Static_assert(sizeof(mapsubsector_t) == 4, "mapsubsector_t WAD layout");
+_Static_assert(sizeof(mapseg_t) == 12, "mapseg_t WAD layout");
+_Static_assert(sizeof(mapnode_t) == 28, "mapnode_t WAD layout");
+_Static_assert(sizeof(mapthing_t) == 10, "mapthing_t WAD layout");
+_Static_assert(sizeof(mappatch_t) == 10, "mappatch_t WAD layout");
+_Static_assert(sizeof(maptexture_t) == 32, "maptexture_t WAD layout");
+_Static_assert(sizeof(patch_t) == 40, "patch_t WAD layout");
 
 #endif			// __DOOMDATA__
 

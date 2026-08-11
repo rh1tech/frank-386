@@ -238,44 +238,21 @@ static int arm_elf_read_shdr(COUNT fd, const arm_elf32_ehdr *eh,
       eh->shoff + (ULONG)sec_num * eh->shentsize, sh, sizeof(*sh));
 }
 
-/* Compute only an allocation upper bound.  Runtime section addresses are not
-   derived from this pass: the DFS below assigns them in first-use order. */
-static int arm_elf_allocation_bound(COUNT fd, const arm_elf32_ehdr *eh,
-                                    ULONG initial_cursor, ULONG *image_end)
+/* Grow the child's single DOS block only when a reached section/area needs it.
+   Section offsets never move, so already-applied relocations remain valid. */
+static int arm_elf_ensure_capacity(UWORD base_seg, ULONG end_off)
 {
-  ULONG cursor = initial_cursor;
-  UWORD i;
+  ULONG paras_long;
 
-  for (i = 0; i < eh->shnum; ++i) {
-    arm_elf32_shdr sh;
-    ULONG padding;
-    int rc = arm_elf_read_shdr(fd, eh, i, &sh);
-    if (rc != SUCCESS)
-      return rc;
-    if (sh.size == 0)
-      continue;
+  if (end_off == 0)
+    return SUCCESS;
+  if (end_off > 0xffff0ul)
+    return DE_NOMEM;
 
-    /* DFS order differs from section-number order.  Reserve the maximum
-       possible padding for every section so the bound remains valid for any
-       first-use ordering. */
-    padding = sh.addralign > 1 ? sh.addralign - 1 : 0;
-    if (cursor > 0xfffffffful - padding ||
-        cursor + padding > 0xfffffffful - sh.size)
-      return DE_INVLDFMT;
-    cursor += padding + sh.size;
-  }
-
-  if (cursor > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
-    return DE_INVLDFMT;
-  cursor += ARM_ELF_ARG_AREA_SIZE;
-  cursor = arm_elf_align_up(cursor, 8u);
-  if (cursor == 0xfffffffful ||
-      cursor > 0xfffffffful - ARM_ELF_DOS_STACK_SIZE ||
-      cursor + ARM_ELF_DOS_STACK_SIZE >
-          0xfffffffful - ARM_ELF_NATIVE_STACK_SIZE)
-    return DE_INVLDFMT;
-  *image_end = cursor + ARM_ELF_DOS_STACK_SIZE + ARM_ELF_NATIVE_STACK_SIZE;
-  return SUCCESS;
+  paras_long = (end_off + 15u) >> 4;
+  if (paras_long == 0 || paras_long > 0xffffu)
+    return DE_NOMEM;
+  return DosMemChange(base_seg, (UWORD)paras_long, NULL);
 }
 
 static int arm_elf_read_section(COUNT fd, UWORD base_seg, ULONG dst_off,
@@ -594,6 +571,14 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
   off = arm_elf_align_up(meta->cursor, sh.addralign);
   if (off == 0xfffffffful || off > 0xfffffffful - sh.size)
     return DE_INVLDFMT;
+
+  rc = arm_elf_ensure_capacity(base_seg, off + sh.size);
+  if (rc != SUCCESS) {
+    dos_printf("ARM ELF: cannot grow guest block for section %u to %lu bytes\r\n",
+               (unsigned)sec_num, off + sh.size);
+    return rc;
+  }
+
   state->offset = off;
   state->state = ARM_ELF_SEC_LOADING;
   meta->cursor = off + sh.size;
@@ -698,11 +683,11 @@ static COUNT exec_run_arm_elf(UWORD child_psp_seg,
                               arm_elf_load_meta *meta);
 
 static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
-                              exec_blk *exp, const BYTE *namep,
-                              ULONG allocation_end)
+                              exec_blk *exp, const BYTE *namep)
 {
   ULONG argv_off = arm_elf_align_up(meta->cursor, 4u);
   ULONG text_off;
+  ULONG argv_end;
   ULONG *argv;
   BYTE *text;
   ULONG text_used = 0;
@@ -712,7 +697,10 @@ static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
   UWORD tail_len = 0;
 
   if (argv_off == 0xfffffffful ||
-      argv_off > allocation_end - ARM_ELF_ARG_AREA_SIZE)
+      argv_off > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
+    return DE_NOMEM;
+  argv_end = argv_off + ARM_ELF_ARG_AREA_SIZE;
+  if (arm_elf_ensure_capacity(base_seg, argv_end) != SUCCESS)
     return DE_NOMEM;
   text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
   argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
@@ -782,7 +770,6 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   ULONG metadata_size;
   ULONG metadata_off;
   ULONG initial_cursor;
-  ULONG allocation_end = 0;
   ULONG final_end;
   ULONG native_stack_off;
   ULONG dos_stack_off;
@@ -840,13 +827,9 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
       metadata_off > 0xfffffffful - metadata_size)
     return arm_elf_reject(DE_NOMEM, "PSP/metadata layout overflow");
   initial_cursor = metadata_off + metadata_size;
-  rc = arm_elf_allocation_bound(fd, &eh, initial_cursor, &allocation_end);
-  if (rc != SUCCESS)
-    return arm_elf_reject((COUNT)rc, "invalid section layout");
-
-  paras_long = (allocation_end + 15u) >> 4;
+  paras_long = (initial_cursor + 15u) >> 4;
   if (paras_long == 0 || paras_long > 0xffffu)
-    return arm_elf_reject(DE_NOMEM, "image does not fit DOS guest memory");
+    return arm_elf_reject(DE_NOMEM, "ELF metadata does not fit DOS guest memory");
 
   rc = ChildEnv(exp, &env_mcb, (char *)namep);
   if (rc != SUCCESS)
@@ -855,7 +838,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   rc = ExecMemAlloc((UWORD)paras_long, &alloc_mcb, &asize);
   if (rc != SUCCESS) {
     DosMemFree(env_mcb);
-    dos_printf("ARM ELF: cannot allocate %lu bytes of guest memory\r\n",
+    dos_printf("ARM ELF: cannot allocate %lu-byte initial guest block\r\n",
                paras_long << 4);
     return (COUNT)rc;
   }
@@ -905,7 +888,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (rc != SUCCESS)
     goto reloc_fail;
 
-  rc = arm_elf_build_argv(load_seg, meta, exp, namep, allocation_end);
+  rc = arm_elf_build_argv(load_seg, meta, exp, namep);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot build argv in child memory\r\n");
     goto fail;
@@ -913,25 +896,31 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 
   dos_stack_off = arm_elf_align_up(meta->cursor, 8u);
   if (dos_stack_off == 0xfffffffful ||
-      dos_stack_off > allocation_end - ARM_ELF_DOS_STACK_SIZE) {
+      dos_stack_off > 0xfffffffful - ARM_ELF_DOS_STACK_SIZE) {
     rc = DE_NOMEM;
     goto fail;
   }
   native_stack_off = arm_elf_align_up(dos_stack_off + ARM_ELF_DOS_STACK_SIZE, 8u);
   if (native_stack_off == 0xfffffffful ||
-      native_stack_off > allocation_end - ARM_ELF_NATIVE_STACK_SIZE) {
+      native_stack_off > 0xfffffffful - ARM_ELF_NATIVE_STACK_SIZE) {
     rc = DE_NOMEM;
+    goto fail;
+  }
+  final_end = native_stack_off + ARM_ELF_NATIVE_STACK_SIZE;
+  rc = arm_elf_ensure_capacity(load_seg, final_end);
+  if (rc != SUCCESS) {
+    dos_printf("ARM ELF: cannot grow guest block for stacks to %lu bytes\r\n",
+               final_end);
     goto fail;
   }
   memset(ARM_PTR(arm_elf_guest_ptr(load_seg, dos_stack_off)), 0,
          ARM_ELF_DOS_STACK_SIZE + ARM_ELF_NATIVE_STACK_SIZE);
   meta->dos_stack_off = dos_stack_off;
   meta->native_stack_off = native_stack_off;
-  final_end = native_stack_off + ARM_ELF_NATIVE_STACK_SIZE;
   final_paras = (UWORD)((final_end + 15u) >> 4);
 
-  /* Shrink only the tail of the DOS allocation.  No loaded section moves, so
-     all absolute and PC-relative relocations retain their assigned addresses. */
+  /* Trim any paragraph tail left by incremental growth.  No loaded section
+     moves, so all absolute and PC-relative relocations retain their addresses. */
   rc = DosMemChange(load_seg, final_paras, NULL);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot shrink guest block to %u paragraphs\r\n",

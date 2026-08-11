@@ -42,6 +42,30 @@ message(STATUS "")
 
 add_executable(${PROJECT_NAME}
     i_main.c
+    tables.c
+    info.c
+    sounds.c
+    dutils.c
+    hu_lib.c
+    st_lib.c
+    p_maputl.c
+    p_lights.c
+    p_ceilng.c
+    p_doors.c
+    p_floor.c
+    p_plats.c
+    p_inter.c
+    p_pspr.c
+    p_switch.c
+    p_telept.c
+    p_user.c
+    p_sight.c
+    p_enemy.c
+    p_map.c
+    p_mobj.c
+    p_tick.c
+    p_spec.c
+    p_setup.c
 #    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
 #    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
 )
@@ -84,7 +108,10 @@ target_compile_options(${PROJECT_NAME} PUBLIC
 )
 endif ()
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE ELF_MODE)
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    ELF_MODE
+    APPVER_EXEDEF=DM19
+)
 
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME "${BUILD_NAME}")
 
