@@ -1496,11 +1496,13 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
 */
     if (cluster <= 1) /* 1/error or 0/FREE chain into the void */
     {
+      #if 0
       if (mode == XFR_READ)
         printf("FATFAIL fd=%u off=%lu rel=%lu saved=%lu cur=%lu next=%lu reason=invalid\n",
                (unsigned)fnp->f_sft_idx, (unsigned long)fnp->f_offset,
                (unsigned long)relcluster, (unsigned long)fnp->f_cluster_offset,
                (unsigned long)fnp->f_cluster, (unsigned long)cluster);
+      #endif
       return DE_SEEK;
     }
 
@@ -1512,10 +1514,12 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
     {
       if (mode == XFR_READ)
       {
+        #if 0
         printf("FATFAIL fd=%u off=%lu rel=%lu saved=%lu cur=%lu next=%lu reason=eoc\n",
                (unsigned)fnp->f_sft_idx, (unsigned long)fnp->f_offset,
                (unsigned long)relcluster, (unsigned long)fnp->f_cluster_offset,
                (unsigned long)fnp->f_cluster, (unsigned long)cluster);
+        #endif
         return DE_SEEK;
       }
 

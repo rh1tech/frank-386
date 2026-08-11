@@ -25,7 +25,8 @@ MEMORY
 {
     FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 1M
     DOS_API(rx) : ORIGIN = 0x10000000 + 1M, LENGTH = 4096
-    RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 508k  /* shared fast SRAM */
+    RAM(rwx) : ORIGIN =  0x20000000, LENGTH = 504k  /* shared fast SRAM */
+    CORE0_STACK_EXT(rwx) : ORIGIN =  0x20000000 + 504k, LENGTH = 4k  /* OSD fast SRAM */
     CORE0_STACK(rwx) : ORIGIN =  0x20000000 + 508k, LENGTH = 4k  /* shared fast SRAM */
     SCRATCH_X(rwx) : ORIGIN = 0x20080000, LENGTH = 4k /* shared stack in SRAM */
     SCRATCH_Y(rwx) : ORIGIN = 0x20081000, LENGTH = 4k /* technical stack in SRAM */
@@ -49,20 +50,21 @@ SECTIONS
     .app_flash_area : {
         __app_flash_area__ = .;
         KEEP (*(.app_flash))
-        __app_flash_area__ = .;
+        __app_flash_area_end__ = .;
     } > FLASH
 
     .dos_api_area : {
         __dos_api_area__ = .;
         KEEP (*(.dos_api))
-        __dos_api_area__ = .;
+        __dos_api_area_end__ = .;
     } > DOS_API
 
-    .libc_flash_area : {
-        __libc_flash_area__ = .;
-        KEEP (*(.libc_flash))
-        __libc_flash_area__ = .;
-    } > FLASH
+    .stack_ext_area : {
+        __stack_ext_area__ = .;
+        KEEP (*(.core0_stack_ext))
+        KEEP (*(.core0_stack_ext.*))
+        __stack_ext_area_end__ = .;
+    } > CORE0_STACK_EXT AT > FLASH
 
     .text : {
         KEEP (*(.reset))

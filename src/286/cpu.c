@@ -142,8 +142,8 @@ void cpu_err_msg(CPU* cpu, const char* msg) {
     print_line(buf, 9);
 }
 static bool no_handler(CPU* cpu) {
-    cpu_err_msg(cpu, "ERROR: no handler defined");
 #ifdef NO_HANDLER_DETECTOR
+    cpu_err_msg(cpu, "ERROR: no handler defined");
 while(1); // remove it
 #endif
     return true;

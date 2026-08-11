@@ -2106,6 +2106,7 @@ static void fcom_copy_exec_tail(char *dst, size_t dst_size, const CommandTail *t
     CONFIG.SYS's DEVICE=/DEVICEHIGH= uses - see LoadDevice() in
     config.c).
 */
+#if CONTROL_STACK
 /* Свободный запас нативного стека, без которого новый уровень EXEC не
    стартует. Лучше честный DE_NOMEM, чем сползание SP через данные
    SCRATCH_Y в SCRATCH_X - в стек core1.
@@ -2124,6 +2125,7 @@ static uint32_t native_stack_free(void)
   return 0xffffffffu;   /* host-сборки для статического анализа */
 #endif
 }
+#endif
 
 COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 {
@@ -2131,7 +2133,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   COUNT fd;
   long openresult;
   dos_far_ptr x86_lp;
-
+#if CONTROL_STACK
   {
     uint32_t free_bytes = native_stack_free();
 
@@ -2144,7 +2146,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
       return DE_NOMEM;
     }
   }
-
+#endif
   if ((mode & 0x7f) == EXEC_LOADNGO &&
       fcom_is_command_com((const char *)lp))
   {
