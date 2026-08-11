@@ -455,7 +455,7 @@ STATIC int ddt_LBA_to_CHS(ULONG LBA_address, struct CHS *chs,
 */
 STATIC unsigned DMA_max_transfer(dos_far_ptr buffer, unsigned count)
 {
-  unsigned dma_off = FP_OFF(buffer);
+  unsigned dma_off = (UWORD)(((ULONG)FP_SEG(buffer) << 4) + FP_OFF(buffer));
   unsigned maxsecsize = LoL->maxsecsize;
   unsigned sectors_to_dma_boundary;
 
