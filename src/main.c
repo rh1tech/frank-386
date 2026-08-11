@@ -1477,8 +1477,19 @@ int main(void) {
      * starting it before the profiler/welcome screen leaves EP0 requests
      * unattended for seconds and the host can reject enumeration. */
     if (config_get_usb_mode() == USB_MODE_DEVICE) {
+        /*
+         * USB DEVICE bring-up diagnostic mode: prepare the normal Win+F12
+         * Disk Manager before starting TinyUSB. diskui_open() may touch/scan
+         * the SD card, so it must not run in the interval after tud_init()
+         * and before the first tud_task().
+         */
+        pc->paused = 1;
+        audio_set_enabled(false);
+        diskui_open();
+
         DBG_PRINT("Initializing USB MSC device...\n");
         usbmsc_device_init();
+        usbmsc_device_task();
     }
 #endif
 
@@ -1510,7 +1521,22 @@ int main(void) {
                 settingsui_animate();
             }
 
-            sleep_ms(16);  // ~60Hz polling/animation rate
+#ifdef USB_HID_ENABLED
+            if (config_get_usb_mode() == USB_MODE_DEVICE) {
+                /*
+                 * With the guest paused there is no pc_step() and therefore no
+                 * platform_poll() heartbeat.  Keep TinyUSB responsive while
+                 * retaining the ~60 Hz OSD cadence.
+                 */
+                for (int i = 0; i < 16; ++i) {
+                    usbmsc_device_task();
+                    sleep_ms(1);
+                }
+            } else
+#endif
+            {
+                sleep_ms(16);  // ~60Hz polling/animation rate
+            }
             continue;
         }
 

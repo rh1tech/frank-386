@@ -5,40 +5,98 @@
 #include <string.h>
 
 #include "tusb.h"
+#include "ff.h"
 #include "disk.h"
 
-#define USBMSC_LUN_COUNT 6u
 #define USBMSC_BLOCK_DISK 512u
 
-static const char *const lun_names[USBMSC_LUN_COUNT] = {
-    "disk_a", "disk_b", "disk_c", "disk_d", "disk_e", "disk_f"
-};
+typedef struct {
+    FIL *fp;
+    uint16_t block_size;
+} usbmsc_disk_t;
+
+static usbmsc_disk_t usb_disk;
+
+static void bind_first_disk(void)
+{
+    usb_disk.fp = NULL;
+    usb_disk.block_size = USBMSC_BLOCK_DISK;
+
+    for (uint8_t i = 0; i < 2; ++i) {
+        FIL *fp = fdd_get_file(i);
+        if (fp && fp->obj.fs) {
+            usb_disk.fp = fp;
+            return;
+        }
+    }
+
+    for (uint8_t i = 0; i < 4; ++i) {
+        FIL *fp = ata_get_file(i);
+        if (fp && fp->obj.fs) {
+            usb_disk.fp = fp;
+            usb_disk.block_size = ata_is_cdrom(i) ? 2048u : USBMSC_BLOCK_DISK;
+            return;
+        }
+    }
+}
+
+static FIL *lun_file(uint8_t lun)
+{
+    if (lun != 0 || !usb_disk.fp || !usb_disk.fp->obj.fs)
+        return NULL;
+    return usb_disk.fp;
+}
 
 static bool lun_info(uint8_t lun, uint32_t *block_count,
                      uint16_t *block_size, bool *writable)
 {
-    return lun < USBMSC_LUN_COUNT &&
-           disk_raw_slot_info(lun, block_count, block_size, writable);
+    FIL *fp = lun_file(lun);
+    if (!fp || !block_count || !block_size || !writable)
+        return false;
+
+    FSIZE_t bytes = f_size(fp);
+    if (bytes < usb_disk.block_size)
+        return false;
+
+    *block_size = usb_disk.block_size;
+    *block_count = (uint32_t)(bytes / usb_disk.block_size);
+    *writable = (fp->flag & FA_WRITE) != 0;
+    return *block_count != 0;
 }
 
 static bool lun_present(uint8_t lun)
 {
-    uint32_t blocks;
-    uint16_t block_size;
-    bool writable;
-    return lun_info(lun, &blocks, &block_size, &writable);
+    return lun_file(lun) != NULL;
 }
 
 static bool lun_readonly(uint8_t lun)
 {
-    uint32_t blocks;
-    uint16_t block_size;
-    bool writable;
-    return lun_info(lun, &blocks, &block_size, &writable) && !writable;
+    FIL *fp = lun_file(lun);
+    return fp && !(fp->flag & FA_WRITE);
+}
+
+static bool lun_seek(uint8_t lun, uint32_t lba, uint32_t offset,
+                     uint32_t bytes, FIL **out)
+{
+    FIL *fp = lun_file(lun);
+    if (!fp || !out || !bytes)
+        return false;
+
+    const uint64_t pos = (uint64_t)lba * usb_disk.block_size + offset;
+    const uint64_t size = (uint64_t)f_size(fp);
+
+    if (pos > size || bytes > size - pos)
+        return false;
+    if (f_lseek(fp, (FSIZE_t)pos) != FR_OK)
+        return false;
+
+    *out = fp;
+    return true;
 }
 
 void usbmsc_device_init(void)
 {
+    bind_first_disk();
     tud_init(BOARD_TUD_RHPORT);
 }
 
@@ -109,7 +167,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
 
 uint8_t tud_msc_get_maxlun_cb(void)
 {
-    return USBMSC_LUN_COUNT;
+    return 1u;
 }
 
 void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
@@ -118,18 +176,20 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
     memset(vendor_id, ' ', 8);
     memcpy(vendor_id, "MURM", 4);
     memset(product_id, ' ', 16);
-    if (lun < USBMSC_LUN_COUNT) {
-        size_t n = strlen(lun_names[lun]);
-        if (n > 16) n = 16;
-        memcpy(product_id, lun_names[lun], n);
-    }
+    if (lun == 0)
+        memcpy(product_id, "disk_a", 6);
     memcpy(product_rev, "1.0 ", 4);
 }
 
 bool tud_msc_test_unit_ready_cb(uint8_t lun)
 {
-    if (lun_present(lun))
+    if (lun_present(lun)) {
+        /* TinyUSB keeps one sense state for the whole MSC interface, not
+         * one per LUN.  Clear a NOT READY left by probing another empty
+         * LUN before reporting this medium ready. */
+        tud_msc_set_sense(lun, 0, 0, 0);
         return true;
+    }
     tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);
     return false;
 }
@@ -140,7 +200,12 @@ void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count, uint16_t *block_siz
     if (!lun_info(lun, block_count, block_size, &writable)) {
         *block_count = 0;
         *block_size = USBMSC_BLOCK_DISK;
+        return;
     }
+
+    /* See TEST UNIT READY above: a successful capacity probe belongs to this
+     * LUN and must not inherit sense from a different, empty LUN. */
+    tud_msc_set_sense(lun, 0, 0, 0);
 }
 
 bool tud_msc_is_writable_cb(uint8_t lun)
@@ -154,32 +219,49 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition,
     (void)power_condition;
     (void)start;
     (void)load_eject;
-    if (lun_present(lun) && !lun_readonly(lun))
-        return disk_raw_slot_sync(lun);
+
+    /* START STOP UNIT is not a write-cache flush request.  Returning a FatFs
+     * f_sync() error here makes Windows treat an otherwise readable LUN as
+     * not ready.  pico-xt acknowledges this command unconditionally. */
+    if (lun_present(lun))
+        tud_msc_set_sense(lun, 0, 0, 0);
     return true;
 }
 
 int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                           void *buffer, uint32_t bufsize)
 {
-    if (!disk_raw_slot_read(lun, lba, offset, buffer, bufsize)) {
+    FIL *fp;
+    UINT done = 0;
+
+    if (!lun_seek(lun, lba, offset, bufsize, &fp) ||
+        f_read(fp, buffer, (UINT)bufsize, &done) != FR_OK ||
+        done != (UINT)bufsize) {
         tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x11, 0x00);
         return -1;
     }
+
     return (int32_t)bufsize;
 }
 
 int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
                            uint8_t *buffer, uint32_t bufsize)
 {
+    FIL *fp;
+    UINT done = 0;
+
     if (lun_readonly(lun)) {
         tud_msc_set_sense(lun, SCSI_SENSE_DATA_PROTECT, 0x27, 0x00);
         return -1;
     }
-    if (!disk_raw_slot_write(lun, lba, offset, buffer, bufsize)) {
+
+    if (!lun_seek(lun, lba, offset, bufsize, &fp) ||
+        f_write(fp, buffer, (UINT)bufsize, &done) != FR_OK ||
+        done != (UINT)bufsize) {
         tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x02);
         return -1;
     }
+
     return (int32_t)bufsize;
 }
 

@@ -5,7 +5,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <limits.h>
 #include <hardware/gpio.h>
 #include "i386.h"
 #include "disk.h"
@@ -441,100 +440,6 @@ bool bios_hdd_sync(uint8_t bios_index) {
 
 uint8_t *disk_sector_buffer(void) {
     return sectorbuffer;
-}
-
-static FIL *disk_raw_slot_file(uint8_t slot)
-{
-    if (slot < 2)
-        return fdd_is_inserted(slot) ? &fdd[slot].fil : NULL;
-    slot -= 2;
-    return slot < 4 && ata_is_inserted(slot) ? &ata[slot].fil : NULL;
-}
-
-bool disk_raw_slot_info(uint8_t slot, uint32_t *block_count,
-                        uint16_t *block_size, bool *writable)
-{
-    FIL *fp = disk_raw_slot_file(slot);
-    uint32_t bytes;
-    uint16_t bs = 512;
-
-    if (!fp || !block_count || !block_size || !writable)
-        return false;
-
-    if (slot < 2) {
-        bytes = fdd[slot].usable_size;
-    } else {
-        uint8_t ata_slot = (uint8_t)(slot - 2);
-        if (ata[ata_slot].iscdrom) {
-            bs = 2048;
-            bytes = (uint32_t)f_size(fp);
-        } else {
-            bytes = ata[ata_slot].usable_size;
-        }
-    }
-
-    *block_size = bs;
-    *block_count = bytes / bs;
-    *writable = (slot < 2 || !ata[slot - 2].iscdrom) &&
-                ((fp->flag & FA_WRITE) != 0);
-    return *block_count != 0;
-}
-
-static bool disk_raw_slot_seek(uint8_t slot, uint32_t lba, uint32_t offset,
-                               uint32_t bytes, FIL **out)
-{
-    FIL *fp = disk_raw_slot_file(slot);
-    uint32_t block_count;
-    uint16_t block_size;
-    bool writable;
-    uint64_t pos;
-    uint64_t limit;
-
-    if (!fp || !out || !disk_raw_slot_info(slot, &block_count, &block_size, &writable))
-        return false;
-
-    pos = (uint64_t)lba * block_size + offset;
-    limit = (uint64_t)block_count * block_size;
-    if (pos > limit || bytes > limit - pos)
-        return false;
-    if (f_lseek(fp, (FSIZE_t)pos) != FR_OK)
-        return false;
-
-    *out = fp;
-    return true;
-}
-
-bool disk_raw_slot_read(uint8_t slot, uint32_t lba, uint32_t offset,
-                        void *buf, uint32_t bytes)
-{
-    FIL *fp;
-    UINT done = 0;
-    if (!bytes || bytes > UINT_MAX ||
-        !disk_raw_slot_seek(slot, lba, offset, bytes, &fp))
-        return false;
-    return f_read(fp, buf, (UINT)bytes, &done) == FR_OK && done == bytes;
-}
-
-bool disk_raw_slot_write(uint8_t slot, uint32_t lba, uint32_t offset,
-                         const void *buf, uint32_t bytes)
-{
-    FIL *fp;
-    UINT done = 0;
-    uint32_t block_count;
-    uint16_t block_size;
-    bool writable;
-
-    if (!bytes || bytes > UINT_MAX ||
-        !disk_raw_slot_info(slot, &block_count, &block_size, &writable) ||
-        !writable || !disk_raw_slot_seek(slot, lba, offset, bytes, &fp))
-        return false;
-    return f_write(fp, buf, (UINT)bytes, &done) == FR_OK && done == bytes;
-}
-
-bool disk_raw_slot_sync(uint8_t slot)
-{
-    FIL *fp = disk_raw_slot_file(slot);
-    return fp && f_sync(fp) == FR_OK;
 }
 
 const char* fdd_get_filename(int i) {
