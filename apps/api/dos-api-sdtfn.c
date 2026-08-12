@@ -937,14 +937,67 @@ struct native_dos_FILE
 static struct native_dos_FILE native_stdout_file = {1, 0, 1};
 FILE *stdout = &native_stdout_file;
 
+/*
+ * DOS console text output uses CRLF. Keep write() itself binary-transparent;
+ * only stdio text sent to stdout/stderr is translated here.
+ */
+static int native_console_write(int handle, const char *data, size_t length)
+{
+    size_t start = 0;
+    size_t i;
+    int total = 0;
+
+    for (i = 0; i < length; ++i)
+    {
+        if (data[i] != '\n')
+            continue;
+
+        if (i > start)
+        {
+            int rc = write(handle, data + start, (unsigned int)(i - start));
+            if (rc < 0)
+                return -1;
+            total += rc;
+        }
+
+        if (i == 0 || data[i - 1] != '\r')
+        {
+            if (write(handle, "\r", 1) != 1)
+                return -1;
+            ++total;
+        }
+
+        if (write(handle, "\n", 1) != 1)
+            return -1;
+        ++total;
+        start = i + 1;
+    }
+
+    if (start < length)
+    {
+        int rc = write(handle, data + start, (unsigned int)(length - start));
+        if (rc < 0)
+            return -1;
+        total += rc;
+    }
+
+    return total;
+}
+
 int fputc(int c, FILE *stream)
 {
     unsigned char ch = (unsigned char)c;
+    int rc;
 
-    if (!stream || write(stream->handle, &ch, 1) != 1)
+    if (!stream)
         return -1;
 
-    return ch;
+    if ((stream->handle == 1 || stream->handle == 2) && ch == '\n')
+        rc = native_console_write(stream->handle, (const char *)&ch, 1);
+    else
+        rc = write(stream->handle, &ch, 1);
+
+    return rc < 0 ? -1 : ch;
 }
 
 int fputs(const char *str, FILE *stream)
@@ -957,6 +1010,9 @@ int fputs(const char *str, FILE *stream)
     len = strlen(str);
     if (len == 0)
         return 0;
+
+    if (stream->handle == 1 || stream->handle == 2)
+        return native_console_write(stream->handle, str, len) >= 0 ? 0 : -1;
 
     return write(stream->handle, str, (unsigned int)len) == (int)len
         ? 0 : -1;
@@ -997,7 +1053,9 @@ static int native_vfprintf_handle(int handle, const char *format, va_list args)
 
     if ((size_t)length < sizeof(stackbuf))
     {
-        int written = write(handle, stackbuf, (unsigned int)length);
+        int written = (handle == 1 || handle == 2)
+            ? native_console_write(handle, stackbuf, (size_t)length)
+            : write(handle, stackbuf, (unsigned int)length);
         return written < 0 ? -1 : length;
     }
 
@@ -1009,7 +1067,9 @@ static int native_vfprintf_handle(int handle, const char *format, va_list args)
     native_vsnprintf(buffer, (size_t)length + 1, format, copy);
     va_end(copy);
 
-    int written = write(handle, buffer, (unsigned int)length);
+    int written = (handle == 1 || handle == 2)
+        ? native_console_write(handle, buffer, (size_t)length)
+        : write(handle, buffer, (unsigned int)length);
     free(buffer);
     return written < 0 ? -1 : length;
 }

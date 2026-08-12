@@ -27,6 +27,7 @@
 #include "DoomDef.h"
 #ifdef ELF_MODE
 #include "psram.h"
+#include "i_native_memory.h"
 #include "dos_mem.h"
 #endif
 #include "R_local.h"
@@ -1523,12 +1524,17 @@ void I_Error (char *error, ...)
 {
 	va_list argptr;
 
-	D_QuitNetGame ();
-	I_Shutdown ();
+	/*
+	 * Print the primary failure before cleanup. If shutdown itself stalls
+	 * during native backend bring-up, the original error is already visible.
+	 */
 	va_start (argptr,error);
 	vprintf (error,argptr);
 	va_end (argptr);
 	printf ("\n");
+
+	D_QuitNetGame ();
+	I_Shutdown ();
 	exit (1);
 }
 
@@ -1603,7 +1609,6 @@ int I_GetHeapSize (void)
 byte *I_ZoneBase (int *size)
 {
 #ifdef ELF_MODE
-    enum { NATIVE_ZONE_OFFSET = 1024 * 1024 + 64 * 1024 };
     uint32_t total_psram = psram_size();
 
     if (total_psram <= NATIVE_ZONE_OFFSET)

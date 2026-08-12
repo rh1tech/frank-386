@@ -18,6 +18,10 @@
 // V_video.c
 
 #include "DoomDef.h"
+#ifdef ELF_MODE
+#include "psram.h"
+#include "i_native_memory.h"
+#endif
 
 #define SC_INDEX			0x3c4
 
@@ -356,9 +360,19 @@ void V_Init (void)
 {
 	int		i;
 	byte	*base;
-		
+
+#ifdef ELF_MODE
+	/*
+	 * The low 0x110000 bytes of PSRAM are guest-owned x86 memory (including
+	 * HMA).  Put native software screens above that range; never write them at
+	 * PSRAM_BASE_ADDR itself.
+	 */
+	base = (byte *)(uintptr_t)(PSRAM_BASE_ADDR + NATIVE_SCREENS_OFFSET);
+	memset(base, 0, NATIVE_SCREENS_SIZE);
+#else
 	// stick these in low dos memory on PCs
 	base = I_AllocLow (SCREENWIDTH*SCREENHEIGHT*4);
+#endif
 
 	for (i=0 ; i<4 ; i++)
 		screens[i] = base + i*SCREENWIDTH*SCREENHEIGHT;
