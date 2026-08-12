@@ -12,19 +12,15 @@
 
 typedef int SFX_HANDLE;
 
-/*
- * Low-level backend entry points used by the restored APODMX shim.
- * Implementations will be provided by the selected native backends.
- */
-int AL_DetectFM(void);
+/* Low-level AdLib backend hook still required by AL_SetCard(). */
 void AL_RegisterTimbreBank(unsigned char *timbres);
-int MPU_Init(int addr);
 
 /* Timer service API used by i_sound.c. */
 void TSM_Install(int rate);
 int TSM_NewService(int (*service)(void), int rate, int priority, int pause);
 void TSM_DelService(int id);
 void TSM_Remove(void);
+void TSM_Yield(void);
 
 void MUS_PauseSong(int handle);
 void MUS_ResumeSong(int handle);

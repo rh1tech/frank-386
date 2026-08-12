@@ -792,110 +792,139 @@ void pc_vga_step(void *o)
 	}
 }
 
+static uint32_t pc_last_device_service;
+
+static void __not_in_flash_func(pc_service_impl)(PC *pc, bool service_adlib)
+{
+    /*
+     * Native ELF code runs synchronously on core0, so the outer emulation
+     * loop cannot reach pc_step() until the native application yields.  This
+     * is the same device tail normally executed after a CPU burst, but it is
+     * deliberately separated from cpu_step(): cooperative yield must never
+     * execute or advance guest CPU state.
+     *
+     * AdLib is normally fed from the CPU-burst loop.  During native execution
+     * that loop is stopped while core1 continues consuming OPL samples, so a
+     * native yield also gives adlib_core0() one opportunity to refill audio.
+     */
+    pc_last_device_service = get_uticks();
+
+    if (service_adlib && pc->adlib_enabled) {
+        PROF_T(t_adlib);
+        adlib_core0(pc->adlib);
+        PROF_ADD(t_adlib, adlib);
+    }
+
+    {
+        /* Завершение отложенного INT 15h/AH=83h (см. bios_15h.c). */
+        extern void bios_15h_event_wait_tick(void);
+        bios_15h_event_wait_tick();
+    }
+
+    PROF_T(t_dev);
+    /* reset_request is handled in main.c via load_bios_and_reset() */
+    int refresh = vga_step(pc->vga);
+    i8254_update_irq(pc->pit);
+    cmos_update_irq(pc->cmos);
+    if (pc->enable_serial)
+        u8250_update(pc->serial);
+    kbd_step(pc->i8042);
+    i8257_dma_run(pc->isa_dma);
+    i8257_dma_run(pc->isa_hdma);
+    if (pc->fdc) fdc_tick(pc->fdc);
+    PROF_ADD(t_dev, devices);
+
+    {
+        PROF_T(t_poll);
+        if (pc->poll) pc->poll(pc->redraw_data);
+        PROF_ADD(t_poll, poll);
+    }
+    {
+        PROF_T(t_refresh);
+        if (refresh && pc->redraw) {
+            vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
+                        pc->full_update != 0);
+            if (pc->full_update == 2)
+                pc->full_update = 0;
+        }
+        PROF_ADD(t_refresh, refresh);
+    }
+}
+
+void __not_in_flash_func(pc_service)(PC *pc)
+{
+    pc_service_impl(pc, true);
+}
+
 void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
 {
-	PROF_T(t_total);
-	/*
-	 * Порядок слайса: сначала CPU-burst, затем обслуживание устройств.
-	 *
-	 * Вложенные нативные вызовы гостевого кода (bios_intcall(): CON-вывод
-	 * посимвольно, INT 16h-опросы) крутят pc_step() до native_done;
-	 * типичный вложенный обработчик - считанные инструкции (трап-страница
-	 * возвращает в нативный код сразу). Завершившийся установкой
-	 * native_done burst выходит, НЕ заходя в платформенную преамбулу
-	 * (USB-poll, DMA, FDC, редрав) - иначе она исполнялась бы на каждый
-	 * символ вывода (двухпорядковый регресс скорости нативного CON
-	 * против гостевого DOS).
-	 *
-	 * Ранний выход рейт-лимитирован (~1 мс): во время долгих НАТИВНЫХ
-	 * фаз (kernel-init, обвязка DOS) внешний цикл стоит, и устройства
-	 * живут только на вложенных pc_step()'ах - безусловный пропуск
-	 * преамбулы замораживал бы PIT-тик (0x46C) и опрос клавиатуры
-	 * (keycheck() конфига ждал бы вечно и клавишу, и таймаут). Раз в
-	 * миллисекунду преамбула проходит даже под штормом коротких
-	 * вложенных вызовов. Выход - только по ПЕРЕХОДУ native_done внутри
-	 * данного burst'а: залипший флаг внешнего потока не морит устройства.
-	 *
-	 * Задержка доставки поднятых устройствами IRQ - один слайс, как и
-	 * была (сдвиг фазы); редрав после burst'а показывает свежий vram.
-	 * Отложенный INT 15h/AH=83h завершается в девайс-блоке - тем же
-	 * миллисекундным гарантированным тактом.
-	 */
-	static uint32_t last_device_service;
-	bool was_native_done = pc->cpu->native_done;
-	if (!pc->paused) {
-		if (max_ops > 4096) max_ops = 4096;
-		if (pc->adlib_enabled) {
-			int i = 0;
-			do {
-				PROF_T(t_cpu);
-				cpu_step(pc->cpu, max_ops > 10 ? 10 : max_ops);
-				PROF_ADD(t_cpu, cpu);
-				PROF_T(t_adlib);
-				adlib_core0(pc->adlib);
-				PROF_ADD(t_adlib, adlib);
-			} while (++i < max_ops / 10);
-		} else {
-			PROF_T(t_cpu);
-			cpu_step(pc->cpu, max_ops);
-			PROF_ADD(t_cpu, cpu);
-		}
-		if (pc->cpu->native_done && !was_native_done &&
-		    (uint32_t)(get_uticks() - last_device_service) < 1000u)
-			return;
-	}
+    PROF_T(t_total);
+    /*
+     * Порядок слайса: сначала CPU-burst, затем обслуживание устройств.
+     *
+     * Вложенные нативные вызовы гостевого кода (bios_intcall(): CON-вывод
+     * посимвольно, INT 16h-опросы) крутят pc_step() до native_done;
+     * типичный вложенный обработчик - считанные инструкции (трап-страница
+     * возвращает в нативный код сразу). Завершившийся установкой
+     * native_done burst выходит, НЕ заходя в платформенную преамбулу
+     * (USB-poll, DMA, FDC, редрав) - иначе она исполнялась бы на каждый
+     * символ вывода (двухпорядковый регресс скорости нативного CON
+     * против гостевого DOS).
+     *
+     * Ранний выход рейт-лимитирован (~1 мс): во время долгих НАТИВНЫХ
+     * фаз (kernel-init, обвязка DOS) внешний цикл стоит, и устройства
+     * живут только на вложенных pc_step()'ах - безусловный пропуск
+     * преамбулы замораживал бы PIT-тик (0x46C) и опрос клавиатуры
+     * (keycheck() конфига ждал бы вечно и клавишу, и таймаут). Раз в
+     * миллисекунду преамбула проходит даже под штормом коротких
+     * вложенных вызовов. Выход - только по ПЕРЕХОДУ native_done внутри
+     * данного burst'а: залипший флаг внешнего потока не морит устройства.
+     *
+     * Задержка доставки поднятых устройствами IRQ - один слайс, как и
+     * была (сдвиг фазы); редрав после burst'а показывает свежий vram.
+     * Отложенный INT 15h/AH=83h завершается в девайс-блоке - тем же
+     * миллисекундным гарантированным тактом.
+     */
+    bool was_native_done = pc->cpu->native_done;
+    if (!pc->paused) {
+        if (max_ops > 4096) max_ops = 4096;
+        if (pc->adlib_enabled) {
+            int i = 0;
+            do {
+                PROF_T(t_cpu);
+                cpu_step(pc->cpu, max_ops > 10 ? 10 : max_ops);
+                PROF_ADD(t_cpu, cpu);
+                PROF_T(t_adlib);
+                adlib_core0(pc->adlib);
+                PROF_ADD(t_adlib, adlib);
+            } while (++i < max_ops / 10);
+        } else {
+            PROF_T(t_cpu);
+            cpu_step(pc->cpu, max_ops);
+            PROF_ADD(t_cpu, cpu);
+        }
+        if (pc->cpu->native_done && !was_native_done &&
+            (uint32_t)(get_uticks() - pc_last_device_service) < 1000u)
+            return;
+    }
 
-	last_device_service = get_uticks();
-	{
-		/* Завершение отложенного INT 15h/AH=83h (см. bios_15h.c). */
-		extern void bios_15h_event_wait_tick(void);
-		bios_15h_event_wait_tick();
-	}
-
-	PROF_T(t_dev);
-	/* reset_request is handled in main.c via load_bios_and_reset() */
-	int refresh = vga_step(pc->vga);
-	i8254_update_irq(pc->pit);
-	cmos_update_irq(pc->cmos);
-	if (pc->enable_serial)
-		u8250_update(pc->serial);
-	kbd_step(pc->i8042);
-	i8257_dma_run(pc->isa_dma);
-	i8257_dma_run(pc->isa_hdma);
-	if (pc->fdc) fdc_tick(pc->fdc);
-	PROF_ADD(t_dev, devices);
-
-	{
-		PROF_T(t_poll);
-		if (pc->poll) pc->poll(pc->redraw_data);
-		PROF_ADD(t_poll, poll);
-	}
-	{
-		PROF_T(t_refresh);
-		if (refresh && pc->redraw) {
-			vga_refresh(pc->vga, pc->redraw, pc->redraw_data,
-				    pc->full_update != 0);
-			if (pc->full_update == 2)
-				pc->full_update = 0;
-		}
-		PROF_ADD(t_refresh, refresh);
-	}
+    pc_service_impl(pc, false);
 
 #if SUBSYS_PROFILE
-	PROF_ADD(t_total, total);
-	if (++g_prof.steps >= PROF_REPORT_STEPS)
-		prof_report();
+    PROF_ADD(t_total, total);
+    if (++g_prof.steps >= PROF_REPORT_STEPS)
+        prof_report();
 #endif
 
 #if 0
-	/* Dump profile every ~10M inАions */
-	static uint32_t prof_dump_counter = 0;
-	prof_dump_counter += 4096;
-	if (prof_dump_counter >= 10000000) {
-		i386_profile_dump();
-		i386_profile_reset();
-		prof_dump_counter = 0;
-	}
+    /* Dump profile every ~10M inАions */
+    static uint32_t prof_dump_counter = 0;
+    prof_dump_counter += 4096;
+    if (prof_dump_counter >= 10000000) {
+        i386_profile_dump();
+        i386_profile_reset();
+        prof_dump_counter = 0;
+    }
 #endif
 }
 

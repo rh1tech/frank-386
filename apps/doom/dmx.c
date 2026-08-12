@@ -14,6 +14,7 @@
 //
 
 #include "dmx.h"
+#include "sound_hw.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -286,21 +287,40 @@ void GF1_SetMap(void *data, int len) {
     }
 }
 int SB_Detect(int *port, int *irq, int *dma, int *unk) {
-    if (FX_GetBlasterSettings(&dmx_blaster)) {
-        if (!port || !irq || !dma) {
-            return -1;
-        }
-        dmx_blaster.Type = fx_SB;
-        dmx_blaster.Address = *port;
-        dmx_blaster.Interrupt = *irq;
-        dmx_blaster.Dma8 = *dma;
+    (void)unk;
+
+    /*
+     * Native FDOS does not probe ISA hardware here.  The emulator has already
+     * instantiated (or not instantiated) the SB16 device, and that state is
+     * available through the public PC structure via sound_hw_mask().
+     *
+     * Keep the port/IRQ/DMA selected by DOOM's configuration: those values
+     * are the guest-visible interface that the backend will program.
+     */
+    if (!(sound_hw_mask() & SOUND_HW_SB16) || !port || !irq || !dma) {
+        return -1;
     }
-printf("  dmx.c SB_Detect port 0x%04x int %d dma %d\n",dmx_blaster.Address,dmx_blaster.Interrupt,dmx_blaster.Dma8);
+
+    dmx_blaster.Type = fx_SB16;
+    dmx_blaster.Address = *port;
+    dmx_blaster.Interrupt = *irq;
+    dmx_blaster.Dma8 = *dma;
+    dmx_blaster.Dma16 = *dma;
+
+    printf("  dmx.c SB_Detect port 0x%04x int %d dma %d\n",
+           dmx_blaster.Address, dmx_blaster.Interrupt, dmx_blaster.Dma8);
     return 0;
 }
 void SB_SetCard(int port, int irq, int dma) { } //FIXME
 int AL_Detect(int *port, int *unk) {
-    return !AL_DetectFM();
+    (void)unk;
+
+    if (!port || !(sound_hw_mask() & SOUND_HW_ADLIB))
+        return -1;
+
+    /* AdLib's guest-visible base port is fixed by the ISA interface. */
+    *port = 0x388;
+    return 0;
 }
 void AL_SetCard(int port, void *data) {
     unsigned char *cdata;
@@ -352,10 +372,13 @@ void AL_SetCard(int port, void *data) {
     free(tmb);
 }
 int MPU_Detect(int *port, int *unk) {
-    if (port == NULL) {
+    (void)unk;
+
+    if (!port || !(sound_hw_mask() & SOUND_HW_MPU401)) {
         return -1;
     }
-    return MPU_Init(*port);
+
+    return 0;
 }
 void MPU_SetCard(int port) {
     dmx_mus_port = port;

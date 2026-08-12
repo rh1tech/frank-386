@@ -24,10 +24,20 @@
 #include "fcom/fcom.h"
 #include "../diag.h"
 
-/* pc_step()/pc - same declaration bios/bios_intcall.c and
-   kernel.c's cpu_far_call() use; there is no shared header for it. */
-extern struct PC* pc;
-void pc_step(struct PC* pc, size_t max_ops);
+/*
+ * Keep this dependency narrow.  Including ../pc.h here pulls host stdio
+ * declarations into the FreeDOS kernel translation unit, where hdrs.h maps
+ * printf() to dos_printf(); that changes the visible prototype and conflicts
+ * with the kernel's own void dos_printf(...).
+ *
+ * These are the same small cross-module declarations already used by other
+ * emulator modules which need the current PC/device service or microsecond
+ * clock without importing the full pc.h include graph.
+ */
+extern struct PC *pc;
+void pc_step(struct PC *pc, int stepcount);
+void pc_service(struct PC *pc);
+uint32_t get_uticks(void);
 
 #define ExeHeader (*(exe_header *)(SecPathName + 0))
 #define TempExeBlock (*(exec_blk *)(SecPathName + sizeof(exe_header)))
@@ -83,7 +93,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define M_API_VERSION              4
+#define M_API_VERSION              7
 #define ARM_ELF_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_DOS_STACK_SIZE    256u
 #define ARM_ELF_ARGV_SLOTS        66u
@@ -1611,6 +1621,22 @@ typedef void (*arm_elf_fini_fn)(void *);
  * SP in its own metadata.
  */
 static volatile ULONG *arm_elf_active_main_sp;
+
+/*
+ * Cooperative service point for a running native ELF application.
+ *
+ * The native main() executes synchronously on core0, so the ordinary outer
+ * emulator loop cannot call pc_step() until main() returns.  A native yield
+ * services exactly the device side of pc_step() and deliberately executes no
+ * guest CPU instructions.  The returned timestamp lets client-side schedulers
+ * (DMX TSM, PC speaker, MIDI, etc.) run callbacks in normal application
+ * context instead of from a second IRQ/timer context.
+ */
+uint32_t arm_elf_yield(void)
+{
+  pc_service(pc);
+  return get_uticks();
+}
 
 /*
  * Call the application main() through a kernel-owned fixed frame.

@@ -91,13 +91,18 @@ add_executable(${PROJECT_NAME}
     i_sound.c
     dmx.c
     mus2mid.c
+    fx_native.c
+    pcfx_native.c
+    music_native.c
     i_cyber.c
-#    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-divmod.S    
     ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
 )
 
 set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
     PROPERTIES COMPILE_OPTIONS "-fno-builtin"
 )
 
@@ -150,6 +155,14 @@ pico_enable_stdio_uart(${PROJECT_NAME} 0)
 pico_enable_stdio_usb(${PROJECT_NAME} 0)
 
 add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    # The native loader consumes a relocatable ELF, so the link intentionally
+    # uses -r.  GNU ld consequently permits unresolved symbols.  Reject them
+    # explicitly here: native applications have no dynamic linker which could
+    # resolve such references at run time.
+    COMMAND ${CMAKE_COMMAND}
+        -DNM=${CMAKE_NM}
+        -DINPUT=$<TARGET_FILE:${PROJECT_NAME}>
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/check_unresolved.cmake
     COMMAND ${CMAKE_COMMAND} -E rename
         $<TARGET_FILE:${PROJECT_NAME}>
         ${COMPILED_DIR}/${BUILD_NAME}.com

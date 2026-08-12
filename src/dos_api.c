@@ -4,11 +4,106 @@
 #include <bios/bios.h>
 #include "mem.h"
 #include "board_config.h"
+#include <math.h>
 
 #define __in_systable(group) __attribute__((section(".dos_api" group)))
 
 extern PC *pc;
 extern void arm_elf_process_exit(int status);
+extern uint32_t arm_elf_yield(void);
+
+/*
+ * Full native math/compiler-runtime backend.
+ *
+ * The exported compiler helpers are the firmware toolchain/libgcc symbols.
+ * Native relocatable ELF applications deliberately do not carry a private
+ * libgcc copy.  Client-side wrappers tail-branch to these entries so unusual
+ * ABI results (notably divmod's r0/r1 pair and complex helpers) are preserved
+ * exactly.
+ */
+extern void __aeabi_fadd(void);
+extern void __aeabi_fsub(void);
+extern void __aeabi_fmul(void);
+extern void __aeabi_fdiv(void);
+extern void __aeabi_fcmpeq(void);
+extern void __aeabi_fcmpge(void);
+extern void __aeabi_fcmpgt(void);
+extern void __aeabi_fcmple(void);
+extern void __aeabi_fcmplt(void);
+extern void __aeabi_fcmpun(void);
+extern void __aeabi_i2f(void);
+extern void __aeabi_ui2f(void);
+extern void __aeabi_f2iz(void);
+extern void __aeabi_f2uiz(void);
+extern void __aeabi_l2f(void);
+extern void __aeabi_ul2f(void);
+extern void __aeabi_f2lz(void);
+extern void __aeabi_f2ulz(void);
+
+extern void __aeabi_dadd(void);
+extern void __aeabi_dsub(void);
+extern void __aeabi_dmul(void);
+extern void __aeabi_ddiv(void);
+extern void __aeabi_dcmpeq(void);
+extern void __aeabi_dcmpge(void);
+extern void __aeabi_dcmplt(void);
+extern void __aeabi_dcmpgt(void);
+extern void __aeabi_dcmple(void);
+extern void __aeabi_dcmpun(void);
+extern void __aeabi_f2d(void);
+extern void __aeabi_d2f(void);
+extern void __aeabi_i2d(void);
+extern void __aeabi_ui2d(void);
+extern void __aeabi_d2iz(void);
+extern void __aeabi_d2uiz(void);
+extern void __aeabi_l2d(void);
+extern void __aeabi_ul2d(void);
+extern void __aeabi_d2lz(void);
+extern void __aeabi_d2ulz(void);
+
+extern void __aeabi_idiv(void);
+extern void __aeabi_idivmod(void);
+extern void __aeabi_uidiv(void);
+extern void __aeabi_uidivmod(void);
+extern void __aeabi_lmul(void);
+extern void __aeabi_uldivmod(void);
+extern void __aeabi_ldivmod(void);
+extern void __aeabi_llsr(void);
+extern void __aeabi_llsl(void);
+extern void __aeabi_lasr(void);
+extern void __aeabi_lcmp(void);
+
+extern void __clzsi2(void);
+extern void __ctzsi2(void);
+extern void __popcountsi2(void);
+extern double _Complex __muldc3(double, double, double, double);
+extern double _Complex __divdc3(double, double, double, double);
+extern float _Complex __mulsc3(float, float, float, float);
+extern float _Complex __divsc3(float, float, float, float);
+extern void __powisf2(void);
+extern void __powidf2(void);
+
+/*
+ * GCC normally emits negation inline and the uploaded MOS2 runtime only
+ * declared __aeabi_fneg/__aeabi_dneg without providing them.  Export explicit
+ * firmware adapters so native applications have a complete EABI surface.
+ */
+static float dos_math_fneg(float x) { return -x; }
+static double dos_math_dneg(double x) { return -x; }
+
+/* MOS2 math-wrapper.c helper surface. */
+static uint32_t dos_math_u32_div(uint32_t x, uint32_t y) { return x / y; }
+static uint32_t dos_math_u32_rem(uint32_t x, uint32_t y) { return x % y; }
+static float dos_math_fff_div(float x, float y) { return x / y; }
+static float dos_math_fff_mul(float x, float y) { return x * y; }
+static float dos_math_ffu32_mul(float x, uint32_t y) { return x * y; }
+static double dos_math_ddd_div(double x, double y) { return x / y; }
+static double dos_math_ddd_mul(double x, double y) { return x * y; }
+static double dos_math_ddu32_mul(double x, uint32_t y) { return x * y; }
+static double dos_math_ddf_mul(double x, float y) { return x * y; }
+static float dos_math_ffu32_div(float x, uint32_t y) { return x / y; }
+static double dos_math_ddu32_div(double x, uint32_t y) { return x / y; }
+
 
 PC* __not_in_flash_func(get_PC)() {
     return pc;
@@ -57,5 +152,94 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)psram_size,
     (unsigned long)vsnprintf,
     (unsigned long)arm_elf_process_exit,
+    (unsigned long)arm_elf_yield,
+    (unsigned long)__aeabi_idiv,       /* 13: compatibility with API v6 */
+    (unsigned long)__aeabi_idivmod,    /* 14 */
+    (unsigned long)__aeabi_uidiv,      /* 15 */
+    (unsigned long)__aeabi_lmul,       /* 16 */
+    (unsigned long)__aeabi_ldivmod,    /* 17 */
+    (unsigned long)__aeabi_uldivmod,   /* 18 */
+    (unsigned long)dos_math_u32_div, /* 19 */
+    (unsigned long)dos_math_u32_rem, /* 20 */
+    (unsigned long)dos_math_fff_div, /* 21 */
+    (unsigned long)dos_math_fff_mul, /* 22 */
+    (unsigned long)dos_math_ffu32_mul, /* 23 */
+    (unsigned long)dos_math_ddd_div, /* 24 */
+    (unsigned long)dos_math_ddd_mul, /* 25 */
+    (unsigned long)dos_math_ddu32_mul, /* 26 */
+    (unsigned long)dos_math_ddf_mul, /* 27 */
+    (unsigned long)dos_math_ffu32_div, /* 28 */
+    (unsigned long)dos_math_ddu32_div, /* 29 */
+    (unsigned long)trunc, /* 30 */
+    (unsigned long)floor, /* 31 */
+    (unsigned long)pow, /* 32 */
+    (unsigned long)sqrt, /* 33 */
+    (unsigned long)sin, /* 34 */
+    (unsigned long)cos, /* 35 */
+    (unsigned long)tan, /* 36 */
+    (unsigned long)atan, /* 37 */
+    (unsigned long)log, /* 38 */
+    (unsigned long)exp, /* 39 */
+    (unsigned long)powf, /* 40 */
+    (unsigned long)__aeabi_fadd, /* 41 */
+    (unsigned long)__aeabi_fsub, /* 42 */
+    (unsigned long)__aeabi_fmul, /* 43 */
+    (unsigned long)__aeabi_fdiv, /* 44 */
+    (unsigned long)dos_math_fneg, /* 45 */
+    (unsigned long)__aeabi_fcmpeq, /* 46 */
+    (unsigned long)__aeabi_fcmpge, /* 47 */
+    (unsigned long)__aeabi_fcmpgt, /* 48 */
+    (unsigned long)__aeabi_fcmple, /* 49 */
+    (unsigned long)__aeabi_fcmplt, /* 50 */
+    (unsigned long)__aeabi_fcmpun, /* 51 */
+    (unsigned long)__aeabi_i2f, /* 52 */
+    (unsigned long)__aeabi_ui2f, /* 53 */
+    (unsigned long)__aeabi_f2iz, /* 54 */
+    (unsigned long)__aeabi_f2uiz, /* 55 */
+    (unsigned long)__aeabi_l2f, /* 56 */
+    (unsigned long)__aeabi_ul2f, /* 57 */
+    (unsigned long)__aeabi_f2lz, /* 58 */
+    (unsigned long)__aeabi_f2ulz, /* 59 */
+    (unsigned long)__aeabi_dadd, /* 60 */
+    (unsigned long)__aeabi_dsub, /* 61 */
+    (unsigned long)__aeabi_dmul, /* 62 */
+    (unsigned long)__aeabi_ddiv, /* 63 */
+    (unsigned long)dos_math_dneg, /* 64 */
+    (unsigned long)__aeabi_dcmpeq, /* 65 */
+    (unsigned long)__aeabi_dcmpge, /* 66 */
+    (unsigned long)__aeabi_dcmplt, /* 67 */
+    (unsigned long)__aeabi_dcmpgt, /* 68 */
+    (unsigned long)__aeabi_dcmple, /* 69 */
+    (unsigned long)__aeabi_dcmpun, /* 70 */
+    (unsigned long)__aeabi_f2d, /* 71 */
+    (unsigned long)__aeabi_d2f, /* 72 */
+    (unsigned long)__aeabi_i2d, /* 73 */
+    (unsigned long)__aeabi_ui2d, /* 74 */
+    (unsigned long)__aeabi_d2iz, /* 75 */
+    (unsigned long)__aeabi_d2uiz, /* 76 */
+    (unsigned long)__aeabi_l2d, /* 77 */
+    (unsigned long)__aeabi_ul2d, /* 78 */
+    (unsigned long)__aeabi_d2lz, /* 79 */
+    (unsigned long)__aeabi_d2ulz, /* 80 */
+    (unsigned long)__aeabi_idivmod, /* 81 */
+    (unsigned long)__aeabi_idiv, /* 82 */
+    (unsigned long)__aeabi_uidiv, /* 83 */
+    (unsigned long)__aeabi_uidivmod, /* 84 */
+    (unsigned long)__aeabi_lmul, /* 85 */
+    (unsigned long)__aeabi_uldivmod, /* 86 */
+    (unsigned long)__aeabi_ldivmod, /* 87 */
+    (unsigned long)__aeabi_llsr, /* 88 */
+    (unsigned long)__aeabi_llsl, /* 89 */
+    (unsigned long)__aeabi_lasr, /* 90 */
+    (unsigned long)__aeabi_lcmp, /* 91 */
+    (unsigned long)__clzsi2, /* 92 */
+    (unsigned long)__ctzsi2, /* 93 */
+    (unsigned long)__popcountsi2, /* 94 */
+    (unsigned long)__muldc3, /* 95 */
+    (unsigned long)__divdc3, /* 96 */
+    (unsigned long)__mulsc3, /* 97 */
+    (unsigned long)__divsc3, /* 98 */
+    (unsigned long)__powisf2, /* 99 */
+    (unsigned long)__powidf2, /* 100 */
     0
 };

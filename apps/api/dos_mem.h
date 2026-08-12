@@ -13,4 +13,12 @@ void *dos_alloc_low(size_t size);
  */
 uint16_t dos_ptr_segment(const void *ptr);
 
+/*
+ * Convert any pointer into conventional guest RAM to its 20-bit DOS linear
+ * address. Returns UINT32_MAX when ptr is outside the first 1 MiB guest RAM.
+ * Unlike dos_ptr_segment(), paragraph alignment is not required; DMA needs
+ * the exact byte address.
+ */
+uint32_t dos_ptr_linear(const void *ptr);
+
 #endif /* __NATIVE_DOS_MEM_H__ */

@@ -146,6 +146,9 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 // XXX: still contains ESP32-specific logic
 void pc_vga_step(void *o);
 void pc_step(PC *pc, size_t max_ops);
+/* Service emulated devices without executing guest CPU instructions.
+ * Used by cooperative native-ELF yield. */
+void pc_service(PC *pc);
 
 int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value);

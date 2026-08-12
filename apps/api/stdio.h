@@ -28,6 +28,10 @@ int remove(const char *filename);
 #endif
 void setbuf(FILE *stream, char *buffer);
 int getchar(void);
+int fputc(int c, FILE *stream);
+int fputs(const char *s, FILE *stream);
+int putchar(int c);
+int puts(const char *s);
 int vprintf(const char *format, va_list args);
 int printf(const char *format, ...);
 int sprintf(char *buffer, const char *format, ...);

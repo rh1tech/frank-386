@@ -11,8 +11,128 @@
 #include "sys/stat.h"
 #include "stdio.h"
 #include "sound_hw.h"
+#include "dos_yield.h"
 #include <stdarg.h>
 
+
+/*
+ * Cooperative replacement for the old DMX TSM IRQ scheduler.
+ *
+ * Native ARM applications execute synchronously on emulator core0.  Services
+ * therefore run when the application yields, in ordinary application context,
+ * rather than from a Pico timer IRQ racing the emulator state.  Each service
+ * keeps its own absolute deadline in the emulator's microsecond clock.
+ */
+#define NATIVE_TSM_SLOTS 16
+
+typedef struct native_tsm_slot
+{
+    int (*service)(void);
+    uint32_t period_us;
+    uint32_t next_us;
+    unsigned char in_use;
+    unsigned char paused;
+} native_tsm_slot;
+
+static native_tsm_slot native_tsm_slots[NATIVE_TSM_SLOTS];
+static int native_tsm_dispatching;
+
+void TSM_Install(int rate)
+{
+    (void)rate;
+    memset(native_tsm_slots, 0, sizeof(native_tsm_slots));
+    native_tsm_dispatching = 0;
+}
+
+int TSM_NewService(int (*service)(void), int rate, int priority, int pause)
+{
+    uint32_t now;
+    int id;
+
+    (void)priority;
+    if (!service || rate <= 0 || rate > 1000000)
+        return -1;
+
+    for (id = 0; id < NATIVE_TSM_SLOTS; ++id)
+        if (!native_tsm_slots[id].in_use)
+            break;
+    if (id == NATIVE_TSM_SLOTS)
+        return -1;
+
+    now = dos_yield();
+    native_tsm_slots[id].service = service;
+    native_tsm_slots[id].period_us = 1000000u / (uint32_t)rate;
+    if (native_tsm_slots[id].period_us == 0)
+        native_tsm_slots[id].period_us = 1;
+    native_tsm_slots[id].next_us = now + native_tsm_slots[id].period_us;
+    native_tsm_slots[id].paused = pause ? 1 : 0;
+    native_tsm_slots[id].in_use = 1;
+    return id;
+}
+
+void TSM_DelService(int id)
+{
+    if (id >= 0 && id < NATIVE_TSM_SLOTS)
+        memset(&native_tsm_slots[id], 0, sizeof(native_tsm_slots[id]));
+}
+
+void TSM_PauseService(int id)
+{
+    if (id >= 0 && id < NATIVE_TSM_SLOTS && native_tsm_slots[id].in_use)
+        native_tsm_slots[id].paused = 1;
+}
+
+void TSM_ResumeService(int id)
+{
+    if (id >= 0 && id < NATIVE_TSM_SLOTS && native_tsm_slots[id].in_use)
+    {
+        native_tsm_slots[id].paused = 0;
+        native_tsm_slots[id].next_us =
+            dos_yield() + native_tsm_slots[id].period_us;
+    }
+}
+
+void TSM_Remove(void)
+{
+    memset(native_tsm_slots, 0, sizeof(native_tsm_slots));
+    native_tsm_dispatching = 0;
+}
+
+void TSM_Yield(void)
+{
+    uint32_t now;
+    int id;
+
+    now = dos_yield();
+    if (native_tsm_dispatching)
+        return;
+
+    native_tsm_dispatching = 1;
+    for (id = 0; id < NATIVE_TSM_SLOTS; ++id)
+    {
+        native_tsm_slot *slot = &native_tsm_slots[id];
+        unsigned catchup = 0;
+
+        if (!slot->in_use || slot->paused || !slot->service)
+            continue;
+
+        /* Signed subtraction keeps the comparison correct across uint32 wrap. */
+        while ((int32_t)(now - slot->next_us) >= 0)
+        {
+            slot->next_us += slot->period_us;
+            slot->service();
+
+            /* Do not spend unbounded time replaying a very long stall. */
+            if (++catchup == 256)
+            {
+                if ((int32_t)(now - slot->next_us) >= 0)
+                    slot->next_us = now + slot->period_us;
+                break;
+            }
+        }
+    }
+    native_tsm_dispatching = 0;
+}
 
 uint32_t sound_hw_mask(void)
 {
@@ -196,6 +316,25 @@ int strncasecmp(const char *a, const char *b, size_t n)
     return 0;
 }
 
+int strcasecmp(const char *a, const char *b)
+{
+    for (;;)
+    {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (unsigned char)(ca + ('a' - 'A'));
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (unsigned char)(cb + ('a' - 'A'));
+
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        if (!ca)
+            return 0;
+    }
+}
+
 int atoi(const char *s)
 {
     int sign = 1;
@@ -329,6 +468,21 @@ uint16_t dos_ptr_segment(const void *ptr)
         return 0;
 
     return (uint16_t)(linear >> 4);
+}
+
+uint32_t dos_ptr_linear(const void *ptr)
+{
+    uintptr_t address = (uintptr_t)ptr;
+    uint32_t linear;
+
+    if (address < (uintptr_t)DOS_GUEST_RAM_BASE)
+        return UINT32_MAX;
+
+    linear = (uint32_t)(address - (uintptr_t)DOS_GUEST_RAM_BASE);
+    if (linear >= 0x00100000u)
+        return UINT32_MAX;
+
+    return linear;
 }
 
 void *dos_alloc_low(size_t size)
@@ -782,6 +936,45 @@ struct native_dos_FILE
 
 static struct native_dos_FILE native_stdout_file = {1, 0, 1};
 FILE *stdout = &native_stdout_file;
+
+int fputc(int c, FILE *stream)
+{
+    unsigned char ch = (unsigned char)c;
+
+    if (!stream || write(stream->handle, &ch, 1) != 1)
+        return -1;
+
+    return ch;
+}
+
+int fputs(const char *str, FILE *stream)
+{
+    size_t len;
+
+    if (!str || !stream)
+        return -1;
+
+    len = strlen(str);
+    if (len == 0)
+        return 0;
+
+    return write(stream->handle, str, (unsigned int)len) == (int)len
+        ? 0 : -1;
+}
+
+int putchar(int c)
+{
+    return fputc(c, stdout);
+}
+
+int puts(const char *str)
+{
+    if (fputs(str, stdout) < 0)
+        return -1;
+    if (fputc('\n', stdout) < 0)
+        return -1;
+    return 0;
+}
 
 static int native_vsnprintf(char *buffer, size_t size,
                             const char *format, va_list args)

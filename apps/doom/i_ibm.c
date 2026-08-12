@@ -148,8 +148,51 @@ boolean grmode;
 //==================================================
 
 boolean         joystickpresent;
-extern  unsigned        joystickx, joysticky;
-boolean I_ReadJoystick (void);          // returns false if not connected
+
+#ifdef ELF_MODE
+unsigned joystickx, joysticky;
+
+/*
+ * Native C translation of i_ibm_a.asm::I_ReadJoystick_.
+ *
+ * Writing port 201h starts the RC timing interval. Axis A uses bits 0/1;
+ * each read counts how long X and Y remain high. The original 10000-read
+ * disconnected-device bound is preserved.
+ *
+ * Guest x86 execution is not concurrent while native ARM owns core0, so the
+ * original pushf/cli/popf section is unnecessary here.
+ */
+boolean I_ReadJoystick(void)
+{
+    unsigned x = 0;
+    unsigned y = 0;
+    unsigned remaining = 10000;
+
+    outp(0x201, inp(0x201));
+
+    while (remaining--)
+    {
+        unsigned value = inp(0x201);
+        unsigned xb = value & 1u;
+        unsigned yb = value & 2u;
+
+        x += xb;
+        y += yb;
+
+        if ((xb | yb) == 0)
+        {
+            joystickx = x;
+            joysticky = y >> 1; /* bit 1 contributes twos in the ASM. */
+            return true;
+        }
+    }
+
+    return false;
+}
+#else
+extern unsigned joystickx, joysticky;
+boolean I_ReadJoystick(void);
+#endif
 
 
 //==================================================
@@ -269,6 +312,15 @@ ticcmd_t *I_BaseTiccmd (void)
 
 int I_GetTime (void)
 {
+#ifdef ELF_MODE
+	/*
+	 * Native DOOM owns core0 while main() is running.  Pump the emulator
+	 * device service and cooperative DMX timers whenever the game queries
+	 * its 35-Hz clock; the normal wait loops call I_GetTime repeatedly.
+	 */
+	extern void TSM_Yield(void);
+	TSM_Yield();
+#endif
 #ifdef NOTIMER
 	ticcount++;
 #endif
