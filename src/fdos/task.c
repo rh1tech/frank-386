@@ -94,8 +94,8 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
 #define M_API_VERSION              7
-#define ARM_ELF_NATIVE_STACK_SIZE 4096u
-#define ARM_ELF_DOS_STACK_SIZE    256u
+#define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
+#define ARM_ELF_DEFAULT_DOS_STACK_SIZE    256u
 #define ARM_ELF_ARGV_SLOTS        66u
 #define ARM_ELF_ARG_TEXT_SIZE     (NAMEMAX + sizeof(((CommandTail *)0)->ctBuffer) + 2u)
 #define ARM_ELF_ARG_AREA_SIZE     (ARM_ELF_ARGV_SLOTS * sizeof(ULONG) + ARM_ELF_ARG_TEXT_SIZE)
@@ -167,6 +167,7 @@ typedef struct arm_elf_load_meta {
   arm_elf32_shdr strtab;
   ULONG cursor;
   ULONG required_api_addr;
+  ULONG requirements_addr;
   ULONG init_addr;
   ULONG main_addr;
   ULONG fini_addr;
@@ -175,6 +176,8 @@ typedef struct arm_elf_load_meta {
   ULONG native_stack_off;
   ULONG native_main_sp;
   ULONG dos_stack_off;
+  ULONG native_stack_size;
+  ULONG dos_stack_size;
   LONG required_api_version;
   UWORD argc;
   UWORD shnum;
@@ -668,9 +671,9 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
 }
 
 static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
-                              ULONG *req_idx, ULONG *init_idx,
-                              ULONG *main_idx, ULONG *fini_idx,
-                              ULONG *sig_idx)
+                              ULONG *req_idx, ULONG *requirements_idx,
+                              ULONG *init_idx, ULONG *main_idx,
+                              ULONG *fini_idx, ULONG *sig_idx)
 {
   ULONG count;
   ULONG i;
@@ -682,8 +685,8 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
   if (entsize < sizeof(arm_elf32_sym))
     return DE_INVLDFMT;
   count = meta->symtab.size / entsize;
-  *req_idx = *init_idx = *main_idx = *fini_idx = *sig_idx =
-      ARM_ELF_NO_SYMBOL;
+  *req_idx = *requirements_idx = *init_idx = *main_idx = *fini_idx =
+      *sig_idx = ARM_ELF_NO_SYMBOL;
 
   for (i = 0; i < count; ++i) {
     arm_elf32_sym sym;
@@ -705,6 +708,10 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
                                       "__required_dos_api_verion")) {
       if (bind == STB_GLOBAL)
         *req_idx = i;
+    } else if (arm_elf_symbol_name_is(fd, meta, &sym,
+                                      "__native_dos_process_requirements")) {
+      if (bind == STB_GLOBAL)
+        *requirements_idx = i;
     } else if (arm_elf_symbol_name_is(fd, meta, &sym, "_fini")) {
       if (bind == STB_GLOBAL)
         *fini_idx = i;
@@ -743,6 +750,68 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk *exb, BYTE *fnam);
 static dos_far_ptr exec_caller_return_addr(void);
 static COUNT exec_run_arm_elf(UWORD child_psp_seg,
                               arm_elf_load_meta *meta);
+
+typedef int (*arm_elf_req_ver_fn)(void);
+
+typedef struct arm_elf_process_requirements {
+  ULONG struct_size;
+  ULONG native_stack_size;
+  ULONG dos_stack_size;
+} arm_elf_process_requirements;
+
+typedef const arm_elf_process_requirements *
+    (*arm_elf_requirements_fn)(void);
+
+/*
+ * Run the startup ABI preflight on the kernel stack, before either application
+ * stack exists.  Version negotiation remains the first application call.  An
+ * optional requirements hook then selects the native ARM and guest DOS stack
+ * independently; absent/zero fields retain the historical defaults.
+ */
+static int arm_elf_preflight(arm_elf_load_meta *meta)
+{
+  const arm_elf_process_requirements *requirements;
+  ULONG native_size = ARM_ELF_DEFAULT_NATIVE_STACK_SIZE;
+  ULONG dos_size = ARM_ELF_DEFAULT_DOS_STACK_SIZE;
+
+  meta->required_api_version = M_API_VERSION;
+  if (meta->required_api_addr != 0)
+    meta->required_api_version =
+        ((arm_elf_req_ver_fn)(uintptr_t)meta->required_api_addr)();
+  if (meta->required_api_version > M_API_VERSION) {
+    dos_printf("ARM ELF: application requires DOS-API version %ld; provided %u\r\n",
+               meta->required_api_version, (unsigned)M_API_VERSION);
+    return DE_INVLDFMT;
+  }
+
+  if (meta->requirements_addr != 0) {
+    requirements = ((arm_elf_requirements_fn)(uintptr_t)
+        meta->requirements_addr)();
+    if (requirements != NULL) {
+      if (requirements->struct_size < sizeof(*requirements)) {
+        dos_printf("ARM ELF: process requirements structure is too small (%lu)\r\n",
+                   requirements->struct_size);
+        return DE_INVLDFMT;
+      }
+      if (requirements->native_stack_size != 0)
+        native_size = requirements->native_stack_size;
+      if (requirements->dos_stack_size != 0)
+        dos_size = requirements->dos_stack_size;
+    }
+  }
+
+  native_size = arm_elf_align_up(native_size, 8u);
+  dos_size = arm_elf_align_up(dos_size, 16u);
+  if (native_size == 0xfffffffful || dos_size == 0xfffffffful ||
+      native_size == 0 || dos_size == 0) {
+    dos_printf("ARM ELF: invalid process stack requirements\r\n");
+    return DE_INVLDFMT;
+  }
+
+  meta->native_stack_size = native_size;
+  meta->dos_stack_size = dos_size;
+  return SUCCESS;
+}
 
 static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
                               exec_blk *exp, const BYTE *namep)
@@ -836,7 +905,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   ULONG native_stack_off;
   ULONG dos_stack_off;
   ULONG paras_long;
-  ULONG req_idx, init_idx, main_idx, fini_idx, sig_idx;
+  ULONG req_idx, requirements_idx, init_idx, main_idx, fini_idx, sig_idx;
   UWORD alloc_mcb, asize = 0, load_seg;
   UWORD env_mcb = 0;
   UWORD fcbcode;
@@ -918,8 +987,8 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     dos_printf("ARM ELF: cannot find a valid SHT_SYMTAB/SHT_STRTAB pair\r\n");
     goto fail;
   }
-  rc = arm_elf_find_roots(fd, meta, &req_idx, &init_idx, &main_idx,
-                          &fini_idx, &sig_idx);
+  rc = arm_elf_find_roots(fd, meta, &req_idx, &requirements_idx,
+                          &init_idx, &main_idx, &fini_idx, &sig_idx);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot scan application entry symbols\r\n");
     goto fail;
@@ -937,6 +1006,10 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
                          &meta->required_api_addr);
   if (rc != SUCCESS)
     goto reloc_fail;
+  rc = arm_elf_load_root(fd, load_seg, meta, requirements_idx,
+                         &meta->requirements_addr);
+  if (rc != SUCCESS)
+    goto reloc_fail;
   rc = arm_elf_load_root(fd, load_seg, meta, init_idx, &meta->init_addr);
   if (rc != SUCCESS)
     goto reloc_fail;
@@ -950,25 +1023,29 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (rc != SUCCESS)
     goto reloc_fail;
 
+  rc = arm_elf_preflight(meta);
+  if (rc != SUCCESS)
+    goto fail;
+
   rc = arm_elf_build_argv(load_seg, meta, exp, namep);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot build argv in child memory\r\n");
     goto fail;
   }
 
-  dos_stack_off = arm_elf_align_up(meta->cursor, 8u);
+  dos_stack_off = arm_elf_align_up(meta->cursor, 16u);
   if (dos_stack_off == 0xfffffffful ||
-      dos_stack_off > 0xfffffffful - ARM_ELF_DOS_STACK_SIZE) {
+      dos_stack_off > 0xfffffffful - meta->dos_stack_size) {
     rc = DE_NOMEM;
     goto fail;
   }
-  native_stack_off = arm_elf_align_up(dos_stack_off + ARM_ELF_DOS_STACK_SIZE, 8u);
+  native_stack_off = arm_elf_align_up(dos_stack_off + meta->dos_stack_size, 8u);
   if (native_stack_off == 0xfffffffful ||
-      native_stack_off > 0xfffffffful - ARM_ELF_NATIVE_STACK_SIZE) {
+      native_stack_off > 0xfffffffful - meta->native_stack_size) {
     rc = DE_NOMEM;
     goto fail;
   }
-  final_end = native_stack_off + ARM_ELF_NATIVE_STACK_SIZE;
+  final_end = native_stack_off + meta->native_stack_size;
   rc = arm_elf_ensure_capacity(load_seg, final_end);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot grow guest block for stacks to %lu bytes\r\n",
@@ -976,7 +1053,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     goto fail;
   }
   memset(ARM_PTR(arm_elf_guest_ptr(load_seg, dos_stack_off)), 0,
-         ARM_ELF_DOS_STACK_SIZE + ARM_ELF_NATIVE_STACK_SIZE);
+         meta->dos_stack_size + meta->native_stack_size);
   meta->dos_stack_off = dos_stack_off;
   meta->native_stack_off = native_stack_off;
   final_paras = (UWORD)((final_end + 15u) >> 4);
@@ -1606,7 +1683,6 @@ static void exec_set_initial_registers(const struct exec_process_start *start)
   cpu_setflags(cpu, 0x0200, (uword)~0x0200u);
 }
 
-typedef int (*arm_elf_req_ver_fn)(void);
 typedef void *(*arm_elf_init_fn)(void);
 typedef int (*arm_elf_main_fn)(int, char **);
 typedef void (*arm_elf_fini_fn)(void *);
@@ -1729,19 +1805,6 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
   void *fini_ctx = NULL;
   int result;
 
-  /* Keep the MOS2 startup contract: API negotiation is the first native
-     application call.  A mismatch rejects execution before _init/main, so
-     _fini must not run either because no application initialization happened. */
-  meta->required_api_version = M_API_VERSION;
-  if (meta->required_api_addr != 0)
-    meta->required_api_version =
-        ((arm_elf_req_ver_fn)(uintptr_t)meta->required_api_addr)();
-  if (meta->required_api_version > M_API_VERSION) {
-    dos_printf("ARM ELF: application requires DOS-API version %ld; provided %u\r\n",
-               meta->required_api_version, (unsigned)M_API_VERSION);
-    return -2;
-  }
-
   if (meta->init_addr != 0)
     fini_ctx = ((arm_elf_init_fn)(uintptr_t)meta->init_addr)();
 
@@ -1834,7 +1897,7 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     arm_elf_load_meta *meta = start->arm_elf;
     uintptr_t stack_bottom = (uintptr_t)ARM_PTR(arm_elf_guest_ptr(
         start->child_psp, meta->native_stack_off));
-    uintptr_t stack_top = stack_bottom + ARM_ELF_NATIVE_STACK_SIZE;
+    uintptr_t stack_top = stack_bottom + meta->native_stack_size;
     int exit_code;
 
     diag_native_code_enter();
@@ -1900,7 +1963,7 @@ static COUNT exec_run_arm_elf(UWORD child_psp_seg,
 
   start.entry = MK_FP(child_psp_seg, 0);
   start.stack = arm_elf_guest_ptr(
-      child_psp_seg, meta->dos_stack_off + ARM_ELF_DOS_STACK_SIZE);
+      child_psp_seg, meta->dos_stack_off + meta->dos_stack_size);
   start.dses = child_psp_seg;
   start.ax_bx = 0;
   start.child_psp = child_psp_seg;

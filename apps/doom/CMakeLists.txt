@@ -42,6 +42,7 @@ message(STATUS "")
 
 add_executable(${PROJECT_NAME}
     i_main.c
+    i_process.c
     tables.c
     info.c
     sounds.c
