@@ -166,6 +166,7 @@ typedef struct arm_elf_load_meta {
   arm_elf32_shdr symtab;
   arm_elf32_shdr strtab;
   ULONG cursor;
+  ULONG allocation_end;
   ULONG required_api_addr;
   ULONG requirements_addr;
   ULONG init_addr;
@@ -252,21 +253,20 @@ static int arm_elf_read_shdr(COUNT fd, const arm_elf32_ehdr *eh,
       eh->shoff + (ULONG)sec_num * eh->shentsize, sh, sizeof(*sh));
 }
 
-/* Grow the child's single DOS block only when a reached section/area needs it.
-   Section offsets never move, so already-applied relocations remain valid. */
-static int arm_elf_ensure_capacity(UWORD base_seg, ULONG end_off)
+/*
+ * The ELF loader owns the largest available DOS block for the duration of
+ * loading and shrinks it to the final image size only after relocation.
+ * Therefore section placement never needs to modify the MCB chain.  This is
+ * both simpler and avoids repeated DosMemChange() calls while recursively
+ * discovering sections.
+ */
+static int arm_elf_ensure_capacity(const arm_elf_load_meta *meta, ULONG end_off)
 {
-  ULONG paras_long;
-
   if (end_off == 0)
     return SUCCESS;
-  if (end_off > 0xffff0ul)
+  if (end_off > 0xffff0ul || end_off > meta->allocation_end)
     return DE_NOMEM;
-
-  paras_long = (end_off + 15u) >> 4;
-  if (paras_long == 0 || paras_long > 0xffffu)
-    return DE_NOMEM;
-  return DosMemChange(base_seg, (UWORD)paras_long, NULL);
+  return SUCCESS;
 }
 
 static int arm_elf_read_section(COUNT fd, UWORD base_seg, ULONG dst_off,
@@ -637,7 +637,7 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
   if (off == 0xfffffffful || off > 0xfffffffful - sh.size)
     return DE_INVLDFMT;
 
-  rc = arm_elf_ensure_capacity(base_seg, off + sh.size);
+  rc = arm_elf_ensure_capacity(meta, off + sh.size);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot grow guest block for section %u to %lu bytes\r\n",
                (unsigned)sec_num, off + sh.size);
@@ -667,6 +667,13 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
   if (rc != SUCCESS)
     return rc;
   state->state = ARM_ELF_SEC_LOADED;
+
+  /*
+   * Visible loader progress.  A percentage would require computing the whole
+   * recursive dependency closure before loading it; one dot per newly loaded
+   * section is cheap and still distinguishes slow progress from a hang.
+   */
+  dos_printf(".");
   return SUCCESS;
 }
 
@@ -744,6 +751,7 @@ static int arm_elf_load_root(COUNT fd, UWORD base_seg,
   return arm_elf_symbol_addr(fd, base_seg, meta, sym_index, address);
 }
 
+STATIC int ExecMemLargest(UWORD *asize, UWORD threshold);
 STATIC int ExecMemAlloc(UWORD size, seg * para, UWORD * asize);
 STATIC COUNT ChildEnv(exec_blk *exp, UWORD *pChildEnvSeg, char *pathname);
 STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk *exb, BYTE *fnam);
@@ -753,13 +761,25 @@ static COUNT exec_run_arm_elf(UWORD child_psp_seg,
 
 typedef int (*arm_elf_req_ver_fn)(void);
 
-typedef struct arm_elf_process_requirements {
-  ULONG struct_size;
-  ULONG native_stack_size;
-  ULONG dos_stack_size;
+#define ARM_ELF_PROCESS_REQUIREMENTS_V1_SIZE 12u
+#define ARM_ELF_PROCESS_REQUIREMENTS_V2_SIZE 20u
+
+typedef struct __attribute__((aligned(4))) arm_elf_process_requirements {
+  ULONG struct_size __attribute__((aligned(4)));
+  ULONG native_stack_size __attribute__((aligned(4)));
+  ULONG dos_stack_size __attribute__((aligned(4)));
+  ULONG assigned_native_stack_size __attribute__((aligned(4)));
+  ULONG assigned_dos_stack_size __attribute__((aligned(4)));
 } arm_elf_process_requirements;
 
-typedef const arm_elf_process_requirements *
+_Static_assert(sizeof(ULONG) == 4, "ARM ELF process ABI requires 32-bit ULONG");
+_Static_assert(__alignof__(arm_elf_process_requirements) == 4,
+               "ARM ELF process requirements alignment");
+_Static_assert(sizeof(arm_elf_process_requirements) ==
+               ARM_ELF_PROCESS_REQUIREMENTS_V2_SIZE,
+               "ARM ELF process requirements layout");
+
+typedef arm_elf_process_requirements *
     (*arm_elf_requirements_fn)(void);
 
 /*
@@ -770,7 +790,7 @@ typedef const arm_elf_process_requirements *
  */
 static int arm_elf_preflight(arm_elf_load_meta *meta)
 {
-  const arm_elf_process_requirements *requirements;
+  arm_elf_process_requirements *requirements = NULL;
   ULONG native_size = ARM_ELF_DEFAULT_NATIVE_STACK_SIZE;
   ULONG dos_size = ARM_ELF_DEFAULT_DOS_STACK_SIZE;
 
@@ -788,7 +808,7 @@ static int arm_elf_preflight(arm_elf_load_meta *meta)
     requirements = ((arm_elf_requirements_fn)(uintptr_t)
         meta->requirements_addr)();
     if (requirements != NULL) {
-      if (requirements->struct_size < sizeof(*requirements)) {
+      if (requirements->struct_size < ARM_ELF_PROCESS_REQUIREMENTS_V1_SIZE) {
         dos_printf("ARM ELF: process requirements structure is too small (%lu)\r\n",
                    requirements->struct_size);
         return DE_INVLDFMT;
@@ -813,6 +833,31 @@ static int arm_elf_preflight(arm_elf_load_meta *meta)
   return SUCCESS;
 }
 
+/*
+ * Publish loader-selected values only after _init().
+ *
+ * Some native runtimes restore the application's statically initialized
+ * .data image in _init().  Writing these output fields during preflight would
+ * therefore be lost before main().  Re-enter the already loaded requirements
+ * hook after _init and write only ABI-v2 fields.
+ */
+static void arm_elf_publish_process_requirements(arm_elf_load_meta *meta)
+{
+  arm_elf_process_requirements *requirements;
+
+  if (meta->requirements_addr == 0)
+    return;
+
+  requirements = ((arm_elf_requirements_fn)(uintptr_t)
+      meta->requirements_addr)();
+  if (requirements == NULL ||
+      requirements->struct_size < ARM_ELF_PROCESS_REQUIREMENTS_V2_SIZE)
+    return;
+
+  requirements->assigned_native_stack_size = meta->native_stack_size;
+  requirements->assigned_dos_stack_size = meta->dos_stack_size;
+}
+
 static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
                               exec_blk *exp, const BYTE *namep)
 {
@@ -831,7 +876,7 @@ static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
       argv_off > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
     return DE_NOMEM;
   argv_end = argv_off + ARM_ELF_ARG_AREA_SIZE;
-  if (arm_elf_ensure_capacity(base_seg, argv_end) != SUCCESS)
+  if (arm_elf_ensure_capacity(meta, argv_end) != SUCCESS)
     return DE_NOMEM;
   text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
   argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
@@ -966,10 +1011,19 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (rc != SUCCESS)
     return (COUNT)rc;
 
-  rc = ExecMemAlloc((UWORD)paras_long, &alloc_mcb, &asize);
+  /*
+   * Reserve the largest available DOS block while loading.  ET_REL discovery
+   * is recursive, so the final image size is not known until all reachable
+   * sections have been relocated.  Owning the whole block avoids growing the
+   * MCB once per newly reached section; the unused tail is returned below by
+   * the existing final DosMemChange().
+   */
+  rc = ExecMemLargest(&asize, (UWORD)paras_long);
+  if (rc == SUCCESS)
+    rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
   if (rc != SUCCESS) {
     DosMemFree(env_mcb);
-    dos_printf("ARM ELF: cannot allocate %lu-byte initial guest block\r\n",
+    dos_printf("ARM ELF: cannot reserve largest guest block (minimum %lu bytes)\r\n",
                paras_long << 4);
     return (COUNT)rc;
   }
@@ -981,6 +1035,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   meta->eh = eh;
   meta->shnum = eh.shnum;
   meta->cursor = initial_cursor;
+  meta->allocation_end = (ULONG)asize << 4;
 
   rc = arm_elf_find_tables(fd, meta);
   if (rc != SUCCESS) {
@@ -1027,6 +1082,10 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (rc != SUCCESS)
     goto fail;
 
+  dos_printf("ARM ELF: stacks native=%lu DOS=%lu, load reserve=%lu bytes\r\n",
+             meta->native_stack_size, meta->dos_stack_size,
+             meta->allocation_end);
+
   rc = arm_elf_build_argv(load_seg, meta, exp, namep);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot build argv in child memory\r\n");
@@ -1046,7 +1105,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     goto fail;
   }
   final_end = native_stack_off + meta->native_stack_size;
-  rc = arm_elf_ensure_capacity(load_seg, final_end);
+  rc = arm_elf_ensure_capacity(meta, final_end);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot grow guest block for stacks to %lu bytes\r\n",
                final_end);
@@ -1077,11 +1136,14 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   fcbcode = patchPSP(alloc_mcb, env_mcb, exp, namep);
   (void)fcbcode;
 
+  /* Terminate the section-progress line before application output begins. */
+  dos_printf("\r\n");
+
   CfgDbgPrintf(("ARM ELF loaded: psp=%04x native_stack=%08lx size=%lu "
                 "argc=%u req=%08lx init=%08lx main=%08lx fini=%08lx sig=%08lx\n",
                 load_seg,
                 (ULONG)(uintptr_t)ARM_PTR(arm_elf_guest_ptr(
-                    load_seg, native_stack_off + ARM_ELF_NATIVE_STACK_SIZE)),
+                    load_seg, native_stack_off + meta->native_stack_size)),
                 final_end, (unsigned)meta->argc, meta->required_api_addr,
                 meta->init_addr, meta->main_addr, meta->fini_addr,
                 meta->signal_addr));
@@ -1807,6 +1869,12 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
 
   if (meta->init_addr != 0)
     fini_ctx = ((arm_elf_init_fn)(uintptr_t)meta->init_addr)();
+
+  /*
+   * _init may have restored the application's original .data contents.
+   * Publish loader-owned output fields only now, immediately before main().
+   */
+  arm_elf_publish_process_requirements(meta);
 
   /*
    * Keep the recovery SP in this process's metadata, not in the application.

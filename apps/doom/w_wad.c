@@ -36,6 +36,9 @@
 #include "DoomDef.h"
 extern int _wp1, _wp2, _wp3, _wp4, _wp5, _wp6, _wp7, _wp8, _wp9;
 extern int _wp10, _wp11, _wp12, _wp13;
+#ifdef ELF_MODE
+void I_PrintProcessRequirements(void);
+#endif
 
 
 //===============
@@ -203,7 +206,9 @@ void W_AddFile (char *filename)
 	else 
 	{
 	// WAD file
+		printf ("W_AddFile: read header\n");
 		read (handle, &header, sizeof(header));
+		printf ("W_AddFile: header read\n");
 		if (strncmp(header.identification,"IWAD",4))
 		{
 			if (strncmp(header.identification,"PWAD",4))
@@ -214,16 +219,31 @@ void W_AddFile (char *filename)
 		header.numlumps = LONG(header.numlumps);
 		header.infotableofs = LONG(header.infotableofs);
 		length = header.numlumps*sizeof(filelump_t);
+#ifdef ELF_MODE
+		/*
+		 * Put the stack diagnostic immediately before the last line known to
+		 * survive on screen.  This is also immediately before the large
+		 * alloca(), so the reported SP describes the relevant call depth.
+		 */
+		I_PrintProcessRequirements();
+#endif
+		printf ("W_AddFile: lumps=%d dir=%d bytes=%d\n",
+			header.numlumps, header.infotableofs, length);
 		fileinfo = alloca (length);
+		printf ("W_AddFile: alloca ok %p\n", fileinfo);
 		lseek (handle, header.infotableofs, SEEK_SET);
+		printf ("W_AddFile: seek ok\n");
 		read (handle, fileinfo, length);
+		printf ("W_AddFile: directory read ok\n");
 		numlumps += header.numlumps;
 	}
 
 //
 // Fill in lumpinfo
 //
+	printf ("W_AddFile: realloc lumpinfo count=%d\n", numlumps);
 	lumpinfo = realloc (lumpinfo, numlumps*sizeof(lumpinfo_t));
+	printf ("W_AddFile: realloc ok %p\n", lumpinfo);
 #if (APPVER_DOOMREV >= AV_DR_DM12)
 	if (!lumpinfo)
 		I_Error ("Couldn't realloc lumpinfo");
@@ -232,6 +252,7 @@ void W_AddFile (char *filename)
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
 	storehandle = reloadname ? -1 : handle;
 #endif
+	printf ("W_AddFile: fill lumpinfo\n");
 	for (i=startlump ; i<numlumps ; i++,lump_p++, fileinfo++)
 	{
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
@@ -247,6 +268,7 @@ void W_AddFile (char *filename)
 	if (reloadname)
 		close (handle);
 #endif
+	printf ("W_AddFile: done %s\n", filename);
 }
 
 
