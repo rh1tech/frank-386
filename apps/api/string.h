@@ -7,22 +7,14 @@
 extern "C" {
 #endif
 
-static inline void *memcpy(void *dst, const void *src, size_t n)
-{
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    while (n--)
-        *d++ = *s++;
-    return dst;
-}
-
-static inline void *memset(void *dst, int value, size_t n)
-{
-    unsigned char *d = (unsigned char *)dst;
-    while (n--)
-        *d++ = (unsigned char)value;
-    return dst;
-}
+size_t strlen(const char *s);
+int strncmp(const char *a, const char *b, size_t n);
+char *strncpy(char *dst, const char *src, size_t n);
+int strcmpi(const char *a, const char *b);
+void strupr(char *s);
+void *memcpy(void *dst, const void *src, size_t n);
+void *memset(void *dst, int value, size_t n);
+int strncasecmp(const char *a, const char *b, size_t n);
 
 #ifdef __cplusplus
 }

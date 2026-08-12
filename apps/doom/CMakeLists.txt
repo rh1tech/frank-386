@@ -66,8 +66,23 @@ add_executable(${PROJECT_NAME}
     p_tick.c
     p_spec.c
     p_setup.c
+    w_wad.c
+    z_zone.c
+    r_bsp.c
+    r_data.c
+    r_main.c
+    r_plane.c
+    r_segs.c
+    r_things.c
+    r_draw.c
+    v_video.c
 #    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
-#    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
+)
+
+set_source_files_properties(
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
+    PROPERTIES COMPILE_OPTIONS "-fno-builtin"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE

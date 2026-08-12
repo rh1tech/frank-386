@@ -29,6 +29,28 @@ extern int _wp33, _wp34, _wp35, _wp36, _wp37, _wp38, _wp39, _wp40, _wp41;
 #endif
 #include "R_local.h"
 
+#ifdef ELF_MODE
+#include <conio.h>
+#include "dos_phys.h"
+#define NATIVE_FDOS_PLANAR 1
+#define PLANEWIDTH (SCREENWIDTH/4)
+
+static inline uint32_t R_GuestAddr(const void *ptr)
+{
+    return (uint32_t)(uintptr_t)ptr;
+}
+
+static inline byte R_GuestRead8(const void *ptr)
+{
+    return dos_phys_read8(R_GuestAddr(ptr));
+}
+
+static inline void R_GuestWrite8(void *ptr, byte value)
+{
+    dos_phys_write8(R_GuestAddr(ptr), value);
+}
+#endif
+
 #define SC_INDEX			0x3c4
 #define SC_MAPMASK			2
 #define GC_INDEX			0x3ce
@@ -68,6 +90,68 @@ byte			*dc_source;		// first pixel in a column (possibly virtual)
 
 int				dccount;		// just for profiling
 
+#ifdef NATIVE_FDOS_PLANAR
+void R_DrawColumn (void)
+{
+    int count;
+    uint32_t dest;
+    fixed_t frac, fracstep;
+
+    count = dc_yh - dc_yl;
+    if (count < 0)
+        return;
+
+#ifdef RANGECHECK
+    if ((unsigned)dc_x >= SCREENWIDTH || dc_yl < 0 || dc_yh >= SCREENHEIGHT)
+        I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
+#endif
+
+    outp (SC_INDEX+1, 1 << (dc_x & 3));
+    dest = R_GuestAddr(destview) + dc_yl * PLANEWIDTH + (dc_x >> 2);
+
+    fracstep = dc_iscale;
+    frac = dc_texturemid + (dc_yl-centery)*fracstep;
+
+    do
+    {
+        dos_phys_write8(dest, dc_colormap[dc_source[(frac>>FRACBITS)&127]]);
+        dest += PLANEWIDTH;
+        frac += fracstep;
+    } while (count--);
+}
+
+void R_DrawColumnLow (void)
+{
+    int count;
+    uint32_t dest;
+    fixed_t frac, fracstep;
+
+    count = dc_yh - dc_yl;
+    if (count < 0)
+        return;
+
+#ifdef RANGECHECK
+    if ((unsigned)dc_x >= SCREENWIDTH || dc_yl < 0 || dc_yh >= SCREENHEIGHT)
+        I_Error ("R_DrawColumnLow: %i to %i at %i", dc_yl, dc_yh, dc_x);
+#endif
+
+    if (dc_x & 1)
+        outp (SC_INDEX+1, 12);
+    else
+        outp (SC_INDEX+1, 3);
+    dest = R_GuestAddr(destview) + dc_yl * PLANEWIDTH + (dc_x >> 1);
+
+    fracstep = dc_iscale;
+    frac = dc_texturemid + (dc_yl-centery)*fracstep;
+
+    do
+    {
+        dos_phys_write8(dest, dc_colormap[dc_source[(frac>>FRACBITS)&127]]);
+        dest += PLANEWIDTH;
+        frac += fracstep;
+    } while (count--);
+}
+#else
 #ifndef __WATCOMC__
 #ifndef __i386
 #ifndef __m68k
@@ -98,8 +182,8 @@ void R_DrawColumn (void)
 		frac += fracstep;
 	} while (count--);
 }
-#endif		// __m68k
-#endif		// __i386
+#endif
+#endif
 #endif
 
 #ifndef __WATCOMC__
@@ -118,7 +202,6 @@ void R_DrawColumnLow (void)
 #ifdef RANGECHECK
 	if ((unsigned)dc_x >= SCREENWIDTH || dc_yl < 0 || dc_yh >= SCREENHEIGHT)
 		I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
-//	dccount++;
 #endif
 
 	dest = ylookup[dc_yl] + columnofs[dc_x]; 
@@ -133,14 +216,14 @@ void R_DrawColumnLow (void)
 		frac += fracstep;
 	} while (count--);
 }
-#endif		// __m68k
-#endif		// __i386
 #endif
-
+#endif
+#endif
+#endif /* NATIVE_FDOS_PLANAR */
 
 #define FUZZTABLE	50
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(NATIVE_FDOS_PLANAR)
 #define FUZZOFF	(SCREENWIDTH/4)
 #else
 #define FUZZOFF	(SCREENWIDTH)
@@ -170,7 +253,7 @@ void R_DrawFuzzColumn (void)
 		I_Error ("R_DrawFuzzColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
 #endif
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(NATIVE_FDOS_PLANAR)
 	if (detailshift)
 	{
 		if (dc_x & 1)
@@ -200,10 +283,14 @@ void R_DrawFuzzColumn (void)
 
 	do
 	{
+#ifdef NATIVE_FDOS_PLANAR
+        R_GuestWrite8(dest, colormaps[6*256 + R_GuestRead8(dest + fuzzoffset[fuzzpos])]);
+#else
 		*dest = colormaps[6*256+dest[fuzzoffset[fuzzpos]]];
+#endif
 		if (++fuzzpos == FUZZTABLE)
 			fuzzpos = 0;
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(NATIVE_FDOS_PLANAR)
 		dest += SCREENWIDTH/4;
 #else
 		dest += SCREENWIDTH;
@@ -238,7 +325,7 @@ void R_DrawTranslatedColumn (void)
 		I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
 #endif
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(NATIVE_FDOS_PLANAR)
 	if (detailshift)
 	{
 		if (dc_x & 1)
@@ -262,8 +349,12 @@ void R_DrawTranslatedColumn (void)
 
 	do
 	{
+#ifdef NATIVE_FDOS_PLANAR
+        R_GuestWrite8(dest, dc_colormap[dc_translation[dc_source[frac>>FRACBITS]]]);
+#else
 		*dest = dc_colormap[dc_translation[dc_source[frac>>FRACBITS]]];
-#ifdef __WATCOMC__
+#endif
+#if defined(__WATCOMC__) || defined(NATIVE_FDOS_PLANAR)
 		dest += SCREENWIDTH/4;
 #else
 		dest += SCREENWIDTH;
@@ -326,6 +417,74 @@ byte			*ds_source;		// start of a 64*64 tile image
 
 int				dscount;		// just for profiling
 
+#ifdef NATIVE_FDOS_PLANAR
+void R_DrawSpan (void)
+{
+    fixed_t xfrac, yfrac;
+    uint32_t dest;
+    int spot, i, prt, dsp_x1, dsp_x2, countp;
+
+#ifdef RANGECHECK
+    if (ds_x2 < ds_x1 || ds_x1 < 0 || ds_x2 >= SCREENWIDTH || (unsigned)ds_y > SCREENHEIGHT)
+        I_Error ("R_DrawSpan: %i to %i at %i", ds_x1, ds_x2, ds_y);
+#endif
+
+    for (i = 0; i < 4; i++)
+    {
+        dsp_x1 = (ds_x1-i)/4;
+        if (dsp_x1*4+i < ds_x1)
+            dsp_x1++;
+        dsp_x2 = (ds_x2-i)/4;
+        countp = dsp_x2 - dsp_x1;
+        if (countp >= 0)
+        {
+            outp (SC_INDEX+1, 1 << i);
+            dest = R_GuestAddr(destview) + ds_y * PLANEWIDTH + dsp_x1;
+            prt = dsp_x1*4 - ds_x1 + i;
+            xfrac = ds_xfrac + ds_xstep*prt;
+            yfrac = ds_yfrac + ds_ystep*prt;
+            do
+            {
+                spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
+                dos_phys_write8(dest++, ds_colormap[ds_source[spot]]);
+                xfrac += ds_xstep*4;
+                yfrac += ds_ystep*4;
+            } while (countp--);
+        }
+    }
+}
+
+void R_DrawSpanLow (void)
+{
+    fixed_t xfrac, yfrac;
+    uint32_t dest;
+    int spot, prt, dsp_x1, dsp_x2, countp;
+
+#ifdef RANGECHECK
+    if (ds_x2 < ds_x1 || ds_x1 < 0 || ds_x2 >= SCREENWIDTH || (unsigned)ds_y > SCREENHEIGHT)
+        I_Error ("R_DrawSpanLow: %i to %i at %i", ds_x1, ds_x2, ds_y);
+#endif
+
+    dsp_x1 = ds_x1/2 + (ds_x1 & 1);
+    dsp_x2 = ds_x2/2;
+    countp = dsp_x2 - dsp_x1;
+    if (countp >= 0)
+    {
+        outp (SC_INDEX+1, 3);
+        dest = R_GuestAddr(destview) + ds_y * PLANEWIDTH + dsp_x1;
+        prt = dsp_x1*2 - ds_x1;
+        xfrac = ds_xfrac + ds_xstep*prt;
+        yfrac = ds_yfrac + ds_ystep*prt;
+        do
+        {
+            spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
+            dos_phys_write8(dest++, ds_colormap[ds_source[spot]]);
+            xfrac += ds_xstep*2;
+            yfrac += ds_ystep*2;
+        } while (countp--);
+    }
+}
+#else
 #ifndef __WATCOMC__
 #ifndef __i386
 #ifndef __m68k
@@ -392,6 +551,7 @@ void R_DrawSpanLow (void)
 #endif
 #endif
 
+#endif /* NATIVE_FDOS_PLANAR */
 
 
 /*
@@ -493,7 +653,7 @@ void R_FillBackScreen (void)
 	V_DrawPatch (viewwindowx+scaledviewwidth, viewwindowy+viewheight, 1,
 		W_CacheLumpName ("brdr_br",PU_CACHE));
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(NATIVE_FDOS_PLANAR)
 	dest = (byte*)0xac000;
 	src = screens[1];
 	for (i = 0; i < 4; i++, src++)
@@ -501,7 +661,11 @@ void R_FillBackScreen (void)
 		outp (SC_INDEX, 2);
 		outp (SC_INDEX+1, 1<<i);
 		for (j = 0; j < (SCREENHEIGHT-SBARHEIGHT)*SCREENWIDTH/4; j++)
+#ifdef NATIVE_FDOS_PLANAR
+            R_GuestWrite8(dest + j, src[j*4]);
+#else
 			dest[j] = src[j*4];
+#endif
 	}
 #endif
 }
@@ -509,7 +673,7 @@ void R_FillBackScreen (void)
 
 void R_VideoErase (unsigned ofs, int count)
 { 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(NATIVE_FDOS_PLANAR)
 	int		i;
 	byte	*src, *dest;
 	outp (SC_INDEX, SC_MAPMASK);
@@ -520,7 +684,11 @@ void R_VideoErase (unsigned ofs, int count)
 	dest = destscreen+(ofs>>2);
 	for (i = (count>>2)-1; i >= 0; i--)
 	{
+#ifdef NATIVE_FDOS_PLANAR
+        R_GuestWrite8(dest + i, R_GuestRead8(src + i));
+#else
 		dest[i] = src[i];
+#endif
 	}
 	outp (GC_INDEX, GC_MODE);
 	outp (GC_INDEX+1, inp (GC_INDEX+1)&~1);
@@ -575,7 +743,7 @@ void R_DrawViewBorder (void)
 		ofs += SCREENWIDTH;
 	}
 
-#ifndef __WATCOMC__
+#if !defined(__WATCOMC__) && !defined(NATIVE_FDOS_PLANAR)
 	V_MarkRect (0,0,SCREENWIDTH, SCREENHEIGHT-SBARHEIGHT);
 #endif
 }

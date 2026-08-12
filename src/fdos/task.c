@@ -401,6 +401,37 @@ static int arm_elf_read_symbol(COUNT fd, const arm_elf_load_meta *meta,
                            sym, sizeof(*sym));
 }
 
+/* Bounded .strtab lookup used only by diagnostics. */
+static int arm_elf_symbol_name(COUNT fd, const arm_elf_load_meta *meta,
+                               const arm_elf32_sym *sym,
+                               BYTE *buf, UWORD buf_size)
+{
+  ULONG remain;
+  UWORD read_len;
+  BYTE *nul;
+
+  if (!buf || buf_size < 2 || sym->name >= meta->strtab.size)
+    return FALSE;
+
+  remain = meta->strtab.size - sym->name;
+  read_len = remain < (ULONG)(buf_size - 1)
+             ? (UWORD)remain : (UWORD)(buf_size - 1);
+  if (read_len == 0)
+    return FALSE;
+  if (arm_elf_read_meta(fd, meta->strtab.offset + sym->name,
+                        buf, read_len) != SUCCESS)
+    return FALSE;
+
+  nul = memchr(buf, '\0', read_len);
+  if (nul) {
+    if (nul == buf)
+      return FALSE;
+  } else {
+    buf[read_len] = '\0';
+  }
+  return TRUE;
+}
+
 static int arm_elf_symbol_name_is(COUNT fd, const arm_elf_load_meta *meta,
                                   const arm_elf32_sym *sym, const char *name)
 {
@@ -432,8 +463,11 @@ static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
   if (rc != SUCCESS)
     return rc;
   if (sym.shndx == SHN_UNDEF) {
-    dos_printf("ARM ELF: undefined symbol index %lu (API binding not implemented yet)\r\n",
-               sym_index);
+    BYTE name[64];
+    if (arm_elf_symbol_name(fd, meta, &sym, name, sizeof(name)))
+      dos_printf("ARM ELF: undefined symbol: %s\r\n", name);
+    else
+      dos_printf("ARM ELF: undefined symbol #%lu\r\n", sym_index);
     return DE_INVLDFMT;
   }
   if (sym.shndx == SHN_ABS) {
@@ -441,8 +475,13 @@ static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
     return SUCCESS;
   }
   if (sym.shndx >= meta->eh.shnum) {
-    dos_printf("ARM ELF: unsupported special section index %u for symbol %lu\r\n",
-               (unsigned)sym.shndx, sym_index);
+    BYTE name[64];
+    if (arm_elf_symbol_name(fd, meta, &sym, name, sizeof(name)))
+      dos_printf("ARM ELF: unsupported section index %u for symbol %s\r\n",
+                 (unsigned)sym.shndx, name);
+    else
+      dos_printf("ARM ELF: unsupported section index %u for symbol #%lu\r\n",
+                 (unsigned)sym.shndx, sym_index);
     return DE_INVLDFMT;
   }
 
@@ -533,11 +572,23 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
           arm_elf_resolve_thm_alu_abs_g0_nc((UWORD *)place, sym_addr);
           break;
         default:
-          dos_printf("ARM ELF: unsupported relocation type %u "
-                     "(section %u, offset %lu, symbol %lu)\r\n",
-                     (unsigned)type, (unsigned)sec_num,
-                     rel.offset, sym_index);
+        {
+          arm_elf32_sym diag_sym;
+          BYTE name[64];
+
+          if (arm_elf_read_symbol(fd, meta, sym_index, &diag_sym) == SUCCESS &&
+              arm_elf_symbol_name(fd, meta, &diag_sym, name, sizeof(name)))
+            dos_printf("ARM ELF: unsupported relocation type %u "
+                       "(section %u, offset %lu, symbol %s)\r\n",
+                       (unsigned)type, (unsigned)sec_num,
+                       rel.offset, name);
+          else
+            dos_printf("ARM ELF: unsupported relocation type %u "
+                       "(section %u, offset %lu, symbol #%lu)\r\n",
+                       (unsigned)type, (unsigned)sec_num,
+                       rel.offset, sym_index);
           return DE_INVLDFMT;
+        }
       }
     }
   }

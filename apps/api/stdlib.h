@@ -1,6 +1,8 @@
 #ifndef __NATIVE_DOS_STDLIB_H__
 #define __NATIVE_DOS_STDLIB_H__
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -10,34 +12,22 @@ extern "C" {
  * Add declarations/implementations here only when the native runtime
  * actually provides them. Do not expose the toolchain libc by accident.
  */
+/* Native implementations are provided by the FDOS runtime layer. */
+void *malloc(size_t size);
+void *calloc(size_t count, size_t size);
+void *realloc(void *ptr, size_t size);
+void free(void *ptr);
+
+#ifndef alloca
+#define alloca(size) __builtin_alloca(size)
+#endif
+
 static inline int abs(int value)
 {
     return value < 0 ? -value : value;
 }
 
-static inline int atoi(const char *s)
-{
-    int sign = 1;
-    int value = 0;
-
-    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == '\f' || *s == '\v')
-        ++s;
-
-    if (*s == '-' || *s == '+')
-    {
-        if (*s == '-')
-            sign = -1;
-        ++s;
-    }
-
-    while (*s >= '0' && *s <= '9')
-    {
-        value = value * 10 + (*s - '0');
-        ++s;
-    }
-
-    return sign * value;
-}
+int atoi(const char *s);
 
 #ifdef __cplusplus
 }

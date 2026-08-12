@@ -21,6 +21,8 @@
 #define __DOOMDEF__
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
 #ifdef __WATCOMC__
 #include <malloc.h>
 #define	strcasecmp strcmpi

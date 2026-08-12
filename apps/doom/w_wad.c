@@ -26,10 +26,11 @@
 
 #else
 
-#include <malloc.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <io.h>
 #include <fcntl.h>
-#include <sys/stat.h>
 #endif
 
 #include "DoomDef.h"
@@ -45,18 +46,20 @@ extern int _wp10, _wp11, _wp12, _wp13;
 typedef struct
 {
 	char		identification[4];		// should be IWAD
-	int			numlumps;
-	int			infotableofs;
+	int32_t		numlumps;
+	int32_t		infotableofs;
 } wadinfo_t;
 
 
 typedef struct
 {
-	int			filepos;
-	int			size;
+	int32_t		filepos;
+	int32_t		size;
 	char		name[8];
 } filelump_t;
 
+_Static_assert(sizeof(wadinfo_t) == 12, "WAD header layout");
+_Static_assert(sizeof(filelump_t) == 16, "WAD directory entry layout");
 
 //=============
 // GLOBALS
