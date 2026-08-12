@@ -1,11 +1,14 @@
 #include <pico.h>
+#include <stdio.h>
 #include <pc.h>
 #include <bios/bios.h>
 #include "mem.h"
+#include "board_config.h"
 
 #define __in_systable(group) __attribute__((section(".dos_api" group)))
 
 extern PC *pc;
+extern void arm_elf_process_exit(int status);
 
 PC* __not_in_flash_func(get_PC)() {
     return pc;
@@ -35,6 +38,11 @@ static void __not_in_flash_func(dos_phys_write32)(uint32_t addr, uint32_t val) {
     pstore32(addr, val);
 }
 
+
+static uint32_t __not_in_flash_func(psram_size)(void) {
+    return PSRAM_SIZE_BYTES;
+}
+
 // To be placed on 0x10100000
 unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)get_PC,
@@ -46,5 +54,8 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)dos_phys_write8,
     (unsigned long)dos_phys_write16,
     (unsigned long)dos_phys_write32,
+    (unsigned long)psram_size,
+    (unsigned long)vsnprintf,
+    (unsigned long)arm_elf_process_exit,
     0
 };

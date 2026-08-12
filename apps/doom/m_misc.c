@@ -24,6 +24,7 @@
 #include <sys/types.h>
 #include <direct.h>
 #include <fcntl.h>
+#include <io.h>
 #include <stdlib.h>
 #endif
 

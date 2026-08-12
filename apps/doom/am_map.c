@@ -512,7 +512,7 @@ void AM_doFollowPlayer(void)
 
 void AM_updateLightLev(void)
 {
-  static nexttic = 0;
+  static int nexttic = 0;
 //static int litelevels[] = { 0, 3, 5, 6, 6, 7, 7, 7 };
   static int litelevels[] = { 0, 4, 7, 10, 12, 14, 15, 15 };
   static int litelevelscnt = 0;
@@ -557,7 +557,7 @@ void AM_clearFB(int color)
 boolean AM_clipMline(mline_t *ml, fline_t *fl)
 {
   enum { LEFT=1, RIGHT=2, BOTTOM=4, TOP=8 };
-  register outcode1 = 0, outcode2 = 0, outside;
+  register int outcode1 = 0, outcode2 = 0, outside;
   fpoint_t tmp;
   int dx, dy;
 
@@ -646,15 +646,12 @@ void AM_drawFline(fline_t *fl, int color)
 {
 
   register int x, y, dx, dy, sx, sy, ax, ay, d;
-  static fuck = 0;
-
   	// For debugging only
   if (   fl->a.x < 0 || fl->a.x >= f_w
       || fl->a.y < 0 || fl->a.y >= f_h
       || fl->b.x < 0 || fl->b.x >= f_w
       || fl->b.y < 0 || fl->b.y >= f_h)
   {
-    fprintf(stderr, "fuck %d \r", fuck++);
     return;
   }
   

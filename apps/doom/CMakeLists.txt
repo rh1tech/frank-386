@@ -76,6 +76,22 @@ add_executable(${PROJECT_NAME}
     r_things.c
     r_draw.c
     v_video.c
+    f_finale.c
+    hu_stuff.c
+    wi_stuff.c
+    st_stuff.c
+    am_map.c
+    g_game.c
+    s_sound.c
+    m_menu.c
+    m_misc.c
+    d_main.c
+    d_net.c
+    i_ibm.c
+    i_sound.c
+    dmx.c
+    mus2mid.c
+    i_cyber.c
 #    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
 )

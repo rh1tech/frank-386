@@ -353,12 +353,14 @@ void S_StartSoundAtVolume(void *origin_p, int sfx_id, int volume)
   // cache data if necessary
   if (!sfx->data)
   {
-#ifndef __WATCOMC__
+#if !defined(__WATCOMC__) && !defined(ELF_MODE)
     fprintf( stderr,
 	     "S_StartSoundAtVolume: 16bit and not pre-cached - wtf?\n");
 #else
     sfx->data = (void *) W_CacheLumpNum(sfx->lumpnum, PU_MUSIC);
+#ifdef __WATCOMC__
     _dpmi_lockregion(sfx->data, lumpinfo[sfx->lumpnum].size);
+#endif
     // fprintf( stderr,
     //	     "S_StartSoundAtVolume: loading %d (lump %d) : 0x%x\n",
     //       sfx_id, sfx->lumpnum, (int)sfx->data );
@@ -446,7 +448,7 @@ void S_UpdateSounds(void* listener_p)
   mobj_t *listener = (mobj_t*)listener_p;
 #endif
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(ELF_MODE)
   if (gametic > nextcleanup)
   {
     for (i=1 ; i<NUMSFX ; i++)
@@ -456,7 +458,9 @@ void S_UpdateSounds(void* listener_p)
         if (--S_sfx[i].usefulness == -1)
         {
           Z_ChangeTag(S_sfx[i].data, PU_CACHE);
+#ifdef __WATCOMC__
 	  _dpmi_unlockregion(S_sfx[i].data, lumpinfo[S_sfx[i].lumpnum].size);
+#endif
           S_sfx[i].data = 0;
         }
       }

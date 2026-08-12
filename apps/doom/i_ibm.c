@@ -21,9 +21,18 @@
 #include <conio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#ifdef __WATCOMC__
 #include <graph.h>
+#endif
 #include "DoomDef.h"
+#ifdef ELF_MODE
+#include "psram.h"
+#include "dos_mem.h"
+#endif
 #include "R_local.h"
+#ifdef ELF_MODE
+#include <dos_phys.h>
+#endif
 
 #if (APPVER_DOOMREV < AV_DR_DM12)
 extern int _wp1, _wp2, _wp3, _wp4, _wp5, _wp6;
@@ -53,6 +62,11 @@ extern  dpmiregs_t      dpmiregs;
 
 void I_ReadMouse (void);
 void I_InitDiskFlash (void);
+void DPMIInt (int i);
+void I_JoystickEvents (void);
+void I_StartupSound (void);
+void I_ShutdownSound (void);
+void I_ShutdownTimer (void);
 
 extern  int     usemouse, usejoystick;
 
@@ -175,6 +189,7 @@ boolean novideo; // if true, stay in text mode for debugging
 
 #define KBDQUESIZE 32
 byte keyboardque[KBDQUESIZE];
+int lastpress;
 int kbdtail, kbdhead;
 
 #define KEY_LSHIFT      0xfe
@@ -603,6 +618,9 @@ void   I_StartTic (void)
 {
 	int             k;
 	event_t ev;
+#ifdef ELF_MODE
+	I_PollKeyboard();
+#endif
 
 
 	I_ReadMouse ();
@@ -659,6 +677,17 @@ void   I_StartTic (void)
 #define SC_DOWNARROW    0x50
 #define SC_LEFTARROW            0x4b
 #define SC_RIGHTARROW   0x4d
+
+#ifdef ELF_MODE
+static void I_PollKeyboard(void)
+{
+    while (inp(0x64) & 1)
+    {
+        keyboardque[kbdhead & (KBDQUESIZE - 1)] = lastpress = inp(0x60);
+        kbdhead++;
+    }
+}
+#endif
 
 void   I_StartTic (void)
 {
@@ -845,9 +874,10 @@ extern int __wp1, __wp2, __wp3;
 ============================================================================
 */
 
+#ifdef __WATCOMC__
 void (__interrupt __far *oldkeyboardisr) () = NULL;
+#endif
 
-int lastpress;
 
 /*
 ================
@@ -857,19 +887,14 @@ int lastpress;
 ================
 */
 
+#ifdef __WATCOMC__
 void __interrupt I_KeyboardISR (void)
 {
-// Get the scan code
-
-	keyboardque[kbdhead&(KBDQUESIZE-1)] = lastpress = _inbyte(0x60);
-	kbdhead++;
-
-// acknowledge the interrupt
-
-	_outbyte(0x20,0x20);
+    keyboardque[kbdhead&(KBDQUESIZE-1)] = lastpress = _inbyte(0x60);
+    kbdhead++;
+    _outbyte(0x20,0x20);
 }
-
-
+#endif
 
 /*
 ===============
@@ -881,20 +906,21 @@ void __interrupt I_KeyboardISR (void)
 
 void I_StartupKeyboard (void)
 {
-#ifndef NOKBD
-	oldkeyboardisr = _dos_getvect(KEYBOARDINT);
-	_dos_setvect (0x8000 | KEYBOARDINT, I_KeyboardISR);
+#if defined(__WATCOMC__) && !defined(NOKBD)
+    oldkeyboardisr = _dos_getvect(KEYBOARDINT);
+    _dos_setvect (0x8000 | KEYBOARDINT, I_KeyboardISR);
 #endif
-
-//I_ReadKeys ();
 }
-
 
 void I_ShutdownKeyboard (void)
 {
-	if (oldkeyboardisr)
-		_dos_setvect (KEYBOARDINT, oldkeyboardisr);
-	*(short *)0x41c = *(short *)0x41a;      // clear bios key buffer
+#ifdef __WATCOMC__
+    if (oldkeyboardisr)
+        _dos_setvect (KEYBOARDINT, oldkeyboardisr);
+    *(short *)0x41c = *(short *)0x41a;
+#elif defined(ELF_MODE)
+    dos_phys_write16(0x41c, dos_phys_read16(0x41a));
+#endif
 }
 
 
@@ -929,8 +955,6 @@ void I_StartupCyberMan(void);
 
 void I_StartupMouse (void)
 {
-   int  (far *function)();
-
    //
    // General mouse detection
    //
@@ -1188,6 +1212,7 @@ unsigned                realstackseg;
 void I_DivException (void);
 int I_SetDivException (void);
 
+#ifdef __WATCOMC__
 void DPMIFarCall (void)
 {
 	segread (&segregs);
@@ -1198,10 +1223,11 @@ void DPMIFarCall (void)
 	segregs.es = segregs.ds;
 	int386x( DPMI_INT, &regs, &regs, &segregs );
 }
-
+#endif
 
 void DPMIInt (int i)
 {
+#ifdef __WATCOMC__
 	dpmiregs.ss = realstackseg;
 	dpmiregs.sp = REALSTACKSIZE-4;
 
@@ -1212,6 +1238,23 @@ void DPMIInt (int i)
 	regs.x.edi = (unsigned)&dpmiregs;
 	segregs.es = segregs.ds;
 	int386x( DPMI_INT, &regs, &regs, &segregs );
+#else
+	union REGS native_regs;
+	memset(&native_regs, 0, sizeof(native_regs));
+	native_regs.x.eax = dpmiregs.eax;
+	native_regs.x.ebx = dpmiregs.ebx;
+	native_regs.x.ecx = dpmiregs.ecx;
+	native_regs.x.edx = dpmiregs.edx;
+	native_regs.x.esi = dpmiregs.esi;
+	native_regs.x.edi = dpmiregs.edi;
+	int386(i, &native_regs, &native_regs);
+	dpmiregs.eax = native_regs.x.eax;
+	dpmiregs.ebx = native_regs.x.ebx;
+	dpmiregs.ecx = native_regs.x.ecx;
+	dpmiregs.edx = native_regs.x.edx;
+	dpmiregs.esi = native_regs.x.esi;
+	dpmiregs.edi = native_regs.x.edi;
+#endif
 }
 
 
@@ -1225,6 +1268,7 @@ void DPMIInt (int i)
 
 void I_StartupDPMI (void)
 {
+#ifdef __WATCOMC__
 	extern char __begtext;
 	extern char ___argc;
 	int     n,d;
@@ -1265,8 +1309,10 @@ void I_StartupDPMI (void)
 
 exit (1);
 #endif
+}#else
+	realstackseg = 0;
+#endif
 }
-
 
 
 /*
@@ -1277,6 +1323,7 @@ exit (1);
 ============================================================================
 */
 
+#ifdef __WATCOMC__
 void (__interrupt __far *oldtimerisr) ();
 
 
@@ -1342,6 +1389,8 @@ void IO_ShutdownTimer (void)
 		_dos_setvect (TIMERINT, oldtimerisr);
 	}
 }
+
+#endif
 
 //===========================================================================
 
@@ -1501,6 +1550,20 @@ int I_GetHeapSize (void)
 #else
 byte *I_ZoneBase (int *size)
 {
+#ifdef ELF_MODE
+    enum { NATIVE_ZONE_OFFSET = 1024 * 1024 + 64 * 1024 };
+    uint32_t total_psram = psram_size();
+
+    if (total_psram <= NATIVE_ZONE_OFFSET)
+        I_Error("Insufficient PSRAM!");
+
+    *size = (int)(total_psram - NATIVE_ZONE_OFFSET);
+    if (*size < 0x180000)
+        I_Error("Insufficient PSRAM for DOOM zone!");
+
+    printf("PSRAM memory: 0x%x allocated for zone\n", *size);
+    return (byte *)(uintptr_t)(PSRAM_BASE_ADDR + NATIVE_ZONE_OFFSET);
+#else
 	int             meminfo[32];
 	int             heap;
 	int             i;
@@ -1573,6 +1636,7 @@ byte *I_ZoneBase (int *size)
 
 	*size = heap;
 	return ptr;
+#endif
 }
 #endif
 
@@ -1698,6 +1762,14 @@ byte *I_AllocLow (int length)
 {
 	byte    *mem;
 
+#ifdef ELF_MODE
+	mem = (byte *)dos_alloc_low((size_t)length);
+	if (!mem)
+		I_Error ("I_AllocLow: DOS alloc of %i failed", length);
+
+	memset (mem,0,length);
+	return mem;
+#else
 	// DPMI call 100h allocates DOS memory
 	segread(&segregs);
 	regs.w.ax = 0x0100;          // DPMI allocate DOS memory
@@ -1714,6 +1786,7 @@ byte *I_AllocLow (int length)
 
 	memset (mem,0,length);
 	return mem;
+#endif
 }
 
 

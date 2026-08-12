@@ -84,7 +84,7 @@ boolean ST_Responder (event_t *ev)
 	
     case AM_MSGEXITED:
 #if (APPVER_DOOMREV < AV_DR_DM12)
-	fprintf(stderr, "AM exited\n");
+    fprintf(stderr, "AM exited\n");
 #endif
 	st_gamestate = FirstPersonState;
 	break;

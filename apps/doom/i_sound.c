@@ -22,6 +22,9 @@
 #include "dmx.h"
 #include "sounds.h"
 #include "i_sound.h"
+#ifdef ELF_MODE
+#include "sound_hw.h"
+#endif
 
 #if (APPVER_DOOMREV < AV_DR_DM12)
 extern int _wp1, _wp2, _wp3, _wp4;
@@ -433,7 +436,7 @@ void I_StopSong(int handle)
   }
 }
 
-void I_PlaySong(int handle, boolean looping)
+int I_PlaySong(int handle, int looping)
 {
   int rc;
   rc = MUS_ChainSong(handle, looping ? handle : -1);
@@ -445,6 +448,7 @@ void I_PlaySong(int handle, boolean looping)
   if (rc < 0) printf("MUS_PlaySong() returned %d\n", rc);
 #endif
 
+  return rc;
 }
 
 /*
@@ -532,13 +536,49 @@ void I_UpdateSoundParams(int handle, int vol, int sep, int pitch)
 // Why PC's Suck, Reason #8712
 //
 
+#ifdef ELF_MODE
+/*
+ * The native build can inspect the public PC structure directly through
+ * sound_hw_mask().  Only devices which both DOOM understands and murm386 has
+ * actually enabled are accepted here.  Unsupported or disabled selections
+ * from default.cfg become snd_none; we do not silently substitute another
+ * sound card.
+ */
+static boolean I_NativeMusicDeviceEnabled(int device, uint32_t hw)
+{
+  switch (device)
+  {
+    case snd_none:  return true;
+    case snd_Adlib: return (hw & SOUND_HW_ADLIB) != 0;
+    case snd_MPU:   return (hw & SOUND_HW_MPU401) != 0;
+    default:        return false;
+  }
+}
+
+static boolean I_NativeSfxDeviceEnabled(int device, uint32_t hw)
+{
+  switch (device)
+  {
+    case snd_none: return true;
+    case snd_PC:   return (hw & SOUND_HW_PC_SPEAKER) != 0;
+    case snd_SB:   return (hw & SOUND_HW_SB16) != 0;
+    default:       return false;
+  }
+}
+#endif
+
 void I_sndArbitrateCards(void)
 {
   // boolean gus, adlib, pc, sb, midi, ensoniq, codec;
+#ifdef ELF_MODE
+  boolean adlib, pc, sb, midi;
+  uint32_t native_hw;
+#else
 #if (APPVER_DOOMREV < AV_DR_DM18)
   boolean gus, adlib, pc, sb, midi;
 #else
   boolean codec, ensoniq, gus, adlib, pc, sb, midi;
+#endif
 #endif
   int i, rc, mputype, p, opltype, wait, dmxlump;
 
@@ -571,15 +611,30 @@ void I_sndArbitrateCards(void)
 	snd_MusicDevice = snd_Adlib;
 #endif
 
+#ifdef ELF_MODE
+  /*
+   * Clamp config-file values before dmxCodes[] is indexed.  This also rejects
+   * legacy cards (GUS/PAS/AWE/ENS/CODEC) which the native backend does not
+   * build at all.
+   */
+  native_hw = sound_hw_mask();
+  if (!I_NativeMusicDeviceEnabled(snd_MusicDevice, native_hw))
+    snd_MusicDevice = snd_none;
+  if (!I_NativeSfxDeviceEnabled(snd_SfxDevice, native_hw))
+    snd_SfxDevice = snd_none;
+#endif
+
   // figure out what i've got to initialize
   //
+#ifndef ELF_MODE
   gus = snd_MusicDevice == snd_GUS || snd_SfxDevice == snd_GUS;
+#endif
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
   sb = snd_SfxDevice == snd_SB;
 #else
   sb = snd_SfxDevice == snd_SB || snd_MusicDevice == snd_SB;
 #endif
-#if (APPVER_DOOMREV >= AV_DR_DM18)
+#if (APPVER_DOOMREV >= AV_DR_DM18) && !defined(ELF_MODE)
   ensoniq = snd_SfxDevice == snd_ENS ;
   codec = snd_SfxDevice == snd_CODEC ;
 #endif
@@ -587,6 +642,7 @@ void I_sndArbitrateCards(void)
   pc = snd_SfxDevice == snd_PC;
   midi = snd_MusicDevice == snd_MPU;
 
+#ifndef ELF_MODE
 #if (APPVER_DOOMREV >= AV_DR_DM18)
   // initialize whatever i've got
   //
@@ -637,6 +693,7 @@ void I_sndArbitrateCards(void)
 	}
 
   }
+#endif /* !ELF_MODE */
   if (sb)
   {
 	if(devparm)

@@ -2,7 +2,7 @@
 #define __NATIVE_DOS_API__
 
 #ifndef DOS_API_VERSION
-#define DOS_API_VERSION (1)
+#define DOS_API_VERSION (4)
 #endif
 
 #ifndef DOS_OS_API_SYS_TABLE_BASE

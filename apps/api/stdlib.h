@@ -17,6 +17,7 @@ void *malloc(size_t size);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
 void free(void *ptr);
+void exit(int status) __attribute__((noreturn));
 
 #ifndef alloca
 #define alloca(size) __builtin_alloca(size)

@@ -1,5 +1,7 @@
 //
-// Copyright (C) 1993-1996 Id Software, Inc.
+// Copyright(C) 1993-1996 Id Software, Inc.
+// Copyright(C) 2005-2014 Simon Howard
+// Copyright(C) 2006 Ben Ryves 2006
 //
 // This program is free software; you can redistribute it and/or
 // modify it under the terms of the GNU General Public License
@@ -11,16 +13,14 @@
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 // GNU General Public License for more details.
 //
-// You should have received a copy of the GNU General Public License
-// along with this program. If not, see <https://www.gnu.org/licenses/>.
 //
+// mus2mid.h - Ben Ryves 2006 - http://benryves.com - benryves@benryves.com
+// Use to convert a MUS file into a single track, type 0 MIDI file.
 
-#include "DoomDef.h"
+#ifndef MUS2MID_H
+#define MUS2MID_H
 
-int main(int argc, char **argv)
-{
-	myargc = argc;
-	myargv = argv;
-	D_DoomMain();
-	return 0;
-}
+int mus2mid(FILE *musinput, FILE *midioutput, int rate, int adlibhack);
+
+#endif /* #ifndef MUS2MID_H */
+

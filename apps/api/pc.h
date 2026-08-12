@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 
 #include "cpu.h"
@@ -26,6 +27,8 @@ typedef struct PCIDevice PCIDevice;
 typedef struct I440FXState I440FXState;
 typedef struct PCIBus PCIBus;
 
+/* Public PC ABI: field layout is fixed to 4-byte packing on both sides. */
+#pragma pack(push, 4)
 typedef struct PC {
 	CPU *cpu;
 	PicState2 *pic;
@@ -97,5 +100,24 @@ typedef struct PC {
 	uint8_t lpt_data[2];   /* LPT1(0x378)/LPT2(0x278) */
 	uint8_t lpt_ctrl[2];   /* control 0x37A/0x27A  	*/
 } PC;
+
+/* ARM32 ABI guards for the public PC layout. */
+#if UINTPTR_MAX == 0xffffffffu
+_Static_assert(offsetof(PC, boot_start_time) == 32, "PC.boot_start_time ABI offset");
+_Static_assert(offsetof(PC, redraw) == 40, "PC.redraw ABI offset");
+_Static_assert(offsetof(PC, emulink) == 80, "PC.emulink ABI offset");
+_Static_assert(offsetof(PC, sb16) == 112, "PC.sb16 ABI offset");
+_Static_assert(offsetof(PC, covox_sample) == 120, "PC.covox_sample ABI offset");
+_Static_assert(offsetof(PC, adlib_enabled) == 124, "PC.adlib_enabled ABI offset");
+_Static_assert(offsetof(PC, ide) == 160, "PC.ide ABI offset");
+_Static_assert(offsetof(PC, bios) == 188, "PC.bios ABI offset");
+_Static_assert(offsetof(PC, port92) == 196, "PC.port92 ABI offset");
+_Static_assert(offsetof(PC, shutdown_state) == 200, "PC.shutdown_state ABI offset");
+_Static_assert(offsetof(PC, lpt_data) == 224, "PC.lpt_data ABI offset");
+_Static_assert(offsetof(PC, lpt_ctrl) == 226, "PC.lpt_ctrl ABI offset");
+_Static_assert(sizeof(PC) == 228, "PC ABI size");
+#endif
+
+#pragma pack(pop)
 
 #endif /* __PC_H__ */

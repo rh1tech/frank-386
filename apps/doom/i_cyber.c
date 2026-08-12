@@ -19,6 +19,14 @@
 
 #include <dos.h>
 #include <stdlib.h>
+#ifdef ELF_MODE
+#include <string.h>
+#include <stdio.h>
+#include "dos_mem.h"
+
+/* I_AllocLow() returns paragraph-aligned conventional DOS memory. */
+unsigned char *I_AllocLow(int length);
+#endif
 
 // VERSIONS RESTORATION
 // This *must* be included (near) the beginning for every compilation unit
@@ -152,11 +160,36 @@ void I_StartupCyberMan(void)
    isCyberPresent = 0;
 
    cyberstat = (SWIFT_3DStatus *)I_AllocLow (DOSMEMSIZE);
+#ifdef ELF_MODE
+   /* cyberstat is a native-mapped pointer; recover its DOS paragraph. */
+   segment = dos_ptr_segment(cyberstat);
+   if (!segment)
+   {
+      printf("CyberMan: invalid DOS buffer address.\n");
+      return;
+   }
+#else
    segment = (int)cyberstat>>4;
+#endif
 
    pbuf = (StaticDeviceData *)cyberstat;
    memset(pbuf, 0, sizeof (StaticDeviceData));
 
+#ifdef ELF_MODE
+   /*
+    * Native FDOS does not need DPMI INT 31h/0300h to simulate INT 33h.
+    * Issue the original SWIFT command directly, with ES:DX addressing the
+    * conventional-DOS buffer allocated above.
+    */
+   memset(&regs, 0, sizeof(regs));
+   segread(&sregs);
+   sregs.es = segment;
+   regs.w.ax = 0x53C1;          // SWIFT: Get Static Device Data
+   regs.w.dx = 0;
+   int386x(MOUSE_INT, &regs, &regs, &sregs);
+
+   if ((short)regs.w.ax != 1)
+#else
    // Use DPMI call 300h to issue mouse interrupt
    memset(&RMI, 0, sizeof(RMI));
    RMI.EAX = 0x53C1;            // SWIFT: Get Static Device Data
@@ -171,10 +204,15 @@ void I_StartupCyberMan(void)
    int386x( DPMI_INT, &regs, &regs, &sregs );
 
    if ((short)RMI.EAX != 1)
+#endif
    {
 	  // SWIFT functions not present
 	  printf("CyberMan: Wrong mouse driver - no SWIFT support (AX=%04x).\n",
+#ifdef ELF_MODE
+			 (unsigned)(short)regs.w.ax);
+#else
 			 (unsigned)(short)RMI.EAX);
+#endif
    }
    else
    if (pbuf->deviceType != DEVTYPE_CYBERMAN)
@@ -218,6 +256,15 @@ void I_ReadCyberCmd (ticcmd_t *cmd)
 {
 	int             delta;
 
+#ifdef ELF_MODE
+	/* Direct native equivalent of the original DPMI-simulated INT 33h. */
+	memset(&regs, 0, sizeof(regs));
+	segread(&sregs);
+	sregs.es = segment;
+	regs.w.ax = 0x5301;          // SWIFT: Get Position and Buttons
+	regs.w.dx = 0;
+	int386x(MOUSE_INT, &regs, &regs, &sregs);
+#else
 	// Use DPMI call 300h to issue mouse interrupt
 	memset(&RMI, 0, sizeof(RMI));
 	RMI.EAX = 0x5301;            // SWIFT: Get Position and Buttons
@@ -230,6 +277,7 @@ void I_ReadCyberCmd (ticcmd_t *cmd)
 	regs.x.edi = FP_OFF(&RMI);
 	sregs.es = FP_SEG(&RMI);
 	int386x( DPMI_INT, &regs, &regs, &sregs );
+#endif
 
 #if (APPVER_DOOMREV < AV_DR_DM12)
 	if (cyberstat->y < -7900)
@@ -312,8 +360,15 @@ void I_Tactile (int on, int off, int total)
 	if (total > 255)
 		total = 255;
 
+#ifdef ELF_MODE
+	memset(&regs, 0, sizeof(regs));
+	regs.w.ax = 0x5330;          // SWIFT: tactile feedback
+	regs.w.bx = (uint16_t)(on*256+off);
+	regs.w.cx = (uint16_t)total;
+	int386(MOUSE_INT, &regs, &regs);
+#else
 	memset(&RMI, 0, sizeof(RMI));
-	RMI.EAX = 0x5330;            // SWIFT: Get Position and Buttons
+	RMI.EAX = 0x5330;            // SWIFT: tactile feedback
 	RMI.EBX = on*256+off;
 	RMI.ECX = total;
 	memset(&sregs, 0, sizeof (sregs));
@@ -323,5 +378,6 @@ void I_Tactile (int on, int off, int total)
 	regs.x.edi = FP_OFF(&RMI);
 	sregs.es = FP_SEG(&RMI);
 	int386x( DPMI_INT, &regs, &regs, &sregs );
+#endif
 }
 #endif

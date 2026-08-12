@@ -2,6 +2,36 @@
 #include "string.h"
 #include "stdlib.h"
 #include "dos-api.h"
+#include "dos.h"
+#include "fcntl.h"
+#include "io.h"
+#include "direct.h"
+#include "dos_mem.h"
+#include "dos_process.h"
+#include "sys/stat.h"
+#include "stdio.h"
+#include "sound_hw.h"
+#include <stdarg.h>
+
+
+uint32_t sound_hw_mask(void)
+{
+    PC *pc = get_PC();
+    uint32_t mask = 0;
+
+    if (!pc)
+        return 0;
+
+    if (pc->pcspk_enabled)  mask |= SOUND_HW_PC_SPEAKER;
+    if (pc->adlib_enabled)  mask |= SOUND_HW_ADLIB;
+    if (pc->sb16_enabled)   mask |= SOUND_HW_SB16;
+    if (pc->tandy_enabled)  mask |= SOUND_HW_TANDY;
+    if (pc->covox_enabled)  mask |= SOUND_HW_COVOX;
+    if (pc->mpu401_enabled) mask |= SOUND_HW_MPU401;
+    if (pc->dss_enabled)    mask |= SOUND_HW_DSS;
+
+    return mask;
+}
 
 uint8_t inp(uint16_t port)
 {
@@ -62,6 +92,37 @@ char *strncpy(char *dst, const char *src, size_t n)
     return ret;
 }
 
+char *strcpy(char *dst, const char *src)
+{
+    char *ret = dst;
+    while ((*dst++ = *src++) != '\0')
+        ;
+    return ret;
+}
+
+char *strcat(char *dst, const char *src)
+{
+    char *ret = dst;
+    while (*dst)
+        ++dst;
+    while ((*dst++ = *src++) != '\0')
+        ;
+    return ret;
+}
+
+int strcmp(const char *a, const char *b)
+{
+    for (;;)
+    {
+        unsigned char ca = (unsigned char)*a++;
+        unsigned char cb = (unsigned char)*b++;
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        if (!ca)
+            return 0;
+    }
+}
+
 int strcmpi(const char *a, const char *b)
 {
     for (;;)
@@ -104,6 +165,21 @@ void *memset(void *dst, int value, size_t n)
     return dst;
 }
 
+int memcmp(const void *a, const void *b, size_t n)
+{
+    const unsigned char *pa = (const unsigned char *)a;
+    const unsigned char *pb = (const unsigned char *)b;
+
+    while (n--)
+    {
+        int d = (int)*pa++ - (int)*pb++;
+        if (d)
+            return d;
+    }
+
+    return 0;
+}
+
 int strncasecmp(const char *a, const char *b, size_t n)
 {
     while (n--)
@@ -142,4 +218,1041 @@ int atoi(const char *s)
     }
 
     return sign * value;
+}
+
+/* Segment-register indices used by CPU_ext_accessors. */
+enum
+{
+    NATIVE_SEG_ES = 0,
+    NATIVE_SEG_CS = 1,
+    NATIVE_SEG_SS = 2,
+    NATIVE_SEG_DS = 3,
+    NATIVE_SEG_FS = 4,
+    NATIVE_SEG_GS = 5
+};
+
+int int386(int intnum, const union REGS *inregs, union REGS *outregs)
+{
+    PC *pc = get_PC();
+    CPU *cpu = pc->cpu;
+
+    gprx_t saved_gprx[8];
+    x86_flags_t saved_flags = cpu->flags;
+
+    for (int i = 0; i < 8; ++i)
+        saved_gprx[i] = cpu->gprx[i];
+
+    cpu->gprx[regax].r32 = inregs->x.eax;
+    cpu->gprx[regbx].r32 = inregs->x.ebx;
+    cpu->gprx[regcx].r32 = inregs->x.ecx;
+    cpu->gprx[regdx].r32 = inregs->x.edx;
+    cpu->gprx[regsi].r32 = inregs->x.esi;
+    cpu->gprx[regdi].r32 = inregs->x.edi;
+
+    bios_intcall(cpu, (uint8_t)intnum, "native int386");
+
+    outregs->x.eax = cpu->gprx[regax].r32;
+    outregs->x.ebx = cpu->gprx[regbx].r32;
+    outregs->x.ecx = cpu->gprx[regcx].r32;
+    outregs->x.edx = cpu->gprx[regdx].r32;
+    outregs->x.esi = cpu->gprx[regsi].r32;
+    outregs->x.edi = cpu->gprx[regdi].r32;
+    outregs->x.cflag = cpu->flags.bits.CF ? 1u : 0u;
+
+    for (int i = 0; i < 8; ++i)
+        cpu->gprx[i] = saved_gprx[i];
+    cpu->flags = saved_flags;
+
+    return (int)outregs->x.eax;
+}
+
+void segread(struct SREGS *segregs)
+{
+    CPU *cpu = get_PC()->cpu;
+
+    segregs->es = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_ES);
+    segregs->cs = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_CS);
+    segregs->ss = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_SS);
+    segregs->ds = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_DS);
+    segregs->fs = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_FS);
+    segregs->gs = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_GS);
+}
+
+int int386x(int intnum, const union REGS *inregs, union REGS *outregs,
+            struct SREGS *segregs)
+{
+    CPU *cpu = get_PC()->cpu;
+    struct SREGS saved;
+    int rc;
+
+    /*
+     * int386() already preserves the native process GPR/FLAGS context.
+     * int386x() extends that contract to the six x86 segment registers.
+     */
+    segread(&saved);
+
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_ES, segregs->es);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_CS, segregs->cs);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_SS, segregs->ss);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_DS, segregs->ds);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_FS, segregs->fs);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_GS, segregs->gs);
+
+    rc = int386(intnum, inregs, outregs);
+
+    /* Return the segment state produced by the interrupt to the caller. */
+    segread(segregs);
+
+    /* Restore the x86 context that belongs to the native application. */
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_ES, saved.es);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_CS, saved.cs);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_SS, saved.ss);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_DS, saved.ds);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_FS, saved.fs);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_GS, saved.gs);
+
+    return rc;
+}
+
+uint16_t dos_ptr_segment(const void *ptr)
+{
+    uintptr_t address = (uintptr_t)ptr;
+    uint32_t linear;
+
+    if (address < (uintptr_t)DOS_GUEST_RAM_BASE)
+        return 0;
+
+    linear = (uint32_t)(address - (uintptr_t)DOS_GUEST_RAM_BASE);
+
+    /* A DOS segment identifies a paragraph and must fit into 16 bits. */
+    if ((linear & 15u) != 0 || linear > 0x000ffff0u)
+        return 0;
+
+    return (uint16_t)(linear >> 4);
+}
+
+void *dos_alloc_low(size_t size)
+{
+    union REGS regs = {0};
+    uint32_t paragraphs;
+
+    if (size == 0)
+        size = 1;
+
+    paragraphs = ((uint32_t)size + 15u) >> 4;
+    if (paragraphs == 0 || paragraphs > 0xffffu)
+        return NULL;
+
+    regs.h.ah = 0x48;
+    regs.w.bx = (uint16_t)paragraphs;
+    int386(0x21, &regs, &regs);
+    if (regs.x.cflag)
+        return NULL;
+
+    return dos_guest_far_ptr(regs.w.ax, 0);
+}
+
+#define NATIVE_DOS_ALLOC_MAGIC 0x4d414c4cu
+
+typedef struct
+{
+    uint32_t magic;
+    uint32_t size;
+    uint16_t segment;
+    uint16_t paragraphs;
+    uint32_t reserved;
+} native_dos_alloc_header_t;
+
+static int native_int21_with_es(uint16_t es, union REGS *regs)
+{
+    CPU *cpu = get_PC()->cpu;
+    uint16_t saved_es = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_ES);
+
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_ES, es);
+    int rc = int386(0x21, regs, regs);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_ES, saved_es);
+
+    return rc;
+}
+
+void *malloc(size_t size)
+{
+    union REGS regs = {0};
+    uint32_t total;
+    uint32_t paragraphs;
+    uint16_t segment;
+    native_dos_alloc_header_t *header;
+
+    if (size == 0)
+        size = 1;
+
+    if (size > UINT32_MAX - sizeof(*header))
+        return NULL;
+
+    total = (uint32_t)size + (uint32_t)sizeof(*header);
+    paragraphs = (total + 15u) >> 4;
+    if (paragraphs == 0 || paragraphs > 0xffffu)
+        return NULL;
+
+    regs.h.ah = 0x48;
+    regs.w.bx = (uint16_t)paragraphs;
+    int386(0x21, &regs, &regs);
+    if (regs.x.cflag)
+        return NULL;
+
+    segment = regs.w.ax;
+    header = (native_dos_alloc_header_t *)dos_guest_far_ptr(segment, 0);
+    header->magic = NATIVE_DOS_ALLOC_MAGIC;
+    header->size = (uint32_t)size;
+    header->segment = segment;
+    header->paragraphs = (uint16_t)paragraphs;
+    header->reserved = 0;
+
+    return (void *)(header + 1);
+}
+
+void free(void *ptr)
+{
+    native_dos_alloc_header_t *header;
+    union REGS regs = {0};
+
+    if (!ptr)
+        return;
+
+    header = ((native_dos_alloc_header_t *)ptr) - 1;
+    if (header->magic != NATIVE_DOS_ALLOC_MAGIC)
+        return;
+
+    regs.h.ah = 0x49;
+    native_int21_with_es(header->segment, &regs);
+
+    if (!regs.x.cflag)
+        header->magic = 0;
+}
+
+void *calloc(size_t count, size_t size)
+{
+    size_t total;
+    void *ptr;
+
+    if (count != 0 && size > (size_t)-1 / count)
+        return NULL;
+
+    total = count * size;
+    ptr = malloc(total);
+    if (ptr)
+        memset(ptr, 0, total);
+
+    return ptr;
+}
+
+void *realloc(void *ptr, size_t size)
+{
+    native_dos_alloc_header_t *header;
+    union REGS regs = {0};
+    uint32_t total;
+    uint32_t paragraphs;
+    size_t old_size;
+    void *new_ptr;
+
+    if (!ptr)
+        return malloc(size);
+
+    if (size == 0)
+    {
+        free(ptr);
+        return NULL;
+    }
+
+    header = ((native_dos_alloc_header_t *)ptr) - 1;
+    if (header->magic != NATIVE_DOS_ALLOC_MAGIC)
+        return NULL;
+
+    if (size > UINT32_MAX - sizeof(*header))
+        return NULL;
+
+    total = (uint32_t)size + (uint32_t)sizeof(*header);
+    paragraphs = (total + 15u) >> 4;
+    if (paragraphs == 0 || paragraphs > 0xffffu)
+        return NULL;
+
+    old_size = header->size;
+
+    regs.h.ah = 0x4a;
+    regs.w.bx = (uint16_t)paragraphs;
+    native_int21_with_es(header->segment, &regs);
+    if (!regs.x.cflag)
+    {
+        header->size = (uint32_t)size;
+        header->paragraphs = (uint16_t)paragraphs;
+        return ptr;
+    }
+
+    new_ptr = malloc(size);
+    if (!new_ptr)
+        return NULL;
+
+    memcpy(new_ptr, ptr, old_size < size ? old_size : size);
+    free(ptr);
+    return new_ptr;
+}
+
+
+enum
+{
+    NATIVE_IO_BUFFER_SIZE = 32768
+};
+
+static uint16_t native_io_segment;
+static unsigned char *native_io_buffer;
+
+static int native_int21_with_ds(uint16_t ds, union REGS *regs)
+{
+    CPU *cpu = get_PC()->cpu;
+    uint16_t saved_ds = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_DS);
+
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_DS, ds);
+    int rc = int386(0x21, regs, regs);
+    cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_DS, saved_ds);
+
+    return rc;
+}
+
+static int native_io_ensure_buffer(void)
+{
+    union REGS regs = {0};
+
+    if (native_io_buffer)
+        return 0;
+
+    regs.h.ah = 0x48;
+    regs.w.bx = NATIVE_IO_BUFFER_SIZE / 16;
+    int386(0x21, &regs, &regs);
+    if (regs.x.cflag)
+        return -1;
+
+    native_io_segment = regs.w.ax;
+    native_io_buffer =
+        (unsigned char *)dos_guest_far_ptr(native_io_segment, 0);
+    return 0;
+}
+
+static int native_io_copy_path(const char *path)
+{
+    size_t length;
+
+    if (native_io_ensure_buffer() != 0)
+        return -1;
+
+    length = strlen(path) + 1;
+    if (length > NATIVE_IO_BUFFER_SIZE)
+        return -1;
+
+    memcpy(native_io_buffer, path, length);
+    return 0;
+}
+
+int open(const char *path, int flags, ...)
+{
+    union REGS regs = {0};
+
+    if (native_io_copy_path(path) != 0)
+        return -1;
+
+    if ((flags & O_CREAT) && (flags & O_TRUNC))
+    {
+        regs.h.ah = 0x3c;
+        regs.w.cx = 0;
+        regs.w.dx = 0;
+        native_int21_with_ds(native_io_segment, &regs);
+    }
+    else
+    {
+        regs.h.ah = 0x3d;
+        regs.h.al = (uint8_t)(flags & 3);
+        regs.w.dx = 0;
+        native_int21_with_ds(native_io_segment, &regs);
+
+        if (regs.x.cflag && (flags & O_CREAT))
+        {
+            regs.x.eax = 0;
+            regs.x.ecx = 0;
+            regs.x.edx = 0;
+            regs.h.ah = 0x3c;
+            native_int21_with_ds(native_io_segment, &regs);
+        }
+    }
+
+    if (regs.x.cflag)
+        return -1;
+
+    return (int)regs.w.ax;
+}
+
+int close(int handle)
+{
+    union REGS regs = {0};
+
+    regs.h.ah = 0x3e;
+    regs.w.bx = (uint16_t)handle;
+    int386(0x21, &regs, &regs);
+
+    return regs.x.cflag ? -1 : 0;
+}
+
+int read(int handle, void *buffer, unsigned int count)
+{
+    unsigned char *dst = (unsigned char *)buffer;
+    unsigned int total = 0;
+
+    if (count == 0)
+        return 0;
+
+    if (native_io_ensure_buffer() != 0)
+        return -1;
+
+    while (total < count)
+    {
+        union REGS regs = {0};
+        unsigned int remain = count - total;
+        uint16_t chunk = (uint16_t)(
+            remain > NATIVE_IO_BUFFER_SIZE
+                ? NATIVE_IO_BUFFER_SIZE
+                : remain);
+
+        regs.h.ah = 0x3f;
+        regs.w.bx = (uint16_t)handle;
+        regs.w.cx = chunk;
+        regs.w.dx = 0;
+        native_int21_with_ds(native_io_segment, &regs);
+
+        if (regs.x.cflag)
+            return total ? (int)total : -1;
+
+        if (regs.w.ax == 0)
+            break;
+
+        memcpy(dst + total, native_io_buffer, regs.w.ax);
+        total += regs.w.ax;
+
+        if (regs.w.ax < chunk)
+            break;
+    }
+
+    return (int)total;
+}
+
+int write(int handle, const void *buffer, unsigned int count)
+{
+    const unsigned char *src = (const unsigned char *)buffer;
+    unsigned int total = 0;
+
+    if (count == 0)
+        return 0;
+
+    if (native_io_ensure_buffer() != 0)
+        return -1;
+
+    while (total < count)
+    {
+        union REGS regs = {0};
+        unsigned int remain = count - total;
+        uint16_t chunk = (uint16_t)(
+            remain > NATIVE_IO_BUFFER_SIZE
+                ? NATIVE_IO_BUFFER_SIZE
+                : remain);
+
+        memcpy(native_io_buffer, src + total, chunk);
+
+        regs.h.ah = 0x40;
+        regs.w.bx = (uint16_t)handle;
+        regs.w.cx = chunk;
+        regs.w.dx = 0;
+        native_int21_with_ds(native_io_segment, &regs);
+
+        if (regs.x.cflag)
+            return total ? (int)total : -1;
+
+        total += regs.w.ax;
+        if (regs.w.ax < chunk)
+            break;
+    }
+
+    return (int)total;
+}
+
+int32_t lseek(int handle, int32_t offset, int origin)
+{
+    union REGS regs = {0};
+
+    regs.h.ah = 0x42;
+    regs.h.al = (uint8_t)origin;
+    regs.w.bx = (uint16_t)handle;
+    regs.w.cx = (uint16_t)((uint32_t)offset >> 16);
+    regs.w.dx = (uint16_t)offset;
+    int386(0x21, &regs, &regs);
+
+    if (regs.x.cflag)
+        return -1;
+
+    return (int32_t)(((uint32_t)regs.w.dx << 16) | regs.w.ax);
+}
+
+int32_t filelength(int handle)
+{
+    int32_t current = lseek(handle, 0, 1);
+    int32_t end;
+
+    if (current < 0)
+        return -1;
+
+    end = lseek(handle, 0, 2);
+    if (end < 0)
+        return -1;
+
+    if (lseek(handle, current, 0) < 0)
+        return -1;
+
+    return end;
+}
+
+int fstat(int handle, struct stat *info)
+{
+    int32_t size = filelength(handle);
+
+    if (size < 0)
+        return -1;
+
+    info->st_size = size;
+    return 0;
+}
+
+int access(const char *path, int mode)
+{
+    union REGS regs = {0};
+    (void)mode;
+
+    if (native_io_copy_path(path) != 0)
+        return -1;
+
+    regs.h.ah = 0x43;
+    regs.h.al = 0x00;
+    regs.w.dx = 0;
+    native_int21_with_ds(native_io_segment, &regs);
+
+    return regs.x.cflag ? -1 : 0;
+}
+
+int mkdir(const char *path, int mode)
+{
+    union REGS regs = {0};
+    (void)mode;
+
+    if (native_io_copy_path(path) != 0)
+        return -1;
+
+    regs.h.ah = 0x39;
+    regs.w.dx = 0;
+    native_int21_with_ds(native_io_segment, &regs);
+
+    return regs.x.cflag ? -1 : 0;
+}
+
+int remove(const char *filename)
+{
+    union REGS regs = {0};
+
+    if (native_io_copy_path(filename) != 0)
+        return -1;
+
+    regs.h.ah = 0x41;
+    regs.w.dx = 0;
+    native_int21_with_ds(native_io_segment, &regs);
+
+    return regs.x.cflag ? -1 : 0;
+}
+
+
+struct native_dos_FILE
+{
+    int handle;
+    int eof;
+    int is_static;
+};
+
+static struct native_dos_FILE native_stdout_file = {1, 0, 1};
+FILE *stdout = &native_stdout_file;
+
+static int native_vsnprintf(char *buffer, size_t size,
+                            const char *format, va_list args)
+{
+    typedef int (*fn_ptr_t)(char *, size_t, const char *, va_list);
+    return ((fn_ptr_t)_sys_table_ptrs[10])(buffer, size, format, args);
+}
+
+static int native_vfprintf_handle(int handle, const char *format, va_list args)
+{
+    char stackbuf[512];
+    va_list copy;
+    int length;
+
+    va_copy(copy, args);
+    length = native_vsnprintf(stackbuf, sizeof(stackbuf), format, copy);
+    va_end(copy);
+    if (length < 0)
+        return length;
+
+    if ((size_t)length < sizeof(stackbuf))
+    {
+        int written = write(handle, stackbuf, (unsigned int)length);
+        return written < 0 ? -1 : length;
+    }
+
+    char *buffer = (char *)malloc((size_t)length + 1);
+    if (!buffer)
+        return -1;
+
+    va_copy(copy, args);
+    native_vsnprintf(buffer, (size_t)length + 1, format, copy);
+    va_end(copy);
+
+    int written = write(handle, buffer, (unsigned int)length);
+    free(buffer);
+    return written < 0 ? -1 : length;
+}
+
+FILE *fopen(const char *filename, const char *mode)
+{
+    int flags;
+    int handle;
+    FILE *stream;
+
+    if (!mode || mode[0] == '\0')
+        return NULL;
+
+    switch (mode[0])
+    {
+        case 'r':
+            flags = O_RDONLY;
+            break;
+        case 'w':
+            flags = O_WRONLY | O_CREAT | O_TRUNC;
+            break;
+        case 'a':
+            flags = O_WRONLY | O_CREAT;
+            break;
+        default:
+            return NULL;
+    }
+
+    for (const char *p = mode; *p; ++p)
+        if (*p == 'b')
+            flags |= O_BINARY;
+
+    handle = open(filename, flags, 0666);
+    if (handle < 0)
+        return NULL;
+
+    if (mode[0] == 'a' && lseek(handle, 0, SEEK_END) < 0)
+    {
+        close(handle);
+        return NULL;
+    }
+
+    stream = (FILE *)malloc(sizeof(*stream));
+    if (!stream)
+    {
+        close(handle);
+        return NULL;
+    }
+
+    stream->handle = handle;
+    stream->eof = 0;
+    stream->is_static = 0;
+    return stream;
+}
+
+int fclose(FILE *stream)
+{
+    int rc;
+
+    if (!stream)
+        return -1;
+
+    if (stream->is_static)
+        return 0;
+
+    rc = close(stream->handle);
+    free(stream);
+    return rc;
+}
+
+size_t fread(void *buffer, size_t size, size_t count, FILE *stream)
+{
+    size_t total;
+    int got;
+
+    if (!stream || size == 0 || count == 0)
+        return 0;
+
+    if (count > (size_t)-1 / size)
+        return 0;
+
+    total = size * count;
+    got = read(stream->handle, buffer, (unsigned int)total);
+    if (got <= 0)
+    {
+        if (got == 0)
+            stream->eof = 1;
+        return 0;
+    }
+
+    if ((size_t)got < total)
+        stream->eof = 1;
+
+    return (size_t)got / size;
+}
+
+size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream)
+{
+    size_t total;
+    int written;
+
+    if (!stream || size == 0 || count == 0)
+        return 0;
+
+    if (count > (size_t)-1 / size)
+        return 0;
+
+    total = size * count;
+    written = write(stream->handle, buffer, (unsigned int)total);
+    if (written <= 0)
+        return 0;
+
+    return (size_t)written / size;
+}
+
+int fseek(FILE *stream, long offset, int origin)
+{
+    if (!stream)
+        return -1;
+
+    if (lseek(stream->handle, (int32_t)offset, origin) < 0)
+        return -1;
+
+    stream->eof = 0;
+    return 0;
+}
+
+long ftell(FILE *stream)
+{
+    if (!stream)
+        return -1;
+
+    return (long)lseek(stream->handle, 0, SEEK_CUR);
+}
+
+void rewind(FILE *stream)
+{
+    if (!stream)
+        return;
+
+    if (lseek(stream->handle, 0, SEEK_SET) >= 0)
+        stream->eof = 0;
+}
+
+int feof(FILE *stream)
+{
+    return stream ? stream->eof : 1;
+}
+
+void setbuf(FILE *stream, char *buffer)
+{
+    (void)stream;
+    (void)buffer;
+}
+
+int getchar(void)
+{
+    unsigned char ch;
+    int rc = read(0, &ch, 1);
+    return rc == 1 ? (int)ch : -1;
+}
+
+int vprintf(const char *format, va_list args)
+{
+    return native_vfprintf_handle(1, format, args);
+}
+
+int printf(const char *format, ...)
+{
+    va_list args;
+    int rc;
+
+    va_start(args, format);
+    rc = native_vfprintf_handle(1, format, args);
+    va_end(args);
+    return rc;
+}
+
+int fprintf(FILE *stream, const char *format, ...)
+{
+    va_list args;
+    int rc;
+
+    if (!stream)
+        return -1;
+
+    va_start(args, format);
+    rc = native_vfprintf_handle(stream->handle, format, args);
+    va_end(args);
+    return rc;
+}
+
+int sprintf(char *buffer, const char *format, ...)
+{
+    va_list args;
+    int rc;
+
+    va_start(args, format);
+    rc = native_vsnprintf(buffer, (size_t)-1, format, args);
+    va_end(args);
+    return rc;
+}
+
+
+static int native_scan_skip_space(const char **input)
+{
+    int n = 0;
+    while (**input == ' ' || **input == '\t' ||
+           **input == '\r' || **input == '\n')
+    {
+        ++*input;
+        ++n;
+    }
+    return n;
+}
+
+static int native_scan_uint(const char **input, unsigned int *value, int base)
+{
+    const char *p = *input;
+    unsigned int v = 0;
+    int digits = 0;
+
+    if (base == 16 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+        p += 2;
+
+    for (;;)
+    {
+        int d;
+        char c = *p;
+
+        if (c >= '0' && c <= '9')
+            d = c - '0';
+        else if (c >= 'a' && c <= 'f')
+            d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F')
+            d = c - 'A' + 10;
+        else
+            break;
+
+        if (d >= base)
+            break;
+
+        v = v * (unsigned int)base + (unsigned int)d;
+        ++p;
+        ++digits;
+    }
+
+    if (!digits)
+        return 0;
+
+    *input = p;
+    *value = v;
+    return 1;
+}
+
+static int native_vsscanf(const char *input, const char *format, va_list ap)
+{
+    int assigned = 0;
+
+    while (*format)
+    {
+        if (*format != '%')
+        {
+            if (*format == ' ' || *format == '\t' ||
+                *format == '\r' || *format == '\n')
+            {
+                while (*format == ' ' || *format == '\t' ||
+                       *format == '\r' || *format == '\n')
+                    ++format;
+                native_scan_skip_space(&input);
+                continue;
+            }
+
+            if (*input != *format)
+                break;
+
+            ++input;
+            ++format;
+            continue;
+        }
+
+        ++format;
+
+        int width = 0;
+        while (*format >= '0' && *format <= '9')
+            width = width * 10 + (*format++ - '0');
+
+        if (*format == 's')
+        {
+            char *dst = va_arg(ap, char *);
+            int n = 0;
+
+            native_scan_skip_space(&input);
+            if (!*input)
+                break;
+
+            while (*input &&
+                   *input != ' ' && *input != '\t' &&
+                   *input != '\r' && *input != '\n' &&
+                   (!width || n < width))
+            {
+                dst[n++] = *input++;
+            }
+
+            if (!n)
+                break;
+
+            dst[n] = '\0';
+            ++assigned;
+            ++format;
+            continue;
+        }
+
+        if (*format == '[' &&
+            format[1] == '^' && format[2] == '\\' &&
+            format[3] == 'n' && format[4] == ']')
+        {
+            char *dst = va_arg(ap, char *);
+            int n = 0;
+
+            format += 5;
+            if (!*input)
+                break;
+
+            while (*input && *input != '\n' &&
+                   (!width || n < width))
+                dst[n++] = *input++;
+
+            dst[n] = '\0';
+            ++assigned;
+            continue;
+        }
+
+        if (*format == 'x')
+        {
+            unsigned int *dst = va_arg(ap, unsigned int *);
+            unsigned int value;
+
+            native_scan_skip_space(&input);
+            if (!native_scan_uint(&input, &value, 16))
+                break;
+
+            *dst = value;
+            ++assigned;
+            ++format;
+            continue;
+        }
+
+        if (*format == 'i')
+        {
+            int *dst = va_arg(ap, int *);
+            int sign = 1;
+            unsigned int value;
+            int base = 10;
+
+            native_scan_skip_space(&input);
+            if (*input == '-' || *input == '+')
+            {
+                if (*input++ == '-')
+                    sign = -1;
+            }
+
+            if (input[0] == '0' && (input[1] == 'x' || input[1] == 'X'))
+                base = 16;
+
+            if (!native_scan_uint(&input, &value, base))
+                break;
+
+            *dst = (int)value * sign;
+            ++assigned;
+            ++format;
+            continue;
+        }
+
+        break;
+    }
+
+    return assigned;
+}
+
+int sscanf(const char *buffer, const char *format, ...)
+{
+    va_list ap;
+    int result;
+
+    va_start(ap, format);
+    result = native_vsscanf(buffer, format, ap);
+    va_end(ap);
+    return result;
+}
+
+int fscanf(FILE *stream, const char *format, ...)
+{
+    char line[256];
+    unsigned int n = 0;
+    va_list ap;
+    int result;
+
+    if (!stream || stream->eof)
+        return -1;
+
+    while (n + 1 < sizeof(line))
+    {
+        char c;
+        int rc = read(stream->handle, &c, 1);
+
+        if (rc <= 0)
+        {
+            stream->eof = 1;
+            break;
+        }
+
+        line[n++] = c;
+        if (c == '\n')
+            break;
+    }
+
+    if (!n)
+        return -1;
+
+    line[n] = '\0';
+
+    va_start(ap, format);
+    result = native_vsscanf(line, format, ap);
+    va_end(ap);
+    return result;
+}
+
+/*
+ * C library exit() for native DOS applications.
+ *
+ * Stack ownership and unwinding are kernel responsibilities.  The public
+ * process API below returns to the kernel-owned main() trampoline; no client
+ * translation unit needs to know the ELF stack address or contain assembler.
+ */
+void exit(int status)
+{
+    dos_process_exit(status);
 }

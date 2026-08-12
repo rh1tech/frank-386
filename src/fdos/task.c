@@ -83,7 +83,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define M_API_VERSION              0
+#define M_API_VERSION              4
 #define ARM_ELF_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_DOS_STACK_SIZE    256u
 #define ARM_ELF_ARGV_SLOTS        66u
@@ -163,6 +163,7 @@ typedef struct arm_elf_load_meta {
   ULONG signal_addr;
   ULONG argv_addr;
   ULONG native_stack_off;
+  ULONG native_main_sp;
   ULONG dos_stack_off;
   LONG required_api_version;
   UWORD argc;
@@ -1600,6 +1601,103 @@ typedef void *(*arm_elf_init_fn)(void);
 typedef int (*arm_elf_main_fn)(int, char **);
 typedef void (*arm_elf_fini_fn)(void *);
 
+/*
+ * The currently active native main() recovery slot.
+ *
+ * The slot itself lives in arm_elf_load_meta, i.e. in metadata belonging to
+ * the particular EXEC child.  Keeping only a pointer here is important for
+ * nested EXEC: arm_elf_run_body() saves/restores the previous pointer while a
+ * nested native child is running, so every process retains its own recovery
+ * SP in its own metadata.
+ */
+static volatile ULONG *arm_elf_active_main_sp;
+
+/*
+ * Call the application main() through a kernel-owned fixed frame.
+ *
+ * There must be no matching assembler wrapper in the application: the whole
+ * purpose of this trampoline is to keep process-unwind mechanics in the
+ * loader/runtime.  exit(status) can then restore the SP saved here and enter
+ * arm_elf_main_return exactly as if main() had returned status normally.
+ *
+ * AAPCS on entry:
+ *   r0 = main_fn
+ *   r1 = argc
+ *   r2 = argv
+ *
+ * Cortex-M0+/Thumb-1 cannot push/pop r8-r11 directly, hence the moves through
+ * r4-r7.  The extra 4-byte slot restores the required 8-byte SP alignment
+ * before BLX into ordinary C code.
+ */
+static int __attribute__((naked, noinline))
+arm_elf_call_main(arm_elf_main_fn main_fn, int argc, char **argv)
+{
+  __asm volatile (
+      /* Save caller state and the LR back into arm_elf_run_body(). */
+      "push {r4-r7, lr}\n"
+      "mov  r4, r8\n"
+      "mov  r5, r9\n"
+      "mov  r6, r10\n"
+      "mov  r7, r11\n"
+      "push {r4-r7}\n"
+      "sub  sp, #4\n"
+
+      /* Store this exact recovery SP into current process metadata. */
+      "ldr  r4, =arm_elf_active_main_sp\n"
+      "ldr  r4, [r4]\n"
+      "mov  r5, sp\n"
+      "str  r5, [r4]\n"
+
+      /* Rearrange wrapper arguments into main(argc, argv). */
+      "mov  r3, r0\n"  /* r3 = main_fn */
+      "mov  r0, r1\n"  /* r0 = argc */
+      "mov  r1, r2\n"  /* r1 = argv */
+      "blx  r3\n"
+
+      /*
+       * Common return point for both paths:
+       *   - ordinary main() return leaves its result in r0;
+       *   - arm_elf_process_exit(status) keeps status in r0, restores the
+       *     saved SP above, and branches directly to this label.
+       */
+      ".global arm_elf_main_return\n"
+      ".type arm_elf_main_return, %function\n"
+      ".thumb_func\n"
+      "arm_elf_main_return:\n"
+
+      "add  sp, #4\n"
+      "pop  {r4-r7}\n"
+      "mov  r8, r4\n"
+      "mov  r9, r5\n"
+      "mov  r10, r6\n"
+      "mov  r11, r7\n"
+      "pop  {r4-r7, pc}\n");
+}
+
+/*
+ * Public native-process termination backend exported through DOS_API.
+ *
+ * AAPCS supplies status in r0.  This naked function deliberately never
+ * modifies r0: after unwinding to arm_elf_main_return it therefore becomes
+ * the return value of main(), and arm_elf_run_body() resumes its normal path
+ * (including _fini()).
+ *
+ * Only SP is restored here.  MSPLIM/PRIMASK still belong to the native stack
+ * context and are restored later by arm_elf_call_on_stack(), exactly as on a
+ * normal main() return.
+ */
+void __attribute__((naked, noreturn)) arm_elf_process_exit(int status)
+{
+  __asm volatile (
+      /* r0 == status; keep it untouched. */
+      "ldr  r1, =arm_elf_active_main_sp\n"
+      "ldr  r1, [r1]\n" /* r1 = &meta->native_main_sp */
+      "ldr  r1, [r1]\n" /* r1 = saved recovery SP */
+      "mov  sp, r1\n"   /* discard all application frames below main */
+      "ldr  r1, =arm_elf_main_return\n"
+      "bx   r1\n");
+}
+
 static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
 {
   void *fini_ctx = NULL;
@@ -1621,8 +1719,17 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
   if (meta->init_addr != 0)
     fini_ctx = ((arm_elf_init_fn)(uintptr_t)meta->init_addr)();
 
-  result = ((arm_elf_main_fn)(uintptr_t)meta->main_addr)(
-      meta->argc, (char **)(uintptr_t)meta->argv_addr);
+  /*
+   * Keep the recovery SP in this process's metadata, not in the application.
+   * Save/restore the active slot pointer so nested native EXEC has an
+   * independent unwind target and the parent resumes with its own target.
+   */
+  volatile ULONG *saved_main_sp_slot = arm_elf_active_main_sp;
+  arm_elf_active_main_sp = &meta->native_main_sp;
+  result = arm_elf_call_main((arm_elf_main_fn)(uintptr_t)meta->main_addr,
+                             meta->argc,
+                             (char **)(uintptr_t)meta->argv_addr);
+  arm_elf_active_main_sp = saved_main_sp_slot;
 
   /* A DOS terminate request made from native code through bios_intcall()
      is semantically noreturn even though the native bridge itself must

@@ -3,6 +3,10 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
+
+/* Public CPU ABI: field layout is fixed to 4-byte packing on both sides. */
+#pragma pack(push, 4)
 
 #define regax 0
 #define regcx 1
@@ -180,5 +184,26 @@ struct CPU {
 }; // should be the same in all implementations
 
 typedef struct CPU CPU;
+
+/* ARM32 ABI guards: fail the build instead of silently changing public layout. */
+#if UINTPTR_MAX == 0xffffffffu
+_Static_assert(sizeof(CPU_CB) == 48, "CPU_CB ABI size");
+_Static_assert(sizeof(struct tlb_entry) == 16, "tlb_entry ABI size");
+_Static_assert(sizeof(cpu_int_hook_t) == 8, "cpu_int_hook_t ABI size");
+_Static_assert(sizeof(bios_callback_params_t) == 24, "bios_callback_params_t ABI size");
+_Static_assert(sizeof(CPU_ext_accessors_t) == 68, "CPU_ext_accessors_t ABI size");
+_Static_assert(sizeof(x86_flags_t) == 4, "x86_flags_t ABI size");
+_Static_assert(sizeof(gprx_t) == 4, "gprx_t ABI size");
+_Static_assert(offsetof(struct CPU, intr) == 48, "CPU.intr ABI offset");
+_Static_assert(offsetof(struct CPU, gen) == 52, "CPU.gen ABI offset");
+_Static_assert(offsetof(struct CPU, cb) == 64, "CPU.cb ABI offset");
+_Static_assert(offsetof(struct CPU, bios) == 120, "CPU.bios ABI offset");
+_Static_assert(offsetof(struct CPU, prefetch_base) == 128, "CPU.prefetch_base ABI offset");
+_Static_assert(offsetof(struct CPU, int_hooks) == 148, "CPU.int_hooks ABI offset");
+_Static_assert(offsetof(struct CPU, fpu) == 1172, "CPU.fpu ABI offset");
+_Static_assert(sizeof(struct CPU) == 1176, "CPU ABI size");
+#endif
+
+#pragma pack(pop)
 
 #endif /* __CPU_H__ */

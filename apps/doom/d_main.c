@@ -22,8 +22,10 @@
 #define	FGCOLOR		8
 #endif
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(ELF_MODE)
 #include <dos.h>
+#endif
+#ifdef __WATCOMC__
 #include <graph.h>
 #include <sys\types.h>
 #include <unistd.h>
@@ -33,6 +35,8 @@
 #include "DoomDef.h"
 #include "soundst.h"
 #include "DUtils.h"
+#include <io.h>
+#include <direct.h>
 
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
 #define	BGCOLOR		1
