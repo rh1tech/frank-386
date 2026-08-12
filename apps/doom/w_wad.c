@@ -578,7 +578,7 @@ void	*W_CacheLumpName (char *name, int tag)
 ====================
 */
 
-int	info[2500][10];
+static int (*info)[10];
 int	profilecount;
 
 void W_Profile (void)
@@ -590,6 +590,19 @@ void W_Profile (void)
 	FILE	*f;
 	int		j;
 	char	name[9];
+
+	/*
+	 * W_Profile() is a developer diagnostic and is not called by the game
+	 * (the only call site in p_setup.c is commented out).  Its historical
+	 * 2500x10 int matrix used to consume 100000 bytes of permanent .bss.
+	 * Preserve the function but allocate its history only on first use.
+	 */
+	if (!info)
+	{
+		info = (int (*)[10])malloc((size_t)numlumps * sizeof(*info));
+		if (!info)
+			return;
+	}
 	
 	
 	for (i=0 ; i<numlumps ; i++)

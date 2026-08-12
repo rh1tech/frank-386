@@ -95,20 +95,13 @@ add_executable(${PROJECT_NAME}
     pcfx_native.c
     music_native.c
     i_cyber.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-divmod.S    
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
 )
 
-set_source_files_properties(
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-sdtfn.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api/dos-api-math.c
-    PROPERTIES COMPILE_OPTIONS "-fno-builtin"
-)
+include(${CMAKE_CURRENT_SOURCE_DIR}/../api/native-dos-runtime.cmake)
+native_dos_runtime_attach(${PROJECT_NAME})
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../api
 )
 
 configure_file(memmap.ld.in memmap.ld @ONLY)

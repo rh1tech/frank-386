@@ -46,7 +46,7 @@ unsigned short divisors[] = {
 typedef struct {
     unsigned int length;
     unsigned short priority;
-    unsigned short data[0x10000];
+    unsigned short data[];
 } pcspkmuse_t;
 
 typedef struct {
@@ -55,8 +55,19 @@ typedef struct {
     unsigned char data[];
 } dmxpcs_t;
 
-pcspkmuse_t pcspkmuse;
+static pcspkmuse_t *pcspkmuse;
 int pcshandle = 0;
+
+static void pcspkmuse_done(unsigned long callbackval)
+{
+    (void)callbackval;
+
+    if (pcspkmuse)
+    {
+        free(pcspkmuse);
+        pcspkmuse = NULL;
+    }
+}
 
 fx_blaster_config dmx_blaster;
 
@@ -232,13 +243,41 @@ int SFX_PlayPatch(void *vdata, int pitch, int sep, int vol, int unk1, int priori
     unsigned short i;
     if (type == 0)
     {
-        pcspkmuse.length = dmxpcs->length * 2;
-        pcspkmuse.priority = 100;
-        for (i = 0; i < dmxpcs->length; i++)
+        size_t bytes;
+
+        /*
+         * The old static buffer reserved space for the maximum possible
+         * 65536 PC-speaker samples: 131080 bytes of permanent .bss even when
+         * PC Speaker was disabled.  Allocate only the current converted lump.
+         * PCFX keeps using the buffer asynchronously, so its completion
+         * callback owns the corresponding free().
+         */
+        if (pcspkmuse)
         {
-            pcspkmuse.data[i] = divisors[dmxpcs->data[i]];
+            if (pcshandle > 0 && PCFX_SoundPlaying(pcshandle))
+                PCFX_Stop(pcshandle);
+            else
+                pcspkmuse_done(0);
         }
-        pcshandle = PCFX_Play((PCSound *)&pcspkmuse, 100, 0);
+
+        bytes = sizeof(*pcspkmuse)
+              + (size_t)dmxpcs->length * sizeof(pcspkmuse->data[0]);
+        pcspkmuse = (pcspkmuse_t *)malloc(bytes);
+        if (!pcspkmuse)
+            return -1;
+
+        pcspkmuse->length = dmxpcs->length * 2;
+        pcspkmuse->priority = 100;
+        for (i = 0; i < dmxpcs->length; i++)
+            pcspkmuse->data[i] = divisors[dmxpcs->data[i]];
+
+        pcshandle = PCFX_Play((PCSound *)pcspkmuse, 100, 0);
+        if (pcshandle < 0)
+        {
+            pcspkmuse_done(0);
+            return pcshandle;
+        }
+
         return pcshandle | 0x8000;
     }
     else if (type == 3)
@@ -432,6 +471,7 @@ printf("  DMX_Init UltraSound\n");
     if (sdev & AHW_PC_SPEAKER)
     {
         PCFX_Init();
+        PCFX_SetCallBack(pcspkmuse_done);
         PCFX_SetTotalVolume(255);
         PCFX_UseLookup(0, 0);
     }
@@ -442,6 +482,7 @@ void DMX_DeInit(void) {
     MUSIC_Shutdown();
     FX_Shutdown();
     PCFX_Shutdown();
+    pcspkmuse_done(0);
     remove("ULTRAMID.INI");
     if (mid_data)
     {
