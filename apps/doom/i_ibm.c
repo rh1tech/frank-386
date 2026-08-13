@@ -28,6 +28,7 @@
 #ifdef ELF_MODE
 #include "psram.h"
 #include "i_native_memory.h"
+#include "native_process.h"
 #include "dos_mem.h"
 #endif
 #include "R_local.h"
@@ -1609,12 +1610,18 @@ int I_GetHeapSize (void)
 byte *I_ZoneBase (int *size)
 {
 #ifdef ELF_MODE
-    uint32_t total_psram = psram_size();
+    uintptr_t zone_start = (uintptr_t)PSRAM_BASE_ADDR + NATIVE_ZONE_OFFSET;
+    uintptr_t zone_end = native_dos_app_psram_end();
 
-    if (total_psram <= NATIVE_ZONE_OFFSET)
-        I_Error("Insufficient PSRAM!");
+    /*
+     * The process loader owns the upper PSRAM reservation used by its native
+     * stack.  DOOM only consumes the range explicitly assigned to the
+     * application; it no longer assumes that psram_size() means "all mine".
+     */
+    if (zone_end <= zone_start)
+        I_Error("Insufficient application PSRAM!");
 
-    *size = (int)(total_psram - NATIVE_ZONE_OFFSET);
+    *size = (int)(zone_end - zone_start);
     if (*size < 0x180000)
         I_Error("Insufficient PSRAM for DOOM zone!");
 

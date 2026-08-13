@@ -25,6 +25,18 @@
 #include "../diag.h"
 
 /*
+ * fdos/hdr/portab.h already publishes the guest PSRAM base as
+ * PSRAM_BASE_ADDR.  board_config.h publishes the same address through the
+ * board-level PSRAM_BASE macro, but does so with another unconditional
+ * definition.  Drop the API-side spelling before importing board_config.h;
+ * this TU needs its PSRAM_SIZE_BYTES configuration as well.
+ */
+#ifdef PSRAM_BASE_ADDR
+#undef PSRAM_BASE_ADDR
+#endif
+#include "../board_config.h"
+
+/*
  * Keep this dependency narrow.  Including ../pc.h here pulls host stdio
  * declarations into the FreeDOS kernel translation unit, where hdrs.h maps
  * printf() to dos_printf(); that changes the visible prototype and conflicts
@@ -84,6 +96,9 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define SHT_STRTAB              3u
 #define SHT_NOBITS              8u
 #define SHT_REL                 9u
+#define SHT_INIT_ARRAY          14u
+#define SHT_FINI_ARRAY          15u
+#define SHT_PREINIT_ARRAY       16u
 #define SHF_ALLOC               0x2u
 #define STB_GLOBAL              1u
 #define STB_WEAK                2u
@@ -103,6 +118,14 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define ARM_ELF_SEC_LOADING     1u
 #define ARM_ELF_SEC_LOADED      2u
 #define ARM_ELF_NO_SYMBOL       0xfffffffful
+
+#define ARM_ELF_STARTUP_NONE     0u
+#define ARM_ELF_STARTUP_PREINIT  1u
+#define ARM_ELF_STARTUP_INIT     2u
+#define ARM_ELF_STARTUP_FINI     3u
+
+/* Sparse progress: enough activity to see that a large ET_REL still moves. */
+#define ARM_ELF_PROGRESS_RELOCS  32u
 
 #pragma pack(push, 1)
 typedef struct arm_elf32_ehdr {
@@ -157,14 +180,18 @@ typedef struct arm_elf32_rel {
 
 typedef struct arm_elf_sec_state {
   ULONG offset;
+  ULONG size;
   UBYTE state;
-  UBYTE reserved[3];
+  UBYTE startup_kind;
+  UBYTE startup_plain;
+  UBYTE reserved;
 } arm_elf_sec_state;
 
 typedef struct arm_elf_load_meta {
   arm_elf32_ehdr eh;
   arm_elf32_shdr symtab;
   arm_elf32_shdr strtab;
+  arm_elf32_shdr shstrtab;
   ULONG cursor;
   ULONG allocation_end;
   ULONG required_api_addr;
@@ -173,12 +200,20 @@ typedef struct arm_elf_load_meta {
   ULONG main_addr;
   ULONG fini_addr;
   ULONG signal_addr;
+  ULONG preinit_array_addr;
+  ULONG preinit_array_count;
+  ULONG init_array_addr;
+  ULONG init_array_count;
+  ULONG fini_array_addr;
+  ULONG fini_array_count;
+  ULONG relocation_progress;
   ULONG argv_addr;
-  ULONG native_stack_off;
+  ULONG native_stack_addr;
   ULONG native_main_sp;
-  ULONG dos_stack_off;
   ULONG native_stack_size;
   ULONG dos_stack_size;
+  UWORD dos_stack_mcb;
+  UWORD dos_stack_seg;
   LONG required_api_version;
   UWORD argc;
   UWORD shnum;
@@ -383,10 +418,17 @@ static COUNT arm_elf_reject(COUNT rc, const char *reason)
 static int arm_elf_find_tables(COUNT fd, arm_elf_load_meta *meta)
 {
   UWORD i;
+  int rc;
+
+  if (meta->eh.shstrndx == SHN_UNDEF || meta->eh.shstrndx >= meta->eh.shnum)
+    return DE_INVLDFMT;
+  rc = arm_elf_read_shdr(fd, &meta->eh, meta->eh.shstrndx, &meta->shstrtab);
+  if (rc != SUCCESS || meta->shstrtab.type != SHT_STRTAB)
+    return DE_INVLDFMT;
 
   for (i = 0; i < meta->eh.shnum; ++i) {
     arm_elf32_shdr sh;
-    int rc = arm_elf_read_shdr(fd, &meta->eh, i, &sh);
+    rc = arm_elf_read_shdr(fd, &meta->eh, i, &sh);
     if (rc != SUCCESS)
       return rc;
     if (sh.type != SHT_SYMTAB)
@@ -446,24 +488,273 @@ static int arm_elf_symbol_name(COUNT fd, const arm_elf_load_meta *meta,
   return TRUE;
 }
 
-static int arm_elf_symbol_name_is(COUNT fd, const arm_elf_load_meta *meta,
-                                  const arm_elf32_sym *sym, const char *name)
+static int arm_elf_section_name(COUNT fd, const arm_elf_load_meta *meta,
+                                const arm_elf32_shdr *sh,
+                                BYTE *buf, UWORD buf_size)
 {
-  BYTE buf[32];
-  UWORD len = (UWORD)strlen(name);
+  ULONG remain;
+  UWORD read_len;
+  BYTE *nul;
 
-  if (len + 1 > sizeof(buf) || sym->name >= meta->strtab.size ||
-      (ULONG)len + 1 > meta->strtab.size - sym->name)
+  if (buf == NULL || buf_size < 2 || sh->name >= meta->shstrtab.size)
     return FALSE;
-  if (arm_elf_read_meta(fd, meta->strtab.offset + sym->name,
-                        buf, len + 1) != SUCCESS)
+
+  remain = meta->shstrtab.size - sh->name;
+  read_len = remain < (ULONG)(buf_size - 1)
+             ? (UWORD)remain : (UWORD)(buf_size - 1);
+  if (read_len == 0)
     return FALSE;
-  return memcmp(buf, name, len + 1) == 0;
+
+  if (arm_elf_read_meta(fd, meta->shstrtab.offset + sh->name,
+                        buf, read_len) != SUCCESS)
+    return FALSE;
+
+  nul = memchr(buf, '\0', read_len);
+  if (nul == NULL)
+    buf[read_len] = '\0';
+  else if (nul == buf)
+    return FALSE;
+
+  return TRUE;
+}
+
+static UBYTE arm_elf_startup_kind(const BYTE *name, ULONG type,
+                                  UBYTE *is_plain)
+{
+  const char *base;
+  UBYTE kind;
+  size_t n;
+
+  if (type == SHT_PREINIT_ARRAY) {
+    base = ".preinit_array";
+    kind = ARM_ELF_STARTUP_PREINIT;
+  } else if (type == SHT_INIT_ARRAY) {
+    base = ".init_array";
+    kind = ARM_ELF_STARTUP_INIT;
+  } else if (type == SHT_FINI_ARRAY) {
+    base = ".fini_array";
+    kind = ARM_ELF_STARTUP_FINI;
+  } else {
+    return ARM_ELF_STARTUP_NONE;
+  }
+
+  n = strlen(base);
+  if (strcmp((const char *)name, base) == 0) {
+    *is_plain = TRUE;
+    return kind;
+  }
+  if (strncmp((const char *)name, base, n) == 0 && name[n] == '.') {
+    *is_plain = FALSE;
+    return kind;
+  }
+  return ARM_ELF_STARTUP_NONE;
 }
 
 static int arm_elf_load_section(COUNT fd, UWORD base_seg,
                                 arm_elf_load_meta *meta, UWORD sec_num,
                                 ULONG *sec_addr);
+
+/*
+ * The final Pico/GNU linker makes preinit/init/fini arrays roots even when no
+ * ordinary code references them.  ET_REL has the input sections separately,
+ * so discover and relocate those sections explicitly.
+ */
+static int arm_elf_discover_startup_sections(COUNT fd, UWORD base_seg,
+                                             arm_elf_load_meta *meta)
+{
+  arm_elf_sec_state *states = arm_elf_states(meta);
+  UWORD i;
+
+  for (i = 0; i < meta->eh.shnum; ++i) {
+    arm_elf32_shdr sh;
+    BYTE name[64];
+    UBYTE plain = FALSE;
+    UBYTE kind;
+    ULONG sec_addr;
+    int rc = arm_elf_read_shdr(fd, &meta->eh, i, &sh);
+
+    if (rc != SUCCESS)
+      return rc;
+    if ((sh.flags & SHF_ALLOC) == 0)
+      continue;
+    if (sh.type != SHT_PREINIT_ARRAY &&
+        sh.type != SHT_INIT_ARRAY &&
+        sh.type != SHT_FINI_ARRAY)
+      continue;
+    if (!arm_elf_section_name(fd, meta, &sh, name, sizeof(name)))
+      return DE_INVLDFMT;
+
+    kind = arm_elf_startup_kind(name, sh.type, &plain);
+    if (kind == ARM_ELF_STARTUP_NONE)
+      continue;
+    if ((sh.size & 3u) != 0)
+      return DE_INVLDFMT;
+
+    states[i].startup_kind = kind;
+    states[i].startup_plain = plain;
+    states[i].size = sh.size;
+
+    rc = arm_elf_load_section(fd, base_seg, meta, i, &sec_addr);
+    if (rc != SUCCESS)
+      return rc;
+  }
+
+  return SUCCESS;
+}
+
+/*
+ * Compare two startup-array sections using the same lexical ordering as
+ * SORT(.xxx_array.*).  Section number is the stable tie-breaker.
+ */
+static int arm_elf_startup_section_less(COUNT fd,
+                                        const arm_elf_load_meta *meta,
+                                        UWORD lhs, UWORD rhs)
+{
+  arm_elf32_shdr lsh, rsh;
+  BYTE lname[64], rname[64];
+  int cmp;
+
+  if (rhs == 0xffffu)
+    return TRUE;
+  if (arm_elf_read_shdr(fd, &meta->eh, lhs, &lsh) != SUCCESS ||
+      arm_elf_read_shdr(fd, &meta->eh, rhs, &rsh) != SUCCESS)
+    return lhs < rhs;
+  if (!arm_elf_section_name(fd, meta, &lsh, lname, sizeof(lname)) ||
+      !arm_elf_section_name(fd, meta, &rsh, rname, sizeof(rname)))
+    return lhs < rhs;
+
+  cmp = strcmp((const char *)lname, (const char *)rname);
+  return cmp < 0 || (cmp == 0 && lhs < rhs);
+}
+
+static int arm_elf_startup_section_after(COUNT fd,
+                                         const arm_elf_load_meta *meta,
+                                         UWORD candidate, UWORD previous)
+{
+  if (previous == 0xffffu)
+    return TRUE;
+  return arm_elf_startup_section_less(fd, meta, previous, candidate);
+}
+
+static int arm_elf_copy_startup_kind(COUNT fd, UWORD base_seg,
+                                     arm_elf_load_meta *meta, UBYTE kind,
+                                     ULONG dst_off, ULONG *entry_count)
+{
+  arm_elf_sec_state *states = arm_elf_states(meta);
+  ULONG count = 0;
+  UBYTE plain_pass;
+
+  /*
+   * GNU/Pico scripts use SORT(.array.*), followed by the plain .array.
+   * Reproduce that exact two-phase ordering without keeping native-SRAM lists.
+   */
+  for (plain_pass = FALSE; plain_pass <= TRUE; ++plain_pass) {
+    UWORD previous = 0xffffu;
+
+    for (;;) {
+      UWORD best = 0xffffu;
+      UWORD i;
+
+      for (i = 0; i < meta->eh.shnum; ++i) {
+        if (states[i].startup_kind != kind ||
+            states[i].startup_plain != plain_pass ||
+            !arm_elf_startup_section_after(fd, meta, i, previous))
+          continue;
+        if (arm_elf_startup_section_less(fd, meta, i, best))
+          best = i;
+      }
+
+      if (best == 0xffffu)
+        break;
+
+      if (states[best].size != 0) {
+        BYTE *src = (BYTE *)ARM_PTR(
+            arm_elf_guest_ptr(base_seg, states[best].offset));
+        BYTE *dst = (BYTE *)ARM_PTR(
+            arm_elf_guest_ptr(base_seg, dst_off + count * sizeof(ULONG)));
+        memcpy(dst, src, states[best].size);
+        count += states[best].size / sizeof(ULONG);
+      }
+      previous = best;
+    }
+  }
+
+  *entry_count = count;
+  return SUCCESS;
+}
+
+/*
+ * Synthesize the contiguous __preinit_array/__init_array/__fini_array ranges
+ * that a normal final linker script would create.
+ */
+static int arm_elf_build_startup_arrays(COUNT fd, UWORD base_seg,
+                                        arm_elf_load_meta *meta)
+{
+  arm_elf_sec_state *states = arm_elf_states(meta);
+  ULONG pre_count = 0, init_count = 0, fini_count = 0;
+  ULONG total_entries, bytes, off;
+  UWORD i;
+  int rc;
+
+  rc = arm_elf_discover_startup_sections(fd, base_seg, meta);
+  if (rc != SUCCESS)
+    return rc;
+
+  for (i = 0; i < meta->eh.shnum; ++i) {
+    ULONG n = states[i].size / sizeof(ULONG);
+    if (states[i].startup_kind == ARM_ELF_STARTUP_PREINIT)
+      pre_count += n;
+    else if (states[i].startup_kind == ARM_ELF_STARTUP_INIT)
+      init_count += n;
+    else if (states[i].startup_kind == ARM_ELF_STARTUP_FINI)
+      fini_count += n;
+  }
+
+  total_entries = pre_count + init_count + fini_count;
+  if (total_entries == 0)
+    return SUCCESS;
+  if (total_entries > 0xfffffffful / sizeof(ULONG))
+    return DE_NOMEM;
+
+  bytes = total_entries * sizeof(ULONG);
+  off = arm_elf_align_up(meta->cursor, sizeof(ULONG));
+  if (off == 0xfffffffful || off > 0xfffffffful - bytes)
+    return DE_NOMEM;
+  rc = arm_elf_ensure_capacity(meta, off + bytes);
+  if (rc != SUCCESS)
+    return rc;
+
+  meta->preinit_array_addr = (ULONG)(uintptr_t)ARM_PTR(
+      arm_elf_guest_ptr(base_seg, off));
+  rc = arm_elf_copy_startup_kind(fd, base_seg, meta,
+                                 ARM_ELF_STARTUP_PREINIT, off,
+                                 &meta->preinit_array_count);
+  if (rc != SUCCESS)
+    return rc;
+  off += meta->preinit_array_count * sizeof(ULONG);
+
+  meta->init_array_addr = (ULONG)(uintptr_t)ARM_PTR(
+      arm_elf_guest_ptr(base_seg, off));
+  rc = arm_elf_copy_startup_kind(fd, base_seg, meta,
+                                 ARM_ELF_STARTUP_INIT, off,
+                                 &meta->init_array_count);
+  if (rc != SUCCESS)
+    return rc;
+  off += meta->init_array_count * sizeof(ULONG);
+
+  meta->fini_array_addr = (ULONG)(uintptr_t)ARM_PTR(
+      arm_elf_guest_ptr(base_seg, off));
+  rc = arm_elf_copy_startup_kind(fd, base_seg, meta,
+                                 ARM_ELF_STARTUP_FINI, off,
+                                 &meta->fini_array_count);
+  if (rc != SUCCESS)
+    return rc;
+  off += meta->fini_array_count * sizeof(ULONG);
+
+  meta->cursor = off;
+  return SUCCESS;
+}
+
 
 static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
                                arm_elf_load_meta *meta, ULONG sym_index,
@@ -560,6 +851,16 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
       place = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg,
                                                 target_off + rel.offset));
       paddr = (ULONG)(uintptr_t)place;
+      /*
+       * Relocations are the useful fine-grained loader progress signal.
+       * Do not print every record: thousands of DOS console writes would make
+       * loading slower than the work being measured.
+       */
+      if (++meta->relocation_progress >= ARM_ELF_PROGRESS_RELOCS) {
+        dos_printf(".");
+        meta->relocation_progress = 0;
+      }
+
       switch (type) {
         case R_ARM_ABS32:
           *(ULONG *)place += sym_addr;
@@ -645,6 +946,7 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
   }
 
   state->offset = off;
+  state->size = sh.size;
   state->state = ARM_ELF_SEC_LOADING;
   meta->cursor = off + sh.size;
 
@@ -668,12 +970,8 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
     return rc;
   state->state = ARM_ELF_SEC_LOADED;
 
-  /*
-   * Visible loader progress.  A percentage would require computing the whole
-   * recursive dependency closure before loading it; one dot per newly loaded
-   * section is cheap and still distinguishes slow progress from a hang.
-   */
-  dos_printf(".");
+  /* 's' marks one completed newly loaded/relocated section. */
+  dos_printf("s");
   return SUCCESS;
 }
 
@@ -697,37 +995,54 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
 
   for (i = 0; i < count; ++i) {
     arm_elf32_sym sym;
+    BYTE name[64];
     UBYTE bind, type;
     int rc = arm_elf_read_symbol(fd, meta, i, &sym);
+
     if (rc != SUCCESS)
       return rc;
+
+    /*
+     * Root discovery used to be pathologically I/O-heavy: after reading one
+     * symbol entry it performed up to six independent seeks into .strtab,
+     * one for every candidate root name.  Large GCC ET_REL files contain
+     * thousands of symbols, so startup spent most of its time seeking rather
+     * than relocating.
+     *
+     * Read a candidate's name once and compare it locally against every root.
+     */
+    if ((i & 63u) == 63u)
+      dos_printf(".");
+
     bind = sym.info >> 4;
     type = sym.info & 0x0fu;
     if (type != STT_FUNC || (bind != STB_GLOBAL && bind != STB_WEAK))
       continue;
+    if (!arm_elf_symbol_name(fd, meta, &sym, name, sizeof(name)))
+      continue;
 
-    if (arm_elf_symbol_name_is(fd, meta, &sym, "_init")) {
+    if (strcmp((const char *)name, "_init") == 0) {
       if (bind == STB_GLOBAL)
         *init_idx = i;
       else
         weak_init = i;
-    } else if (arm_elf_symbol_name_is(fd, meta, &sym,
-                                      "__required_dos_api_verion")) {
+    } else if (strcmp((const char *)name,
+                      "__required_dos_api_verion") == 0) {
       if (bind == STB_GLOBAL)
         *req_idx = i;
-    } else if (arm_elf_symbol_name_is(fd, meta, &sym,
-                                      "__native_dos_process_requirements")) {
+    } else if (strcmp((const char *)name,
+                      "__native_dos_process_requirements") == 0) {
       if (bind == STB_GLOBAL)
         *requirements_idx = i;
-    } else if (arm_elf_symbol_name_is(fd, meta, &sym, "_fini")) {
+    } else if (strcmp((const char *)name, "_fini") == 0) {
       if (bind == STB_GLOBAL)
         *fini_idx = i;
       else
         weak_fini = i;
-    } else if (arm_elf_symbol_name_is(fd, meta, &sym, "main")) {
+    } else if (strcmp((const char *)name, "main") == 0) {
       if (bind == STB_GLOBAL)
         *main_idx = i;
-    } else if (arm_elf_symbol_name_is(fd, meta, &sym, "signal")) {
+    } else if (strcmp((const char *)name, "signal") == 0) {
       if (bind == STB_GLOBAL)
         *sig_idx = i;
     }
@@ -763,6 +1078,16 @@ typedef int (*arm_elf_req_ver_fn)(void);
 
 #define ARM_ELF_PROCESS_REQUIREMENTS_V1_SIZE 12u
 #define ARM_ELF_PROCESS_REQUIREMENTS_V2_SIZE 20u
+#define ARM_ELF_PROCESS_REQUIREMENTS_V3_SIZE 28u
+
+/*
+ * Keep native application stacks out of DOS memory without making the rest of
+ * PSRAM a kernel heap.  The fixed arena is excluded from every application's
+ * published PSRAM range, so nested native EXEC can safely consume it LIFO
+ * without colliding with a parent's application allocations.
+ */
+#define ARM_ELF_NATIVE_STACK_ARENA_SIZE (256u * 1024u)
+#define ARM_ELF_APP_PSRAM_BEGIN_OFFSET  0x00110000ul
 
 typedef struct __attribute__((aligned(4))) arm_elf_process_requirements {
   ULONG struct_size __attribute__((aligned(4)));
@@ -770,17 +1095,109 @@ typedef struct __attribute__((aligned(4))) arm_elf_process_requirements {
   ULONG dos_stack_size __attribute__((aligned(4)));
   ULONG assigned_native_stack_size __attribute__((aligned(4)));
   ULONG assigned_dos_stack_size __attribute__((aligned(4)));
+  ULONG app_psram_begin __attribute__((aligned(4)));
+  ULONG app_psram_end __attribute__((aligned(4)));
 } arm_elf_process_requirements;
 
 _Static_assert(sizeof(ULONG) == 4, "ARM ELF process ABI requires 32-bit ULONG");
 _Static_assert(__alignof__(arm_elf_process_requirements) == 4,
                "ARM ELF process requirements alignment");
 _Static_assert(sizeof(arm_elf_process_requirements) ==
-               ARM_ELF_PROCESS_REQUIREMENTS_V2_SIZE,
+               ARM_ELF_PROCESS_REQUIREMENTS_V3_SIZE,
                "ARM ELF process requirements layout");
 
 typedef arm_elf_process_requirements *
     (*arm_elf_requirements_fn)(void);
+
+/*
+ * Native stack arena.
+ *
+ * PSRAM_SIZE_BYTES already excludes the EMS backing store when LTEMS is
+ * enabled, so this arena is carved from the top of the application-visible
+ * PSRAM portion, not from EMS.  Every application receives an app_psram_end
+ * below the entire arena.  Stack lifetimes follow synchronous nested EXEC, so
+ * a LIFO allocator is sufficient and cannot fragment.
+ */
+static uintptr_t arm_elf_native_stack_cursor;
+
+static uintptr_t arm_elf_native_stack_arena_end(void)
+{
+  return (uintptr_t)PSRAM_BASE_ADDR + (uintptr_t)PSRAM_SIZE_BYTES;
+}
+
+static uintptr_t arm_elf_native_stack_arena_begin(void)
+{
+  return arm_elf_native_stack_arena_end() - ARM_ELF_NATIVE_STACK_ARENA_SIZE;
+}
+
+static int arm_elf_native_stack_acquire(ULONG size, uintptr_t *bottom,
+                                        uintptr_t *previous_cursor)
+{
+  uintptr_t arena_begin = arm_elf_native_stack_arena_begin();
+  uintptr_t cursor = arm_elf_native_stack_cursor;
+  uintptr_t next;
+
+  if (cursor == 0)
+    cursor = arm_elf_native_stack_arena_end();
+  if (size == 0 || size > cursor - arena_begin)
+    return DE_NOMEM;
+
+  next = (cursor - size) & ~(uintptr_t)7u;
+  if (next < arena_begin)
+    return DE_NOMEM;
+
+  *previous_cursor = cursor;
+  *bottom = next;
+  arm_elf_native_stack_cursor = next;
+  memset((void *)next, 0, size);
+  return SUCCESS;
+}
+
+static void arm_elf_native_stack_release(uintptr_t bottom,
+                                         uintptr_t previous_cursor)
+{
+  /* Native EXEC is synchronous; stack reservations must unwind in LIFO order. */
+  if (arm_elf_native_stack_cursor == bottom)
+    arm_elf_native_stack_cursor = previous_cursor;
+}
+
+/*
+ * Allocate the guest DOS stack as its own DOS-owned block.  Prefer UMB when
+ * available, then fall back to conventional memory.  FreeProcessMem() will
+ * later release it because the MCB owner is changed to the child PSP.
+ */
+static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
+{
+  UWORD paras = (UWORD)((meta->dos_stack_size + 15u) >> 4);
+  UWORD mcb_seg = 0;
+  UWORD largest = 0;
+  UBYTE old_umb_link = LoL->uppermem_link;
+  int rc;
+
+  if (paras == 0)
+    return DE_NOMEM;
+
+  DosUmbLink(1);
+  rc = DosMemAlloc(paras, FIRST_FIT_U, &mcb_seg, &largest);
+  DosUmbLink(old_umb_link);
+
+  if (rc != SUCCESS)
+    rc = DosMemAlloc(paras, FIRST_FIT, &mcb_seg, &largest);
+  if (rc != SUCCESS)
+    return rc;
+
+  meta->dos_stack_mcb = mcb_seg;
+  meta->dos_stack_seg = mcb_seg + 1;
+  memset(ARM_PTR(MK_FP(meta->dos_stack_seg, 0)), 0, meta->dos_stack_size);
+
+  {
+    mcb *block = (mcb *)ARM_PTR(MK_FP(mcb_seg, 0));
+    block->m_psp = child_psp;
+    memcpy(block->m_name, "ARMSTK  ", sizeof(block->m_name));
+  }
+
+  return SUCCESS;
+}
 
 /*
  * Run the startup ABI preflight on the kernel stack, before either application
@@ -856,6 +1273,22 @@ static void arm_elf_publish_process_requirements(arm_elf_load_meta *meta)
 
   requirements->assigned_native_stack_size = meta->native_stack_size;
   requirements->assigned_dos_stack_size = meta->dos_stack_size;
+
+  if (requirements->struct_size >= ARM_ELF_PROCESS_REQUIREMENTS_V3_SIZE) {
+    requirements->app_psram_begin =
+        (ULONG)((uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET);
+    requirements->app_psram_end = (ULONG)arm_elf_native_stack_arena_begin();
+  }
+
+  /*
+   * Temporary visible cross-check: DOOM prints the same object later.  If the
+   * values differ, the problem is no longer stack selection but object/image
+   * identity or a later overwrite.
+   */
+  dos_printf("ARM ELF: published stacks ARM=%lu DOS=%lu at %08lx\r\n",
+             requirements->assigned_native_stack_size,
+             requirements->assigned_dos_stack_size,
+             (ULONG)(uintptr_t)requirements);
 }
 
 static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
@@ -947,8 +1380,6 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   ULONG metadata_off;
   ULONG initial_cursor;
   ULONG final_end;
-  ULONG native_stack_off;
-  ULONG dos_stack_off;
   ULONG paras_long;
   ULONG req_idx, requirements_idx, init_idx, main_idx, fini_idx, sig_idx;
   UWORD alloc_mcb, asize = 0, load_seg;
@@ -1078,10 +1509,23 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (rc != SUCCESS)
     goto reloc_fail;
 
+  /*
+   * ET_REL has not passed through the normal final linker script.  Make the
+   * linker-owned startup array sections explicit roots and synthesize the
+   * contiguous arrays which crt startup code normally receives.
+   */
+  rc = arm_elf_build_startup_arrays(fd, load_seg, meta);
+  if (rc != SUCCESS) {
+    dos_printf("ARM ELF: cannot build startup init arrays\r\n");
+    goto reloc_fail;
+  }
+
   rc = arm_elf_preflight(meta);
   if (rc != SUCCESS)
     goto fail;
 
+  /* Finish the compact loader-progress line before verbose diagnostics. */
+  dos_printf("\r\n");
   dos_printf("ARM ELF: stacks native=%lu DOS=%lu, load reserve=%lu bytes\r\n",
              meta->native_stack_size, meta->dos_stack_size,
              meta->allocation_end);
@@ -1092,31 +1536,29 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     goto fail;
   }
 
-  dos_stack_off = arm_elf_align_up(meta->cursor, 16u);
-  if (dos_stack_off == 0xfffffffful ||
-      dos_stack_off > 0xfffffffful - meta->dos_stack_size) {
+  /*
+   * Stacks no longer consume the main ELF MCB:
+   *   - native ARM stack comes from the fixed PSRAM runtime arena;
+   *   - guest DOS stack is a separate DOS allocation (UMB first).
+   * The child image can therefore be shrunk immediately after argv.
+   */
+  final_end = arm_elf_align_up(meta->cursor, 16u);
+  if (final_end == 0xfffffffful) {
     rc = DE_NOMEM;
     goto fail;
   }
-  native_stack_off = arm_elf_align_up(dos_stack_off + meta->dos_stack_size, 8u);
-  if (native_stack_off == 0xfffffffful ||
-      native_stack_off > 0xfffffffful - meta->native_stack_size) {
-    rc = DE_NOMEM;
-    goto fail;
-  }
-  final_end = native_stack_off + meta->native_stack_size;
+
+  dos_printf("ARM ELF layout: image=%lu, ARM stack=%lu external, "
+             "DOS stack=%lu separate\r\n",
+             final_end, meta->native_stack_size, meta->dos_stack_size);
+
   rc = arm_elf_ensure_capacity(meta, final_end);
   if (rc != SUCCESS) {
-    dos_printf("ARM ELF: cannot grow guest block for stacks to %lu bytes\r\n",
+    dos_printf("ARM ELF: final image exceeds reserved guest block (%lu bytes)\r\n",
                final_end);
     goto fail;
   }
-  memset(ARM_PTR(arm_elf_guest_ptr(load_seg, dos_stack_off)), 0,
-         meta->dos_stack_size + meta->native_stack_size);
-  meta->dos_stack_off = dos_stack_off;
-  meta->native_stack_off = native_stack_off;
   final_paras = (UWORD)((final_end + 15u) >> 4);
-
   /* Trim any paragraph tail left by incremental growth.  No loaded section
      moves, so all absolute and PC-relative relocations retain their addresses. */
   rc = DosMemChange(load_seg, final_paras, NULL);
@@ -1136,15 +1578,18 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   fcbcode = patchPSP(alloc_mcb, env_mcb, exp, namep);
   (void)fcbcode;
 
-  /* Terminate the section-progress line before application output begins. */
-  dos_printf("\r\n");
+  rc = arm_elf_alloc_dos_stack(meta, load_seg);
+  if (rc != SUCCESS) {
+    dos_printf("ARM ELF: cannot allocate %lu-byte DOS stack\r\n",
+               meta->dos_stack_size);
+    goto fail;
+  }
 
-  CfgDbgPrintf(("ARM ELF loaded: psp=%04x native_stack=%08lx size=%lu "
-                "argc=%u req=%08lx init=%08lx main=%08lx fini=%08lx sig=%08lx\n",
-                load_seg,
-                (ULONG)(uintptr_t)ARM_PTR(arm_elf_guest_ptr(
-                    load_seg, native_stack_off + meta->native_stack_size)),
-                final_end, (unsigned)meta->argc, meta->required_api_addr,
+  CfgDbgPrintf(("ARM ELF loaded: psp=%04x size=%lu argc=%u "
+                "DOS-stack=%04x:0000 req=%08lx init=%08lx main=%08lx "
+                "fini=%08lx sig=%08lx\n",
+                load_seg, final_end, (unsigned)meta->argc,
+                meta->dos_stack_seg, meta->required_api_addr,
                 meta->init_addr, meta->main_addr, meta->fini_addr,
                 meta->signal_addr));
   return exec_run_arm_elf(load_seg, meta);
@@ -1153,6 +1598,8 @@ reloc_fail:
   dos_printf("ARM ELF: dependency loading/relocation failed, DOS error %d\r\n",
              (int)rc);
 fail:
+  if (meta != NULL && meta->dos_stack_mcb != 0)
+    DosMemFree(meta->dos_stack_mcb);
   DosMemFree(alloc_mcb);
   DosMemFree(env_mcb);
   DosCloseSft(fd, FALSE);
@@ -1862,19 +2309,63 @@ void __attribute__((naked, noreturn)) arm_elf_process_exit(int status)
       "bx   r1\n");
 }
 
+typedef void (*arm_elf_array_fn)(void);
+
+static void arm_elf_run_init_array(ULONG addr, ULONG count)
+{
+  ULONG i;
+  arm_elf_array_fn *array = (arm_elf_array_fn *)(uintptr_t)addr;
+
+  for (i = 0; i < count; ++i) {
+    arm_elf_array_fn fn = array[i];
+    if (fn != NULL && (uintptr_t)fn != ~(uintptr_t)0)
+      fn();
+  }
+}
+
+static void arm_elf_run_fini_array_reverse(ULONG addr, ULONG count)
+{
+  arm_elf_array_fn *array = (arm_elf_array_fn *)(uintptr_t)addr;
+
+  while (count != 0) {
+    arm_elf_array_fn fn = array[--count];
+    if (fn != NULL && (uintptr_t)fn != ~(uintptr_t)0)
+      fn();
+  }
+}
+
 static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
 {
   void *fini_ctx = NULL;
   int result;
 
-  if (meta->init_addr != 0)
-    fini_ctx = ((arm_elf_init_fn)(uintptr_t)meta->init_addr)();
-
   /*
-   * _init may have restored the application's original .data contents.
-   * Publish loader-owned output fields only now, immediately before main().
+   * Standard final-link/crt startup semantics:
+   *   preinit_array -> init_array -> optional application _init -> main.
+   * Pico SDK 2.x runtime initializers and C++ constructors are registered via
+   * these arrays.  _init remains a weak/optional user hook, not a substitute
+   * for the standard linker-created mechanism.
    */
+  dos_printf("ARM ELF startup: preinit count=%lu\r\n",
+             meta->preinit_array_count);
+  arm_elf_run_init_array(meta->preinit_array_addr, meta->preinit_array_count);
+  dos_printf("ARM ELF startup: preinit done\r\n");
+
+  dos_printf("ARM ELF startup: init_array count=%lu\r\n",
+             meta->init_array_count);
+  arm_elf_run_init_array(meta->init_array_addr, meta->init_array_count);
+  dos_printf("ARM ELF startup: init_array done\r\n");
+
+  if (meta->init_addr != 0) {
+    dos_printf("ARM ELF startup: _init %08lx\r\n", meta->init_addr);
+    fini_ctx = ((arm_elf_init_fn)(uintptr_t)meta->init_addr)();
+    dos_printf("ARM ELF startup: _init done\r\n");
+  } else {
+    dos_printf("ARM ELF startup: no _init\r\n");
+  }
+
   arm_elf_publish_process_requirements(meta);
+  dos_printf("ARM ELF startup: entering main %08lx\r\n", meta->main_addr);
 
   /*
    * Keep the recovery SP in this process's metadata, not in the application.
@@ -1895,8 +2386,14 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
      that is explicitly meant to remain resident.  The same rule also
      preserves normal INT 21h/4Ch semantics for native applications that
      choose to terminate through DOS rather than by returning from main(). */
-  if (!terminate_requested() && meta->fini_addr != 0)
-    ((arm_elf_fini_fn)(uintptr_t)meta->fini_addr)(fini_ctx);
+  if (!terminate_requested()) {
+    if (meta->fini_addr != 0)
+      ((arm_elf_fini_fn)(uintptr_t)meta->fini_addr)(fini_ctx);
+
+    /* Standard fini_array execution is reverse registration order. */
+    arm_elf_run_fini_array_reverse(meta->fini_array_addr,
+                                   meta->fini_array_count);
+  }
 
   return result;
 }
@@ -1963,15 +2460,28 @@ static COUNT exec_run_process(const struct exec_process_start *start)
   if (start->kind == EXEC_PROCESS_ARM_ELF)
   {
     arm_elf_load_meta *meta = start->arm_elf;
-    uintptr_t stack_bottom = (uintptr_t)ARM_PTR(arm_elf_guest_ptr(
-        start->child_psp, meta->native_stack_off));
-    uintptr_t stack_top = stack_bottom + meta->native_stack_size;
+    uintptr_t stack_bottom;
+    uintptr_t stack_top;
+    uintptr_t previous_stack_cursor;
     int exit_code;
+
+    if (arm_elf_native_stack_acquire(meta->native_stack_size, &stack_bottom,
+                                     &previous_stack_cursor) != SUCCESS) {
+      dos_printf("ARM ELF: native PSRAM stack arena exhausted (%lu bytes)\r\n",
+                 meta->native_stack_size);
+      exec_leave_child(saved, start->child_psp);
+      return DE_NOMEM;
+    }
+    meta->native_stack_addr = (ULONG)stack_bottom;
+    stack_top = stack_bottom + meta->native_stack_size;
 
     diag_native_code_enter();
     exit_code = arm_elf_call_on_stack(meta, stack_top, stack_bottom,
                                       arm_elf_run_body);
     diag_native_code_leave();
+
+    arm_elf_native_stack_release(stack_bottom, previous_stack_cursor);
+    meta->native_stack_addr = 0;
 
     /* Returning from main() is the native equivalent of INT 21h/4Ch,
        but only if the application has not already requested termination
@@ -2030,8 +2540,8 @@ static COUNT exec_run_arm_elf(UWORD child_psp_seg,
   struct exec_process_start start;
 
   start.entry = MK_FP(child_psp_seg, 0);
-  start.stack = arm_elf_guest_ptr(
-      child_psp_seg, meta->dos_stack_off + meta->dos_stack_size);
+  start.stack = MK_FP(meta->dos_stack_seg,
+                      (UWORD)meta->dos_stack_size);
   start.dses = child_psp_seg;
   start.ax_bx = 0;
   start.child_psp = child_psp_seg;
