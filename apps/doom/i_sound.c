@@ -43,6 +43,7 @@ extern int _wp11, _wp12, _wp13, _wp14, _wp15, _wp16, _wp17, _wp18, _wp19;
 */
 
 static int tsm_ID;
+static boolean i_timer_started;
 
 void I_StartupTimer (void)
 {
@@ -57,13 +58,18 @@ void I_StartupTimer (void)
 	{
 		I_Error("Can't register 35 Hz timer w/ DMX library");
 	}
+	i_timer_started = true;
 #endif
 }
 
 void I_ShutdownTimer (void)
 {
+	if (!i_timer_started)
+		return;
+
 	TSM_DelService(tsm_ID);
 	TSM_Remove();
+	i_timer_started = false;
 }
 #endif
 
@@ -773,6 +779,8 @@ void I_sndArbitrateCards(void)
 
 // inits all sound stuff
 
+static boolean i_dmx_started;
+
 void I_StartupSound (void)
 {
   int rc, i;
@@ -838,6 +846,7 @@ void I_StartupSound (void)
 	fprintf(stderr, "calling DMX_Init\n");
 	rc = DMX_Init(SND_TICRATE, SND_MAXSONGS, dmxCodes[snd_MusicDevice],
 		dmxCodes[snd_SfxDevice]);
+	i_dmx_started = true;
   }
   else
 	  rc = 0;
@@ -851,6 +860,7 @@ void I_StartupSound (void)
   printf("  calling DMX_Init\n");
   rc = DMX_Init(SND_TICRATE, SND_MAXSONGS, dmxCodes[snd_MusicDevice],
 	dmxCodes[snd_SfxDevice]);
+  i_dmx_started = true;
 
   if (devparm)
 	printf("  DMX_Init() returned %d\n", rc);
@@ -862,18 +872,40 @@ void I_StartupSound (void)
 
 void I_ShutdownSound (void)
 {
+  /*
+   * I_Error() is legal during early startup.  In particular R_Init() runs
+   * before I_Init()/I_StartupSound(), so shutdown must not assume that DMX or
+   * its timer service exists yet.
+   */
+  if (!i_dmx_started)
+	return;
+
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
   S_PauseSound();
   {
 	int s;
 	extern volatile int ticcount;
-	for (s=ticcount + 30; s != ticcount ; );
+
+	s = ticcount + 30;
+	while (s != ticcount)
+	{
+#ifdef ELF_MODE
+	  /*
+	   * Original DOS advances ticcount asynchronously from the DMX timer IRQ.
+	   * Native ELF uses the cooperative TSM backend, so a busy wait must pump
+	   * it explicitly or ticcount can never advance.
+	   */
+	  TSM_Yield();
+#endif
+	}
   }
 #endif
 #if (APPVER_DOOMREV < AV_DR_DM12)
   if (snd_MusicAvail || snd_SfxAvail)
 #endif
   DMX_DeInit();
+
+  i_dmx_started = false;
 }
 
 void I_SetChannels(int channels)

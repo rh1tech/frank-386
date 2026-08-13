@@ -126,6 +126,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 
 /* Sparse progress: enough activity to see that a large ET_REL still moves. */
 #define ARM_ELF_PROGRESS_RELOCS  32u
+#define ARM_ELF_LONG_JOB_US        2000000ul
 
 #pragma pack(push, 1)
 typedef struct arm_elf32_ehdr {
@@ -207,6 +208,9 @@ typedef struct arm_elf_load_meta {
   ULONG fini_array_addr;
   ULONG fini_array_count;
   ULONG relocation_progress;
+  ULONG loader_started_us;
+  UBYTE is_long_running_job;
+  UBYTE loader_progress_reserved[3];
   ULONG argv_addr;
   ULONG native_stack_addr;
   ULONG native_main_sp;
@@ -800,6 +804,47 @@ static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
   return SUCCESS;
 }
 
+/*
+ * Compact loader progress is also a cooperative cancellation/service point.
+ *
+ * pc_service() lets host keyboard/device state advance while the native ELF
+ * loader owns core0.  ndread() peeks the DOS console without blocking; when
+ * Ctrl+C is pending, consume exactly that character and abort the EXEC load.
+ *
+ * Do not route this through handle_break()/INT 23h: the child process has not
+ * started yet, so invoking the current process's INT 23h would incorrectly
+ * deliver the break to the parent which is synchronously waiting in EXEC.
+ */
+static int arm_elf_loader_progress(arm_elf_load_meta *meta,
+                                   const char *marker)
+{
+  int c;
+
+  /*
+   * Service devices and poll Ctrl+C from the first loader iteration.  Only
+   * visual progress is delayed, so fast native programs do not print a line
+   * of dots at all.
+   */
+  pc_service(pc);
+
+  if (!meta->is_long_running_job) {
+    ULONG elapsed = get_uticks() - meta->loader_started_us;
+    if (elapsed >= ARM_ELF_LONG_JOB_US)
+      meta->is_long_running_job = TRUE;
+  }
+
+  if (meta->is_long_running_job)
+    dos_printf("%s", marker);
+
+  c = ndread(&LoL->syscon);
+  if (c != CTL_C)
+    return FALSE;
+
+  (void)read_char_stdin(FALSE);
+  dos_printf("^C\r\n");
+  return TRUE;
+}
+
 static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
                                              arm_elf_load_meta *meta,
                                              UWORD sec_num,
@@ -857,8 +902,9 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
        * loading slower than the work being measured.
        */
       if (++meta->relocation_progress >= ARM_ELF_PROGRESS_RELOCS) {
-        dos_printf(".");
         meta->relocation_progress = 0;
+        if (arm_elf_loader_progress(meta, "."))
+          return DE_ACCESS;
       }
 
       switch (type) {
@@ -971,7 +1017,8 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
   state->state = ARM_ELF_SEC_LOADED;
 
   /* 's' marks one completed newly loaded/relocated section. */
-  dos_printf("s");
+  if (arm_elf_loader_progress(meta, "s"))
+    return DE_ACCESS;
   return SUCCESS;
 }
 
@@ -1011,8 +1058,8 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
      *
      * Read a candidate's name once and compare it locally against every root.
      */
-    if ((i & 63u) == 63u)
-      dos_printf(".");
+    if ((i & 63u) == 63u && arm_elf_loader_progress(meta, "."))
+      return DE_ACCESS;
 
     bind = sym.info >> 4;
     type = sym.info & 0x0fu;
@@ -1285,10 +1332,6 @@ static void arm_elf_publish_process_requirements(arm_elf_load_meta *meta)
    * values differ, the problem is no longer stack selection but object/image
    * identity or a later overwrite.
    */
-  dos_printf("ARM ELF: published stacks ARM=%lu DOS=%lu at %08lx\r\n",
-             requirements->assigned_native_stack_size,
-             requirements->assigned_dos_stack_size,
-             (ULONG)(uintptr_t)requirements);
 }
 
 static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
@@ -1463,6 +1506,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   /* Persistent loader metadata belongs to the child allocation. */
   meta = (arm_elf_load_meta *)ARM_PTR(arm_elf_guest_ptr(load_seg, metadata_off));
   memset(meta, 0, metadata_size);
+  meta->loader_started_us = get_uticks();
   meta->eh = eh;
   meta->shnum = eh.shnum;
   meta->cursor = initial_cursor;
@@ -1524,12 +1568,9 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (rc != SUCCESS)
     goto fail;
 
-  /* Finish the compact loader-progress line before verbose diagnostics. */
-  dos_printf("\r\n");
-  dos_printf("ARM ELF: stacks native=%lu DOS=%lu, load reserve=%lu bytes\r\n",
-             meta->native_stack_size, meta->dos_stack_size,
-             meta->allocation_end);
-
+  /* Do not emit a blank line for loads completed before the threshold. */
+  if (meta->is_long_running_job)
+    dos_printf("\r\n");
   rc = arm_elf_build_argv(load_seg, meta, exp, namep);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot build argv in child memory\r\n");
@@ -1547,10 +1588,6 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     rc = DE_NOMEM;
     goto fail;
   }
-
-  dos_printf("ARM ELF layout: image=%lu, ARM stack=%lu external, "
-             "DOS stack=%lu separate\r\n",
-             final_end, meta->native_stack_size, meta->dos_stack_size);
 
   rc = arm_elf_ensure_capacity(meta, final_end);
   if (rc != SUCCESS) {
@@ -2265,17 +2302,7 @@ arm_elf_call_main(arm_elf_main_fn main_fn, int argc, char **argv)
       "mov  r1, r2\n"  /* r1 = argv */
       "blx  r3\n"
 
-      /*
-       * Common return point for both paths:
-       *   - ordinary main() return leaves its result in r0;
-       *   - arm_elf_process_exit(status) keeps status in r0, restores the
-       *     saved SP above, and branches directly to this label.
-       */
-      ".global arm_elf_main_return\n"
-      ".type arm_elf_main_return, %function\n"
-      ".thumb_func\n"
-      "arm_elf_main_return:\n"
-
+      /* Ordinary main() return: restore the wrapper's saved state. */
       "add  sp, #4\n"
       "pop  {r4-r7}\n"
       "mov  r8, r4\n"
@@ -2293,20 +2320,35 @@ arm_elf_call_main(arm_elf_main_fn main_fn, int argc, char **argv)
  * the return value of main(), and arm_elf_run_body() resumes its normal path
  * (including _fini()).
  *
- * Only SP is restored here.  MSPLIM/PRIMASK still belong to the native stack
- * context and are restored later by arm_elf_call_on_stack(), exactly as on a
- * normal main() return.
+ * The wrapper's saved registers/LR are restored here after switching back to
+ * its recovery SP.  MSPLIM/PRIMASK still belong to the native stack context
+ * and are restored later by arm_elf_call_on_stack(), exactly as on a normal
+ * main() return.
  */
 void __attribute__((naked, noreturn)) arm_elf_process_exit(int status)
 {
   __asm volatile (
-      /* r0 == status; keep it untouched. */
+      /*
+       * r0 == status and must survive unchanged: it becomes main()'s return
+       * value.  Restore the exact recovery SP recorded by arm_elf_call_main()
+       * and execute that wrapper's epilogue directly.
+       *
+       * Keeping the epilogue here avoids a cross-function branch to a global
+       * assembler label and therefore removes any dependence on the linker
+       * preserving the Thumb-function bit for that synthetic symbol.
+       */
       "ldr  r1, =arm_elf_active_main_sp\n"
       "ldr  r1, [r1]\n" /* r1 = &meta->native_main_sp */
       "ldr  r1, [r1]\n" /* r1 = saved recovery SP */
       "mov  sp, r1\n"   /* discard all application frames below main */
-      "ldr  r1, =arm_elf_main_return\n"
-      "bx   r1\n");
+
+      "add  sp, #4\n"
+      "pop  {r4-r7}\n"
+      "mov  r8, r4\n"
+      "mov  r9, r5\n"
+      "mov  r10, r6\n"
+      "mov  r11, r7\n"
+      "pop  {r4-r7, pc}\n");
 }
 
 typedef void (*arm_elf_array_fn)(void);
@@ -2346,26 +2388,13 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
    * these arrays.  _init remains a weak/optional user hook, not a substitute
    * for the standard linker-created mechanism.
    */
-  dos_printf("ARM ELF startup: preinit count=%lu\r\n",
-             meta->preinit_array_count);
   arm_elf_run_init_array(meta->preinit_array_addr, meta->preinit_array_count);
-  dos_printf("ARM ELF startup: preinit done\r\n");
-
-  dos_printf("ARM ELF startup: init_array count=%lu\r\n",
-             meta->init_array_count);
   arm_elf_run_init_array(meta->init_array_addr, meta->init_array_count);
-  dos_printf("ARM ELF startup: init_array done\r\n");
 
-  if (meta->init_addr != 0) {
-    dos_printf("ARM ELF startup: _init %08lx\r\n", meta->init_addr);
+  if (meta->init_addr != 0)
     fini_ctx = ((arm_elf_init_fn)(uintptr_t)meta->init_addr)();
-    dos_printf("ARM ELF startup: _init done\r\n");
-  } else {
-    dos_printf("ARM ELF startup: no _init\r\n");
-  }
 
   arm_elf_publish_process_requirements(meta);
-  dos_printf("ARM ELF startup: entering main %08lx\r\n", meta->main_addr);
 
   /*
    * Keep the recovery SP in this process's metadata, not in the application.
@@ -2399,8 +2428,9 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
 }
 
 /* RP2350 core0 normally runs with MSPLIM guarding its dedicated SRAM stack.
-   Native DOS applications deliberately run on a stack inside their own MCB,
-   so both SP and MSPLIM must move as one atomic transition.  IRQs are masked
+   Native DOS applications run on their process stack in the reserved PSRAM
+   stack arena, so both SP and MSPLIM must move as one atomic transition.
+   IRQs are masked
    only across the two transitions; the application itself runs with the
    caller's original PRIMASK. */
 static int __attribute__((naked, noinline))
@@ -2482,6 +2512,23 @@ static COUNT exec_run_process(const struct exec_process_start *start)
 
     arm_elf_native_stack_release(stack_bottom, previous_stack_cursor);
     meta->native_stack_addr = 0;
+
+    /*
+     * A TSR keeps its resident ELF image, but neither startup stack is part of
+     * resident state.  The native stack above has already returned to the
+     * LIFO PSRAM arena.  The guest DOS stack is a separate child-owned MCB;
+     * free it explicitly because exec_release_child() intentionally skips
+     * FreeProcessMem() for exit type 3.
+     *
+     * Resident callbacks execute in the context/stack of the process they
+     * intercept, so retaining either startup stack would only leak memory.
+     */
+    if (terminate_requested() && term_exit_type == 3 &&
+        meta->dos_stack_mcb != 0) {
+      DosMemFree(meta->dos_stack_mcb);
+      meta->dos_stack_mcb = 0;
+      meta->dos_stack_seg = 0;
+    }
 
     /* Returning from main() is the native equivalent of INT 21h/4Ch,
        but only if the application has not already requested termination
