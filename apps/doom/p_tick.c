@@ -661,9 +661,14 @@ void P_AddThinker (thinker_t *thinker)
 ===============
 */
 
+void P_RemovedThinkerMarker (thinker_t *thinker)
+{
+	(void)thinker;
+}
+
 void P_RemoveThinker (thinker_t *thinker)
 {
-	thinker->function = (think_t)-1;
+	thinker->function = P_RemovedThinkerMarker;
 }
 
 /*
@@ -696,7 +701,7 @@ void P_RunThinkers (void)
 	currentthinker = thinkercap.next;
 	while (currentthinker != &thinkercap)
 	{
-		if (currentthinker->function == (think_t)-1)
+		if (currentthinker->function == P_RemovedThinkerMarker)
 		{	// time to remove it
 			currentthinker->next->prev = currentthinker->prev;
 			currentthinker->prev->next = currentthinker->next;

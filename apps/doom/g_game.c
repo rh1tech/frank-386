@@ -69,13 +69,13 @@ boolean         sendsave;               // send a save event next tic
 boolean         usergame;               // ok to save / end game
 
 boolean         timingdemo;             // if true, exit with report on completion
-boolean         nodrawers;              // for comparative timing purposes 
-boolean         noblit;                 // for comparative timing purposes 
+int             nodrawers;              // M_CheckParm() result; nonzero means enabled
+int             noblit;                 // M_CheckParm() result; nonzero means enabled
 int             starttime;              // for comparative timing purposes
 
 boolean         viewactive;
 
-boolean         deathmatch;             // only if started as net death
+int             deathmatch;             // 0 = off, 1 = deathmatch, 2 = altdeath
 boolean         netgame;                // only true if packets are broadcast
 boolean         playeringame[MAXPLAYERS];
 player_t        players[MAXPLAYERS];

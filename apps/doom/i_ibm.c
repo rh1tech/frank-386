@@ -230,7 +230,7 @@ int             ticcount;
 union REGS regs;
 struct SREGS segregs;
 
-boolean novideo; // if true, stay in text mode for debugging
+int novideo; // M_CheckParm() result; nonzero means stay in text mode
 
 #define KBDQUESIZE 32
 byte keyboardque[KBDQUESIZE];

@@ -79,13 +79,13 @@ boolean tnt;
 #endif
 #endif
 
-boolean devparm;            // started game with -devparm
+int devparm;                // M_CheckParm() result; nonzero means enabled
 #if (APPVER_DOOMREV >= AV_DR_DM12)
-boolean nomonsters;			// checkparm of -nomonsters
-boolean respawnparm;			// checkparm of -respawn
+int nomonsters;				// M_CheckParm() result; nonzero means enabled
+int respawnparm;				// M_CheckParm() result; nonzero means enabled
 #endif
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
-boolean fastparm;				// checkparm of -fastparm
+int fastparm;					// M_CheckParm() result; nonzero means enabled
 #endif
 
 boolean drone;
@@ -685,7 +685,7 @@ fixed_t FixedDiv (fixed_t a, fixed_t b)
 */
 
 // wipegamestate can be set to -1 to force a wipe on the next draw
-gamestate_t wipegamestate = GS_DEMOSCREEN;
+int wipegamestate = GS_DEMOSCREEN;
 extern boolean setsizeneeded;
 extern int showMessages;
 void R_ExecuteSetViewSize (void);
@@ -696,7 +696,7 @@ void D_Display (void)
 	static boolean menuactivestate = false;
 	static boolean inhelpscreensstate = false;
 	static boolean fullscreen = false;
-	static gamestate_t oldgamestate = -1;
+	static int oldgamestate = -1;
 	static int borderdrawcount;
 	int nowtime;
 	int tics;

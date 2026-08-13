@@ -485,7 +485,7 @@ boolean P_BlockThingsIterator (int x, int y, boolean(*func)(mobj_t*) )
 intercept_t		intercepts[MAXINTERCEPTS], *intercept_p;
 
 divline_t 	trace;
-boolean 	earlyout;
+int 			earlyout;
 int			ptflags;
 
 /*

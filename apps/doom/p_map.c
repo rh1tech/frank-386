@@ -280,7 +280,7 @@ boolean PIT_CheckLine(line_t *ld)
 boolean PIT_CheckThing (mobj_t *thing)
 {
 	fixed_t		blockdist;
-	boolean		solid;
+	int			solid;
 	int			damage;
 
 	if (!(thing->flags & (MF_SOLID|MF_SPECIAL|MF_SHOOTABLE) ))

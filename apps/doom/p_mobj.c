@@ -420,13 +420,13 @@ void P_MobjThinker (mobj_t *mobj)
 	if (mobj->momx || mobj->momy || (mobj->flags&MF_SKULLFLY) )
 	{
 		P_XYMovement (mobj);
-		if (mobj->thinker.function == (think_t)-1)
+		if (mobj->thinker.function == P_RemovedThinkerMarker)
 			return;		// mobj was removed
 	}
 	if ( (mobj->z != mobj->floorz) || mobj->momz )
 	{
 		P_ZMovement (mobj);
-		if (mobj->thinker.function == (think_t)-1)
+		if (mobj->thinker.function == P_RemovedThinkerMarker)
 			return;		// mobj was removed
 	}
 

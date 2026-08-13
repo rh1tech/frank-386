@@ -612,11 +612,11 @@ extern int _dp1, _dp2, _dp3, _dp4, _dp5, _dp6, _dp7; // align for d_main.c
 #endif
 
 #if (APPVER_DOOMREV >= AV_DR_DM12)
-extern boolean nomonsters; // checkparm of -nomonsters
-extern boolean respawnparm; // checkparm of -respawn
+extern int nomonsters; // M_CheckParm() result; nonzero means enabled
+extern int respawnparm; // M_CheckParm() result; nonzero means enabled
 #endif
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
-extern boolean fastparm; // checkparm of -fastparm
+extern int fastparm; // M_CheckParm() result; nonzero means enabled
 #endif
 
 extern boolean shareware; // true if main WAD is the shareware version
@@ -632,7 +632,7 @@ extern boolean tnt;
 #endif
 #endif
 
-extern boolean devparm; // started game with -devparm
+extern int devparm; // M_CheckParm() result; nonzero means enabled
 
 #if (APPVER_DOOMREV >= AV_DR_DM12)
 extern int _gp1, _gp2, _gp3, _gp4, _gp5, _gp6, _gp7, _gp8; // align for g_game.c
@@ -644,7 +644,7 @@ extern int _gp17, _gp18; // align for g_game.c
 extern int _gp19;
 #endif
 
-extern boolean deathmatch; // only if started as net death
+extern int deathmatch; // 0 = off, 1 = deathmatch, 2 = altdeath
 
 extern boolean netgame; // only true if >1 player
 
@@ -728,7 +728,7 @@ extern int viewheight;
 
 extern int mouseSensitivity;
 
-extern gamestate_t wipegamestate;
+extern int wipegamestate; // may be -1 to force a wipe
 
 extern boolean precache; // if true, load all graphics at level load
 
@@ -748,8 +748,8 @@ extern int _dp12;
 
 extern boolean automapactive;
 extern boolean menuactive;
-extern boolean nodrawers;
-extern boolean noblit;
+extern int nodrawers;
+extern int noblit;
 extern boolean viewactive;
 extern boolean singledemo; // quit after playing a demo from cmdline
 extern boolean modifiedgame;
