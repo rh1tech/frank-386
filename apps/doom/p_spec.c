@@ -94,8 +94,13 @@ void P_InitPicAnims (void)
 		{
 			if (W_CheckNumForName(animdefs[i].startname) == -1)
 				continue;
+			printf("P_InitPicAnims: flat[%d] start=%.8s end=%.8s\n",
+				i, animdefs[i].startname, animdefs[i].endname);
+			fputs("P_InitPicAnims: calling end\n", stdout);
 			lastanim->picnum = R_FlatNumForName (animdefs[i].endname);
+			fputs("P_InitPicAnims: end ok; calling start\n", stdout);
 			lastanim->basepic = R_FlatNumForName (animdefs[i].startname);
+			fputs("P_InitPicAnims: start ok\n", stdout);
 		}
 		lastanim->istexture = animdefs[i].istexture;
 		lastanim->numpics = lastanim->picnum - lastanim->basepic + 1;

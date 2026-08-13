@@ -95,7 +95,9 @@ fixed_t		cachedystep[SCREENHEIGHT];
 
 void R_InitSkyMap (void)
 {
+	fputs("R_InitSkyMap: calling R_FlatNumForName(F_SKY1)\n", stdout);
 	skyflatnum = R_FlatNumForName ("F_SKY1");
+	fputs("R_InitSkyMap: F_SKY1 ok\n", stdout);
 	skytexturemid = 100*FRACUNIT;
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
 	skyiscale = FRACUNIT;

@@ -42,7 +42,7 @@ typedef struct
 //
 typedef struct
 {
-	boolean	istexture;		// if false, it's a flat
+	int		istexture;		// if false, it's a flat
 	char	endname[9];
 	char	startname[9];
 	int		speed;

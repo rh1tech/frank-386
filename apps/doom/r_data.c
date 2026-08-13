@@ -564,6 +564,33 @@ int	R_FlatNumForName (char *name)
 	i = W_CheckNumForName (name);
 	if (i == -1)
 	{
+#ifdef ELF_MODE
+		static const char hex[] = "0123456789ABCDEF";
+		char hexname[8*3];
+		char printable[9];
+		int j;
+
+		for (j = 0; j < 8; j++)
+		{
+			unsigned char c = (unsigned char)name[j];
+
+			hexname[j*3+0] = hex[c >> 4];
+			hexname[j*3+1] = hex[c & 15];
+			hexname[j*3+2] = (j == 7) ? 0 : ' ';
+			printable[j] = (c >= 32 && c <= 126) ? (char)c : '.';
+		}
+		printable[8] = 0;
+
+		/*
+		 * Keep this diagnostic independent of printf/vprintf formatting.
+		 * A broken %s path is one of the possibilities being tested.
+		 */
+		fputs ("R_FlatNumForName: bytes=", stdout);
+		fputs (hexname, stdout);
+		fputs (" printable=\"", stdout);
+		fputs (printable, stdout);
+		fputs ("\"\n", stdout);
+#endif
 		namet[8] = 0;
 		memcpy (namet, name,8);
 		I_Error ("R_FlatNumForName: %s not found",namet);
