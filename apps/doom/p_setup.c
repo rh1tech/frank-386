@@ -197,38 +197,6 @@ void P_LoadSectors (int lump)
 	sectors = Z_Malloc (numsectors*sizeof(sector_t),PU_LEVEL,0);	
 	memset (sectors, 0, numsectors*sizeof(sector_t));
 	data = W_CacheLumpNum (lump,PU_STATIC);
-#ifdef ELF_MODE
-	{
-		int j;
-		printf("P_LoadSectors: lump=%d pos=%d size=%d numsectors=%d name=",
-			lump, lumpinfo[lump].position, lumpinfo[lump].size, numsectors);
-		for (j = 0; j < 8; ++j)
-		{
-			unsigned char c = (unsigned char)lumpinfo[lump].name[j];
-			putchar((c >= 32 && c <= 126) ? c : '.');
-		}
-		printf("\nP_LoadSectors: raw=");
-		for (j = 0; j < W_LumpLength(lump) && j < 52; ++j)
-			printf("%02X%s", (unsigned)data[j], ((j & 15) == 15) ? "\nP_LoadSectors: raw=" : " ");
-		putchar('\n');
-
-		printf("P_LoadSectors: directory around SECTORS:\n");
-		for (j = lump - 2; j <= lump + 2; ++j)
-		{
-			int k;
-			if (j < 0 || j >= numlumps)
-				continue;
-			printf("  %d pos=%d size=%d name=",
-				j, lumpinfo[j].position, lumpinfo[j].size);
-			for (k = 0; k < 8; ++k)
-			{
-				unsigned char c = (unsigned char)lumpinfo[j].name[k];
-				putchar((c >= 32 && c <= 126) ? c : '.');
-			}
-			putchar('\n');
-		}
-	}
-#endif
 	
 	ms = (mapsector_t *)data;
 	ss = sectors;
@@ -561,9 +529,9 @@ void P_GroupLines (void)
 				M_AddToBox (bbox, li->v2->x, li->v2->y);
 			}
 		}
-		if (linebuffer - sector->lines != sector->linecount)
+		if (linebuffer - sector->lines != sector->linecount) {
 			I_Error ("P_GroupLines: miscounted");
-			
+		}
 		// set the degenmobj_t to the middle of the bounding box
 		sector->soundorg.x = (bbox[BOXRIGHT]+bbox[BOXLEFT])/2;
 		sector->soundorg.y = (bbox[BOXTOP]+bbox[BOXBOTTOM])/2;

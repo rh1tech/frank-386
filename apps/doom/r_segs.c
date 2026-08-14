@@ -28,6 +28,7 @@ extern int _wp11, _wp12, _wp13, _wp14, _wp15, _wp16, _wp17, _wp18;
 #endif
 #include "R_local.h"
 
+
 // OPTIMIZE: closed two sided lines as single sided
 
 boolean         segtextured;    // true if any of the segs textures might be vis
@@ -230,6 +231,7 @@ void R_RenderSegLoop (void)
 				floorplane->bottom[rw_x] = bottom;
 			}
 		}
+
 
 //
 // texturecolumn and lighting are independent of wall tiers
@@ -658,7 +660,6 @@ void R_StoreWallRange (int start, int stop)
 		ceilingplane = R_CheckPlane (ceilingplane, rw_x, rw_stopx-1);
 	if (markfloor)
 		floorplane = R_CheckPlane (floorplane, rw_x, rw_stopx-1);
-
 	R_RenderSegLoop ();
 
 //

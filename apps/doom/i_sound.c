@@ -438,7 +438,18 @@ void I_StopSong(int handle)
   {
 	int s;
 	extern volatile int ticcount;
-	for (s=ticcount ; ticcount - s < 10 ; );
+	s = ticcount;
+	while (ticcount - s < 10)
+	{
+#ifdef ELF_MODE
+	  /*
+	   * Original DOS advances ticcount asynchronously from the DMX timer IRQ.
+	   * Native ELF uses the cooperative TSM backend, so a busy wait here would
+	   * never make progress unless we explicitly pump it.
+	   */
+	  TSM_Yield();
+#endif
+	}
   }
 }
 

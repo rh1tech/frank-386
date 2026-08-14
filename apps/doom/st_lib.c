@@ -124,9 +124,9 @@ void STlib_drawNum (st_number_t *n, boolean refresh)
 // clear the area
   x = n->x - numdigits*w;
 
-  if (n->y - ST_Y < 0)
+  if (n->y - ST_Y < 0) {
     I_Error("drawNum: n->y - ST_Y < 0");
-
+  }
   V_CopyRect(x, n->y - ST_Y, BG, w*numdigits, h, x, n->y, FG);
 
 // if non-number, do not draw it
@@ -207,8 +207,9 @@ void STlib_updateMultIcon (st_multicon_t *mi, boolean refresh)
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
       V_CopyRect(x, y, BG, w, h, x, y, FG);
 #else
-      if (y - ST_Y < 0)
-	I_Error("updateMultIcon: y - ST_Y < 0");
+      if (y - ST_Y < 0) {
+	      I_Error("updateMultIcon: y - ST_Y < 0");
+      }
 
       V_CopyRect(x, y-ST_Y, BG, w, h, x, y, FG);
 #endif
@@ -244,8 +245,9 @@ void STlib_updateBinIcon (st_binicon_t *bi, boolean refresh)
     h = SHORT(bi->p->height);
 
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
-    if (y - ST_Y < 0)
+    if (y - ST_Y < 0) {
       I_Error("updateBinIcon: y - ST_Y < 0");
+    }
 #endif
 
     if (*bi->val)

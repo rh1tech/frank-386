@@ -150,9 +150,9 @@ void Z_Free (void *ptr)
 	memblock_t	*block, *other;
 	
 	block = (memblock_t *) ( (byte *)ptr - sizeof(memblock_t));
-	if (block->id != ZONEID)
+	if (block->id != ZONEID) {
 		I_Error ("Z_Free: freed a pointer without ZONEID");
-		
+	}
 	if (block->user > (void **)0x100)	// smaller values are not pointers
 		*block->user = 0;		// clear the user's mark
 	block->user = NULL;	// mark as free
@@ -220,8 +220,9 @@ void *Z_Malloc (int size, int tag, void *user)
 	
 	do
 	{
-		if (rover == start)		// scanned all the way around the list
+		if (rover == start)	{	// scanned all the way around the list
 			I_Error("Z_Malloc: failed on allocation of %i bytes", size);
+		}
 		if (rover->user)
 		{
 			if (rover->tag < PU_PURGELEVEL)
@@ -264,8 +265,9 @@ void *Z_Malloc (int size, int tag, void *user)
 	}
 	else
 	{
-		if (tag >= PU_PURGELEVEL)
+		if (tag >= PU_PURGELEVEL) {
 			I_Error ("Z_Malloc: an owner is required for purgable blocks");
+		}
 		base->user = (void *)2;		// mark as in use, but unowned	
 	}
 	base->tag = tag;
@@ -378,12 +380,15 @@ void Z_CheckHeap (void)
 	{
 		if (block->next == &mainzone->blocklist)
 			break;			// all blocks have been hit	
-		if ( (byte *)block + block->size != (byte *)block->next)
+		if ( (byte *)block + block->size != (byte *)block->next) {
 			I_Error ("Z_CheckHeap: block size does not touch the next block\n");
-		if ( block->next->prev != block)
+		}
+		if ( block->next->prev != block) {
 			I_Error ("Z_CheckHeap: next block doesn't have proper back link\n");
-		if (!block->user && !block->next->user)
+		}
+		if (!block->user && !block->next->user) {
 			I_Error ("Z_CheckHeap: two consecutive free blocks\n");
+		}
 	}
 }
 
@@ -401,14 +406,16 @@ void Z_ChangeTag2 (void *ptr, int tag)
 	memblock_t	*block;
 	
 	block = (memblock_t *) ( (byte *)ptr - sizeof(memblock_t));
-	if (block->id != ZONEID)
+	if (block->id != ZONEID) {
 		I_Error ("Z_ChangeTag: freed a pointer without ZONEID");
+	}
 #if (APPVER_DOOMREV < AV_DR_DM12)
-	if (tag >= PU_PURGELEVEL && (int)block->user < 0x100)
+	if (tag >= PU_PURGELEVEL && (int)block->user < 0x100) {
 #else
-	if (tag >= PU_PURGELEVEL && (unsigned)block->user < 0x100)
+	if (tag >= PU_PURGELEVEL && (unsigned)block->user < 0x100) {
 #endif
 		I_Error ("Z_ChangeTag: an owner is required for purgable blocks");
+	}
 	block->tag = tag;
 }
 

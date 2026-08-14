@@ -24,6 +24,10 @@
 #include "fcom/fcom.h"
 #include "../diag.h"
 
+extern volatile uint32_t dos_diag_kernel_code;
+extern UBYTE doom_wad_watch_handle;
+extern UWORD doom_wad_watch_psp;
+
 /*
  * fdos/hdr/portab.h already publishes the guest PSRAM base as
  * PSRAM_BASE_ADDR.  board_config.h publishes the same address through the
@@ -108,7 +112,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define M_API_VERSION              7
+#define M_API_VERSION              9
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    256u
 #define ARM_ELF_ARGV_SLOTS        66u
@@ -1167,6 +1171,96 @@ typedef arm_elf_process_requirements *
  */
 static uintptr_t arm_elf_native_stack_cursor;
 
+
+/*
+ * Runtime stack bounds for the currently executing native process.
+ * Nested native EXEC saves/restores these around the child.
+ */
+static uintptr_t doom_diag_native_stack_bottom;
+static uintptr_t doom_diag_native_stack_top;
+static UWORD doom_diag_dos_stack_seg;
+static UWORD doom_diag_dos_stack_size;
+
+#define DOOM_NATIVE_STACK_GUARD 32u
+#define DOOM_DOS_STACK_GUARD    64u
+#define DOOM_STACK_CANARY       0xa5u
+
+/*
+ * Cheap stack-boundary check used by the existing diagnostic checkpoints.
+ * No DOS/BIOS calls are made here.
+ *
+ * KRN codes on failure:
+ *   70SSFFFF  native stack free bytes FFFF too small/out of range
+ *   71SSOOVV  native bottom canary offset OO changed to VV
+ *   72SSFFFF  DOS stack SP FFFF too small/out of range
+ *   73SSOOVV  DOS bottom canary offset OO changed to VV
+ */
+void doom_stack_guard_check(unsigned stage)
+{
+  extern volatile uint32_t dos_diag_kernel_code;
+  uintptr_t sp;
+  unsigned i;
+
+  if (doom_diag_native_stack_bottom == 0 || doom_diag_native_stack_top == 0)
+    return;
+
+  __asm volatile ("mov %0, sp" : "=r" (sp));
+
+  if (sp < doom_diag_native_stack_bottom ||
+      sp > doom_diag_native_stack_top ||
+      sp - doom_diag_native_stack_bottom < 256u)
+  {
+    unsigned free_bytes =
+        sp >= doom_diag_native_stack_bottom
+        ? (unsigned)(sp - doom_diag_native_stack_bottom) : 0u;
+    dos_diag_kernel_code =
+        0x70000000u | ((stage & 0xffu) << 16) | (free_bytes & 0xffffu);
+    for (;;)
+      __asm volatile ("nop");
+  }
+
+  for (i = 0; i < DOOM_NATIVE_STACK_GUARD; ++i)
+  {
+    uint8_t v = ((volatile uint8_t *)doom_diag_native_stack_bottom)[i];
+    if (v != DOOM_STACK_CANARY)
+    {
+      dos_diag_kernel_code =
+          0x71000000u | ((stage & 0xffu) << 16)
+          | ((i & 0xffu) << 8) | v;
+      for (;;)
+        __asm volatile ("nop");
+    }
+  }
+
+  if (doom_diag_dos_stack_seg != 0)
+  {
+    volatile uint8_t *base =
+        (volatile uint8_t *)ARM_PTR(MK_FP(doom_diag_dos_stack_seg, 0));
+
+    for (i = 0; i < DOOM_DOS_STACK_GUARD; ++i)
+    {
+      uint8_t v = base[i];
+      if (v != DOOM_STACK_CANARY)
+      {
+        dos_diag_kernel_code =
+            0x73000000u | ((stage & 0xffu) << 16)
+            | ((i & 0xffu) << 8) | v;
+        for (;;)
+          __asm volatile ("nop");
+      }
+    }
+
+    if (CPU_SS == doom_diag_dos_stack_seg &&
+        (CPU_SP > doom_diag_dos_stack_size || CPU_SP < 256u))
+    {
+      dos_diag_kernel_code =
+          0x72000000u | ((stage & 0xffu) << 16) | ((unsigned)CPU_SP & 0xffffu);
+      for (;;)
+        __asm volatile ("nop");
+    }
+  }
+}
+
 static uintptr_t arm_elf_native_stack_arena_end(void)
 {
   return (uintptr_t)PSRAM_BASE_ADDR + (uintptr_t)PSRAM_SIZE_BYTES;
@@ -1197,6 +1291,8 @@ static int arm_elf_native_stack_acquire(ULONG size, uintptr_t *bottom,
   *bottom = next;
   arm_elf_native_stack_cursor = next;
   memset((void *)next, 0, size);
+  if (size >= DOOM_NATIVE_STACK_GUARD)
+    memset((void *)next, DOOM_STACK_CANARY, DOOM_NATIVE_STACK_GUARD);
   return SUCCESS;
 }
 
@@ -1236,6 +1332,9 @@ static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
   meta->dos_stack_mcb = mcb_seg;
   meta->dos_stack_seg = mcb_seg + 1;
   memset(ARM_PTR(MK_FP(meta->dos_stack_seg, 0)), 0, meta->dos_stack_size);
+  if (meta->dos_stack_size >= DOOM_DOS_STACK_GUARD)
+    memset(ARM_PTR(MK_FP(meta->dos_stack_seg, 0)),
+           DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   {
     mcb *block = (mcb *)ARM_PTR(MK_FP(mcb_seg, 0));
@@ -2132,6 +2231,19 @@ static void exec_enter_child(struct exec_child_context *saved,
      be part of this stack frame, not destroyed by the blanket clears
      that used to live on both the enter and leave paths. */
   saved->native_done=cpu->native_done;
+
+  if (doom_wad_watch_handle != 0xff
+      && internal_data->cu_psp == doom_wad_watch_psp
+      && child_psp_seg != doom_wad_watch_psp)
+  {
+    dos_diag_kernel_code =
+        0x4d000000u
+        | (((unsigned)child_psp_seg & 0xffffu) << 8)
+        | ((unsigned)doom_wad_watch_psp & 0xffu);
+    for (;;)
+      __asm volatile ("nop");
+  }
+
   internal_data->cu_psp=child_psp_seg;
   internal_data->dta=MK_FP(child_psp_seg,offsetof(psp,ps_cmd));
   SET_SS(FP_SEG(stack)); CPU_SP=FP_OFF(stack);
@@ -2186,6 +2298,19 @@ static void exec_leave_child(struct exec_child_context *saved,
      while vectors, handles, FCBs and process memory are released. */
   internal_data->abort_progress = (UBYTE)-1;
   exec_release_child(child_psp_seg);
+
+  if (doom_wad_watch_handle != 0xff
+      && saved->cu_psp != doom_wad_watch_psp
+      && child_psp_seg != doom_wad_watch_psp)
+  {
+    dos_diag_kernel_code =
+        0x4f000000u
+        | (((unsigned)saved->cu_psp & 0xffffu) << 8)
+        | ((unsigned)doom_wad_watch_psp & 0xffu);
+    for (;;)
+      __asm volatile ("nop");
+  }
+
   internal_data->cu_psp = saved->cu_psp;
   internal_data->dta = saved->dta;
   internal_data->abort_progress = 0;
@@ -2505,10 +2630,27 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     meta->native_stack_addr = (ULONG)stack_bottom;
     stack_top = stack_bottom + meta->native_stack_size;
 
-    diag_native_code_enter();
-    exit_code = arm_elf_call_on_stack(meta, stack_top, stack_bottom,
-                                      arm_elf_run_body);
-    diag_native_code_leave();
+    {
+      uintptr_t saved_diag_native_bottom = doom_diag_native_stack_bottom;
+      uintptr_t saved_diag_native_top = doom_diag_native_stack_top;
+      UWORD saved_diag_dos_seg = doom_diag_dos_stack_seg;
+      UWORD saved_diag_dos_size = doom_diag_dos_stack_size;
+
+      doom_diag_native_stack_bottom = stack_bottom;
+      doom_diag_native_stack_top = stack_top;
+      doom_diag_dos_stack_seg = meta->dos_stack_seg;
+      doom_diag_dos_stack_size = (UWORD)meta->dos_stack_size;
+
+      diag_native_code_enter();
+      exit_code = arm_elf_call_on_stack(meta, stack_top, stack_bottom,
+                                        arm_elf_run_body);
+      diag_native_code_leave();
+
+      doom_diag_native_stack_bottom = saved_diag_native_bottom;
+      doom_diag_native_stack_top = saved_diag_native_top;
+      doom_diag_dos_stack_seg = saved_diag_dos_seg;
+      doom_diag_dos_stack_size = saved_diag_dos_size;
+    }
 
     arm_elf_native_stack_release(stack_bottom, previous_stack_cursor);
     meta->native_stack_addr = 0;

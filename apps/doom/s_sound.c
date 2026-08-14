@@ -67,9 +67,9 @@ void S_ChangeMusic (int musicnum, int looping)
   extern int snd_MusicDevice;
   if (snd_MusicDevice == 2 && musicnum == mus_intro)
     musicnum = mus_introa;
-  if ( (musicnum <= mus_None) || (musicnum >= NUMMUSIC) )
+  if ( (musicnum <= mus_None) || (musicnum >= NUMMUSIC) ) {
     I_Error("Bad music number %d", musicnum);
-  else
+  } else
     music = &S_music[musicnum];
   if (mus_playing == music)
     return;

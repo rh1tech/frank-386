@@ -1,6 +1,84 @@
 #include "bios/bios.h"
 #include "hdrs.h"
 
+extern volatile uint32_t dos_diag_kernel_code;
+
+/*
+ * Armed when a WAD is opened.  We only need the numeric DOS handle here:
+ * the earlier unconditional 13h trap proved that handle numbers are reused
+ * during DOS startup, so the trap must not become active until DOOM opens
+ * its WAD.
+ */
+UBYTE doom_wad_watch_handle = 0xff;
+UWORD doom_wad_watch_psp;
+UBYTE doom_wad_watch_sft = 0xff;
+
+/*
+ * Check whether the kernel current PSP still belongs to the process that
+ * opened the watched WAD.
+ *
+ * KRN:4CSSCCCC
+ *   SS   = caller-defined stage
+ *   CCCC = current internal_data->cu_psp
+ */
+void doom_wad_check_cupsp(unsigned stage)
+{
+  extern void doom_stack_guard_check(unsigned stage);
+
+  doom_stack_guard_check(stage);
+
+  if (doom_wad_watch_handle == 0xff)
+    return;
+  if (internal_data->cu_psp == doom_wad_watch_psp)
+    return;
+
+  dos_diag_kernel_code =
+      0x4c000000u
+      | ((stage & 0xffu) << 16)
+      | ((unsigned)internal_data->cu_psp & 0xffffu);
+
+  for (;;)
+    __asm volatile ("nop");
+}
+
+
+/*
+ * Same PSP watch, but preserve a 24-bit caller value in the KRN code.
+ * Used around dos_phys_write8() so the exact guest physical address which
+ * first changes cu_psp is visible without another diagnostic call afterward.
+ */
+void doom_wad_check_cupsp_value(unsigned family, uint32_t value)
+{
+  if (doom_wad_watch_handle == 0xff)
+    return;
+  if (internal_data->cu_psp == doom_wad_watch_psp)
+    return;
+
+  dos_diag_kernel_code =
+      ((family & 0xffu) << 24)
+      | (value & 0x00ffffffu);
+
+  for (;;)
+    __asm volatile ("nop");
+}
+
+static int doom_wad_name(const char *name)
+{
+  const char *end;
+
+  if (name == NULL)
+    return FALSE;
+
+  end = name + strlen(name);
+  if (end - name < 4)
+    return FALSE;
+
+  return end[-4] == '.'
+      && (end[-3] == 'W' || end[-3] == 'w')
+      && (end[-2] == 'A' || end[-2] == 'a')
+      && (end[-1] == 'D' || end[-1] == 'd');
+}
+
 /* DOS calls this to see if it's okay to open the file.
     Returns a file_table entry number to use (>= 0) if okay
     to open.  Otherwise returns < 0 and may generate a critical
@@ -467,14 +545,75 @@ int get_sft_idx(unsigned hndl)
   UBYTE *jft;
   int idx;
 
+  /*
+   * Watch the WAD handle at the first kernel point which consumes it.
+   * This catches a wrong current PSP/JFT before the later read error and
+   * before cleanup can overwrite the diagnostic.
+   */
+  if (doom_wad_watch_handle != 0xff && hndl == doom_wad_watch_handle)
+  {
+    if (internal_data->cu_psp != doom_wad_watch_psp)
+    {
+      /*
+       * KRN:4ACCCCEE
+       *   CCCC = current PSP segment
+       *   EE   = low byte of expected WAD-owner PSP
+       */
+      dos_diag_kernel_code =
+          0x4a000000u
+          | (((unsigned)internal_data->cu_psp & 0xffffu) << 8)
+          | ((unsigned)doom_wad_watch_psp & 0xffu);
+      for (;;)
+        __asm volatile ("nop");
+    }
+  }
+
+  dos_diag_kernel_code = 0x42000000u
+                       | (((unsigned)internal_data->cu_psp & 0xffu) << 16)
+                       | (((unsigned)p->ps_maxfiles & 0xffu) << 8)
+                       | (hndl & 0xffu);
+
   if (hndl >= p->ps_maxfiles)
+  {
+    dos_diag_kernel_code = 0x42fe0000u | ((hndl & 0xffu) << 8)
+                         | ((unsigned)p->ps_maxfiles & 0xffu);
     return DE_INVLDHNDL;
+  }
 
   if ((jft = jft_of(p)) == NULL)
+  {
+    dos_diag_kernel_code = 0x42fd0000u | (hndl & 0xffffu);
     return DE_INVLDHNDL;
+  }
 
   idx = jft[hndl];
-  return idx == 0xff ? DE_INVLDHNDL : idx;
+
+  if (doom_wad_watch_handle != 0xff && hndl == doom_wad_watch_handle
+      && (unsigned)idx != doom_wad_watch_sft)
+  {
+    /*
+     * KRN:4BAAEEHH
+     *   AA = actual JFT/SFT index (FF means closed)
+     *   EE = expected SFT index captured at WAD open
+     *   HH = WAD handle
+     */
+    dos_diag_kernel_code =
+        0x4b000000u
+        | (((unsigned)idx & 0xffu) << 16)
+        | (((unsigned)doom_wad_watch_sft & 0xffu) << 8)
+        | ((unsigned)hndl & 0xffu);
+    for (;;)
+      __asm volatile ("nop");
+  }
+
+  dos_diag_kernel_code = 0x43000000u
+                       | (((unsigned)idx & 0xffu) << 16)
+                       | ((hndl & 0xffu) << 8)
+                       | ((unsigned)p->ps_maxfiles & 0xffu);
+
+  if (idx == 0xff)
+    return DE_INVLDHNDL;
+  return idx;
 }
 
 /*
@@ -608,13 +747,27 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
   dos_far_ptr _s = idx_to_sft(sft_idx);
   if (far_is_end(_s))
   {
+    dos_diag_kernel_code = 0x44000000u | ((unsigned)sft_idx & 0xffffu);
     return DE_INVLDHNDL;
   }
   sft* s = (sft*)ARM_PTR(_s);
+
+  /*
+   * 45IIMMMM:
+   *   II   = resolved SFT index
+   *   MMMM = sft_mode
+   */
+  dos_diag_kernel_code = 0x45000000u
+                | (((unsigned)sft_idx & 0xffu) << 16)
+                | ((unsigned)s->sft_mode & 0xffffu);
+
   /* If for read and write-only or for write and read-only then exit */
   if((mode == XFR_READ && (s->sft_mode & O_WRONLY)) ||
      (mode == XFR_WRITE && (s->sft_mode & O_ACCMODE) == O_RDONLY))
   {
+    dos_diag_kernel_code = 0x46u << 24
+                  | (((unsigned)sft_idx & 0xffu) << 16)
+                  | ((unsigned)s->sft_mode & 0xffffu);
     return DE_ACCESS;
   }
   if (mode == XFR_FORCE_WRITE)
@@ -871,6 +1024,22 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
       return DE_TOOMANY;
     jft[hndl] = (UBYTE)result;
   }
+
+  /* WAD/PSP diagnostic watch disabled. */
+  if (FALSE && doom_wad_name((const char *)ARM_PTR(fname)))
+  {
+    doom_wad_watch_handle = (UBYTE)hndl;
+    doom_wad_watch_psp = internal_data->cu_psp;
+    doom_wad_watch_sft = (UBYTE)result;
+
+    /* KRN:49HHSSPP = armed; PP is low byte of owner PSP. */
+    dos_diag_kernel_code =
+        0x49000000u
+        | (((unsigned)hndl & 0xffu) << 16)
+        | (((unsigned)result & 0xffu) << 8)
+        | ((unsigned)doom_wad_watch_psp & 0xffu);
+  }
+
   return hndl | (result & 0xffff0000l);
 }
 

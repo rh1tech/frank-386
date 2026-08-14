@@ -102,8 +102,9 @@ void R_DrawColumn (void)
         return;
 
 #ifdef RANGECHECK
-    if ((unsigned)dc_x >= SCREENWIDTH || dc_yl < 0 || dc_yh >= SCREENHEIGHT)
+    if ((unsigned)dc_x >= SCREENWIDTH || dc_yl < 0 || dc_yh >= SCREENHEIGHT) {
         I_Error ("R_DrawColumn: %i to %i at %i", dc_yl, dc_yh, dc_x);
+	}
 #endif
 
     outp (SC_INDEX+1, 1 << (dc_x & 3));
@@ -114,7 +115,11 @@ void R_DrawColumn (void)
 
     do
     {
+#ifdef ELF_MODE
         dos_phys_write8(dest, dc_colormap[dc_source[(frac>>FRACBITS)&127]]);
+#else
+        dos_phys_write8(dest, dc_colormap[dc_source[(frac>>FRACBITS)&127]]);
+#endif
         dest += PLANEWIDTH;
         frac += fracstep;
     } while (count--);
@@ -146,7 +151,11 @@ void R_DrawColumnLow (void)
 
     do
     {
+#ifdef ELF_MODE
         dos_phys_write8(dest, dc_colormap[dc_source[(frac>>FRACBITS)&127]]);
+#else
+        dos_phys_write8(dest, dc_colormap[dc_source[(frac>>FRACBITS)&127]]);
+#endif
         dest += PLANEWIDTH;
         frac += fracstep;
     } while (count--);

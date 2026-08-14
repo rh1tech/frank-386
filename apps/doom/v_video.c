@@ -84,11 +84,12 @@ void V_CopyRect (int srcx, int srcy, int srcscrn, int width, int height, int des
 	if (srcx<0 ||srcx+width >SCREENWIDTH || srcy<0 || srcy+height>SCREENHEIGHT
 ||destx<0||destx+width >SCREENWIDTH || desty<0 || desty+height>SCREENHEIGHT
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
-|| (unsigned)srcscrn>1 || (unsigned)destscrn>1)
+|| (unsigned)srcscrn>1 || (unsigned)destscrn>1) {
 #else
-|| (unsigned)srcscrn>4 || (unsigned)destscrn>4)
+|| (unsigned)srcscrn>4 || (unsigned)destscrn>4) {
 #endif
 		I_Error ("Bad V_CopyRect");
+    }
 #endif 
 	V_MarkRect (destx, desty, width, height);
 
@@ -124,15 +125,16 @@ void V_DrawPatch (int x, int y, int scrn, patch_t *patch)
 #ifdef RANGECHECK
 	if (x<0||x+SHORT(patch->width) >SCREENWIDTH || y<0 || y+SHORT(patch->height)>SCREENHEIGHT
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
-|| (unsigned)scrn>1)
+|| (unsigned)scrn>1) {
 #else
-|| (unsigned)scrn>4)
+|| (unsigned)scrn>4) {
 #endif
 #if (APPVER_DOOMREV < AV_DR_DM12)
 		I_Error("Bad V_DrawPatch: (%i+%i,%i+%i)", x, SHORT(patch->width), y, SHORT(patch->height));
 #else
 		I_Error("Bad V_DrawPatch");
 #endif
+   }
 #endif
 	if (!scrn)
 		V_MarkRect (x, y, SHORT(patch->width), SHORT(patch->height));
@@ -184,8 +186,9 @@ void V_DrawPatchFlipped (int x, int y, int scrn, patch_t *patch)
 	x -= SHORT(patch->leftoffset);
 #ifdef RANGECHECK
 	if (x<0||x+SHORT(patch->width) >SCREENWIDTH || y<0 || y+SHORT(patch->height)>SCREENHEIGHT
-|| (unsigned)scrn>4)
+|| (unsigned)scrn>4) {
 		I_Error("Bad V_DrawPatch");
+    }
 #endif
 	if (!scrn)
 		V_MarkRect (x, y, SHORT(patch->width), SHORT(patch->height));
@@ -296,11 +299,12 @@ void V_DrawBlock (int x, int y, int scrn, int width, int height, byte *src)
 #ifdef RANGECHECK
 	if (x<0||x+width >SCREENWIDTH || y<0 || y+height>SCREENHEIGHT
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
-|| (unsigned)scrn>1)
+|| (unsigned)scrn>1) {
 #else
-|| (unsigned)scrn>4)
+|| (unsigned)scrn>4) {
 #endif
 		I_Error ("Bad V_DrawBlock");
+    }
 #endif
 
 	V_MarkRect (x, y, width, height);
@@ -331,11 +335,12 @@ void V_GetBlock (int x, int y, int scrn, int width, int height, byte *dest)
 #ifdef RANGECHECK
 	if (x<0||x+width >SCREENWIDTH || y<0 || y+height>SCREENHEIGHT
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
-|| (unsigned)scrn>1)
+|| (unsigned)scrn>1) {
 #else
-|| (unsigned)scrn>4)
+|| (unsigned)scrn>4) {
 #endif
 		I_Error ("Bad V_DrawBlock");
+    }
 #endif
 
 	src = screens[scrn] + y*SCREENWIDTH+x;

@@ -95,9 +95,7 @@ fixed_t		cachedystep[SCREENHEIGHT];
 
 void R_InitSkyMap (void)
 {
-	fputs("R_InitSkyMap: calling R_FlatNumForName(F_SKY1)\n", stdout);
 	skyflatnum = R_FlatNumForName ("F_SKY1");
-	fputs("R_InitSkyMap: F_SKY1 ok\n", stdout);
 	skytexturemid = 100*FRACUNIT;
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
 	skyiscale = FRACUNIT;
@@ -144,8 +142,9 @@ void R_MapPlane (int y, int x1, int x2)
 	unsigned	index;
 	
 #ifdef RANGECHECK
-	if (x2 < x1 || x1<0 || x2>=viewwidth || (unsigned)y>viewheight)
+	if (x2 < x1 || x1<0 || x2>=viewwidth || (unsigned)y>viewheight) {
 		I_Error ("R_MapPlane: %i, %i at %i",x1,x2,y);
+	}
 #endif
 
 	if (planeheight != cachedheight[y])
@@ -389,12 +388,15 @@ void R_DrawPlanes (void)
 	int			angle;
 
 #ifdef RANGECHECK
-	if (ds_p - drawsegs > MAXDRAWSEGS)
+	if (ds_p - drawsegs > MAXDRAWSEGS) {
 		I_Error ("R_DrawPlanes: drawsegs overflow (%i)", ds_p - drawsegs);
-	if (lastvisplane - visplanes > MAXVISPLANES)
+	}
+	if (lastvisplane - visplanes > MAXVISPLANES) {
 		I_Error ("R_DrawPlanes: visplane overflow (%i)", lastvisplane - visplanes);
-	if (lastopening - openings > MAXOPENINGS)
+	}
+	if (lastopening - openings > MAXOPENINGS) {
 		I_Error ("R_DrawPlanes: opening overflow (%i)", lastopening - openings);
+	}
 #endif
 
 	for (pl = visplanes ; pl < lastvisplane ; pl++)

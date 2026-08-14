@@ -72,6 +72,63 @@ static const struct pio_program pio_vga_program = {
 int active_start = DEFAULT_ACTIVE_START;
 int active_end   = DEFAULT_ACTIVE_END;
 
+extern volatile uint32_t dos_diag_code;
+extern volatile uint32_t dos_diag_kernel_code;
+
+/*
+ * Draw the native diagnostic latch in the otherwise blank 40-line top border.
+ * 8x16 built-in font, white-on-black, no locks/calls into DOS.
+ */
+static inline void __time_critical_func(render_diag_border_vga)(
+    uint32_t line, uint32_t *output_buffer)
+{
+    uint32_t code;
+    const char *prefix;
+    uint32_t glyph_line;
+
+    /*
+     * Keep the native application and FDOS/kernel producers independent.
+     * The standard 640x400-in-640x480 modes have 40 blank lines above:
+     *
+     *   lines  2..17: APP:xxxxxxxx
+     *   lines 22..37: KRN:xxxxxxxx
+     */
+    if (active_start < 40)
+        return;
+
+    if (line >= 2 && line < 18) {
+        code = dos_diag_code;
+        prefix = "APP:";
+        glyph_line = line - 2;
+    } else if (line >= 22 && line < 38) {
+        code = dos_diag_kernel_code;
+        prefix = "KRN:";
+        glyph_line = line - 22;
+    } else {
+        return;
+    }
+
+    if (!code)
+        return;
+
+    static const char hex[] = "0123456789ABCDEF";
+    uint8_t *out = (uint8_t *)output_buffer + VGA_SHIFT_PICTURE;
+    const uint8_t fg = 0xC0u | 0x3fu;
+    const uint8_t bg = 0xC0u;
+    const int x0 = 8;
+
+    for (int col = 0; col < 12; ++col) {
+        char ch = (col < 4)
+            ? prefix[col]
+            : hex[(code >> ((11 - col) * 4)) & 0x0f];
+
+        uint8_t glyph = font_8x16[(uint8_t)ch * 16 + glyph_line];
+        uint8_t *d = out + x0 + col * 8;
+        for (int bit = 0; bit < 8; ++bit)
+            d[bit] = (glyph & (1u << bit)) ? fg : bg;
+    }
+}
+
 #define HS_SIZE             96
 #define SHIFT_PICTURE       VGA_SHIFT_PICTURE  // Where active video starts (from board_config.h)
 
@@ -85,10 +142,9 @@ int active_end   = DEFAULT_ACTIVE_END;
 // Module State
 // ============================================================================
 
-// Line pattern buffers - now 6 buffers:
-// 0 = hsync template, 1 = vsync template, 2-5 = active video (4 line rolling buffer)
-static uint32_t *lines_pattern[6];
-static uint32_t *lines_pattern_data = NULL;
+// Line pattern buffers:
+// 0 = hsync template, 1 = vsync template, 2-3 = active video (2-line ping-pong)
+static uint32_t* lines_pattern[4];
 
 // DMA channels
 static int dma_data_chan = -1;
@@ -102,7 +158,7 @@ uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__(
 static volatile int update_requested = 0;  // Set by update call
 
 #define GFX_BUFFER_SIZE (256 * 1024)
-uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
+uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((section(".bss.gfx_buffer"), aligned(4)));
 
 // Fast text palette for 2-bit pixel pairs
 extern uint32_t conv_color2[1024]; // 4096 in hdmi only
@@ -491,7 +547,7 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *
     }
 }
 
-uint32_t __scratch_y("spread8_lut") spread8_lut[256];
+uint32_t __not_in_flash("spread8_lut") spread8_lut[256];
 // Spread 8 bits of a byte into positions 0,4,8,...28
 static inline uint32_t spread8(uint32_t plane) {
     plane = (plane | (plane << 12)) & 0x000F000Fu;
@@ -722,7 +778,7 @@ void __time_critical_func(pre_render_line)(void) {
 }
 
 // Dispatch to appropriate renderer based on current mode
-static void __scratch_y("render_line") render_line(uint32_t line, uint32_t *output_buffer) {
+static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buffer) {
     pre_render_line();
     // --- Верхнее поле ---
     if (line < (uint32_t)active_start) {
@@ -730,6 +786,7 @@ static void __scratch_y("render_line") render_line(uint32_t line, uint32_t *outp
         uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
         for (int i = 0; i < 160; i++)
             out32[i] = blank;
+        render_diag_border_vga(line, output_buffer);
         return;
     }
 
@@ -935,7 +992,7 @@ static void __time_critical_func(render_load_bar)(uint32_t abs_line,
 #endif
 }
 
-static void __isr __time_critical_func(dma_handler_vga)(void) {
+static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     uint32_t t_enter = timer_hw->timerawl;
     dma_hw->ints0 = 1u << dma_ctrl_chan;
     static uint32_t current_line = 0;
@@ -993,57 +1050,51 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
         }
     }
 
-    // Vertical blanking region
-    if (line >= N_LINES_VISIBLE) {
-        if (line >= LINE_VS_BEGIN && line <= LINE_VS_END) {
-            dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[1], false);
-        } else {
-            dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[0], false);
+    // Latch frame state late in vblank.  The control-channel IRQ is raised
+    // only after that channel has already programmed and chained the next
+    // data transfer, so this ISR always prepares the line TWO transfers ahead.
+    if (line == N_LINES_TOTAL - 4) {
+        if (vga_state) {
+            const uint8_t *cr = vga_state->cr;
+            // Wolf3D writes cr[0x0c] and cr[0x0d] as two separate OUT
+            // instructions. The ISR may land between them and read a
+            // half-updated 16-bit address.  Re-read until both bytes
+            // are stable (usually only one extra read is needed).
+            uint8_t hi, lo;
+            do {
+                hi = cr[0x0c];
+                lo = cr[0x0d];
+            } while (hi != cr[0x0c]);
+            frame_vram_offset = (uint16_t)((hi << 8) | lo);
+            frame_pixel_panning = vga_state->ar[0x13] & 0x07;
+            int lc = (int)cr[0x18]
+                   | (((int)cr[0x07] & 0x10) << 4)
+                   | (((int)cr[0x09] & 0x40) << 3);
+            frame_line_compare = (lc > 0 && lc < N_LINES_VISIBLE) ? lc : -1;
         }
-
-        // Line N_LINES_TOTAL-4 (521): late in vblank, just before DMA needs line 0.
-        // Wolf3D has already written the new page address to CRTC by now.
-        // Read cr[] and ar[] directly — no intermediate volatile copies.
-        if (line == N_LINES_TOTAL - 4) {
-            if (vga_state) {
-                const uint8_t *cr = vga_state->cr;
-                // Wolf3D writes cr[0x0c] and cr[0x0d] as two separate OUT
-                // instructions. The ISR may land between them and read a
-                // half-updated 16-bit address.  Re-read until both bytes
-                // are stable (usually only one extra read is needed).
-                uint8_t hi, lo;
-                do {
-                    hi = cr[0x0c];
-                    lo = cr[0x0d];
-                } while (hi != cr[0x0c]);
-                frame_vram_offset = (uint16_t)((hi << 8) | lo);
-                frame_pixel_panning = vga_state->ar[0x13] & 0x07;
-                int lc = (int)cr[0x18]
-                       | (((int)cr[0x07] & 0x10) << 4)
-                       | (((int)cr[0x09] & 0x40) << 3);
-                frame_line_compare = (lc > 0 && lc < N_LINES_VISIBLE) ? lc : -1;
-            }
-            render_line(0, lines_pattern[2]);
-            render_line(1, lines_pattern[3]);
-            render_line(2, lines_pattern[4]);
-            render_line(3, lines_pattern[5]);
-        }
-        return;
     }
-    
-    // Active video: DMA reads from buffer (line % 4), we render (line + 2) % 4
-    uint32_t read_buf = 2 + (line & 3);
-    uint32_t render_buf = 2 + ((line + 2) & 3);
-    uint32_t render_line_num = line + 2;
 
-    // Set DMA to read from the buffer we already rendered
-    dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[read_buf], false);
+    /*
+     * At ISR entry data line N+1 is already being transmitted.  The control
+     * source selected here will be consumed when N+1 finishes, i.e. for N+2.
+     * Render N+2 into the opposite ping-pong buffer; never touch the buffer
+     * currently being read by data DMA.
+     */
+    uint32_t prepare_line = line + 2;
+    if (prepare_line >= N_LINES_TOTAL)
+        prepare_line -= N_LINES_TOTAL;
 
-    // Pre-render 2 lines ahead
-    if (render_line_num < N_LINES_VISIBLE) {
-        render_line(render_line_num, lines_pattern[render_buf]);
+    if (prepare_line >= N_LINES_VISIBLE) {
+        uint32_t sync_buf =
+            (prepare_line >= LINE_VS_BEGIN && prepare_line <= LINE_VS_END) ? 1u : 0u;
+        dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[sync_buf], false);
+    } else {
+        uint32_t render_buf = 2u + (prepare_line & 1u);
+
+        dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[render_buf], false);
+        render_line(prepare_line, lines_pattern[render_buf]);
         // Load bar goes into the inactive region below active_end (e.g. lines 440-479)
-        render_load_bar(render_line_num, lines_pattern[render_buf]);
+        render_load_bar(prepare_line, lines_pattern[render_buf]);
     }
 
     // Accumulate ISR busy time (µs)
@@ -1088,6 +1139,11 @@ void vga_hw_reclock(void) {
     VGA_PIO->sm[vga_sm].clkdiv = (div_int << 16) | (div_frac << 8);
     frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
 }
+
+static uint32_t vga_line0[LINE_SIZE / 4] __scratch_y("vga_line0") = { 0 };
+static uint32_t vga_line1[LINE_SIZE / 4] __scratch_y("vga_line1") = { 0 };
+static uint32_t vga_line2[LINE_SIZE / 4] __scratch_y("vga_line2") = { 0 };
+static uint32_t vga_line3[LINE_SIZE / 4] __scratch_y("vga_line3") = { 0 };
 
 void vga_hw_init(void) {
     for(uint32_t i = 0; i < 256; ++i) {
@@ -1141,16 +1197,10 @@ void vga_hw_init(void) {
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
     DBG_PRINT("  Frame period: %lu us\n", (unsigned long)frame_period_us);
     
-    // Allocate line pattern buffers (6 buffers: 2 sync + 4 active)
-    lines_pattern_data = (uint32_t *)calloc(LINE_SIZE * 6 / 4, sizeof(uint32_t));
-    if (!lines_pattern_data) {
-        printf("ERROR: Failed to allocate VGA buffers!\n");
-        return;
-    }
-    
-    for (int i = 0; i < 6; i++) {
-        lines_pattern[i] = &lines_pattern_data[i * (LINE_SIZE / 4)];
-    }
+    lines_pattern[0] = vga_line0;
+    lines_pattern[1] = vga_line1;
+    lines_pattern[2] = vga_line2;
+    lines_pattern[3] = vga_line3;
     
     // Initialize line templates
     uint8_t *base = (uint8_t *)lines_pattern[0];
@@ -1161,8 +1211,8 @@ void vga_hw_init(void) {
     memset(base, TMPL_VS, LINE_SIZE);
     memset(base, TMPL_VHS, HS_SIZE);
     
-    // Initialize all 4 active line buffers with the sync template
-    for (int i = 2; i < 6; i++) {
+    // Initialize both active line buffers with the sync template
+    for (int i = 2; i < 4; i++) {
         memcpy(lines_pattern[i], lines_pattern[0], LINE_SIZE);
     }
 
@@ -1307,7 +1357,7 @@ void vga_hw_set_palette(const uint8_t *palette_data) {
 
 // Update EGA 16-color palette from AC palette registers
 // palette16_data is 48 bytes (16 entries × 3 bytes RGB, each 0-63)
-void __scratch_y("vga_hw_set_palette16") vga_hw_set_palette16(const uint8_t *palette16_data) {
+void vga_hw_set_palette16(const uint8_t *palette16_data) {
     for (int i = 0; i < 16; i++) {
         uint8_t r6 = palette16_data[i * 3 + 0];
         uint8_t g6 = palette16_data[i * 3 + 1];

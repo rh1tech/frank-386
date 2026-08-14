@@ -2,6 +2,10 @@
 #include "bios/bios.h"
 #include "fdos.h"
 
+extern volatile uint32_t dos_diag_kernel_code;
+extern UBYTE doom_wad_watch_handle;
+extern UWORD doom_wad_watch_psp;
+
 int snprintf(char *s, size_t n, const char *fmt, ...);
 static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
 {
@@ -829,12 +833,76 @@ rebuild_dpb:
 DOS 1+ - main DOS handler
 */
 bool fdos_21h(CPU* _cpu) {
+    extern volatile uint32_t dos_diag_kernel_code;
+    extern UBYTE doom_wad_watch_handle;
+    extern void doom_wad_check_cupsp_value(unsigned family, uint32_t value);
+
+    /*
+     * Capture the actual INT 21h function before this handler changes either
+     * the live CPU image or the saved R_* image. Every 5C trace below reports
+     * this immutable entry AX, never an output AX.
+     */
+    /* CPU_AX uses the global 'cpu' pointer, which is assigned from _cpu
+       only later in this function.  Read the callback argument directly
+       so stage 00 records the actual INT 21h entry AX. */
+    const UWORD diag_entry_ax = _cpu->gprx[regax].r16;
+    UBYTE diag_guards_ready = 0;
+    UWORD diag_guard_sp = 0;
+    UWORD diag_guard_hi = 0;
+    UWORD diag_guard_hi_len = 0;
+
+#define INT21_DIAG_GUARD_BYTES 16u
+#define INT21_DIAG_LOW_VALUE   0xa6u
+#define INT21_DIAG_HIGH_VALUE  0x5au
+
+#define INT21_FRAME_GUARD(stage) do {                                      \
+    if (diag_guards_ready && doom_wad_watch_handle != 0xff) {              \
+        unsigned _i;                                                        \
+        volatile UBYTE *_lo = (volatile UBYTE *)                            \
+            ARM_PTR(MK_FP(entry_ss, diag_guard_sp));                        \
+        volatile UBYTE *_hi = (volatile UBYTE *)                            \
+            ARM_PTR(MK_FP(entry_ss, diag_guard_hi));                        \
+        for (_i = 0; _i < INT21_DIAG_GUARD_BYTES; ++_i) {                  \
+            UBYTE _v = _lo[_i];                                             \
+            if (_v != INT21_DIAG_LOW_VALUE) {                               \
+                dos_diag_kernel_code = 0x5d000000u                          \
+                    | (((uint32_t)(stage) & 0xffu) << 16)                   \
+                    | ((_i & 0xffu) << 8) | _v;                             \
+                for (;;) __asm volatile ("nop");                            \
+            }                                                               \
+        }                                                                   \
+        for (_i = 0; _i < diag_guard_hi_len; ++_i) {                        \
+            UBYTE _v = _hi[_i];                                             \
+            if (_v != INT21_DIAG_HIGH_VALUE) {                              \
+                dos_diag_kernel_code = 0x5d000000u                          \
+                    | (((uint32_t)(stage) & 0xffu) << 16)                   \
+                    | (((0x80u + _i) & 0xffu) << 8) | _v;                   \
+                for (;;) __asm volatile ("nop");                            \
+            }                                                               \
+        }                                                                   \
+    }                                                                       \
+} while (0)
+
+#define INT21_PSP_GUARD(stage, ignored_ah, ignored_al) do {                 \
+    INT21_FRAME_GUARD(stage);                                               \
+    doom_wad_check_cupsp_value(0x5cu,                                      \
+        (((uint32_t)(stage) & 0xffu) << 16)                                \
+        | ((uint32_t)diag_entry_ax & 0xffffu));                             \
+} while (0)
+
+    /*
+     * Stage 00 runs before entry_ss/guard placement exist, so it must not
+     * invoke INT21_FRAME_GUARD yet. Still report the immutable entry AX.
+     */
+    doom_wad_check_cupsp_value(
+        0x5cu, ((uint32_t)0x00u << 16) | (uint32_t)diag_entry_ax);
     COUNT rc;
     CPU_regs *regs;
     UWORD entry_ss, entry_sp;
     UWORD entry_ip, entry_cs;
     UWORD frame_sp;
     UWORD regs_sp;
+    UWORD guard_sp;
     dos_far_ptr old_ps_stack;
     dos_far_ptr old_user_r;
     dos_far_ptr old_prev_user_r;
@@ -846,6 +914,7 @@ bool fdos_21h(CPU* _cpu) {
     entry_ip = readw86(stk_lin(entry_ss, entry_sp, 0));
     entry_cs = readw86(stk_lin(entry_ss, entry_sp, 2));
     uint16_t flags_on_stack = readw86(stk_lin(entry_ss, entry_sp, 4));
+    INT21_PSP_GUARD(0x01, CPU_AH, CPU_AL);
 
     /*
      * Keep both INT 21h register images on the current DOS process stack.
@@ -868,26 +937,61 @@ bool fdos_21h(CPU* _cpu) {
      * when the nested call returns.
      */
     frame_sp = (UWORD)(entry_sp - sizeof(struct int21_guest_iregs));
-    regs_sp = (UWORD)((frame_sp - sizeof(*regs)) & (UWORD)~3u);
-    CPU_SP = regs_sp;
+
+    /*
+     * Layout, high -> low addresses:
+     *
+     *   entry_sp
+     *   public int21_guest_iregs
+     *   high canary (>=16 bytes)
+     *   CPU_regs
+     *   low canary (16 bytes)
+     *   CPU_SP -> nested guest pushes continue below here
+     *
+     * Therefore nested BIOS/device calls cannot legitimately touch either
+     * canary. A hit means somebody wrote into the active INT21 frame area,
+     * even if the 4-KB DOS stack itself never approached its lower boundary.
+     */
+    regs_sp = (UWORD)((frame_sp - INT21_DIAG_GUARD_BYTES
+                       - sizeof(*regs)) & (UWORD)~3u);
+    guard_sp = (UWORD)(regs_sp - INT21_DIAG_GUARD_BYTES);
+    diag_guard_sp = guard_sp;
+    diag_guard_hi = (UWORD)(regs_sp + sizeof(*regs));
+    diag_guard_hi_len = (UWORD)(frame_sp - diag_guard_hi);
+
+    CPU_SP = guard_sp;
     regs = (CPU_regs *)ARM_PTR(MK_FP(entry_ss, regs_sp));
+
+    memset(ARM_PTR(MK_FP(entry_ss, diag_guard_sp)),
+           INT21_DIAG_LOW_VALUE, INT21_DIAG_GUARD_BYTES);
+    memset(ARM_PTR(MK_FP(entry_ss, diag_guard_hi)),
+           INT21_DIAG_HIGH_VALUE, diag_guard_hi_len);
+    diag_guards_ready = 1;
+
+    INT21_PSP_GUARD(0x02, CPU_AH, CPU_AL);
     cpu_save_regs(_cpu, regs);
+    INT21_PSP_GUARD(0x03, CPU_AH, CPU_AL);
     regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
     current_psp = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+    INT21_PSP_GUARD(0x04, CPU_AH, CPU_AL);
     old_ps_stack = current_psp->ps_stack;
     old_user_r = internal_data->user_r;
     old_prev_user_r = internal_data->prev_user_r;
 
     current_psp->ps_stack = MK_FP(entry_ss, frame_sp);
+    INT21_PSP_GUARD(0x05, CPU_AH, CPU_AL);
     internal_data->prev_user_r = old_user_r;
     internal_data->user_r = current_psp->ps_stack;
+    INT21_PSP_GUARD(0x06, CPU_AH, CPU_AL);
 
     int21_store_guest_frame(current_psp->ps_stack, regs,
                             entry_ip, entry_cs, flags_on_stack);
+    INT21_PSP_GUARD(0x07, CPU_AH, CPU_AL);
 
 
     internal_data->Int21AX = R_AX;
     ++internal_data->InDOS;
+    INT21_PSP_GUARD(0x08, R_AH, R_AL);
 
     /*
      * A user INT 24h handler is allowed to abandon the DOS critical-error
@@ -919,6 +1023,7 @@ bool fdos_21h(CPU* _cpu) {
 dispatch:                       /* re-entry point for AH=5Dh AL=00h
                                    (remote server call), matching the
                                    original inthndlr.c dispatch: label */
+    INT21_PSP_GUARD(0x09, R_AH, R_AL);
     /*
      * Match FreeDOS int21_service(): file/path/network functions clear
      * carry before dispatch and start a fresh extended-error record.
@@ -1504,6 +1609,17 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         /* Set PSP                                                      */
       case 0x50:
+        if (doom_wad_watch_handle != 0xff
+            && internal_data->cu_psp == doom_wad_watch_psp
+            && R_BX != doom_wad_watch_psp)
+        {
+          dos_diag_kernel_code =
+              0x4c000000u
+              | (((unsigned)R_BX & 0xffffu) << 8)
+              | ((unsigned)doom_wad_watch_psp & 0xffu);
+          for (;;)
+            __asm volatile ("nop");
+        }
         internal_data->cu_psp = R_BX;
         break;
 
@@ -2514,6 +2630,19 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* copy command line from the parent (required for some device
            loaders) */
         fmemcpy(MK_FP(R_DX, 0x80), MK_FP(internal_data->cu_psp, 0x80), 128);
+
+        if (doom_wad_watch_handle != 0xff
+            && internal_data->cu_psp == doom_wad_watch_psp
+            && R_DX != doom_wad_watch_psp)
+        {
+          dos_diag_kernel_code =
+              0x4e000000u
+              | (((unsigned)R_DX & 0xffffu) << 8)
+              | ((unsigned)doom_wad_watch_psp & 0xffu);
+          for (;;)
+            __asm volatile ("nop");
+        }
+
         internal_data->cu_psp = R_DX;
         break;
 
@@ -2588,6 +2717,7 @@ error_carry:
     R_CF = 1;
 
 exit_dispatch:
+    INT21_PSP_GUARD(0xE0, R_AH, R_AL);
     flags_on_stack = (flags_on_stack & ~0x0041u)
                    | (regs->flags.value & 0x0041u);
     /*
@@ -2597,18 +2727,29 @@ exit_dispatch:
      */
     int21_store_guest_frame(current_psp->ps_stack, regs,
                             entry_ip, entry_cs, flags_on_stack);
+    INT21_PSP_GUARD(0xE1, R_AH, R_AL);
 
     /* Upstream copies its local lregs frame back only after dispatch.
      * Do the same here, then patch CF/ZF in the caller's IRET frame. */
     cpu_restore_regs(_cpu, regs);
+    INT21_PSP_GUARD(0xE2, CPU_AH, CPU_AL);
     dpb_watch_int21_checkpoint(cpu, "exit");
     writew86(stk_lin(entry_ss, entry_sp, 4), flags_on_stack);
+    INT21_PSP_GUARD(0xE3, CPU_AH, CPU_AL);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
     current_psp->ps_stack = old_ps_stack;
+    INT21_PSP_GUARD(0xE4, CPU_AH, CPU_AL);
     internal_data->user_r = old_user_r;
     internal_data->prev_user_r = old_prev_user_r;
     CPU_SP = entry_sp;
+    INT21_PSP_GUARD(0xE5, CPU_AH, CPU_AL);
     --internal_data->InDOS;
+    INT21_PSP_GUARD(0xE6, CPU_AH, CPU_AL);
+#undef INT21_PSP_GUARD
+#undef INT21_FRAME_GUARD
+#undef INT21_DIAG_HIGH_VALUE
+#undef INT21_DIAG_LOW_VALUE
+#undef INT21_DIAG_GUARD_BYTES
     return true;
 }
 

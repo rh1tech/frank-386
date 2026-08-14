@@ -12,6 +12,9 @@
 #include "vga_osd.h"
 #include "disk.h"
 #include "config_save.h"
+#ifdef USB_HID_ENABLED
+#include "usbmsc_device.h"
+#endif
 #include "ff.h"
 #include <string.h>
 #include <strings.h>  // For strcasecmp
@@ -81,6 +84,8 @@ static void select_file(void);
 static void eject_pending(void);
 static void apply_and_close(void);
 static void reset_pending(void);
+static int first_attached_drive(void);
+static void usb_device_exit_to_host(void);
 
 // --------------------------------------------------------------------------
 // Helpers
@@ -137,6 +142,64 @@ static void reset_pending(void) {
     reboot_required = false;
 }
 
+
+/*
+ * Return the same first attached image that USB DEVICE mode exports:
+ * FDD-0, FDD-1, then ATA0-0 .. ATA1-1.
+ *
+ * usbmsc_device_init() intentionally runs after diskui_open() during DEVICE
+ * startup, so determine the row directly from the already opened disk FILs
+ * instead of querying USB MSC state.
+ */
+static int first_attached_drive(void) {
+    for (int i = 0; i < 2; ++i) {
+        FIL *fp = fdd_get_file((uint8_t)i);
+        if (fp && fp->obj.fs)
+            return DRIVE_FDD0 + i;
+    }
+
+    for (int i = 0; i < 4; ++i) {
+        FIL *fp = ata_get_file((uint8_t)i);
+        if (fp && fp->obj.fs)
+            return DRIVE_ATA0_0 + i;
+    }
+
+    return -1;
+}
+
+/*
+ * Emergency/convenience exit from USB DEVICE mode.
+ *
+ * Save HOST to the persistent configuration first.  If saving fails, keep the
+ * current DEVICE session alive and leave the menu open instead of rebooting
+ * back into DEVICE with the user thinking the change was committed.
+ *
+ * Once the config is safely on SD, disconnect TinyUSB, sync/close the exported
+ * image, then perform the normal full-board reboot.
+ */
+static void usb_device_exit_to_host(void) {
+    if (config_get_usb_mode() != USB_MODE_DEVICE)
+        return;
+
+    config_set_usb_mode(USB_MODE_HOST);
+    if (!config_save_all()) {
+        config_set_usb_mode(USB_MODE_DEVICE);
+        draw_main_menu();
+        return;
+    }
+
+#ifdef USB_HID_ENABLED
+    usbmsc_device_shutdown();
+#endif
+
+    diskui_close();
+
+    *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52;
+    watchdog_reboot(0, 0, 0);
+    while (true);
+    __unreachable();
+}
+
 // --------------------------------------------------------------------------
 // Public API
 // --------------------------------------------------------------------------
@@ -154,6 +217,12 @@ void diskui_open(void) {
     if (menu_state != MENU_CLOSED) return;
 
     reset_pending();
+
+    if (config_get_usb_mode() == USB_MODE_DEVICE) {
+        int drive = first_attached_drive();
+        selected_row = (drive >= 0) ? drive : DRIVE_FDD0;
+    }
+
     menu_state = MENU_MAIN;
     osd_clear();
     osd_show();
@@ -237,7 +306,15 @@ static void draw_main_menu(void) {
     }
 
     int help_y = MENU_Y + MENU_H - 2;
-    osd_print_center(help_y, "\x18/\x19: Navigate   Enter: Select/Eject   Esc: Cancel", OSD_ATTR_HIGHLIGHT);
+    if (config_get_usb_mode() == USB_MODE_DEVICE) {
+        osd_print_center(help_y,
+                         "\x18/\x19: Navigate  Enter: Select/Eject  Esc: USB HOST + Reboot",
+                         OSD_ATTR_HIGHLIGHT);
+    } else {
+        osd_print_center(help_y,
+                         "\x18/\x19: Navigate   Enter: Select/Eject   Esc: Cancel",
+                         OSD_ATTR_HIGHLIGHT);
+    }
 }
 
 static void draw_file_browser(void) {
@@ -447,7 +524,10 @@ bool diskui_handle_key(int keycode, bool is_down) {
                 }
 
                 case KEY_ESC:
-                    diskui_close();
+                    if (config_get_usb_mode() == USB_MODE_DEVICE)
+                        usb_device_exit_to_host();
+                    else
+                        diskui_close();
                     break;
 
                 // Quick selection by drive number

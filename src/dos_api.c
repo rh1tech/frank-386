@@ -11,6 +11,21 @@
 extern PC *pc;
 extern void arm_elf_process_exit(int status);
 extern uint32_t arm_elf_yield(void);
+extern void doom_wad_check_cupsp(unsigned stage);
+extern void doom_wad_check_cupsp_value(unsigned family, uint32_t value);
+
+/*
+ * Native-ELF diagnostic latch.
+ *
+ * Applications write this word directly through system-table slot 101.
+ * There is deliberately no callback, DOS interrupt or device service on the
+ * write path: one volatile 32-bit store is the complete instrumentation cost.
+ * The video core only reads it while generating the normally blank border.
+ */
+volatile uint32_t dos_diag_code = 0;
+
+/* FDOS/kernel diagnostics use a separate latch from the native app. */
+volatile uint32_t dos_diag_kernel_code = 0;
 
 /*
  * Full native math/compiler-runtime backend.
@@ -122,7 +137,16 @@ static uint32_t __not_in_flash_func(dos_phys_read32)(uint32_t addr) {
 }
 
 static void __not_in_flash_func(dos_phys_write8)(uint32_t addr, uint8_t val) {
+    /*
+     * The renderer trace has localized cu_psp corruption to this call.
+     * Check immediately before and after pstore8().  On failure:
+     *
+     *   KRN:59AAAAAA  - PSP was already bad on entry
+     *   KRN:5AAAAAAA  - pstore8() changed it; AAAAAA is guest phys addr
+     */
+    doom_wad_check_cupsp_value(0x59u, addr);
     pstore8(addr, val);
+    doom_wad_check_cupsp_value(0x5au, addr);
 }
 
 static void __not_in_flash_func(dos_phys_write16)(uint32_t addr, uint16_t val) {
@@ -241,5 +265,7 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)__divsc3, /* 98 */
     (unsigned long)__powisf2, /* 99 */
     (unsigned long)__powidf2, /* 100 */
+    (unsigned long)&dos_diag_code, /* 101: native diagnostic latch */
+    (unsigned long)doom_wad_check_cupsp, /* 102: diagnostic PSP guard */
     0
 };

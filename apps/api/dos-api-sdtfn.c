@@ -8,6 +8,7 @@
 #include "direct.h"
 #include "dos_mem.h"
 #include "dos_process.h"
+#include "dos_diag.h"
 #include "sys/stat.h"
 #include "stdio.h"
 #include "sound_hw.h"
@@ -747,6 +748,29 @@ int close(int handle)
 {
     union REGS regs = {0};
 
+#ifdef DIAG
+    /* Diagnostic only: distinguish fclose() from direct close(). */
+    static unsigned native_close_context;
+    /*
+     * Stop on the first close of handle 13h.  The current failure proves that
+     * this JFT slot is later FF, so this catches the event which destroys the
+     * WAD handle instead of diagnosing after the fact.
+     *
+     * 47CCAAAA:
+     *   CC = 01 if close() was called by fclose(), 00 for direct close()
+     *   AAAA = low 16 bits of the native return address into the caller.
+     */
+    if ((unsigned)handle == 0x13u)
+    {
+        uintptr_t caller = (uintptr_t)__builtin_return_address(0);
+        dos_diag_set(0x47000000u
+                     | ((native_close_context & 0xffu) << 16)
+                     | (caller & 0xffffu));
+        for (;;)
+            __asm volatile ("nop");
+    }
+#endif
+
     regs.h.ah = 0x3e;
     regs.w.bx = (uint16_t)handle;
     int386(0x21, &regs, &regs);
@@ -778,20 +802,109 @@ int read(int handle, void *buffer, unsigned int count)
         regs.w.bx = (uint16_t)handle;
         regs.w.cx = chunk;
         regs.w.dx = 0;
+        #if DIAG
+        native_read_diag =
+            0x37000000u | (((unsigned)chunk & 0x7fffu) << 8)
+                        | ((total >> 15) & 0xffu);
+        #endif
         native_int21_with_ds(native_io_segment, &regs);
 
         if (regs.x.cflag)
+        {
+            unsigned dos_error = (unsigned)regs.w.ax & 0xffu;
+            #if DIAG
+            native_read_diag = 0x39000000u | ((total & 0xffffu) << 8) | dos_error;
+            #endif
+
+            /*
+             * Diagnose ERROR_INVALID_HANDLE only after the failing AH=3Fh.
+             * This extra AH=51h call therefore cannot affect the failure.
+             *
+             * Border code:
+             *   4M JJ HH EE
+             *   M  = current PSP max-files (low 6 bits, added to 0x40)
+             *   JJ = JFT entry for handle HH (FF=closed, FE=out of range)
+             *   HH = handle passed to read()
+             *   EE = DOS error (06 = invalid handle)
+             */
+            if (dos_error == 0x06u)
+            {
+                union REGS pspregs = {0};
+                uint16_t psp_seg;
+                uint16_t maxfiles;
+                uint16_t jft_off;
+                uint16_t jft_seg;
+                unsigned jft_entry = 0xfeu;
+
+                pspregs.h.ah = 0x51;
+                int386(0x21, &pspregs, &pspregs);
+                psp_seg = pspregs.w.bx;
+
+                maxfiles = *(volatile uint16_t *)
+                    dos_guest_far_ptr(psp_seg, 0x32);
+                jft_off = *(volatile uint16_t *)
+                    dos_guest_far_ptr(psp_seg, 0x34);
+                jft_seg = *(volatile uint16_t *)
+                    dos_guest_far_ptr(psp_seg, 0x36);
+
+                if ((unsigned)handle < maxfiles)
+                {
+                    volatile uint8_t *jft =
+                        (volatile uint8_t *)dos_guest_far_ptr(jft_seg, jft_off);
+                    jft_entry = jft[(unsigned)handle];
+                }
+
+                #if DIAG
+                /*
+                 * Second-stage diagnostic.  The previous run already showed
+                 * maxfiles==0 / handle out of range.  Publish the exact PSP
+                 * segment now:
+                 *
+                 *   41 PPPP MM
+                 *      PPPP = current PSP segment returned by AH=51h
+                 *      MM   = ps_maxfiles at PSP:0032h
+                 */
+                native_read_diag =
+                    0x41000000u | ((uint32_t)psp_seg << 8)
+                                | ((unsigned)maxfiles & 0xffu);
+                #endif
+            }
+
             return total ? (int)total : -1;
+        }
 
         if (regs.w.ax == 0)
+        {
+            #if DIAG
+            native_read_diag = 0x3a000000u | (total & 0x00ffffffu);
+            #endif
             break;
+        }
 
         memcpy(dst + total, native_io_buffer, regs.w.ax);
         total += regs.w.ax;
+        #if DIAG
+        native_read_diag =
+            0x38000000u | (((unsigned)regs.w.ax & 0xffu) << 16)
+                        | (total & 0xffffu);
+        #endif
 
-        if (regs.w.ax < chunk)
-            break;
+        /*
+         * A successful DOS read is allowed to return fewer bytes than CX.
+         * Do not treat a non-zero short read as EOF here: this wrapper's
+         * contract is already to satisfy the caller's whole count by issuing
+         * repeated AH=3Fh requests through the low-memory bounce buffer.
+         *
+         * True EOF is AX==0 (handled above).  If a short read was caused by
+         * an internal FAT/block-transfer boundary, the next iteration resumes
+         * from the SFT's advanced file position and fills the remainder.
+         */
     }
+
+    #if DIAG
+    if (total == count)
+        native_read_diag = 0x3c000000u | (total & 0x00ffffffu);
+    #endif
 
     return (int)total;
 }
@@ -1135,7 +1248,13 @@ int fclose(FILE *stream)
     if (stream->is_static)
         return 0;
 
+#ifdef DIAG
+    native_close_context = 1;
+#endif
     rc = close(stream->handle);
+#ifdef DIAG
+    native_close_context = 0;
+#endif
     free(stream);
     return rc;
 }

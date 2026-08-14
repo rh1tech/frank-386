@@ -38,6 +38,7 @@
 #include <io.h>
 #include <direct.h>
 
+
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
 #define	BGCOLOR		1
 #define	FGCOLOR		14
@@ -723,13 +724,17 @@ void D_Display (void)
 	if (gamestate != wipegamestate)
 	{
 		wipe = true;
-		wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
 	}
 	else
 		wipe = false;
 
+	if (wipe)
+		wipe_StartScreen(0, 0, SCREENWIDTH, SCREENHEIGHT);
+
 	if (gamestate == GS_LEVEL && gametic)
+	{
 		HU_Erase();
+	}
 
 //
 // do buffered drawing
@@ -740,7 +745,9 @@ void D_Display (void)
 		if (!gametic)
 			break;
 		if (automapactive)
+		{
 			AM_Drawer ();
+		}
 		if (wipe || (viewheight != 200 && fullscreen) )
 			redrawsbar = true;
 		if (inhelpscreensstate && !inhelpscreens)
@@ -769,10 +776,14 @@ void D_Display (void)
 	
 	// draw the view directly
 	if (gamestate == GS_LEVEL && !automapactive && gametic)
+	{
 		R_RenderPlayerView (&players[displayplayer]);
+	}
 	
 	if (gamestate == GS_LEVEL && gametic)
+	{
 		HU_Drawer ();
+	}
 	
 	// clean up border stuff
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
@@ -780,7 +791,9 @@ void D_Display (void)
 #else
 	if (gamestate != oldgamestate && gamestate != GS_LEVEL)
 #endif
+	{
 		I_SetPalette (W_CacheLumpName ("PLAYPAL",PU_CACHE));
+	}
 	
 	// see if the border needs to be initially drawn
 	if (gamestate == GS_LEVEL && oldgamestate != GS_LEVEL)

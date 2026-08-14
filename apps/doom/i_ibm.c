@@ -34,6 +34,32 @@
 #include "R_local.h"
 #ifdef ELF_MODE
 #include <dos_phys.h>
+
+/*
+ * In native ELF mode pointers such as 0xa0000/0xa4000 are guest x86 physical
+ * VGA addresses, not ARM pointers.  Keep them as address tokens (the renderer
+ * already does this), but route every actual VGA-memory access through the
+ * emulator memory API.
+ */
+static inline uint32_t I_GuestVgaAddr(const void *ptr)
+{
+	return (uint32_t)(uintptr_t)ptr;
+}
+
+static inline byte I_GuestVgaRead8(const void *ptr)
+{
+	return dos_phys_read8(I_GuestVgaAddr(ptr));
+}
+
+static inline void I_GuestVgaWrite8(void *ptr, byte value)
+{
+	dos_phys_write8(I_GuestVgaAddr(ptr), value);
+}
+
+static inline void I_GuestVgaWrite16(void *ptr, uint16_t value)
+{
+	dos_phys_write16(I_GuestVgaAddr(ptr), value);
+}
 #endif
 
 #if (APPVER_DOOMREV < AV_DR_DM12)
@@ -487,7 +513,12 @@ void I_UpdateBox (int x, int y, int width, int height)
 		{
 			for (x=wwide ; x ; x--)
 			{
+#ifdef ELF_MODE
+				I_GuestVgaWrite16(dest, (uint16_t)(*source + (source[4]<<8)));
+				dest++;
+#else
 				*dest++ = *source + (source[4]<<8);
+#endif
 				source += 8;
 			}
 			source+=srcdelta;
@@ -563,9 +594,17 @@ void I_FinishUpdate (void)
 		outpw (SC_INDEX, SC_MAPMASK | (1 << 8));
 
 		for (i=0 ; i<tics ; i++)
+#ifdef ELF_MODE
+			I_GuestVgaWrite8(destscreen + (SCREENHEIGHT-1)*PLANEWIDTH + i, 0xff);
+#else
 			destscreen[ (SCREENHEIGHT-1)*PLANEWIDTH + i] = 0xff;
+#endif
 		for ( ; i<20 ; i++)
+#ifdef ELF_MODE
+			I_GuestVgaWrite8(destscreen + (SCREENHEIGHT-1)*PLANEWIDTH + i, 0x0);
+#else
 			destscreen[ (SCREENHEIGHT-1)*PLANEWIDTH + i] = 0x0;
+#endif
 	}
 
 	// page flip
@@ -600,7 +639,17 @@ void I_InitGraphics (void)
 	outp (GC_INDEX,GC_MISCELLANEOUS);
 	outp (GC_INDEX+1,inp(GC_INDEX+1)&~2);
 	outpw (SC_INDEX,SC_MAPMASK|(15<<8));
+#ifdef ELF_MODE
+	/*
+	 * screen == 0xa0000 is a guest VGA aperture address.  A native ARM memset
+	 * would dereference address 0x000a0000 directly and fault/hang.  Go through
+	 * the guest physical-memory path so VGA plane/write-mode semantics apply.
+	 */
+	for (uint32_t addr = 0xa0000u; addr < 0xb0000u; ++addr)
+		dos_phys_write8(addr, 0);
+#else
 	memset (screen, 0, 65536);
+#endif
 	outp (CRTC_INDEX,CRTC_UNDERLINE);
 	outp (CRTC_INDEX+1,inp(CRTC_INDEX+1)&~0x40);
 	outp (CRTC_INDEX,CRTC_MODE);
@@ -620,7 +669,12 @@ void I_InitGraphics (void)
 
 void I_ShutdownGraphics (void)
 {
-	if (*(byte *)0x449 == 0x13) // don't reset mode if it didn't get set
+#ifdef ELF_MODE
+	byte mode = I_GuestVgaRead8((const void *)0x449);
+#else
+	byte mode = *(byte *)0x449;
+#endif
+	if (mode == 0x13) // don't reset mode if it didn't get set
 	{
 		regs.w.ax = 3;
 		int386 (0x10, &regs, &regs); // back to text mode
@@ -645,7 +699,11 @@ void I_ReadScreen (byte *scr)
 	{
 		outp (GC_INDEX+1,p);
 		for (i = 0; i < SCREENWIDTH*SCREENHEIGHT/4; i++)
+#ifdef ELF_MODE
+			scr[i*4+p] = I_GuestVgaRead8(currentscreen + i);
+#else
 			scr[i*4+p] = currentscreen[i];
+#endif
 	}
 }
 
@@ -1526,9 +1584,12 @@ void I_Error (char *error, ...)
 	va_list argptr;
 
 	/*
-	 * Print the primary failure before cleanup. If shutdown itself stalls
-	 * during native backend bring-up, the original error is already visible.
+	 * In native graphics mode console text is not useful after the later
+	 * mode switch.  Put the display back in text mode first, then print the
+	 * primary error so it remains visible even if subsequent shutdown stalls.
 	 */
+	I_ShutdownGraphics ();
+
 	va_start (argptr,error);
 	vprintf (error,argptr);
 	va_end (argptr);
@@ -1750,10 +1811,18 @@ void I_BeginRead (void)
 	dest = (byte *)0xac000 + 184*80 + 288/4;
 	for (y=0 ; y<16 ; y++)
 	{
+#ifdef ELF_MODE
+		for (int i = 0; i < 4; ++i)
+		{
+			byte value = I_GuestVgaRead8(src + i);
+			I_GuestVgaWrite8(dest + i, value);
+		}
+#else
 		dest[0] = src[0];
 		dest[1] = src[1];
 		dest[2] = src[2];
 		dest[3] = src[3];
+#endif
 		src += 80;
 		dest += 80;
 	}
@@ -1763,10 +1832,18 @@ void I_BeginRead (void)
 	src = (byte *)0xac000 + 184*80 + 304/4;
 	for (y=0 ; y<16 ; y++)
 	{
+#ifdef ELF_MODE
+		for (int i = 0; i < 4; ++i)
+		{
+			byte value = I_GuestVgaRead8(src + i);
+			I_GuestVgaWrite8(dest + i, value);
+		}
+#else
 		dest[0] = src[0];
 		dest[1] = src[1];
 		dest[2] = src[2];
 		dest[3] = src[3];
+#endif
 		src += 80;
 		dest += 80;
 	}
@@ -1799,10 +1876,18 @@ void I_EndRead (void)
 	src = (byte *)0xac000 + 184*80 + 288/4;
 	for (y=0 ; y<16 ; y++)
 	{
+#ifdef ELF_MODE
+		for (int i = 0; i < 4; ++i)
+		{
+			byte value = I_GuestVgaRead8(src + i);
+			I_GuestVgaWrite8(dest + i, value);
+		}
+#else
 		dest[0] = src[0];
 		dest[1] = src[1];
 		dest[2] = src[2];
 		dest[3] = src[3];
+#endif
 		src += 80;
 		dest += 80;
 	}

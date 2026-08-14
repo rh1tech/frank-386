@@ -167,7 +167,7 @@ uint16_t const *tud_descriptor_string_cb(uint8_t index, uint16_t langid)
         return desc;
     }
 
-    s = index == 1 ? "Murmulator" : index == 2 ? "murm386 disks" : NULL;
+    s = index == 1 ? "Murmulator" : index == 2 ? "FreeDOS disk" : NULL;
     if (!s)
         return NULL;
 

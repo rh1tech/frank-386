@@ -257,8 +257,9 @@ void R_GenerateLookup (int texnum)
 		{
 			collump[x] = -1;	// use the cached block
 			colofs[x] = texturecompositesize[texnum];
-			if (texturecompositesize[texnum] > 0x10000-texture->height)
+			if (texturecompositesize[texnum] > 0x10000-texture->height) {
 				I_Error ("R_GenerateLookup: texture %i is >64k",texnum);
+			}
 			texturecompositesize[texnum] += texture->height;
 		}
 	}	
@@ -276,14 +277,25 @@ void R_GenerateLookup (int texnum)
 byte *R_GetColumn (int tex, int col)
 {
 	int	lump, ofs;
-	
+
+
 	col &= texturewidthmask[tex];
+
 	lump = texturecolumnlump[tex][col];
+
 	ofs = texturecolumnofs[tex][col];
+
 	if (lump > 0)
-		return (byte *)W_CacheLumpNum(lump,PU_CACHE)+ofs;
+	{
+		byte *result = (byte *)W_CacheLumpNum(lump,PU_CACHE)+ofs;
+		return result;
+	}
+
 	if (!texturecomposite[tex])
+	{
 		R_GenerateComposite (tex);
+	}
+
 	return texturecomposite[tex] + ofs;
 }
 
@@ -564,33 +576,6 @@ int	R_FlatNumForName (char *name)
 	i = W_CheckNumForName (name);
 	if (i == -1)
 	{
-#ifdef ELF_MODE
-		static const char hex[] = "0123456789ABCDEF";
-		char hexname[8*3];
-		char printable[9];
-		int j;
-
-		for (j = 0; j < 8; j++)
-		{
-			unsigned char c = (unsigned char)name[j];
-
-			hexname[j*3+0] = hex[c >> 4];
-			hexname[j*3+1] = hex[c & 15];
-			hexname[j*3+2] = (j == 7) ? 0 : ' ';
-			printable[j] = (c >= 32 && c <= 126) ? (char)c : '.';
-		}
-		printable[8] = 0;
-
-		/*
-		 * Keep this diagnostic independent of printf/vprintf formatting.
-		 * A broken %s path is one of the possibilities being tested.
-		 */
-		fputs ("R_FlatNumForName: bytes=", stdout);
-		fputs (hexname, stdout);
-		fputs (" printable=\"", stdout);
-		fputs (printable, stdout);
-		fputs ("\"\n", stdout);
-#endif
 		namet[8] = 0;
 		memcpy (namet, name,8);
 		I_Error ("R_FlatNumForName: %s not found",namet);

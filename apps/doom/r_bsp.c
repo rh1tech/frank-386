@@ -22,6 +22,7 @@ extern int _wp1, _wp2, _wp3, _wp4, _wp5, _wp6, _wp7, _wp8, _wp9;
 extern int _wp10, _wp11, _wp12, _wp13, _wp14, _wp15, _wp16, _wp17, _wp19, _wp20;
 #include "R_local.h"
 
+
 seg_t		*curline;
 side_t		*sidedef;
 line_t		*linedef;
@@ -218,7 +219,6 @@ void R_AddLine (seg_t *line)
 	curline = line;
 
 // OPTIMIZE: quickly reject orthogonal back sides
-
 	angle1 = R_PointToAngle (line->v1->x, line->v1->y);
 	angle2 = R_PointToAngle (line->v2->x, line->v2->y);
 
@@ -281,7 +281,7 @@ void R_AddLine (seg_t *line)
 		return;	
 				
 clippass:
-	R_ClipPassWallSegment (x1, x2-1);	
+	R_ClipPassWallSegment (x1, x2-1);
 	return;
 		
 clipsolid:
@@ -418,8 +418,9 @@ void R_Subsector (int num)
 	subsector_t	*sub;
 	
 #ifdef RANGECHECK
-	if (num>=numsubsectors)
+	if (num>=numsubsectors) {
 		I_Error ("R_Subsector: ss %i with numss = %i",num, numsubsectors);
+	}
 #endif
 
 	sscount++;
@@ -427,7 +428,6 @@ void R_Subsector (int num)
 	frontsector = sub->sector;
 	count = sub->numlines;
 	line = &segs[sub->firstline];
-
 	if (frontsector->floorheight < viewz)
 		floorplane = R_FindPlane (frontsector->floorheight,
 		frontsector->floorpic, frontsector->lightlevel);
@@ -439,8 +439,7 @@ void R_Subsector (int num)
 		frontsector->ceilingpic, frontsector->lightlevel);
 	else
 		ceilingplane = NULL;
-		
-	R_AddSprites (frontsector);	
+	R_AddSprites (frontsector);
 
 	while (count--)
 	{
@@ -462,7 +461,6 @@ void R_RenderBSPNode (int bspnum)
 {
 	node_t 		*bsp;
 	int			side;
-
 	if (bspnum & NF_SUBSECTOR)
 	{
 		if (bspnum == -1)			
@@ -471,7 +469,6 @@ void R_RenderBSPNode (int bspnum)
 			R_Subsector (bspnum&(~NF_SUBSECTOR));
 		return;
 	}
-		
 	bsp = &nodes[bspnum];
 	
 #ifdef __NeXT__
@@ -482,11 +479,11 @@ void R_RenderBSPNode (int bspnum)
 // decide which side the view point is on
 //
 	side = R_PointOnSide (viewx, viewy, bsp);
-
 	R_RenderBSPNode (bsp->children[side]); // recursively divide front space
-	
 	if (R_CheckBBox (bsp->bbox[side^1]))	// possibly divide back space
+	{
 		R_RenderBSPNode (bsp->children[side^1]);
+	}
 }
 
 

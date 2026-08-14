@@ -54,6 +54,52 @@ extern int cursor_blink_state;
 extern int active_start;
 extern int active_end;
 
+extern volatile uint32_t dos_diag_code;
+extern volatile uint32_t dos_diag_kernel_code;
+
+/* Same diagnostic latch as VGA, rendered in the normally blank top border. */
+static inline void __time_critical_func(render_diag_border_hdmi)(
+    uint32_t line, uint8_t *output_buffer)
+{
+    uint32_t code;
+    const char *prefix;
+    uint32_t glyph_line;
+
+    if (active_start < 40)
+        return;
+
+    if (line >= 2 && line < 18) {
+        code = dos_diag_code;
+        prefix = "APP:";
+        glyph_line = line - 2;
+    } else if (line >= 22 && line < 38) {
+        code = dos_diag_kernel_code;
+        prefix = "KRN:";
+        glyph_line = line - 22;
+    } else {
+        return;
+    }
+
+    if (!code)
+        return;
+
+    static const char hex[] = "0123456789ABCDEF";
+    const uint8_t fg = 0x0f;
+    const uint8_t bg = 0x00;
+    const int x0 = 8;
+
+    for (int col = 0; col < 12; ++col) {
+        char ch = (col < 4)
+            ? prefix[col]
+            : hex[(code >> ((11 - col) * 4)) & 0x0f];
+
+        uint8_t glyph = font_8x16[(uint8_t)ch * 16 + glyph_line];
+        uint8_t *d = output_buffer + x0 + col * 8;
+        for (int bit = 0; bit < 8; ++bit)
+            d[bit] = (glyph & (1u << bit)) ? fg : bg;
+    }
+}
+
 extern int gfx_submode;
 extern int gfx_width;
 extern int gfx_height;
@@ -727,6 +773,7 @@ static void __time_critical_func(dma_handler_HDMI)() {
         uint8_t* output_buffer = activ_buf + 72;
         if (line < (uint32_t)active_start) {
             nf_memset(output_buffer, 0, SCREEN_WIDTH);
+            render_diag_border_hdmi(line, output_buffer);
             goto f;
         }
         if (line >= (uint32_t)active_end) {

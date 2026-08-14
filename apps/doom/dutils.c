@@ -31,8 +31,9 @@ lnode_t *dll_AddEndNode(list_t *list, void *value)
 {
   lnode_t *node;
 
-  if (!list)
+  if (!list) {
     I_Error("Bad list in dll_AddEndNode");
+  }
   node = (lnode_t*)Z_Malloc(sizeof(lnode_t), PU_STATIC, 0);
   node->value = value;
   node->next = NULL;
@@ -49,8 +50,9 @@ lnode_t *dll_AddStartNode(list_t *list, void *value)
 {
   lnode_t *node;
 
-  if (!list)
+  if (!list) {
     I_Error("Bad list in dll_AddStartNode");
+  }
   node = (lnode_t*)Z_Malloc(sizeof(lnode_t), PU_STATIC, 0);
   node->value = value;
   node->next = list->start;
@@ -67,10 +69,12 @@ void *dll_DelNode(list_t *list, lnode_t *node)
 {
   void *value;
 
-  if (!list)
+  if (!list) {
     I_Error("Bad list in dll_DelNode");
-  if (!list->start)
+  }
+  if (!list->start) {
     I_Error("Empty list in dll_DelNode");
+  }
   value = node->value;
   if (node->prev)
     node->prev->next = node->next;

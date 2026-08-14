@@ -127,8 +127,9 @@ void ExtractFileBase (char *path, char *dest)
 	length = 0;
 	while (*src && *src != '.')
 	{
-		if (++length == 9)
+		if (++length == 9) {
 			I_Error ("Filename base of %s >8 chars",path);
+		}
 		*dest++ = toupper((int)*src++);
 	}
 }
@@ -211,9 +212,10 @@ void W_AddFile (char *filename)
 		printf ("W_AddFile: header read\n");
 		if (strncmp(header.identification,"IWAD",4))
 		{
-			if (strncmp(header.identification,"PWAD",4))
+			if (strncmp(header.identification,"PWAD",4)) {
 				I_Error ("Wad file %s doesn't have IWAD or PWAD id\n"
 				,filename);
+			}
 			modifiedgame = true;
 		}
 		header.numlumps = LONG(header.numlumps);
@@ -245,8 +247,9 @@ void W_AddFile (char *filename)
 	lumpinfo = realloc (lumpinfo, numlumps*sizeof(lumpinfo_t));
 	printf ("W_AddFile: realloc ok %p\n", lumpinfo);
 #if (APPVER_DOOMREV >= AV_DR_DM12)
-	if (!lumpinfo)
+	if (!lumpinfo) {
 		I_Error ("Couldn't realloc lumpinfo");
+	}
 #endif
 	lump_p = &lumpinfo[startlump];
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
@@ -298,9 +301,9 @@ void W_Reload (void)
 	if (!reloadname)
 		return;
 		
-	if ( (handle = open (reloadname,O_RDONLY | O_BINARY)) == -1)
+	if ( (handle = open (reloadname,O_RDONLY | O_BINARY)) == -1) {
 		I_Error ("W_Reload: couldn't open %s",reloadname);
-
+	}
 	read (handle, &header, sizeof(header));
 	lumpcount = LONG(header.numlumps);
 	header.infotableofs = LONG(header.infotableofs);
@@ -363,9 +366,9 @@ void W_InitMultipleFiles (char **filenames)
 	for ( ; *filenames ; filenames++)
 		W_AddFile (*filenames);
 
-	if (!numlumps)
+	if (!numlumps) {
 		I_Error ("W_InitFiles: no files found");
-		
+	}
 //
 // set up caching
 //
@@ -374,8 +377,9 @@ void W_InitMultipleFiles (char **filenames)
 #else
 	size = numlumps * sizeof(*lumpcache);
 	lumpcache = malloc (size);
-	if (!lumpcache)
+	if (!lumpcache) {
 		I_Error ("Couldn't allocate lumpcache");
+	}
 	memset (lumpcache,0, size);
 #endif
 }
@@ -492,8 +496,9 @@ int	W_GetNumForName (char *name)
 
 int W_LumpLength (int lump)
 {
-	if (lump >= numlumps)
+	if (lump >= numlumps) {
 		I_Error ("W_LumpLength: %i >= numlumps",lump);
+	}
 	return lumpinfo[lump].size;
 }
 
@@ -515,11 +520,10 @@ void W_ReadLump (int lump, void *dest)
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
 	int			handle;
 #endif
-	
-	if (lump >= numlumps)
+	if (lump >= numlumps) {
 		I_Error ("W_ReadLump: %i >= numlumps",lump);
+	}
 	l = lumpinfo+lump;
-	
 	I_BeginRead ();
 #if (APPVER_DOOMREV < AV_DR_DM1666P)
 	lseek (l->handle, l->position, SEEK_SET);
@@ -527,8 +531,9 @@ void W_ReadLump (int lump, void *dest)
 #else
 	if (l->handle == -1)
 	{	// reloadable file, so use open / read / close
-		if ( (handle = open (reloadname,O_RDONLY | O_BINARY)) == -1)
+		if ( (handle = open (reloadname,O_RDONLY | O_BINARY)) == -1) {
 			I_Error ("W_ReadLump: couldn't open %s",reloadname);
+		}
 	}
 	else
 		handle = l->handle;
@@ -536,10 +541,14 @@ void W_ReadLump (int lump, void *dest)
 	c = read (handle, dest, l->size);
 #endif
 	if (c < l->size)
+	{
 		I_Error ("W_ReadLump: only read %i of %i on lump %i",c,l->size,lump);
+	}
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
 	if (l->handle == -1)
+	{
 		close (handle);
+	}
 #endif
 	I_EndRead ();
 }
@@ -557,6 +566,7 @@ void W_ReadLump (int lump, void *dest)
 void	*W_CacheLumpNum (int lump, int tag)
 {
 byte *ptr;
+
 
 	if ((unsigned)lump >= numlumps)
 		I_Error ("W_CacheLumpNum: %i >= numlumps",lump);

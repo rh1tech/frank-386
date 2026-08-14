@@ -229,8 +229,9 @@ boolean P_Move(mobj_t *actor)
 		return false;
 
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
-	if ((unsigned)actor->movedir >= 8)
+	if ((unsigned)actor->movedir >= 8) {
 		I_Error ("Weird actor->movedir!");
+	}
 #endif
 
 	tryx = actor->x+actor->info->speed*xspeed[actor->movedir];
@@ -328,9 +329,9 @@ void P_NewChaseDir (mobj_t *actor)
 	dirtype_t	d[3];
 	dirtype_t	tdir, olddir, turnaround;
 
-	if (!actor->target)
+	if (!actor->target) {
 		I_Error ("P_NewChaseDir: called with no target");
-		
+	}
 	olddir = actor->movedir;
 	turnaround=opposite[olddir];
 
