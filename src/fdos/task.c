@@ -119,7 +119,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define M_API_VERSION              9
+#define M_API_VERSION             10
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    256u
 #define ARM_ELF_ARGV_SLOTS        66u

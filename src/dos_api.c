@@ -153,6 +153,117 @@ static uint32_t __not_in_flash_func(psram_size)(void) {
     return PSRAM_SIZE_BYTES;
 }
 
+/*
+ * Native-app memory primitives.
+ *
+ * Do not export the firmware libc memcpy/memset entry points directly: their
+ * placement is a toolchain/ROM/XIP detail.  Keep this ABI on explicit SRAM
+ * functions instead.  The memset core mirrors the proven nf_memset() used by
+ * the HDMI driver; memcpy uses word transfers only when source/destination
+ * have compatible alignment.
+ */
+void *__not_in_flash_func(nf_memset)(void *ptr, int value, size_t len)
+{
+    uint8_t *p = (uint8_t *)ptr;
+    uint8_t v8 = (uint8_t)value;
+
+    while (len && ((uintptr_t)p & 3u)) {
+        *p++ = v8;
+        --len;
+    }
+
+    if (len >= 4u) {
+        uint32_t v32 = v8;
+        v32 |= v32 << 8;
+        v32 |= v32 << 16;
+
+        uint32_t *p32 = (uint32_t *)p;
+        size_t n32 = len >> 2;
+        while (n32--)
+            *p32++ = v32;
+
+        p = (uint8_t *)p32;
+        len &= 3u;
+    }
+
+    while (len--)
+        *p++ = v8;
+
+    return ptr;
+}
+
+static void *__not_in_flash_func(dos_api_memcpy)(void *dst,
+                                                  const void *src,
+                                                  size_t len)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+
+    if ((((uintptr_t)d ^ (uintptr_t)s) & 3u) == 0u) {
+        while (len && ((uintptr_t)d & 3u)) {
+            *d++ = *s++;
+            --len;
+        }
+
+        if (len >= 4u) {
+            uint32_t *d32 = (uint32_t *)d;
+            const uint32_t *s32 = (const uint32_t *)s;
+            size_t n32 = len >> 2;
+
+            while (n32--)
+                *d32++ = *s32++;
+
+            d = (uint8_t *)d32;
+            s = (const uint8_t *)s32;
+            len &= 3u;
+        }
+    }
+
+    while (len--)
+        *d++ = *s++;
+
+    return dst;
+}
+
+static int __not_in_flash_func(dos_api_memcmp)(const void *a,
+                                                const void *b,
+                                                size_t len)
+{
+    const uint8_t *p = (const uint8_t *)a;
+    const uint8_t *q = (const uint8_t *)b;
+
+    /* Word-compare equal runs; byte-compare the first unequal word so the
+       return sign remains exactly the standard unsigned-char ordering. */
+    if ((((uintptr_t)p ^ (uintptr_t)q) & 3u) == 0u) {
+        while (len && ((uintptr_t)p & 3u)) {
+            if (*p != *q)
+                return (int)*p - (int)*q;
+            ++p;
+            ++q;
+            --len;
+        }
+
+        while (len >= 4u) {
+            uint32_t x = *(const uint32_t *)p;
+            uint32_t y = *(const uint32_t *)q;
+            if (x != y)
+                break;
+            p += 4;
+            q += 4;
+            len -= 4;
+        }
+    }
+
+    while (len--) {
+        if (*p != *q)
+            return (int)*p - (int)*q;
+        ++p;
+        ++q;
+    }
+
+    return 0;
+}
+
 // To be placed on 0x10100000
 unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)get_PC,
@@ -257,5 +368,9 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)__powisf2, /* 99 */
     (unsigned long)__powidf2, /* 100 */
     (unsigned long)&dos_diag_code, /* 101: native diagnostic latch */
+    (unsigned long)vsscanf, /* 102: libc scanner backend */
+    (unsigned long)dos_api_memcpy, /* 103: SRAM native-app memcpy */
+    (unsigned long)nf_memset, /* 104: shared SRAM memset */
+    (unsigned long)dos_api_memcmp, /* 105: SRAM native-app memcmp */
     0
 };

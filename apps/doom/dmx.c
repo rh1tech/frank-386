@@ -76,8 +76,12 @@ char *mid_data = NULL;
 
 int mus_loop = 0;
 int dmx_mus_port = 0;
-int dmx_sdev = NumSoundCards;
-int dmx_mdev = 0;
+int dmx_sdev = 0;
+int dmx_mdev = NumSoundCards;
+
+static int dmx_music_started;
+static int dmx_fx_started;
+static int dmx_pcfx_started;
 int mus_rate = 140;
 int mus_active = 0;
 int mus_fadeout = 0;
@@ -423,80 +427,110 @@ void MPU_SetCard(int port) {
     dmx_mus_port = port;
 }
 int DMX_Init(int rate, int maxsng, int mdev, int sdev) {
-    long status, device;
+    long status;
+    long device = NumSoundCards;
+
+    (void)maxsng;
     mus_rate = rate;
     dmx_sdev = sdev;
-    status = 0;
+    dmx_mdev = NumSoundCards;
+    dmx_music_started = 0;
+    dmx_fx_started = 0;
+    dmx_pcfx_started = 0;
 
-    switch (mdev) {
-    case 0:
-        device = NumSoundCards;
-        break;
-    case AHW_ADLIB:
-        if (sdev & AHW_SOUND_BLASTER)
-            device = SoundBlaster;
-        else
-            device = Adlib;
-printf("  DMX_Init Adlib\n");
-        break;
-    case AHW_SOUND_BLASTER:
-        device = SoundBlaster;
-printf("  DMX_Init SoundBlaster\n");
-        break;
-    case AHW_MPU_401:
-        device = GenMidi;
-printf("  DMX_Init MPU401/GenMidi\n");
-        break;
-    case AHW_ULTRA_SOUND:
-        device = UltraSound;
-printf("  DMX_Init UltraSound\n");
-        break;
-    default:
-        return -1;
-        break;
-    }
-    dmx_mdev = device;
-    if (device == SoundBlaster)
+    /*
+     * DMX code 0 means "None".  Do not turn it into NumSoundCards and call
+     * MUSIC_Init(): that starts the native sequencer even when DEFAULT.CFG
+     * explicitly disabled music.
+     */
+    if (mdev != 0)
     {
-        int MaxVoices;
-        int MaxBits;
-        int MaxChannels;
+        switch (mdev) {
+        case AHW_ADLIB:
+            if (sdev & AHW_SOUND_BLASTER)
+                device = SoundBlaster;
+            else
+                device = Adlib;
+            printf("  DMX_Init Adlib\n");
+            break;
+        case AHW_SOUND_BLASTER:
+            device = SoundBlaster;
+            printf("  DMX_Init SoundBlaster\n");
+            break;
+        case AHW_MPU_401:
+            device = GenMidi;
+            printf("  DMX_Init MPU401/GenMidi\n");
+            break;
+        case AHW_ULTRA_SOUND:
+            device = UltraSound;
+            printf("  DMX_Init UltraSound\n");
+            break;
+        default:
+            return -1;
+        }
 
-        FX_SetupSoundBlaster(dmx_blaster, (int *)&MaxVoices, (int *)&MaxBits, (int *)&MaxChannels);
-    }
-    status = MUSIC_Init(device, dmx_mus_port);
-    if (status == MUSIC_Ok) {
+        dmx_mdev = device;
+        if (device == SoundBlaster)
+        {
+            int MaxVoices;
+            int MaxBits;
+            int MaxChannels;
+
+            FX_SetupSoundBlaster(dmx_blaster, &MaxVoices,
+                                 &MaxBits, &MaxChannels);
+        }
+
+        status = MUSIC_Init(device, dmx_mus_port);
+        if (status != MUSIC_Ok)
+            return -1;
+
+        dmx_music_started = 1;
         MUSIC_SetVolume(0);
     }
+
     if (sdev & AHW_PC_SPEAKER)
     {
         PCFX_Init();
+        dmx_pcfx_started = 1;
         PCFX_SetCallBack(pcspkmuse_done);
         PCFX_SetTotalVolume(255);
         PCFX_UseLookup(0, 0);
     }
+
     return mdev | sdev;
 }
 
 void DMX_DeInit(void) {
-    MUSIC_Shutdown();
-    FX_Shutdown();
-    PCFX_Shutdown();
-    pcspkmuse_done(0);
+    if (dmx_music_started) {
+        MUSIC_Shutdown();
+        dmx_music_started = 0;
+    }
+    if (dmx_fx_started) {
+        FX_Shutdown();
+        dmx_fx_started = 0;
+    }
+    if (dmx_pcfx_started) {
+        PCFX_Shutdown();
+        pcspkmuse_done(0);
+        dmx_pcfx_started = 0;
+    }
     remove("ULTRAMID.INI");
     if (mid_data)
     {
         free(mid_data);
+        mid_data = NULL;
     }
 }
 
 void WAV_PlayMode(int channels, int samplerate) {
-    long device, status;
-    char tmp[300];
+    long device;
+    long status;
+
+    /* DMX sound-device code 0 is a real disabled state. */
+    if (dmx_sdev == 0)
+        return;
+
     switch (dmx_sdev) {
-    case 0:
-        device = NumSoundCards;
-        break;
     case AHW_SOUND_BLASTER:
         device = SoundBlaster;
         break;
@@ -505,18 +539,22 @@ void WAV_PlayMode(int channels, int samplerate) {
         break;
     default:
         return;
-        break;
     }
-    if (device == SoundBlaster) {
 
+    if (device == SoundBlaster) {
         int MaxVoices;
         int MaxBits;
         int MaxChannels;
 
-        FX_SetupSoundBlaster(dmx_blaster, (int *)&MaxVoices, (int *)&MaxBits, (int *)&MaxChannels);
+        FX_SetupSoundBlaster(dmx_blaster, &MaxVoices,
+                             &MaxBits, &MaxChannels);
     }
+
     status = FX_Init(device, channels, 2, 16, samplerate);
-    FX_SetVolume(255);
+    if (status == FX_Ok) {
+        dmx_fx_started = 1;
+        FX_SetVolume(255);
+    }
 }
 
 int CODEC_Detect(int *a, int *b)

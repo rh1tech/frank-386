@@ -15,6 +15,9 @@
 #include "hdmi.h"
 #include "font8x16.h"
 
+/* Shared SRAM-resident memset from src/dos_api.c. */
+void *nf_memset(void *ptr, int value, size_t len);
+
 //PIO параметры
 static uint offs_prg0 = 0;
 static uint offs_prg1 = 0;
@@ -247,42 +250,6 @@ static void pio_set_x(PIO pio, const int sm, uint32_t v) {
         pio_sm_exec(pio, sm, instr_shift);
     }
     pio_sm_exec(pio, sm, instr_mov);
-}
-
-static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t len)
-{
-    uint8_t* p = (uint8_t*)ptr;
-    uint8_t v8 = (uint8_t)value;
-
-    // --- выравниваем до 4 байт ---
-    while (len && ((uintptr_t)p & 3)) {
-        *p++ = v8;
-        len--;
-    }
-
-    // --- основной 32-битный цикл ---
-    if (len >= 4) {
-        uint32_t v32 = v8;
-        v32 |= v32 << 8;
-        v32 |= v32 << 16;
-
-        uint32_t* p32 = (uint32_t*)p;
-        size_t n32 = len >> 2;
-
-        while (n32--) {
-            *p32++ = v32;
-        }
-
-        p = (uint8_t*)p32;
-        len &= 3;
-    }
-
-    // --- хвост ---
-    while (len--) {
-        *p++ = v8;
-    }
-
-    return ptr;
 }
 
 #define is_hdmi_sync(c) (c >= HDMI_CTRL_0)

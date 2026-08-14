@@ -1,6 +1,7 @@
 #ifndef __NATIVE_DOS_IO_H__
 #define __NATIVE_DOS_IO_H__
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifndef SEEK_SET
@@ -19,6 +20,7 @@
 
 int read(int handle, void *buffer, unsigned int count);
 int write(int handle, const void *buffer, unsigned int count);
+void dos_lock_term(bool lock);
 int close(int handle);
 int access(const char *path, int mode);
 int32_t lseek(int handle, int32_t offset, int origin);

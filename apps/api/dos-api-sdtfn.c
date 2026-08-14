@@ -273,35 +273,22 @@ void strupr(char *s)
 
 void *memcpy(void *dst, const void *src, size_t n)
 {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    while (n--)
-        *d++ = *s++;
-    return dst;
+    typedef void *(*fn_ptr_t)(void *, const void *, size_t);
+    return ((fn_ptr_t)_sys_table_ptrs[103])(dst, src, n);
 }
 
 void *memset(void *dst, int value, size_t n)
 {
-    unsigned char *d = (unsigned char *)dst;
-    while (n--)
-        *d++ = (unsigned char)value;
-    return dst;
+    typedef void *(*fn_ptr_t)(void *, int, size_t);
+    return ((fn_ptr_t)_sys_table_ptrs[104])(dst, value, n);
 }
 
 int memcmp(const void *a, const void *b, size_t n)
 {
-    const unsigned char *pa = (const unsigned char *)a;
-    const unsigned char *pb = (const unsigned char *)b;
-
-    while (n--)
-    {
-        int d = (int)*pa++ - (int)*pb++;
-        if (d)
-            return d;
-    }
-
-    return 0;
+    typedef int (*fn_ptr_t)(const void *, const void *, size_t);
+    return ((fn_ptr_t)_sys_table_ptrs[105])(a, b, n);
 }
+
 
 int strncasecmp(const char *a, const char *b, size_t n)
 {
@@ -780,6 +767,18 @@ int close(int handle)
     return regs.x.cflag ? -1 : 0;
 }
 
+/*
+ * Native file I/O is normally also a cooperative emulator service point.
+ * Applications which already provide their own sufficiently frequent yields
+ * may temporarily suppress that extra work around bulk I/O.
+ */
+static bool native_term_locked;
+
+void dos_lock_term(bool lock)
+{
+    native_term_locked = lock;
+}
+
 int read(int handle, void *buffer, unsigned int count)
 {
     unsigned char *dst = (unsigned char *)buffer;
@@ -799,6 +798,9 @@ int read(int handle, void *buffer, unsigned int count)
             remain > NATIVE_IO_BUFFER_SIZE
                 ? NATIVE_IO_BUFFER_SIZE
                 : remain);
+
+        if (!native_term_locked)
+            (void)dos_yield();
 
         regs.h.ah = 0x3f;
         regs.w.bx = (uint16_t)handle;
@@ -932,6 +934,9 @@ int write(int handle, const void *buffer, unsigned int count)
                 : remain);
 
         memcpy(native_io_buffer, src + total, chunk);
+
+        if (!native_term_locked)
+            (void)dos_yield();
 
         regs.h.ah = 0x40;
         regs.w.bx = (uint16_t)handle;
@@ -1395,181 +1400,12 @@ int sprintf(char *buffer, const char *format, ...)
 }
 
 
-static int native_scan_skip_space(const char **input)
-{
-    int n = 0;
-    while (**input == ' ' || **input == '\t' ||
-           **input == '\r' || **input == '\n')
-    {
-        ++*input;
-        ++n;
-    }
-    return n;
-}
-
-static int native_scan_uint(const char **input, unsigned int *value, int base)
-{
-    const char *p = *input;
-    unsigned int v = 0;
-    int digits = 0;
-
-    if (base == 16 && p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
-        p += 2;
-
-    for (;;)
-    {
-        int d;
-        char c = *p;
-
-        if (c >= '0' && c <= '9')
-            d = c - '0';
-        else if (c >= 'a' && c <= 'f')
-            d = c - 'a' + 10;
-        else if (c >= 'A' && c <= 'F')
-            d = c - 'A' + 10;
-        else
-            break;
-
-        if (d >= base)
-            break;
-
-        v = v * (unsigned int)base + (unsigned int)d;
-        ++p;
-        ++digits;
-    }
-
-    if (!digits)
-        return 0;
-
-    *input = p;
-    *value = v;
-    return 1;
-}
-
 static int native_vsscanf(const char *input, const char *format, va_list ap)
 {
-    int assigned = 0;
-
-    while (*format)
-    {
-        if (*format != '%')
-        {
-            if (*format == ' ' || *format == '\t' ||
-                *format == '\r' || *format == '\n')
-            {
-                while (*format == ' ' || *format == '\t' ||
-                       *format == '\r' || *format == '\n')
-                    ++format;
-                native_scan_skip_space(&input);
-                continue;
-            }
-
-            if (*input != *format)
-                break;
-
-            ++input;
-            ++format;
-            continue;
-        }
-
-        ++format;
-
-        int width = 0;
-        while (*format >= '0' && *format <= '9')
-            width = width * 10 + (*format++ - '0');
-
-        if (*format == 's')
-        {
-            char *dst = va_arg(ap, char *);
-            int n = 0;
-
-            native_scan_skip_space(&input);
-            if (!*input)
-                break;
-
-            while (*input &&
-                   *input != ' ' && *input != '\t' &&
-                   *input != '\r' && *input != '\n' &&
-                   (!width || n < width))
-            {
-                dst[n++] = *input++;
-            }
-
-            if (!n)
-                break;
-
-            dst[n] = '\0';
-            ++assigned;
-            ++format;
-            continue;
-        }
-
-        if (*format == '[' &&
-            format[1] == '^' && format[2] == '\\' &&
-            format[3] == 'n' && format[4] == ']')
-        {
-            char *dst = va_arg(ap, char *);
-            int n = 0;
-
-            format += 5;
-            if (!*input)
-                break;
-
-            while (*input && *input != '\n' &&
-                   (!width || n < width))
-                dst[n++] = *input++;
-
-            dst[n] = '\0';
-            ++assigned;
-            continue;
-        }
-
-        if (*format == 'x')
-        {
-            unsigned int *dst = va_arg(ap, unsigned int *);
-            unsigned int value;
-
-            native_scan_skip_space(&input);
-            if (!native_scan_uint(&input, &value, 16))
-                break;
-
-            *dst = value;
-            ++assigned;
-            ++format;
-            continue;
-        }
-
-        if (*format == 'i')
-        {
-            int *dst = va_arg(ap, int *);
-            int sign = 1;
-            unsigned int value;
-            int base = 10;
-
-            native_scan_skip_space(&input);
-            if (*input == '-' || *input == '+')
-            {
-                if (*input++ == '-')
-                    sign = -1;
-            }
-
-            if (input[0] == '0' && (input[1] == 'x' || input[1] == 'X'))
-                base = 16;
-
-            if (!native_scan_uint(&input, &value, base))
-                break;
-
-            *dst = (int)value * sign;
-            ++assigned;
-            ++format;
-            continue;
-        }
-
-        break;
-    }
-
-    return assigned;
+    typedef int (*fn_ptr_t)(const char *, const char *, va_list);
+    return ((fn_ptr_t)_sys_table_ptrs[102])(input, format, ap);
 }
+
 
 int sscanf(const char *buffer, const char *format, ...)
 {

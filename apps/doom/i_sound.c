@@ -868,10 +868,18 @@ void I_StartupSound (void)
   if (devparm)
 	printf("DMX_Init() returned %d\n", rc);
 #else
-  printf("  calling DMX_Init\n");
-  rc = DMX_Init(SND_TICRATE, SND_MAXSONGS, dmxCodes[snd_MusicDevice],
-	dmxCodes[snd_SfxDevice]);
-  i_dmx_started = true;
+  if (snd_MusicDevice != snd_none || snd_SfxDevice != snd_none)
+  {
+    printf("  calling DMX_Init\n");
+    rc = DMX_Init(SND_TICRATE, SND_MAXSONGS, dmxCodes[snd_MusicDevice],
+      dmxCodes[snd_SfxDevice]);
+    i_dmx_started = true;
+  }
+  else
+  {
+    rc = 0;
+    i_dmx_started = false;
+  }
 
   if (devparm)
 	printf("  DMX_Init() returned %d\n", rc);
