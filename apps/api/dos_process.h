@@ -12,6 +12,8 @@ static const unsigned long * const _dos_process_sys_table_ptrs =
 extern "C" {
 #endif
 
+#include <stdbool.h>
+
 /*
  * Terminate the current native DOS process.
  *
@@ -24,6 +26,13 @@ static inline __attribute__((noreturn)) void dos_process_exit(int status)
     typedef void (*fn_ptr_t)(int) __attribute__((noreturn));
     ((fn_ptr_t)_dos_process_sys_table_ptrs[11])(status);
     __builtin_unreachable();
+}
+
+/* Return non-zero after DOS has requested termination of this native child. */
+static inline bool dos_termination_requested(void)
+{
+    typedef bool (*fn_ptr_t)(void);
+    return ((fn_ptr_t)_dos_process_sys_table_ptrs[106])();
 }
 
 #ifdef __cplusplus

@@ -11,6 +11,7 @@
 extern PC *pc;
 extern void arm_elf_process_exit(int status);
 extern uint32_t arm_elf_yield(void);
+extern bool terminate_requested(void);
 
 /*
  * Native-ELF diagnostic latch.
@@ -372,5 +373,6 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)dos_api_memcpy, /* 103: SRAM native-app memcpy */
     (unsigned long)nf_memset, /* 104: shared SRAM memset */
     (unsigned long)dos_api_memcmp, /* 105: SRAM native-app memcmp */
+    (unsigned long)terminate_requested, /* 106: native process termination state */
     0
 };

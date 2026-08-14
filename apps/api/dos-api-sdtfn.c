@@ -779,6 +779,26 @@ void dos_lock_term(bool lock)
     native_term_locked = lock;
 }
 
+static void dos_term_point(void)
+{
+    union REGS regs = {0};
+
+    (void)dos_yield();
+    if (dos_termination_requested())
+        exit(0);
+
+    /*
+     * dos_yield() lets the guest BIOS service IRQ1 and place pending input
+     * into the BIOS keyboard buffer. Peek at the next key without removing
+     * it, so Ctrl+C remains queued for the command interpreter after this
+     * native process exits.
+     */
+    regs.h.ah = 0x01;
+    int386(0x16, &regs, &regs);
+    if (regs.h.al == 0x03)
+        exit(0);
+}
+
 int read(int handle, void *buffer, unsigned int count)
 {
     unsigned char *dst = (unsigned char *)buffer;
@@ -800,7 +820,7 @@ int read(int handle, void *buffer, unsigned int count)
                 : remain);
 
         if (!native_term_locked)
-            (void)dos_yield();
+            dos_term_point();
 
         regs.h.ah = 0x3f;
         regs.w.bx = (uint16_t)handle;
@@ -936,7 +956,7 @@ int write(int handle, const void *buffer, unsigned int count)
         memcpy(native_io_buffer, src + total, chunk);
 
         if (!native_term_locked)
-            (void)dos_yield();
+            dos_term_point();
 
         regs.h.ah = 0x40;
         regs.w.bx = (uint16_t)handle;

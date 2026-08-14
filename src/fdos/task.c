@@ -119,7 +119,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define M_API_VERSION             10
+#define DOS_API_VERSION           11
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    256u
 #define ARM_ELF_ARGV_SLOTS        66u
@@ -1364,13 +1364,13 @@ static int arm_elf_preflight(arm_elf_load_meta *meta)
   ULONG native_size = ARM_ELF_DEFAULT_NATIVE_STACK_SIZE;
   ULONG dos_size = ARM_ELF_DEFAULT_DOS_STACK_SIZE;
 
-  meta->required_api_version = M_API_VERSION;
+  meta->required_api_version = DOS_API_VERSION;
   if (meta->required_api_addr != 0)
     meta->required_api_version =
         ((arm_elf_req_ver_fn)(uintptr_t)meta->required_api_addr)();
-  if (meta->required_api_version > M_API_VERSION) {
+  if (meta->required_api_version > DOS_API_VERSION) {
     dos_printf("ARM ELF: application requires DOS-API version %ld; provided %u\r\n",
-               meta->required_api_version, (unsigned)M_API_VERSION);
+               meta->required_api_version, (unsigned)DOS_API_VERSION);
     return DE_INVLDFMT;
   }
 
