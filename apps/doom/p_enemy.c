@@ -211,6 +211,18 @@ boolean P_CheckMissileRange(mobj_t *actor)
 fixed_t	xspeed[8] = {FRACUNIT,47000,0,-47000,-FRACUNIT,-47000,0,47000};
 fixed_t yspeed[8] = {0,47000,FRACUNIT,47000,0,-47000,-FRACUNIT,-47000};
 
+/*
+ * Temporary movedir corruption diagnostic.
+ * Valid mobj movedir values are DI_EAST..DI_SOUTHEAST (0..7)
+ * and DI_NODIR (8).  Report the first point which observes anything else.
+ */
+#define P_CHECK_MOVEDIR(actor, site) \
+	do { \
+		if ((unsigned)(actor)->movedir > (unsigned)DI_NODIR) \
+			I_Error("bad movedir=%d type=%d site=%d", \
+			        (actor)->movedir, (actor)->type, (site)); \
+	} while (0)
+
 #define	MAXSPECIALCROSS		8
 extern	line_t	*spechit[MAXSPECIALCROSS];
 extern	int			 numspechit;
@@ -230,7 +242,8 @@ boolean P_Move(mobj_t *actor)
 
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
 	if ((unsigned)actor->movedir >= 8) {
-		I_Error ("Weird actor->movedir!");
+		I_Error ("bad movedir=%d type=%d site=200",
+		         actor->movedir, actor->type);
 	}
 #endif
 
@@ -259,6 +272,7 @@ boolean P_Move(mobj_t *actor)
 			return false;
 
 		actor->movedir = DI_NODIR;
+		P_CHECK_MOVEDIR(actor, 261);
 		good = false;
 		while (numspechit--)
 		{
@@ -317,21 +331,28 @@ boolean P_TryWalk(mobj_t *actor)
 ================
 */
 
-dirtype_t opposite[] =
+/*
+ * Direction values participate in arithmetic and in a descending loop which
+ * intentionally runs down to DI_EAST-1.  Keep these temporaries as int:
+ * dirtype_t may use a narrow unsigned enum representation on ARM, in which
+ * decrementing DI_EAST (0) wraps to 255 instead of producing -1.
+ */
+int opposite[] =
 {DI_WEST, DI_SOUTHWEST, DI_SOUTH, DI_SOUTHEAST, DI_EAST, DI_NORTHEAST,
 DI_NORTH, DI_NORTHWEST, DI_NODIR};
 
-dirtype_t diags[] = {DI_NORTHWEST,DI_NORTHEAST,DI_SOUTHWEST,DI_SOUTHEAST};
+int diags[] = {DI_NORTHWEST,DI_NORTHEAST,DI_SOUTHWEST,DI_SOUTHEAST};
 
 void P_NewChaseDir (mobj_t *actor)
 {
 	fixed_t		deltax,deltay;
-	dirtype_t	d[3];
-	dirtype_t	tdir, olddir, turnaround;
+	int			d[3];
+	int			tdir, olddir, turnaround;
 
 	if (!actor->target) {
 		I_Error ("P_NewChaseDir: called with no target");
 	}
+	P_CHECK_MOVEDIR(actor, 330);
 	olddir = actor->movedir;
 	turnaround=opposite[olddir];
 
@@ -355,6 +376,7 @@ void P_NewChaseDir (mobj_t *actor)
 	if (d[1] != DI_NODIR && d[2] != DI_NODIR)
 	{
 		actor->movedir = diags[((deltay<0)<<1)+(deltax>0)];
+		P_CHECK_MOVEDIR(actor, 357);
 		if (actor->movedir != turnaround && P_TryWalk(actor))
 			return;
 	}
@@ -375,6 +397,7 @@ void P_NewChaseDir (mobj_t *actor)
 	if (d[1]!=DI_NODIR)
 	{
 		actor->movedir = d[1];
+		P_CHECK_MOVEDIR(actor, 377);
 		if (P_TryWalk(actor))
 			return;     /*either moved forward or attacked*/
 	}
@@ -382,6 +405,7 @@ void P_NewChaseDir (mobj_t *actor)
 	if (d[2]!=DI_NODIR)
 	{
 		actor->movedir =d[2];
+		P_CHECK_MOVEDIR(actor, 384);
 		if (P_TryWalk(actor))
 			return;
 	}
@@ -391,6 +415,7 @@ void P_NewChaseDir (mobj_t *actor)
 	if (olddir!=DI_NODIR)
 	{
 		actor->movedir =olddir;
+		P_CHECK_MOVEDIR(actor, 393);
 		if (P_TryWalk(actor))
 			return;
 	}
@@ -402,6 +427,8 @@ void P_NewChaseDir (mobj_t *actor)
 			if (tdir!=turnaround)
 			{
 				actor->movedir =tdir;
+				P_CHECK_MOVEDIR(actor, 420);
+				P_CHECK_MOVEDIR(actor, 404);
 				if ( P_TryWalk(actor) )
 					return;
 			}
@@ -427,12 +454,16 @@ void P_NewChaseDir (mobj_t *actor)
 	if (turnaround !=  DI_NODIR)
 	{
 		actor->movedir =turnaround;
+		P_CHECK_MOVEDIR(actor, 429);
 		if ( P_TryWalk(actor) )
 			return;
 	}
 
 	actor->movedir = DI_NODIR;		// can't move
+	P_CHECK_MOVEDIR(actor, 434);
 }
+
+#undef P_CHECK_MOVEDIR
 
 /*
 ================
