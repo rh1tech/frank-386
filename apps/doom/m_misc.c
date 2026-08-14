@@ -318,7 +318,7 @@ default_t defaults[] =
 	{"music_volume", &musicVolume, 8},
 #endif
 	{"show_messages",&showMessages, 1},
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(ELF_MODE)
 #define SC_UPARROW              0x48
 #define SC_DOWNARROW            0x50
 #define SC_LEFTARROW            0x4b
@@ -430,7 +430,7 @@ void M_SaveDefaults (void)
 			v = *defaults[i].location;
 		fprintf (f,"%s\t\t%i\n",defaults[i].name,v);
 #else
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(ELF_MODE)
 		if (defaults[i].scantranslate)
 			defaults[i].location = &defaults[i].untranslated;
 #endif
@@ -561,7 +561,7 @@ void M_LoadDefaults (void)
 	}
 
 
-#ifdef __WATCOMC__
+#if defined(__WATCOMC__) || defined(ELF_MODE)
 	for(i = 0; i < numdefaults; i++)
 	{
 		if(defaults[i].scantranslate)

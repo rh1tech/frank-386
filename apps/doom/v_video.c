@@ -21,6 +21,8 @@
 #ifdef ELF_MODE
 #include "psram.h"
 #include "i_native_memory.h"
+#include <dos_phys.h>
+#include <conio.h>
 #endif
 
 #define SC_INDEX			0x3c4
@@ -231,7 +233,7 @@ void V_DrawPatchFlipped (int x, int y, int scrn, patch_t *patch)
 
 void V_DrawPatchDirect (int x, int y, int scrn, patch_t *patch)
 {
-#ifndef __WATCOMC__
+#if !defined(__WATCOMC__) && !defined(ELF_MODE)
 	V_DrawPatch (x,y,scrn, patch); 
 #else
 	int			count,col;
@@ -270,7 +272,11 @@ void V_DrawPatchDirect (int x, int y, int scrn, patch_t *patch)
 			
 			while (count--)
 			{
+#ifdef ELF_MODE
+				dos_phys_write8((uint32_t)(uintptr_t)dest, *source++);
+#else
 				*dest = *source++;
+#endif
 				dest += SCREENWIDTH/4;
 			}
 			column = (column_t *)(  (byte *)column + column->length
