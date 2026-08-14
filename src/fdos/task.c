@@ -55,6 +55,14 @@ void pc_step(struct PC *pc, int stepcount);
 void pc_service(struct PC *pc);
 uint32_t get_uticks(void);
 
+/* Native-yield IRQ trampoline uses the same callback trap mechanism as
+   bios_intcall(), but deliberately does not execute the suspended parent
+   CS:IP. */
+bool set_bios_callback(CPU *cpu, bios_callback_params_t *params, bool reenter);
+bool drop_bios_callback(CPU *cpu, bios_callback_params_t *params);
+bool cpu_pending_trap(void);
+void cpu_pending_trap_set(bool v);
+
 #define ExeHeader (*(exe_header *)(SecPathName + 0))
 #define TempExeBlock (*(exec_blk *)(SecPathName + sizeof(exe_header)))
 #define Shell (SecPathName + sizeof(exe_header) + sizeof(exec_blk))
@@ -2370,18 +2378,104 @@ typedef void (*arm_elf_fini_fn)(void *);
 static volatile ULONG *arm_elf_active_main_sp;
 
 /*
+ * Synthetic guest return point used while a native ELF application yields.
+ *
+ * The CPU image normally parked while native main() is running contains the
+ * suspended parent process CS:IP.  It must never be resumed from yield().
+ * Instead, pending IRQs run with CS:IP pointing at this callback trap.  A
+ * hardware IRQ pushes that synthetic return address, executes through the
+ * normal PIC/IVT path, and its final IRET lands here.
+ *
+ * Setting native_done gives cpu_step()/pc_step() an immediate stop condition:
+ * the interpreter exits at the top of its next iteration instead of executing
+ * even one instruction from the suspended parent context.
+ */
+static bool arm_elf_irq_return(CPU *cpu, bios_callback_params_t *params)
+{
+  if (!params->done) {
+    params->done = true;
+    cpu->native_done = true;
+  }
+  return false; /* callback address itself has no guest IRET */
+}
+
+/*
+ * Run pending guest hardware IRQs without resuming the process which EXEC'ed
+ * the native ELF child.
+ *
+ * exec_enter_child() already switched SS:SP to the native child's dedicated
+ * DOS stack.  We preserve the complete parked CPU register image, replace only
+ * CS:IP with a synthetic BIOS callback return point and force IF=1/TF=0.  If
+ * an IRQ is pending, i286/i386 step takes it before fetching the synthetic
+ * address, so PIC arbitration, IVT dispatch, guest hooks, STI/nested IRQs and
+ * EOI semantics remain entirely in the existing guest machinery.
+ *
+ * If no IRQ is pending this helper is not entered.  During the handler we use
+ * ten-instruction pc_step() slices: that keeps the AdLib pc_step path to one
+ * CPU slice, and when the final IRET reaches arm_elf_irq_return(),
+ * native_done causes the current slice to stop immediately.
+ */
+static void arm_elf_service_guest_irq(void)
+{
+  struct saved_cpu_ctx saved;
+  bios_callback_params_t params;
+  bool old_native_done;
+  bool old_pending_trap;
+
+  if (pc == NULL || cpu == NULL || !cpu->intr)
+    return;
+
+  save_ctx(cpu, &saved);
+  old_native_done = cpu->native_done;
+  old_pending_trap = cpu_pending_trap();
+
+  memset(&params, 0, sizeof(params));
+  params.callback = arm_elf_irq_return;
+  params.expected_cs = 0xFFEF;
+  params.expected_ip = 0x000F;
+  params.owner = "NATIVE ELF IRQ";
+
+  cpu_pending_trap_set(false);
+  set_bios_callback(cpu, &params, true);
+
+  /*
+   * This is the only guest continuation visible to the IRQ.  The interrupt is
+   * accepted before opcode fetch, so its IRET returns here, never to saved.cs:
+   * saved.ip (the suspended parent EXEC context).
+   */
+  SET_CS(params.expected_cs);
+  SET_IP(params.expected_ip);
+  cpu_setflags(cpu, 0x0200u, 0x0100u); /* IF=1, TF=0 */
+  cpu->native_done = false;
+
+  while (!params.done) {
+    pc_step(pc, 10);
+
+    /* A DOS termination request aborts the active guest burst.  Do not spin on
+       native_done waiting for an IRET which will never arrive. */
+    if (terminate_requested())
+      break;
+  }
+
+  drop_bios_callback(cpu, &params);
+  cpu_pending_trap_set(old_pending_trap);
+  restore_ctx(cpu, &saved);
+  cpu->native_done = old_native_done;
+}
+
+/*
  * Cooperative service point for a running native ELF application.
  *
- * The native main() executes synchronously on core0, so the ordinary outer
- * emulator loop cannot call pc_step() until main() returns.  A native yield
- * services exactly the device side of pc_step() and deliberately executes no
- * guest CPU instructions.  The returned timestamp lets client-side schedulers
- * (DMX TSM, PC speaker, MIDI, etc.) run callbacks in normal application
- * context instead of from a second IRQ/timer context.
+ * Device polling first makes fresh IRQ state visible (keyboard, PIT, etc.).
+ * Then any pending IRQ is allowed to execute through the ordinary guest
+ * PIC/IVT machinery on the child's DOS stack, but only between the synthetic
+ * callback boundaries above.  The suspended parent CS:IP remains frozen for
+ * the entire native-child lifetime.
  */
 uint32_t arm_elf_yield(void)
 {
   pc_service(pc);
+  arm_elf_service_guest_irq();
   return get_uticks();
 }
 
