@@ -894,18 +894,22 @@ void I_ShutdownSound (void)
 #if (APPVER_DOOMREV >= AV_DR_DM1666P)
   S_PauseSound();
   {
-	int s;
+	int start;
 	extern volatile int ticcount;
 
-	s = ticcount + 30;
-	while (s != ticcount)
+	/*
+	 * Wait for at least 30 ticks, not for one exact ticcount value.
+	 *
+	 * Under native ELF TSM_Yield() may service more than one timer callback
+	 * before returning (and now may also run guest IRQ work).  The old
+	 * "s != ticcount" test can therefore step over s and wait until integer
+	 * wraparound, which looks exactly like a clean switch to text mode followed
+	 * by an exit into nowhere.
+	 */
+	start = ticcount;
+	while ((unsigned)(ticcount - start) < 30u)
 	{
 #ifdef ELF_MODE
-	  /*
-	   * Original DOS advances ticcount asynchronously from the DMX timer IRQ.
-	   * Native ELF uses the cooperative TSM backend, so a busy wait must pump
-	   * it explicitly or ticcount can never advance.
-	   */
 	  TSM_Yield();
 #endif
 	}
