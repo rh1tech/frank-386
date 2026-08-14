@@ -8,6 +8,8 @@
 #include "direct.h"
 #include "dos_mem.h"
 #include "dos_process.h"
+#include "dos_vect.h"
+#include "cpu.h"
 #include "dos_diag.h"
 #include "sys/stat.h"
 #include "stdio.h"
@@ -1615,6 +1617,76 @@ int fscanf(FILE *stream, const char *format, ...)
     result = native_vsscanf(line, format, ap);
     va_end(ap);
     return result;
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* Native interrupt-vector ownership                                          */
+/* ------------------------------------------------------------------------- */
+
+#ifndef DOS_OS_API_SYS_TABLE_BASE
+#define DOS_OS_API_SYS_TABLE_BASE ((void *)(0x10100000ul))
+#endif
+
+static volatile uint16_t *dos_vector_ivt_word(unsigned intno)
+{
+    return (volatile uint16_t *)(uintptr_t)
+        (0x11000000ul + ((uint32_t)(intno & 0xffu) << 2));
+}
+
+static dos_native_vector_handler_t *dos_vector_handler_table(void)
+{
+    const unsigned long *table =
+        (const unsigned long *)(uintptr_t)DOS_OS_API_SYS_TABLE_BASE;
+    return (dos_native_vector_handler_t *)(uintptr_t)table[1];
+}
+
+bool dos_native_setvect(dos_native_vector_t *state,
+                        unsigned intno,
+                        dos_native_vector_handler_t handler)
+{
+    volatile uint16_t *ivt;
+    dos_native_vector_handler_t *handlers;
+
+    if (!state || !handler || intno > 0xffu || state->installed)
+        return false;
+
+    ivt = dos_vector_ivt_word(intno);
+    handlers = dos_vector_handler_table();
+    if (!handlers)
+        return false;
+
+    state->intno = (uint16_t)intno;
+    state->old_off = ivt[0];
+    state->old_seg = ivt[1];
+    state->old_handler = handlers[intno];
+
+    handlers[intno] = handler;
+    ivt[0] = (uint16_t)intno;
+    ivt[1] = 0xFFE0u;
+    state->installed = true;
+    return true;
+}
+
+void dos_native_restorevect(dos_native_vector_t *state)
+{
+    volatile uint16_t *ivt;
+    dos_native_vector_handler_t *handlers;
+    unsigned intno;
+
+    if (!state || !state->installed)
+        return;
+
+    intno = state->intno;
+    ivt = dos_vector_ivt_word(intno);
+    handlers = dos_vector_handler_table();
+
+    ivt[0] = state->old_off;
+    ivt[1] = state->old_seg;
+    if (handlers)
+        handlers[intno] = state->old_handler;
+
+    state->installed = false;
 }
 
 /*

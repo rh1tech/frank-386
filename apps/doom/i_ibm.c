@@ -34,6 +34,7 @@
 #include "R_local.h"
 #ifdef ELF_MODE
 #include <dos_phys.h>
+#include <dos_vect.h>
 
 /*
  * In native ELF mode pointers such as 0xa0000/0xa4000 are guest x86 physical
@@ -988,6 +989,8 @@ extern int __wp1, __wp2, __wp3;
 
 #ifdef __WATCOMC__
 void (__interrupt __far *oldkeyboardisr) () = NULL;
+#elif defined(ELF_MODE)
+static dos_native_vector_t native_keyboard_vector;
 #endif
 
 
@@ -1006,6 +1009,22 @@ void __interrupt I_KeyboardISR (void)
     kbdhead++;
     _outbyte(0x20,0x20);
 }
+#elif defined(ELF_MODE)
+/*
+ * Native equivalent of DOOM's original IRQ1 ISR.
+ *
+ * Returning true tells the FFE0 native-BIOS trap to execute its reusable
+ * guest IRET.  That IRET returns to the synthetic yield IRQ boundary rather
+ * than to the suspended parent process.
+ */
+static bool I_NativeKeyboardISR(void *cpu)
+{
+    (void)cpu;
+    keyboardque[kbdhead&(KBDQUESIZE-1)] = lastpress = _inbyte(0x60);
+    kbdhead++;
+    _outbyte(0x20,0x20);
+    return true;
+}
 #endif
 
 /*
@@ -1021,6 +1040,10 @@ void I_StartupKeyboard (void)
 #if defined(__WATCOMC__) && !defined(NOKBD)
     oldkeyboardisr = _dos_getvect(KEYBOARDINT);
     _dos_setvect (0x8000 | KEYBOARDINT, I_KeyboardISR);
+#elif defined(ELF_MODE) && !defined(NOKBD)
+    if (!dos_native_setvect(&native_keyboard_vector,
+                            KEYBOARDINT, I_NativeKeyboardISR))
+        I_Error("Can't install native keyboard IRQ");
 #endif
 }
 
@@ -1031,6 +1054,7 @@ void I_ShutdownKeyboard (void)
         _dos_setvect (KEYBOARDINT, oldkeyboardisr);
     *(short *)0x41c = *(short *)0x41a;
 #elif defined(ELF_MODE)
+    dos_native_restorevect(&native_keyboard_vector);
     dos_phys_write16(0x41c, dos_phys_read16(0x41a));
 #endif
 }
