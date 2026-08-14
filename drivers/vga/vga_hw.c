@@ -72,6 +72,7 @@ static const struct pio_program pio_vga_program = {
 int active_start = DEFAULT_ACTIVE_START;
 int active_end   = DEFAULT_ACTIVE_END;
 
+#if DIAG
 extern volatile uint32_t dos_diag_code;
 extern volatile uint32_t dos_diag_kernel_code;
 
@@ -128,6 +129,7 @@ static inline void __time_critical_func(render_diag_border_vga)(
             d[bit] = (glyph & (1u << bit)) ? fg : bg;
     }
 }
+#endif
 
 #define HS_SIZE             96
 #define SHIFT_PICTURE       VGA_SHIFT_PICTURE  // Where active video starts (from board_config.h)
@@ -786,7 +788,9 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
         for (int i = 0; i < 160; i++)
             out32[i] = blank;
+#if DIAG
         render_diag_border_vga(line, output_buffer);
+#endif
         return;
     }
 

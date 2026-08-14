@@ -17,7 +17,6 @@
  * enter DOS, bios_intcall(), pc_service(), stdio, FatFS, or any scheduler.
  */
 #define DOS_DIAG_API_INDEX       101u
-#define DOS_DIAG_PSP_GUARD_INDEX 102u
 
 static inline void dos_diag_set(uint32_t code)
 {
@@ -30,30 +29,6 @@ static inline void dos_diag_set(uint32_t code)
     volatile uint32_t *latch =
         (volatile uint32_t *)(uintptr_t)table[DOS_DIAG_API_INDEX];
     *latch = code;
-
-    /*
-     * While hunting the WAD/PSP corruption, probe only coarse renderer/WAD
-     * markers.  Do not call into firmware for the very hot 30/31/32 renderer
-     * markers; that would perturb every rendered column.
-     *
-     * APP remains the exact code which triggered the check.  If cu_psp no
-     * longer matches the PSP which opened the WAD, the firmware guard freezes
-     * core0 and KRN shows the current PSP.
-     */
-    {
-        uint8_t family = (uint8_t)(code >> 24);
-        if ((family >= 0x11u && family <= 0x14u)
-            || (family >= 0x21u && family <= 0x22u)
-            || family == 0x30u
-            || family == 0x31u
-            || family == 0x32u
-            || family == 0x33u
-            || family == 0x34u)
-        {
-            typedef void (*guard_fn_t)(unsigned);
-            ((guard_fn_t)table[DOS_DIAG_PSP_GUARD_INDEX])(0x20u);
-        }
-    }
 }
 
 #endif /* DIAG */

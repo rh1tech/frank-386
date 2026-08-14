@@ -22,11 +22,8 @@ extern struct PC* pc;
 void pc_step(struct PC* pc, size_t max_ops);
 /* proto.h (fdos) not included here - forward-declare the terminate probe. */
 extern bool terminate_requested(void);
-extern void doom_wad_check_cupsp(unsigned stage);
-extern void doom_wad_check_cupsp_value(unsigned family, uint32_t value);
 
 void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
-    doom_wad_check_cupsp(0x10);
     u16 cs = CPU_CS;
     u16 ip = CPU_IP;
     /*
@@ -74,7 +71,6 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     bool old_native_done = cpu->native_done;
     // set CS:IP/flags, prep stack, and on IRET will recover
     cpu_intcall(cpu, intnum);
-    doom_wad_check_cupsp(0x11);
     cpu->native_done = false;
     while(!params.done) {
         /* Break the nested guest burst when a terminate is pending.
@@ -89,23 +85,7 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
         if (terminate_requested())
             break;
         pc_step(pc, 4096); /// TODO: a lot of?
-
-        /*
-         * If this guest burst changes cu_psp, preserve which interrupt was
-         * executing and where the guest CPU stopped:
-         *
-         * KRN:5BIICCIP
-         *   II = interrupt number
-         *   CC = low byte of guest CS
-         *   IP = low byte of guest IP
-         */
-        doom_wad_check_cupsp_value(
-            0x5bu,
-            ((uint32_t)intnum << 16)
-            | (((uint32_t)CPU_CS & 0xffu) << 8)
-            | ((uint32_t)CPU_IP & 0xffu));
     }
-    doom_wad_check_cupsp(0x13);
     cpu->native_done = old_native_done;
     drop_bios_callback(cpu, &params);
     ifl = old_ifl;
@@ -114,6 +94,5 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     // restore initial CS:IP
     SET_CS (cs);
     SET_IP (ip);
-    doom_wad_check_cupsp(0x14);
     //gpio_put(PICO_DEFAULT_LED_PIN, 0);
 }

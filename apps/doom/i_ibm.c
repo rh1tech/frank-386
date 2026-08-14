@@ -1650,7 +1650,17 @@ void I_Quit (void)
 	M_SaveDefaults ();
 	scr = (byte *)W_CacheLumpName ("ENDOOM", PU_CACHE);
 	I_Shutdown ();
+#ifdef ELF_MODE
+	/*
+	 * 0xb8000 is guest text VRAM, not a native ARM pointer.  A direct memcpy
+	 * here faults/stalls core0 after the mode switch, before exit() can unwind
+	 * the native child and resume its parent.
+	 */
+	for (unsigned i = 0; i < 80u*25u*2u; ++i)
+		dos_phys_write8(0xb8000u + i, scr[i]);
+#else
 	memcpy ((void *)0xb8000, scr, 80*25*2);
+#endif
 	regs.w.ax = 0x0200;
 	regs.h.bh = 0;
 	regs.h.dl = 0;

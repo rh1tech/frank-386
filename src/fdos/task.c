@@ -24,10 +24,9 @@
 #include "fcom/fcom.h"
 #include "../diag.h"
 
+#if DIAG
 extern volatile uint32_t dos_diag_kernel_code;
-extern UBYTE doom_wad_watch_handle;
-extern UWORD doom_wad_watch_psp;
-
+#endif
 /*
  * fdos/hdr/portab.h already publishes the guest PSRAM base as
  * PSRAM_BASE_ADDR.  board_config.h publishes the same address through the
@@ -2240,18 +2239,6 @@ static void exec_enter_child(struct exec_child_context *saved,
      that used to live on both the enter and leave paths. */
   saved->native_done=cpu->native_done;
 
-  if (doom_wad_watch_handle != 0xff
-      && internal_data->cu_psp == doom_wad_watch_psp
-      && child_psp_seg != doom_wad_watch_psp)
-  {
-    dos_diag_kernel_code =
-        0x4d000000u
-        | (((unsigned)child_psp_seg & 0xffffu) << 8)
-        | ((unsigned)doom_wad_watch_psp & 0xffu);
-    for (;;)
-      __asm volatile ("nop");
-  }
-
   internal_data->cu_psp=child_psp_seg;
   internal_data->dta=MK_FP(child_psp_seg,offsetof(psp,ps_cmd));
   SET_SS(FP_SEG(stack)); CPU_SP=FP_OFF(stack);
@@ -2306,18 +2293,6 @@ static void exec_leave_child(struct exec_child_context *saved,
      while vectors, handles, FCBs and process memory are released. */
   internal_data->abort_progress = (UBYTE)-1;
   exec_release_child(child_psp_seg);
-
-  if (doom_wad_watch_handle != 0xff
-      && saved->cu_psp != doom_wad_watch_psp
-      && child_psp_seg != doom_wad_watch_psp)
-  {
-    dos_diag_kernel_code =
-        0x4f000000u
-        | (((unsigned)saved->cu_psp & 0xffffu) << 8)
-        | ((unsigned)doom_wad_watch_psp & 0xffu);
-    for (;;)
-      __asm volatile ("nop");
-  }
 
   internal_data->cu_psp = saved->cu_psp;
   internal_data->dta = saved->dta;

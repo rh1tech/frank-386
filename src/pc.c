@@ -853,11 +853,7 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool service_adlib)
 
 void __not_in_flash_func(pc_service)(PC *pc)
 {
-    extern void doom_wad_check_cupsp(unsigned stage);
-
-    doom_wad_check_cupsp(0x01);
     pc_service_impl(pc, true);
-    doom_wad_check_cupsp(0x02);
 }
 
 void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)

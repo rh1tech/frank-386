@@ -54,6 +54,7 @@ extern int cursor_blink_state;
 extern int active_start;
 extern int active_end;
 
+#if DIAG
 extern volatile uint32_t dos_diag_code;
 extern volatile uint32_t dos_diag_kernel_code;
 
@@ -99,6 +100,7 @@ static inline void __time_critical_func(render_diag_border_hdmi)(
             d[bit] = (glyph & (1u << bit)) ? fg : bg;
     }
 }
+#endif
 
 extern int gfx_submode;
 extern int gfx_width;
@@ -773,7 +775,9 @@ static void __time_critical_func(dma_handler_HDMI)() {
         uint8_t* output_buffer = activ_buf + 72;
         if (line < (uint32_t)active_start) {
             nf_memset(output_buffer, 0, SCREEN_WIDTH);
+#if DIAG
             render_diag_border_hdmi(line, output_buffer);
+#endif
             goto f;
         }
         if (line >= (uint32_t)active_end) {

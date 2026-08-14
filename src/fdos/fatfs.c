@@ -1,8 +1,5 @@
 #include "hdrs.h"
 
-extern volatile uint32_t dos_diag_kernel_code;
-extern UBYTE doom_wad_watch_handle;
-
 static const char *media_check_source = "?";
 
 /*
