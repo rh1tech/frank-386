@@ -1,6 +1,7 @@
 #include "crt0.h"
 #include "ez.h"
 #include "dos_process.h"
+#include "dos_api_version.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -26,7 +27,8 @@ extern int main(int argc, char **argv);
 const native_ez_process_requirements __attribute__((weak))
 __native_ez_process_requirements = {
     0,
-    0
+    0,
+    DOS_API_VERSION
 };
 
 /*

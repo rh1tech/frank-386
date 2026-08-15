@@ -156,7 +156,7 @@ static int dma_ctrl_chan = -1;
 static uint vga_sm = 0;
 
 // Text buffer in SRAM (non-static to allow OSD reuse when paused)
-uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__((section(".core0_stack_ext.text_buffer_sram")));
+uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__((section(".core0_stack_ext.text_buffer_sram"))) = { 0 } ;
 static volatile int update_requested = 0;  // Set by update call
 
 #define GFX_BUFFER_SIZE (256 * 1024)

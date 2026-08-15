@@ -1569,6 +1569,23 @@ void dos_native_restorevect(dos_native_vector_t *state)
 }
 
 /*
+ * The common native-DOS libc is also linked into legacy ET_REL applications
+ * which do not carry the EZ crt0 module.  Keep the EZ exit hooks optional:
+ * crt0.c/crt0.S provide strong definitions when present, while legacy
+ * applications fall back to the kernel-owned ELF exit path below.
+ */
+int __attribute__((weak)) __ez_crt_main_active(void)
+{
+    return 0;
+}
+
+void __attribute__((weak, noreturn)) __ez_crt_exit(int status)
+{
+    dos_process_exit(status);
+    __builtin_unreachable();
+}
+
+/*
  * C library exit() for native DOS applications.
  *
  * Stack ownership and unwinding are kernel responsibilities.  The public

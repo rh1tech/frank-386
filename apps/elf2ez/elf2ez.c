@@ -1255,7 +1255,7 @@ static int convert_elf_to_ez(int input, int output)
     header.version = EZ_FORMAT_VERSION;
     header.header_size = sizeof(header);
     header.flags = EZ_FLAG_THUMB | EZ_FLAG_ARMV6M | EZ_FLAG_SOFT_FLOAT;
-    header.required_dos_api_version = DOS_API_VERSION;
+    header.required_dos_api_version = requirements.required_dos_api_version;
     header.native_stack_size = requirements.native_stack_size;
     header.dos_stack_size = requirements.dos_stack_size;
 

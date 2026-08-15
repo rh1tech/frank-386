@@ -12,7 +12,7 @@
  *     MinGW and MSVC on both Windows and Linux (and other Unixes).
  *   - Reproduce the small slice of the native DOS API that elf2ez.c actually
  *     uses: the low-level fd file calls (open/read/write/close/lseek/access),
- *     the O_* / SEEK_SET constants, and DOS_API_VERSION.
+ *     the O_* / SEEK_SET constants.
  *
  * The DOS "work block" allocator (alloc_largest_block/free_dos_block) is NOT
  * provided here; elf2ez.c supplies a malloc/free based version under the same
@@ -31,20 +31,9 @@
  * Pull the pure on-disk / ABI data types straight from the project's own
  * headers so this shim never has to duplicate (and drift from) them. These
  * headers only need <stdint.h> and contain no emulator/runtime code:
- *   - native_process.h defines native_ez_process_requirements
- *   - ez.h (included by elf2ez.c itself) defines the EZ file structures
+ *   - ez.h (included by elf2ez.c itself) defines the EZ file structures and
+ *     native_ez_process_requirements.
  */
-#include "native_process.h"
-
-/*
- * Native DOS API version stamped into every EZ file's
- * required_dos_api_version field. It must match api/dos-api.h (currently 11);
- * that header cannot be included on the host because it pulls in emulator-only
- * definitions. Override with -DDOS_API_VERSION=<n> if the project value changes.
- */
-#ifndef DOS_API_VERSION
-#define DOS_API_VERSION (11)
-#endif
 
 /* open() flag bits - values mirror api/fcntl.h so the source is unchanged. */
 #ifndef O_RDONLY

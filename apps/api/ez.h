@@ -111,14 +111,21 @@ enum ez_reloc_type {
  * Static process requirements consumed by elf2ez.
  *
  * crt0 provides a weak zero-filled definition.  An application may provide a
- * strong definition with the same name to request explicit stack sizes.
- * elf2ez reads this object from ET_REL data and copies the values into the EZ
- * file header; no application code is executed during conversion.
+ * strong definition with the same name to request a DOS API version and
+ * explicit stack sizes.  elf2ez reads this object from ET_REL data and copies
+ * the values into the EZ file header; no application code is executed during
+ * conversion.
  */
 #pragma pack(push, 4)
 typedef struct native_ez_process_requirements {
     uint32_t native_stack_size;
     uint32_t dos_stack_size;
+    /*
+     * Minimum DOS native API version required by this executable.  This is
+     * compiled into the ET_REL application itself; elf2ez merely copies the
+     * value into ez_file_header.required_dos_api_version.
+     */
+    uint32_t required_dos_api_version;
 } native_ez_process_requirements;
 #pragma pack(pop)
 
@@ -316,7 +323,7 @@ static_assert(sizeof(native_ez_process_requirements) == 8,
 static_assert(sizeof(native_ez_process_info) == 16,
               "EZ process info size");
 #else
-_Static_assert(sizeof(native_ez_process_requirements) == 8,
+_Static_assert(sizeof(native_ez_process_requirements) == 12,
                "EZ process requirements size");
 _Static_assert(sizeof(native_ez_process_info) == 16,
                "EZ process info size");

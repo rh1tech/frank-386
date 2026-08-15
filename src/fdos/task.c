@@ -120,12 +120,12 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define DOS_API_VERSION           12
+#define DOS_API_VERSION         13
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    256u
-#define ARM_ELF_ARGV_SLOTS        66u
-#define ARM_ELF_ARG_TEXT_SIZE     (NAMEMAX + sizeof(((CommandTail *)0)->ctBuffer) + 2u)
-#define ARM_ELF_ARG_AREA_SIZE     (ARM_ELF_ARGV_SLOTS * sizeof(ULONG) + ARM_ELF_ARG_TEXT_SIZE)
+#define ARM_ELF_ARGV_SLOTS      66u
+#define ARM_ELF_ARG_TEXT_SIZE   (NAMEMAX + sizeof(((CommandTail *)0)->ctBuffer) + 2u)
+#define ARM_ELF_ARG_AREA_SIZE   (ARM_ELF_ARGV_SLOTS * sizeof(ULONG) + ARM_ELF_ARG_TEXT_SIZE)
 #define ARM_ELF_SEC_UNSEEN      0u
 #define ARM_ELF_SEC_LOADING     1u
 #define ARM_ELF_SEC_LOADED      2u
@@ -1693,6 +1693,8 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   UWORD alloc_mcb = 0, asize = 0, load_seg;
   UWORD env_mcb = 0;
   UWORD fcbcode;
+  UBYTE umb_state = LoL->uppermem_link;
+  UBYTE orig_mem_access = internal_data->mem_access_mode;
   ULONG i;
   int rc;
 
@@ -1791,12 +1793,31 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     return DE_NOMEM;
   final_paras = (UWORD)((final_end + 15u) >> 4);
 
+  /* Match the ordinary DOS loaders' LOAD_HIGH semantics.  In particular,
+     ExecMemLargest() knows how to try UMB-only allocation first and then fall
+     back to low memory when the high block is too small.  EZ already knows
+     its exact final size, so reserve/check the placement with that helper but
+     allocate only final_paras rather than consuming the largest block. */
+  if (mode & LOAD_HIGH) {
+    DosUmbLink(1);
+    internal_data->mem_access_mode |= 0x80;
+  }
+
   rc = ChildEnv(exp, &env_mcb, (char *)namep);
-  if (rc != SUCCESS)
-    return (COUNT)rc;
-  rc = ExecMemAlloc(final_paras, &alloc_mcb, &asize);
+  if (rc == SUCCESS)
+    rc = ExecMemLargest(&asize, final_paras);
+  if (rc == SUCCESS)
+    rc = ExecMemAlloc(final_paras, &alloc_mcb, &asize);
+
+  if (mode & LOAD_HIGH) {
+    internal_data->mem_access_mode = orig_mem_access;
+    DosUmbLink(umb_state);
+    mode &= 0x7f;
+  }
+
   if (rc != SUCCESS) {
-    DosMemFree(env_mcb);
+    if (env_mcb != 0)
+      DosMemFree(env_mcb);
     return (COUNT)rc;
   }
   load_seg = alloc_mcb + 1;

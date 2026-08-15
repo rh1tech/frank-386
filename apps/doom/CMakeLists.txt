@@ -27,6 +27,11 @@ set(CMAKE_CXX_STANDARD 17)
 
 set(OUTPUT_DIR "${CMAKE_SOURCE_DIR}/../../bin/${CMAKE_BUILD_TYPE}")
 set(COMPILED_DIR "${CMAKE_SOURCE_DIR}/../../apps/compiled")
+if(WIN32)
+    set(ELF2EZ_TOOL "${CMAKE_SOURCE_DIR}/../../tools/elf2ez.exe")
+else()
+    set(ELF2EZ_TOOL "${CMAKE_SOURCE_DIR}/../../tools/elf2ez")
+endif()
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${OUTPUT_DIR}")
@@ -167,7 +172,14 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
         -DINPUT=$<TARGET_FILE:${PROJECT_NAME}>
         -DALLOW_UNRESOLVED=__ez_preinit_array_start,__ez_preinit_array_end,__ez_init_array_start,__ez_init_array_end,__ez_fini_array_start,__ez_fini_array_end
         -P ${CMAKE_CURRENT_SOURCE_DIR}/check_unresolved.cmake
-    COMMAND ${CMAKE_COMMAND} -E rename
+    # Convert the relocatable ARM ELF with the repository host tool.
+    # elf2ez derives the .exe name from its input, so stage the ET_REL
+    # temporarily in apps/compiled and remove it after conversion.
+    COMMAND ${CMAKE_COMMAND} -E copy
         $<TARGET_FILE:${PROJECT_NAME}>
+        ${COMPILED_DIR}/${BUILD_NAME}.crt
+    COMMAND ${ELF2EZ_TOOL}
+        /y ${COMPILED_DIR}/${BUILD_NAME}.crt
+    COMMAND ${CMAKE_COMMAND} -E rm -f
         ${COMPILED_DIR}/${BUILD_NAME}.crt
 )
