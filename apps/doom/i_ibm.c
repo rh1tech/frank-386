@@ -1720,7 +1720,7 @@ byte *I_ZoneBase (int *size)
     if (*size < 0x180000)
         I_Error("Insufficient PSRAM for DOOM zone!");
 
-    printf("PSRAM memory: 0x%x allocated for zone\n", *size);
+    printf("PSRAM memory: %d (%dK) allocated for zone\n", *size, (*size) >> 10);
     return (byte *)(uintptr_t)(PSRAM_BASE_ADDR + NATIVE_ZONE_OFFSET);
 #else
 	int             meminfo[32];

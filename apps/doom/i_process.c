@@ -37,11 +37,10 @@ void I_PrintProcessRequirements(void)
     __asm volatile ("mov %0, sp" : "=r" (sp));
 
     printf("Native process stacks: ARM=%lu DOS=%lu, SP=%08lx\n"
-           "PSRAM allocated=%d [%08lx..%08lx]\n",
+           "PSRAM range: [%08lx..%08lx]\n",
            (unsigned long)doom_process_requirements.native_stack_size,
            (unsigned long)doom_process_requirements.dos_stack_size,
            (unsigned long)sp,
-           native_dos_app_psram_end() - native_dos_app_psram_begin(),
            (unsigned long)native_dos_app_psram_begin(),
            (unsigned long)native_dos_app_psram_end()
     );

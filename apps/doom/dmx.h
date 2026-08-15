@@ -12,6 +12,10 @@
 
 typedef int SFX_HANDLE;
 
+/* Startup diagnostics: mirror short sound-init lines to screen and file. */
+void DMX_DiagReset(void);
+void DMX_Diag(const char *format, ...);
+
 /* Low-level AdLib backend hook still required by AL_SetCard(). */
 void AL_RegisterTimbreBank(unsigned char *timbres);
 

@@ -148,20 +148,31 @@ static int native_dma_buffer_ensure(void)
         return 0;
 
     /*
-     * ISA 8-bit DMA may not cross a 64-KiB boundary.  Keep the ring entirely
-     * inside one 64-KiB window selected from a 128-KiB FDOS allocation.
+     * ISA 8-bit DMA may not cross a 64-KiB boundary.  A 4-KiB ring needs at
+     * most 4095 bytes of padding to move past the end of the current 64-KiB
+     * window, so 8 KiB is sufficient.  The previous code always rounded up
+     * to the next 64-KiB boundary and therefore allocated 128 KiB just to
+     * obtain a 4-KiB ring.
      */
-    native_dma_alloc = (unsigned char *)malloc(0x20000u);
-    if (!native_dma_alloc)
+    native_dma_alloc = (unsigned char *)malloc(NATIVE_FX_RING_SIZE + 0x0fffu);
+    if (!native_dma_alloc) {
+        DMX_Diag("SB DMA: allocation of %u bytes failed\n",
+                 (unsigned)(NATIVE_FX_RING_SIZE + 0x0fffu));
         return -1;
+    }
 
     address = (uintptr_t)native_dma_alloc;
-    aligned = (address + 0xffffu) & ~(uintptr_t)0xffffu;
+    aligned = address;
+
+    if ((aligned & 0xffffu) > (0x10000u - NATIVE_FX_RING_SIZE))
+        aligned = (aligned + 0xffffu) & ~(uintptr_t)0xffffu;
 
     native_dma_buffer = (unsigned char *)aligned;
     native_dma_linear = dos_ptr_linear(native_dma_buffer);
     if (native_dma_linear == UINT32_MAX)
     {
+        DMX_Diag("SB DMA: dos_ptr_linear failed buffer=%p\n",
+                 native_dma_buffer);
         free(native_dma_alloc);
         native_dma_alloc = NULL;
         native_dma_buffer = NULL;
@@ -180,10 +191,15 @@ static int native_dma8_program_autoinit(void)
 
     if (native_dma_buffer_ensure() != 0)
         return -1;
-    if (native_dma8_ports((unsigned)native_sb.Dma8, &p) != 0)
+    if (native_dma8_ports((unsigned)native_sb.Dma8, &p) != 0) {
+        DMX_Diag("SB DMA: unsupported channel %d\n", native_sb.Dma8);
         return -1;
+    }
 
     addr = native_dma_linear;
+    DMX_Diag("SB DMA: channel=%d linear=0x%06lx size=%u\n",
+             native_sb.Dma8, (unsigned long)addr,
+             (unsigned)NATIVE_FX_RING_SIZE);
     count = (uint16_t)(NATIVE_FX_RING_SIZE - 1u);
 
     outp(p.mask_port, 0x04u | p.channel_select);
@@ -402,8 +418,10 @@ static int native_fx_start_dma(void)
     unsigned tc;
     uint16_t block = (uint16_t)(NATIVE_FX_BLOCK_SIZE - 1u);
 
-    if (native_dma8_program_autoinit() != 0)
+    if (native_dma8_program_autoinit() != 0) {
+        DMX_Diag("SB start: DMA programming failed\n");
         return -1;
+    }
 
     tc = 256u - (1000000u / native_mix_rate);
     if (tc > 255u)
@@ -415,8 +433,11 @@ static int native_fx_start_dma(void)
         native_sb_write((uint8_t)block) != 0 ||
         native_sb_write((uint8_t)(block >> 8)) != 0 ||
         native_sb_write(SB_CMD_SPEAKER_ON) != 0 ||
-        native_sb_write(SB_CMD_DMA8_AUTO) != 0)
+        native_sb_write(SB_CMD_DMA8_AUTO) != 0) {
+        DMX_Diag("SB start: DSP command sequence failed tc=%u block=%u\n",
+                 tc, (unsigned)block + 1u);
         return -1;
+    }
 
     native_mix_write_pos = NATIVE_FX_LEAD;
     memset(native_dma_buffer, 128, NATIVE_FX_RING_SIZE);
@@ -433,7 +454,13 @@ int FX_SetupSoundBlaster(fx_blaster_config blaster,
     if (MaxSampleBits) *MaxSampleBits = 8;
     if (MaxChannels) *MaxChannels = 1;
 
-    return native_sb_reset() == 0 ? FX_Ok : FX_BlasterError;
+    {
+        int rc = native_sb_reset();
+        DMX_Diag("SB setup: port=0x%x irq=%d dma=%d reset=%s\n",
+                 native_sb.Address, native_sb.Interrupt, native_sb.Dma8,
+                 rc == 0 ? "ok" : "FAIL");
+        return rc == 0 ? FX_Ok : FX_BlasterError;
+    }
 }
 
 int FX_Init(int SoundCard, int numvoices, int numchannels,
@@ -453,16 +480,29 @@ int FX_Init(int SoundCard, int numvoices, int numchannels,
 
     memset(native_voices, 0, sizeof(native_voices));
 
-    if (native_sb_reset() != 0 || native_fx_start_dma() != 0)
+    DMX_Diag("SB FX init: card=%d rate=%u voices=%d\n",
+             SoundCard, native_mix_rate, NATIVE_FX_VOICES);
+
+    if (native_sb_reset() != 0) {
+        DMX_Diag("SB FX init: DSP reset FAIL\n");
         return FX_BlasterError;
+    }
+    DMX_Diag("SB FX init: DSP reset ok\n");
+
+    if (native_fx_start_dma() != 0)
+        return FX_BlasterError;
+    DMX_Diag("SB FX init: DMA/DSP playback started\n");
 
     if (native_fx_service_id < 0)
         native_fx_service_id = TSM_NewService(native_fx_service,
                                                NATIVE_FX_SERVICE_RATE,
                                                1, 0);
-    if (native_fx_service_id < 0)
+    if (native_fx_service_id < 0) {
+        DMX_Diag("SB FX init: TSM service registration FAIL\n");
         return FX_Error;
+    }
 
+    DMX_Diag("SB FX init: service id=%d ok\n", native_fx_service_id);
     return FX_Ok;
 }
 

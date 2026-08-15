@@ -1246,8 +1246,8 @@ int puts(const char *str)
     return 0;
 }
 
-static int native_vsnprintf(char *buffer, size_t size,
-                            const char *format, va_list args)
+int vsnprintf(char *buffer, size_t size,
+              const char *format, va_list args)
 {
     typedef int (*fn_ptr_t)(char *, size_t, const char *, va_list);
     return ((fn_ptr_t)_sys_table_ptrs[10])(buffer, size, format, args);
@@ -1260,7 +1260,7 @@ static int native_vfprintf_handle(int handle, const char *format, va_list args)
     int length;
 
     va_copy(copy, args);
-    length = native_vsnprintf(stackbuf, sizeof(stackbuf), format, copy);
+    length = vsnprintf(stackbuf, sizeof(stackbuf), format, copy);
     va_end(copy);
     if (length < 0)
         return length;
@@ -1278,7 +1278,7 @@ static int native_vfprintf_handle(int handle, const char *format, va_list args)
         return -1;
 
     va_copy(copy, args);
-    native_vsnprintf(buffer, (size_t)length + 1, format, copy);
+    vsnprintf(buffer, (size_t)length + 1, format, copy);
     va_end(copy);
 
     int written = (handle == 1 || handle == 2)
@@ -1488,7 +1488,7 @@ int sprintf(char *buffer, const char *format, ...)
     int rc;
 
     va_start(args, format);
-    rc = native_vsnprintf(buffer, (size_t)-1, format, args);
+    rc = vsnprintf(buffer, (size_t)-1, format, args);
     va_end(args);
     return rc;
 }

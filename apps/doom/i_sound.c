@@ -796,6 +796,11 @@ void I_StartupSound (void)
 {
   int rc, i;
 
+#ifdef ELF_MODE
+  DMX_DiagReset();
+  DMX_Diag("DOOM sound startup\n");
+#endif
+
   if (devparm)
 #if (APPVER_DOOMREV < AV_DR_DM12)
 	fprintf(stderr, "I_StartupSound: forking sound daemon.\n");
@@ -850,6 +855,15 @@ void I_StartupSound (void)
   I_StartupTimer();
 #endif
 
+#ifdef ELF_MODE
+  DMX_Diag("DOOM config: music=%d code=%d sfx=%d code=%d "
+           "SB=0x%x/IRQ%d/DMA%d MPU=0x%x hw=0x%02x\n",
+           snd_MusicDevice, dmxCodes[snd_MusicDevice],
+           snd_SfxDevice, dmxCodes[snd_SfxDevice],
+           snd_SBport, snd_SBirq, snd_SBdma, snd_Mport,
+           sound_hw_mask());
+#endif
+
   // inits DMX sound library
 #if (APPVER_DOOMREV < AV_DR_DM12)
   if (snd_MusicDevice != snd_none || snd_SfxDevice != snd_none)
@@ -883,6 +897,9 @@ void I_StartupSound (void)
 
   if (devparm)
 	printf("  DMX_Init() returned %d\n", rc);
+#ifdef ELF_MODE
+  DMX_Diag("DOOM DMX result: rc=%d\n", rc);
+#endif
 #endif
 
 }

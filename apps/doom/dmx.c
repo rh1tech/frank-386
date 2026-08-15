@@ -16,6 +16,7 @@
 #include "dmx.h"
 #include "sound_hw.h"
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include "fx_man.h"
@@ -78,6 +79,34 @@ int mus_loop = 0;
 int dmx_mus_port = 0;
 int dmx_sdev = 0;
 int dmx_mdev = NumSoundCards;
+
+#define DMX_DIAG_FILE "sounddiag.txt"
+
+void DMX_DiagReset(void)
+{
+    FILE *f = fopen(DMX_DIAG_FILE, "w");
+    if (f)
+        fclose(f);
+}
+
+void DMX_Diag(const char *format, ...)
+{
+    char line[192];
+    va_list ap;
+    FILE *f;
+
+    va_start(ap, format);
+    vsnprintf(line, sizeof(line), format, ap);
+    va_end(ap);
+
+    printf("%s", line);
+
+    f = fopen(DMX_DIAG_FILE, "a");
+    if (f) {
+        fputs(line, f);
+        fclose(f);
+    }
+}
 
 static int dmx_music_started;
 static int dmx_fx_started;
@@ -350,8 +379,9 @@ int SB_Detect(int *port, int *irq, int *dma, int *unk) {
     dmx_blaster.Dma8 = *dma;
     dmx_blaster.Dma16 = *dma;
 
-    printf("  dmx.c SB_Detect port 0x%04x int %d dma %d\n",
-           dmx_blaster.Address, dmx_blaster.Interrupt, dmx_blaster.Dma8);
+    DMX_Diag("SB detect: port=0x%04x irq=%d dma=%d hw=0x%02x\n",
+             dmx_blaster.Address, dmx_blaster.Interrupt, dmx_blaster.Dma8,
+             sound_hw_mask());
     return 0;
 }
 void SB_SetCard(int port, int irq, int dma) { } //FIXME
@@ -438,6 +468,9 @@ int DMX_Init(int rate, int maxsng, int mdev, int sdev) {
     dmx_fx_started = 0;
     dmx_pcfx_started = 0;
 
+    DMX_Diag("DMX init: rate=%d music_code=%d sfx_code=%d\n",
+             rate, mdev, sdev);
+
     /*
      * DMX code 0 means "None".  Do not turn it into NumSoundCards and call
      * MUSIC_Init(): that starts the native sequencer even when DEFAULT.CFG
@@ -447,10 +480,13 @@ int DMX_Init(int rate, int maxsng, int mdev, int sdev) {
     {
         switch (mdev) {
         case AHW_ADLIB:
-            if (sdev & AHW_SOUND_BLASTER)
-                device = SoundBlaster;
-            else
-                device = Adlib;
+            /*
+             * AdLib music remains OPL music even when SFX use a Sound
+             * Blaster.  The SB contains an OPL-compatible FM block, but the
+             * native music backend is selected as Adlib; SoundBlaster is an
+             * FX device and MUSIC_Init() intentionally does not accept it.
+             */
+            device = Adlib;
             printf("  DMX_Init Adlib\n");
             break;
         case AHW_SOUND_BLASTER:
@@ -481,6 +517,8 @@ int DMX_Init(int rate, int maxsng, int mdev, int sdev) {
         }
 
         status = MUSIC_Init(device, dmx_mus_port);
+        DMX_Diag("MUSIC init: device=%ld port=0x%x rc=%ld\n",
+                 device, dmx_mus_port, status);
         if (status != MUSIC_Ok)
             return -1;
 
@@ -551,6 +589,8 @@ void WAV_PlayMode(int channels, int samplerate) {
     }
 
     status = FX_Init(device, channels, 2, 16, samplerate);
+    DMX_Diag("FX init result: device=%ld voices=%d rate=%d rc=%ld\n",
+             device, channels, samplerate, status);
     if (status == FX_Ok) {
         dmx_fx_started = 1;
         FX_SetVolume(255);

@@ -33,6 +33,7 @@ int fputs(const char *s, FILE *stream);
 int putchar(int c);
 int puts(const char *s);
 int vprintf(const char *format, va_list args);
+int vsnprintf(char *buffer, size_t size, const char *format, va_list args);
 int printf(const char *format, ...);
 int sprintf(char *buffer, const char *format, ...);
 
