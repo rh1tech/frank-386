@@ -667,11 +667,13 @@ void *realloc(void *ptr, size_t size)
 
 enum
 {
-    NATIVE_IO_BUFFER_SIZE = 32768
+    NATIVE_IO_BUFFER_DEFAULT_SIZE = 512,
+    NATIVE_IO_BUFFER_MAX_SIZE = 0xfff0
 };
 
 static uint16_t native_io_segment;
 static unsigned char *native_io_buffer;
+static unsigned int native_io_buffer_size = NATIVE_IO_BUFFER_DEFAULT_SIZE;
 
 static int native_int21_with_ds(uint16_t ds, union REGS *regs)
 {
@@ -693,7 +695,7 @@ static int native_io_ensure_buffer(void)
         return 0;
 
     regs.h.ah = 0x48;
-    regs.w.bx = NATIVE_IO_BUFFER_SIZE / 16;
+    regs.w.bx = (uint16_t)(native_io_buffer_size / 16u);
     int386(0x21, &regs, &regs);
     if (regs.x.cflag)
         return -1;
@@ -701,6 +703,55 @@ static int native_io_ensure_buffer(void)
     native_io_segment = regs.w.ax;
     native_io_buffer =
         (unsigned char *)dos_guest_far_ptr(native_io_segment, 0);
+    return 0;
+}
+
+int dos_set_io_buffer_size(unsigned int size)
+{
+    union REGS regs = {0};
+    unsigned int aligned_size;
+    uint16_t new_segment;
+    unsigned char *new_buffer;
+
+    if (size == 0 || size > NATIVE_IO_BUFFER_MAX_SIZE)
+        return -1;
+
+    aligned_size = (size + 15u) & ~15u;
+    if (aligned_size > NATIVE_IO_BUFFER_MAX_SIZE)
+        return -1;
+
+    if (aligned_size == native_io_buffer_size)
+        return 0;
+
+    if (!native_io_buffer)
+    {
+        native_io_buffer_size = aligned_size;
+        return 0;
+    }
+
+    regs.h.ah = 0x48;
+    regs.w.bx = (uint16_t)(aligned_size / 16u);
+    int386(0x21, &regs, &regs);
+    if (regs.x.cflag)
+        return -1;
+
+    new_segment = regs.w.ax;
+    new_buffer = (unsigned char *)dos_guest_far_ptr(new_segment, 0);
+
+    regs.x.eax = 0;
+    regs.h.ah = 0x49;
+    native_int21_with_es(native_io_segment, &regs);
+    if (regs.x.cflag)
+    {
+        union REGS free_regs = {0};
+        free_regs.h.ah = 0x49;
+        native_int21_with_es(new_segment, &free_regs);
+        return -1;
+    }
+
+    native_io_segment = new_segment;
+    native_io_buffer = new_buffer;
+    native_io_buffer_size = aligned_size;
     return 0;
 }
 
@@ -712,7 +763,7 @@ static int native_io_copy_path(const char *path)
         return -1;
 
     length = strlen(path) + 1;
-    if (length > NATIVE_IO_BUFFER_SIZE)
+    if (length > native_io_buffer_size)
         return -1;
 
     memcpy(native_io_buffer, path, length);
@@ -838,8 +889,8 @@ int read(int handle, void *buffer, unsigned int count)
         union REGS regs = {0};
         unsigned int remain = count - total;
         uint16_t chunk = (uint16_t)(
-            remain > NATIVE_IO_BUFFER_SIZE
-                ? NATIVE_IO_BUFFER_SIZE
+            remain > native_io_buffer_size
+                ? native_io_buffer_size
                 : remain);
 
         if (!native_term_locked)
@@ -972,8 +1023,8 @@ int write(int handle, const void *buffer, unsigned int count)
         union REGS regs = {0};
         unsigned int remain = count - total;
         uint16_t chunk = (uint16_t)(
-            remain > NATIVE_IO_BUFFER_SIZE
-                ? NATIVE_IO_BUFFER_SIZE
+            remain > native_io_buffer_size
+                ? native_io_buffer_size
                 : remain);
 
         memcpy(native_io_buffer, src + total, chunk);

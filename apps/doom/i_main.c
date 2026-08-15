@@ -16,9 +16,11 @@
 //
 
 #include "DoomDef.h"
+#include "io.h"
 
 int main(int argc, char **argv)
 {
+	dos_set_io_buffer_size(32768);
 	myargc = argc;
 	myargv = argv;
 	D_DoomMain();

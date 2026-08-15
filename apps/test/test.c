@@ -1,5 +1,6 @@
 #include "dos-api.h"
 #include "dos.h"
+#include "io.h"
 #include <stdio.h>
 
 static int is_resident_arg(const char *arg)
@@ -69,7 +70,7 @@ static int stay_resident(void)
             *(volatile uint16_t *)dos_guest_far_ptr(stack_mcb, 3u);
 
         printf("test.exe: MCB main=%04x size=%u (%lu bytes), "
-               "DOS-stack=%04x size=%u (%lu bytes)\\r\\n",
+               "DOS-stack=%04x size=%u (%lu bytes)\n",
                main_mcb, main_paras, (unsigned long)main_paras * 16ul,
                stack_mcb, stack_paras, (unsigned long)stack_paras * 16ul);
     }
@@ -89,6 +90,7 @@ static int stay_resident(void)
 
 int main(int argc, char **argv)
 {
+    dos_set_io_buffer_size(128);
     printf("test.exe: main entered\r\n");
 
     if (argc == 2 && is_resident_arg(argv[1]))

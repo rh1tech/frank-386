@@ -20,6 +20,7 @@
 int read(int handle, void *buffer, unsigned int count);
 int write(int handle, const void *buffer, unsigned int count);
 void dos_lock_term(_Bool lock);
+int dos_set_io_buffer_size(unsigned int size);
 int close(int handle);
 int access(const char *path, int mode);
 int32_t lseek(int handle, int32_t offset, int origin);
