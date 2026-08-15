@@ -3,10 +3,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef ELF2EZ_HOST
+#include "elf2ez_host.h"
+#else
 #include "dos.h"
 #include "dos-api.h"
 #include "fcntl.h"
 #include "io.h"
+#endif
 #include "ez.h"
 
 #define ELF2EZ_OUTPUT_NAME_MAX 260u
@@ -32,6 +36,7 @@
 #define SHF_ALLOC               0x2u
 #define STB_GLOBAL              1u
 #define STB_WEAK                2u
+#define STT_OBJECT              1u
 #define STT_FUNC                2u
 #define R_ARM_ABS32             2u
 #define R_ARM_REL32             3u
@@ -115,7 +120,7 @@ typedef struct {
     elf32_shdr strtab;
     elf32_shdr shstrtab;
     uint32_t cursor;
-    uint32_t allocation_end;
+    uint32_t image_store_addr;
     uint32_t preinit_array_rva;
     uint32_t preinit_array_count;
     uint32_t init_array_rva;
@@ -124,7 +129,6 @@ typedef struct {
     uint32_t fini_array_count;
     uint32_t relocation_progress;
     uint32_t reloc_store_addr;
-    uint32_t reloc_capacity;
     uint32_t ez_reloc_count;
     uint16_t shnum;
     uint16_t symtab_index;
@@ -235,6 +239,39 @@ static int read_exact_at(int fd, uint32_t offset, void *dst, uint32_t size)
     return 0;
 }
 
+#ifdef ELF2EZ_HOST
+/*
+ * Host build: the DOS "largest free block" has no meaning, so simply reserve a
+ * generous heap buffer with the standard allocator. RP2040/EZ images are far
+ * smaller than this, and the work-block capacity checks still guard the size.
+ */
+#ifndef ELF2EZ_HOST_WORK_BLOCK
+#define ELF2EZ_HOST_WORK_BLOCK (64u * 1024u * 1024u)
+#endif
+
+static int alloc_largest_block(dos_block *block)
+{
+    uint32_t size = ELF2EZ_HOST_WORK_BLOCK;
+
+    memset(block, 0, sizeof(*block));
+    block->ptr = (uint8_t *)malloc(size);
+    while (block->ptr == NULL && size >= (1u << 20)) {
+        size >>= 1;
+        block->ptr = (uint8_t *)malloc(size);
+    }
+    if (block->ptr == NULL)
+        return -1;
+
+    block->size = size;
+    return 0;
+}
+
+static void free_dos_block(dos_block *block)
+{
+    free(block->ptr);
+    memset(block, 0, sizeof(*block));
+}
+#else
 static int alloc_largest_block(dos_block *block)
 {
     union REGS regs = {0};
@@ -283,6 +320,7 @@ static void free_dos_block(dos_block *block)
     int386x(0x21, &regs, &regs, &sregs);
     memset(block, 0, sizeof(*block));
 }
+#endif
 
 static elf_sec_state *elf_states(elf_load_meta *meta)
 {
@@ -316,18 +354,36 @@ static int read_shdr(int fd, const elf32_ehdr *eh, uint16_t sec_num,
 
 static int ensure_capacity(const elf_load_meta *meta, uint32_t end_off)
 {
-    return end_off <= meta->allocation_end ? 0 : -1;
+    uint32_t image_end;
+
+    if (meta->image_store_addr > UINT32_MAX - end_off)
+        return -1;
+    image_end = meta->image_store_addr + end_off;
+    return image_end <= meta->reloc_store_addr ? 0 : -1;
 }
 
 static int emit_ez_reloc(elf_load_meta *meta, uint32_t rva, uint8_t type)
 {
-    struct ez_reloc *relocs =
-        (struct ez_reloc *)(uintptr_t)meta->reloc_store_addr;
+    uint32_t image_end;
+    uint32_t reloc_addr;
     struct ez_reloc *rel;
 
-    if (meta->ez_reloc_count >= meta->reloc_capacity)
+    if (meta->image_store_addr > UINT32_MAX - meta->cursor)
         return -1;
-    rel = &relocs[meta->ez_reloc_count++];
+    image_end = meta->image_store_addr + meta->cursor;
+    if (meta->reloc_store_addr < sizeof(struct ez_reloc))
+        return -1;
+    reloc_addr = meta->reloc_store_addr - sizeof(struct ez_reloc);
+    if (reloc_addr < image_end)
+        return -1;
+
+    meta->reloc_store_addr = reloc_addr;
+#ifdef ELF2EZ_HOST
+    rel = (struct ez_reloc *)((uint8_t *)meta + reloc_addr);
+#else
+    rel = (struct ez_reloc *)(uintptr_t)reloc_addr;
+#endif
+    ++meta->ez_reloc_count;
     rel->rva = rva;
     rel->type = type;
     memset(rel->reserved, 0, sizeof(rel->reserved));
@@ -1020,41 +1076,43 @@ static int find_entry_symbol(int fd, elf_load_meta *meta, uint32_t *entry_idx)
     return 0;
 }
 
-static int count_relocation_capacity(int fd, const elf32_ehdr *eh,
-                                     uint32_t *capacity)
+static int read_named_data_symbol(int fd, const elf_load_meta *meta,
+                                  const char *wanted, void *dst, uint32_t size)
 {
-    uint32_t total = 0;
-    uint16_t i;
+    uint32_t entsize = meta->symtab.entsize ? meta->symtab.entsize
+                                             : sizeof(elf32_sym);
+    uint32_t count;
+    uint32_t i;
 
-    for (i = 0; i < eh->shnum; ++i) {
+    if (entsize < sizeof(elf32_sym))
+        return -1;
+    count = meta->symtab.size / entsize;
+
+    for (i = 0; i < count; ++i) {
+        elf32_sym sym;
         elf32_shdr sh;
-        uint32_t entsize;
-        uint32_t count;
+        char name[64];
+        uint8_t bind;
+        uint8_t type;
 
-        if (read_shdr(fd, eh, i, &sh) != 0)
+        if (read_symbol(fd, meta, i, &sym) != 0)
             return -1;
-        if (sh.type == SHT_REL) {
-            entsize = sh.entsize ? sh.entsize : sizeof(elf32_rel);
-            if (entsize < sizeof(elf32_rel))
-                return -1;
-            count = sh.size / entsize;
-            if (total > UINT32_MAX - count)
-                return -1;
-            total += count;
-        } else if ((sh.type == SHT_PREINIT_ARRAY ||
-                    sh.type == SHT_INIT_ARRAY ||
-                    sh.type == SHT_FINI_ARRAY) &&
-                   (sh.flags & SHF_ALLOC) != 0) {
-            if ((sh.size & 3u) != 0)
-                return -1;
-            count = sh.size / sizeof(uint32_t);
-            if (total > UINT32_MAX - count)
-                return -1;
-            total += count;
-        }
+        bind = sym.info >> 4;
+        type = sym.info & 0x0fu;
+        if ((bind != STB_GLOBAL && bind != STB_WEAK) || type != STT_OBJECT)
+            continue;
+        if (!symbol_name(fd, meta, &sym, name, sizeof(name)) ||
+            strcmp(name, wanted) != 0)
+            continue;
+        if (sym.shndx == SHN_UNDEF)
+            return 0;
+        if (sym.shndx >= meta->eh.shnum ||
+            read_shdr(fd, &meta->eh, sym.shndx, &sh) != 0 ||
+            sh.type == SHT_NOBITS || sym.value > sh.size ||
+            size > sh.size - sym.value)
+            return -1;
+        return read_exact_at(fd, sh.offset + sym.value, dst, size) == 0 ? 1 : -1;
     }
-
-    *capacity = total;
     return 0;
 }
 
@@ -1083,11 +1141,10 @@ static int convert_elf_to_ez(int input, int output)
     elf32_ehdr eh;
     elf_load_meta *meta;
     struct ez_file_header header;
+    native_ez_process_requirements requirements;
     uint8_t *image;
     struct ez_reloc *relocs;
     uint32_t metadata_size;
-    uint32_t reloc_capacity;
-    uint32_t reloc_bytes;
     uint32_t image_store_off;
     uint32_t image_size;
     uint32_t entry_idx;
@@ -1109,42 +1166,59 @@ static int convert_elf_to_ez(int input, int output)
     }
 
     metadata_size = elf_metadata_size(eh.shnum);
-    if (metadata_size == UINT32_MAX ||
-        count_relocation_capacity(input, &eh, &reloc_capacity) != 0 ||
-        reloc_capacity > UINT32_MAX / sizeof(struct ez_reloc)) {
-        printf("Bad ELF: metadata/relocation overflow\n");
+    if (metadata_size == UINT32_MAX) {
+        printf("Bad ELF: metadata overflow\n");
         return -1;
     }
-    reloc_bytes = reloc_capacity * sizeof(struct ez_reloc);
 
     if (alloc_largest_block(&block) != 0) {
         printf("Unable to allocate ELF work block\n");
         return -1;
     }
 
-    image_store_off = align_up(metadata_size + reloc_bytes, 4u);
+    image_store_off = align_up(metadata_size, 4u);
     if (image_store_off == UINT32_MAX || image_store_off > block.size) {
-        printf("ELF does not fit work block\n");
+        printf("ELF metadata does not fit work block\n");
         goto out;
     }
 
     meta = (elf_load_meta *)block.ptr;
     memset(meta, 0, metadata_size);
-    relocs = (struct ez_reloc *)(block.ptr + metadata_size);
-    if (reloc_bytes != 0)
-        memset(relocs, 0, reloc_bytes);
     image = block.ptr + image_store_off;
 
     meta->eh = eh;
     meta->shnum = eh.shnum;
     meta->cursor = 0;
-    meta->allocation_end = block.size - image_store_off;
-    meta->reloc_store_addr = (uint32_t)(uintptr_t)relocs;
-    meta->reloc_capacity = reloc_capacity;
+#ifdef ELF2EZ_HOST
+    /*
+     * On a 64-bit host a work-block pointer cannot survive truncation to the
+     * uint32_t image_store_addr/reloc_store_addr fields. Store both as offsets
+     * from the block base instead; the block base is meta itself, so every
+     * consumer reconstructs the pointer as (uint8_t *)meta + offset. All the
+     * range arithmetic on these fields is offset-vs-offset and stays correct.
+     * On the 32-bit target these offsets are not used (see #else below).
+     */
+    meta->image_store_addr = image_store_off;
+    meta->reloc_store_addr = block.size;
+#else
+    meta->image_store_addr = (uint32_t)(uintptr_t)image;
+    meta->reloc_store_addr = (uint32_t)(uintptr_t)(block.ptr + block.size);
+#endif
 
     if (find_tables(input, meta) != 0) {
         printf("Bad ELF: cannot find symbol/string tables\n");
         goto out;
+    }
+
+    memset(&requirements, 0, sizeof(requirements));
+    {
+        int req_rc = read_named_data_symbol(input, meta,
+                                             "__native_ez_process_requirements",
+                                             &requirements, sizeof(requirements));
+        if (req_rc < 0) {
+            printf("Bad ELF: invalid __native_ez_process_requirements\n");
+            goto out;
+        }
     }
 
     /*
@@ -1169,8 +1243,10 @@ static int convert_elf_to_ez(int input, int output)
     }
 
     image_size = align_up(meta->cursor, 4u);
-    if (image_size == UINT32_MAX || image_size > meta->allocation_end)
+    if (image_size == UINT32_MAX || ensure_capacity(meta, image_size) != 0) {
+        printf("\nELF image/relocations do not fit work block\n");
         goto out;
+    }
     if (image_size > meta->cursor)
         memset(image + meta->cursor, 0, image_size - meta->cursor);
 
@@ -1180,8 +1256,8 @@ static int convert_elf_to_ez(int input, int output)
     header.header_size = sizeof(header);
     header.flags = EZ_FLAG_THUMB | EZ_FLAG_ARMV6M | EZ_FLAG_SOFT_FLOAT;
     header.required_dos_api_version = DOS_API_VERSION;
-    header.native_stack_size = 0;
-    header.dos_stack_size = 0;
+    header.native_stack_size = requirements.native_stack_size;
+    header.dos_stack_size = requirements.dos_stack_size;
 
     /*
      * For this first end-to-end implementation the zero-only sections are
@@ -1195,6 +1271,11 @@ static int convert_elf_to_ez(int input, int output)
     header.reloc_offset = sizeof(header) + image_size;
     header.reloc_count = meta->ez_reloc_count;
     header.reloc_entry_size = sizeof(struct ez_reloc);
+#ifdef ELF2EZ_HOST
+    relocs = (struct ez_reloc *)((uint8_t *)meta + meta->reloc_store_addr);
+#else
+    relocs = (struct ez_reloc *)(uintptr_t)meta->reloc_store_addr;
+#endif
 
     if (write_exact(output, &header, sizeof(header)) != 0 ||
         write_exact(output, image, image_size) != 0 ||

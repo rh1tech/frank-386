@@ -1,4 +1,5 @@
 #include "crt0.h"
+#include "ez.h"
 #include "dos_process.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -20,6 +21,13 @@ extern void (*__ez_fini_array_end[])(void);
 
 /* Application entry point is mandatory. */
 extern int main(int argc, char **argv);
+
+/* Default EZ resource requirements; applications override this weak object. */
+const native_ez_process_requirements __attribute__((weak))
+__native_ez_process_requirements = {
+    0,
+    0
+};
 
 /*
  * Optional hooks retained for compatibility with the current native ELF ABI.

@@ -101,6 +101,15 @@ add_executable(${PROJECT_NAME}
 include(${CMAKE_CURRENT_SOURCE_DIR}/../api/native-dos-runtime.cmake)
 native_dos_runtime_attach(${PROJECT_NAME})
 
+# EZ applications carry their C runtime startup code in the relocatable image.
+# The six __ez_*_array_* linker-style boundary symbols intentionally remain
+# unresolved here; elf2ez synthesizes them after it has discovered and laid out
+# the reachable startup-array sections.
+target_sources(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/crt0.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/crt0.S
+)
+
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
@@ -156,8 +165,9 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_COMMAND}
         -DNM=${CMAKE_NM}
         -DINPUT=$<TARGET_FILE:${PROJECT_NAME}>
+        -DALLOW_UNRESOLVED=__ez_preinit_array_start,__ez_preinit_array_end,__ez_init_array_start,__ez_init_array_end,__ez_fini_array_start,__ez_fini_array_end
         -P ${CMAKE_CURRENT_SOURCE_DIR}/check_unresolved.cmake
     COMMAND ${CMAKE_COMMAND} -E rename
         $<TARGET_FILE:${PROJECT_NAME}>
-        ${COMPILED_DIR}/${BUILD_NAME}.com
+        ${COMPILED_DIR}/${BUILD_NAME}.crt
 )

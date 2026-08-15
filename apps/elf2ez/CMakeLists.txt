@@ -1,3 +1,57 @@
+# ==========================================================================
+# Optional host (Win32 / Linux) console build of elf2ez.
+#
+#   Default (OFF): the original Raspberry Pi Pico / native-DOS build below is
+#   used, completely unchanged - it still produces the RP2040 `.com` tool.
+#
+#   -DELF2EZ_HOST=ON: build elf2ez as an ordinary native console program with
+#   the host's default compiler (GCC, Clang, MinGW or MSVC). Only ISO C
+#   <stdio.h>/<stdlib.h>/<string.h> are used - no Pico SDK, no cross toolchain,
+#   no POSIX-only or experimental APIs. Example:
+#
+#       cmake -S . -B build-host -DELF2EZ_HOST=ON -DCMAKE_BUILD_TYPE=Release
+#       cmake --build build-host
+#
+#   The executable is written next to the other host binaries in ../../bin/<Config>.
+# ==========================================================================
+cmake_minimum_required(VERSION 3.13)
+
+option(ELF2EZ_HOST "Build elf2ez as a native Win32/Linux console tool" ON)
+
+if(ELF2EZ_HOST)
+    project(elf2ez C)
+
+    set(CMAKE_C_STANDARD 11)
+    set(CMAKE_C_STANDARD_REQUIRED ON)
+
+    # Default to a Release single-config build when the user did not choose.
+    if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+        set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    endif()
+
+    add_executable(elf2ez elf2ez.c)
+
+    target_compile_definitions(elf2ez PRIVATE ELF2EZ_HOST)
+    target_include_directories(elf2ez PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/../api   # for ez.h
+    )
+
+    if(MSVC)
+        # fopen() etc. are standard C; silence MSVC's non-standard deprecation.
+        target_compile_definitions(elf2ez PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+
+    # Mirror the native build's output convention: ../../bin/<Config>.
+    set(_elf2ez_bin "${CMAKE_CURRENT_SOURCE_DIR}/../../bin")
+    set_target_properties(elf2ez PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY         "${_elf2ez_bin}/${CMAKE_BUILD_TYPE}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${_elf2ez_bin}/Debug"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_elf2ez_bin}/Release")
+
+    return()
+endif()
+
 # == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
 if(WIN32)
     set(USERHOME $ENV{USERPROFILE})

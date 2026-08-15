@@ -8,6 +8,7 @@
 #include "direct.h"
 #include "dos_mem.h"
 #include "dos_process.h"
+#include "ez.h"
 #include "dos_vect.h"
 #include "cpu.h"
 #include "dos_diag.h"
@@ -15,7 +16,15 @@
 #include "stdio.h"
 #include "sound_hw.h"
 #include "dos_yield.h"
+#include "crt0.h"
 #include <stdarg.h>
+
+
+const native_ez_process_info *native_ez_get_process_info(void)
+{
+    typedef const native_ez_process_info *(*fn_ptr_t)(void);
+    return ((fn_ptr_t)_sys_table_ptrs[107])();
+}
 
 
 /*
@@ -786,9 +795,9 @@ int close(int handle)
  * Applications which already provide their own sufficiently frequent yields
  * may temporarily suppress that extra work around bulk I/O.
  */
-static bool native_term_locked;
+static _Bool native_term_locked;
 
-void dos_lock_term(bool lock)
+void dos_lock_term(_Bool lock)
 {
     native_term_locked = lock;
 }
@@ -1568,5 +1577,7 @@ void dos_native_restorevect(dos_native_vector_t *state)
  */
 void exit(int status)
 {
+    if (__ez_crt_main_active())
+        __ez_crt_exit(status);
     dos_process_exit(status);
 }

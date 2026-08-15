@@ -108,6 +108,48 @@ enum ez_reloc_type {
 };
 
 /*
+ * Static process requirements consumed by elf2ez.
+ *
+ * crt0 provides a weak zero-filled definition.  An application may provide a
+ * strong definition with the same name to request explicit stack sizes.
+ * elf2ez reads this object from ET_REL data and copies the values into the EZ
+ * file header; no application code is executed during conversion.
+ */
+#pragma pack(push, 4)
+typedef struct native_ez_process_requirements {
+    uint32_t native_stack_size;
+    uint32_t dos_stack_size;
+} native_ez_process_requirements;
+#pragma pack(pop)
+
+/*
+ * Runtime information for the currently executing EZ process.
+ *
+ * Unlike native_ez_process_requirements this structure is not file metadata.
+ * It is filled by the kernel after the executable has been loaded and resource
+ * sizes have been aligned/assigned.  The pointer returned by
+ * native_ez_get_process_info() is valid only while the current EZ process is
+ * running.
+ */
+#pragma pack(push, 4)
+typedef struct native_ez_process_info {
+    uint32_t native_stack_size;
+    uint32_t dos_stack_size;
+    uint32_t app_psram_begin;
+    uint32_t app_psram_end;
+} native_ez_process_info;
+#pragma pack(pop)
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+extern const native_ez_process_requirements __native_ez_process_requirements;
+const native_ez_process_info *native_ez_get_process_info(void);
+#ifdef __cplusplus
+}
+#endif
+
+/*
  * One runtime relocation record.
  *
  * rva
@@ -266,6 +308,19 @@ struct ez_file {
 };
 
 #pragma pack(pop)
+
+/* Shared EZ process ABI structures also have fixed layouts. */
+#ifdef __cplusplus
+static_assert(sizeof(native_ez_process_requirements) == 8,
+              "EZ process requirements size");
+static_assert(sizeof(native_ez_process_info) == 16,
+              "EZ process info size");
+#else
+_Static_assert(sizeof(native_ez_process_requirements) == 8,
+               "EZ process requirements size");
+_Static_assert(sizeof(native_ez_process_info) == 16,
+               "EZ process info size");
+#endif
 
 /* EZ v1 structures are part of an on-disk ABI; their byte sizes are fixed. */
 #ifdef __cplusplus

@@ -120,7 +120,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define DOS_API_VERSION           11
+#define DOS_API_VERSION           12
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    256u
 #define ARM_ELF_ARGV_SLOTS        66u
@@ -246,7 +246,15 @@ typedef struct arm_ez_load_meta {
   UWORD dos_stack_mcb;
   UWORD dos_stack_seg;
   UWORD argc;
+  native_ez_process_info process_info;
 } arm_ez_load_meta;
+
+static const native_ez_process_info *arm_ez_active_process_info;
+
+const native_ez_process_info *arm_ez_get_process_info(void)
+{
+  return arm_ez_active_process_info;
+}
 
 /* Metadata reads must still pass through DosRWSft(), whose destination is a
    guest far pointer.  RelocBuf is existing synchronous task.c scratch space
@@ -1821,6 +1829,11 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
       arm_elf_guest_ptr(load_seg, header.entry_rva));
   meta->native_stack_size = native_stack_size;
   meta->dos_stack_size = dos_stack_size;
+  meta->process_info.native_stack_size = native_stack_size;
+  meta->process_info.dos_stack_size = dos_stack_size;
+  meta->process_info.app_psram_begin =
+      (ULONG)((uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET);
+  meta->process_info.app_psram_end = (ULONG)arm_elf_native_stack_arena_begin();
 
   rc = arm_ez_build_argv(load_seg, meta, &cursor, (ULONG)final_paras << 4,
                          exp, namep);
@@ -3048,6 +3061,8 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     uintptr_t stack_top;
     uintptr_t previous_stack_cursor;
     int exit_code;
+    const native_ez_process_info *saved_ez_process_info =
+        arm_ez_active_process_info;
 
     if (arm_elf_native_stack_acquire(native_stack_size, &stack_bottom,
                                      &previous_stack_cursor) != SUCCESS) {
@@ -3061,6 +3076,9 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     else
       ez_meta->native_stack_addr = (ULONG)stack_bottom;
     stack_top = stack_bottom + native_stack_size;
+
+    if (ez_meta)
+      arm_ez_active_process_info = &ez_meta->process_info;
 
     {
       uintptr_t saved_diag_native_bottom = doom_diag_native_stack_bottom;
@@ -3087,6 +3105,9 @@ static COUNT exec_run_process(const struct exec_process_start *start)
       doom_diag_dos_stack_seg = saved_diag_dos_seg;
       doom_diag_dos_stack_size = saved_diag_dos_size;
     }
+
+    if (ez_meta)
+      arm_ez_active_process_info = saved_ez_process_info;
 
     arm_elf_native_stack_release(stack_bottom, previous_stack_cursor);
     if (elf_meta)

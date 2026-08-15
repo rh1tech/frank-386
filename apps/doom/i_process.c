@@ -4,6 +4,11 @@
 #include <stdint.h>
 #include <native_process.h>
 
+const native_ez_process_requirements __native_ez_process_requirements = {
+    64u * 1024u, /* native ARM stack */
+    4u * 1024u   /* guest DOS stack */
+};
+
 static native_dos_process_requirements doom_process_requirements = {
     sizeof(native_dos_process_requirements),
     64u * 1024u, /* native ARM stack: WAD directory alloca() is tens of KiB */
@@ -30,11 +35,9 @@ void I_PrintProcessRequirements(void)
     __asm volatile ("mov %0, sp" : "=r" (sp));
 
     printf("Native process stacks: requested ARM=%lu DOS=%lu, "
-           "assigned ARM=%lu DOS=%lu, PSRAM=%08lx..%08lx, SP=%08lx\n",
+           "PSRAM=%08lx..%08lx, SP=%08lx\n",
            (unsigned long)doom_process_requirements.native_stack_size,
            (unsigned long)doom_process_requirements.dos_stack_size,
-           (unsigned long)doom_process_requirements.assigned_native_stack_size,
-           (unsigned long)doom_process_requirements.assigned_dos_stack_size,
            (unsigned long)doom_process_requirements.app_psram_begin,
            (unsigned long)doom_process_requirements.app_psram_end,
            (unsigned long)sp);

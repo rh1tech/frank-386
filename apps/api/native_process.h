@@ -2,6 +2,7 @@
 #define __NATIVE_DOS_PROCESS_H__
 
 #include <stdint.h>
+#include "ez.h"
 
 /*
  * Optional native ELF startup requirements.
@@ -54,14 +55,24 @@ native_dos_process_requirements *__native_dos_process_requirements(void);
 
 static inline uintptr_t native_dos_app_psram_begin(void)
 {
-    native_dos_process_requirements *r = __native_dos_process_requirements();
+    const native_ez_process_info *ez = native_ez_get_process_info();
+    native_dos_process_requirements *r;
+
+    if (ez != 0)
+        return (uintptr_t)ez->app_psram_begin;
+    r = __native_dos_process_requirements();
     return r != 0 && r->struct_size >= NATIVE_DOS_PROCESS_REQUIREMENTS_V3_SIZE
         ? (uintptr_t)r->app_psram_begin : 0;
 }
 
 static inline uintptr_t native_dos_app_psram_end(void)
 {
-    native_dos_process_requirements *r = __native_dos_process_requirements();
+    const native_ez_process_info *ez = native_ez_get_process_info();
+    native_dos_process_requirements *r;
+
+    if (ez != 0)
+        return (uintptr_t)ez->app_psram_end;
+    r = __native_dos_process_requirements();
     return r != 0 && r->struct_size >= NATIVE_DOS_PROCESS_REQUIREMENTS_V3_SIZE
         ? (uintptr_t)r->app_psram_end : 0;
 }
