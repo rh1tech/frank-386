@@ -12,7 +12,8 @@
 #       cmake -S . -B build-host -DELF2EZ_HOST=ON -DCMAKE_BUILD_TYPE=Release
 #       cmake --build build-host
 #
-#   The executable is written next to the other host binaries in ../../bin/<Config>.
+#   The executable is written straight into the repository tools/ directory
+#   (../../tools), next to the prebuilt elf2ez.exe - no per-config subfolder.
 # ==========================================================================
 cmake_minimum_required(VERSION 3.13)
 
@@ -42,12 +43,14 @@ if(ELF2EZ_HOST)
         target_compile_definitions(elf2ez PRIVATE _CRT_SECURE_NO_WARNINGS)
     endif()
 
-    # Mirror the native build's output convention: ../../bin/<Config>.
-    set(_elf2ez_bin "${CMAKE_CURRENT_SOURCE_DIR}/../../bin")
+    # Emit the host tool straight into the repository tools/ directory, with no
+    # per-config subfolder (elf2ez on Linux, elf2ez.exe on Windows). The *_DEBUG
+    # / *_RELEASE overrides pin the same path for multi-config generators (MSVC).
+    set(_elf2ez_tools "${CMAKE_CURRENT_SOURCE_DIR}/../../tools")
     set_target_properties(elf2ez PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY         "${_elf2ez_bin}/${CMAKE_BUILD_TYPE}"
-        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${_elf2ez_bin}/Debug"
-        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_elf2ez_bin}/Release")
+        RUNTIME_OUTPUT_DIRECTORY         "${_elf2ez_tools}"
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG   "${_elf2ez_tools}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${_elf2ez_tools}")
 
     return()
 endif()

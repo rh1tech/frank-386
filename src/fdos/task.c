@@ -1693,8 +1693,6 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   UWORD alloc_mcb = 0, asize = 0, load_seg;
   UWORD env_mcb = 0;
   UWORD fcbcode;
-  UBYTE umb_state = LoL->uppermem_link;
-  UBYTE orig_mem_access = internal_data->mem_access_mode;
   ULONG i;
   int rc;
 
@@ -1793,27 +1791,16 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     return DE_NOMEM;
   final_paras = (UWORD)((final_end + 15u) >> 4);
 
-  /* Match the ordinary DOS loaders' LOAD_HIGH semantics.  In particular,
-     ExecMemLargest() knows how to try UMB-only allocation first and then fall
-     back to low memory when the high block is too small.  EZ already knows
-     its exact final size, so reserve/check the placement with that helper but
-     allocate only final_paras rather than consuming the largest block. */
-  if (mode & LOAD_HIGH) {
-    DosUmbLink(1);
-    internal_data->mem_access_mode |= 0x80;
-  }
-
+  /* Match the ELF loader's allocation contract.  ExecMemAlloc() may fall
+     back to the largest available block, so reserve through ExecMemLargest(),
+     load into that temporary reservation, then trim it to final_paras before
+     the child starts.  LOADHIGH has already prepared mem_access_mode/UMB
+     blockers before DosExec(), just as for the ELF path. */
   rc = ChildEnv(exp, &env_mcb, (char *)namep);
   if (rc == SUCCESS)
     rc = ExecMemLargest(&asize, final_paras);
   if (rc == SUCCESS)
-    rc = ExecMemAlloc(final_paras, &alloc_mcb, &asize);
-
-  if (mode & LOAD_HIGH) {
-    internal_data->mem_access_mode = orig_mem_access;
-    DosUmbLink(umb_state);
-    mode &= 0x7f;
-  }
+    rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
 
   if (rc != SUCCESS) {
     if (env_mcb != 0)
@@ -1856,10 +1843,17 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
       (ULONG)((uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET);
   meta->process_info.app_psram_end = (ULONG)arm_elf_native_stack_arena_begin();
 
-  rc = arm_ez_build_argv(load_seg, meta, &cursor, (ULONG)final_paras << 4,
+  rc = arm_ez_build_argv(load_seg, meta, &cursor, (ULONG)asize << 4,
                          exp, namep);
   if (rc != SUCCESS)
     goto fail;
+
+  rc = DosMemChange(load_seg, final_paras, NULL);
+  if (rc != SUCCESS) {
+    dos_printf("ARM EZ: cannot shrink guest block to %u paragraphs\r\n",
+               (unsigned)final_paras);
+    goto fail;
+  }
 
   DosCloseSft(fd, FALSE);
   setvec(0x22, exec_caller_return_addr());
