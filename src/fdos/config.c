@@ -2398,6 +2398,13 @@ VOID PostConfig(VOID)
   sfttbl *sp;
   COUNT extra_files;
 
+  /* DOS=UMB requests UMB use during pass 1, but historically umb_init()
+     was only triggered lazily by DEVICEHIGH.  Finalize that pending request
+     here as well so DOS=HIGH,UMB works even when CONFIG.SYS has no
+     DEVICEHIGH directive. */
+  if (UmbState == 2)
+    umb_init();
+
   if (Config.cfgDosDataUmb)
   {
     Config.cfgFilesHigh = TRUE;

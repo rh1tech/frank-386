@@ -16,6 +16,7 @@ bool bios_11h(CPU*); // EQUIPMENT LIST
 bool bios_12h(CPU*); // LOW MEM SIZE
 bool bios_13h(CPU*); // DISK 
 void bios_13h_init(void);
+void bios_13h_fdc_mediachange(int drive);
 bool bios_14h(CPU*); // SERIAL
 bool bios_15h(CPU*); // TSR
 bool bios_15h_89h(CPU*); // SWITCH TO PROTECTED MODE

@@ -153,6 +153,29 @@ message(STATUS "frank-386 version: ${FIRMWARE_VERSION}")
 pico_sdk_init()
 
 #=============================================================================
+# SRAM reclaim, step 1: drop DWARF/ARM exception-unwinding.
+#
+# This C firmware never throws, catches, or backtraces. GCC still emits
+# .ARM.exidx/.extab for every function by default, and the C++ TUs pull in
+# libstdc++ (snprintf_lite.o -> __aeabi_unwind_cpp_pr0), which drags the whole
+# libgcc unwinder (unwind-arm.o/pr-support.o/libunwind.o, ~4.4 KiB) into the
+# .data RAM catch-all. Disabling unwind tables removes that dead weight from
+# SRAM (and the exidx/extab from FLASH). Applied to every target defined below
+# (our libs, the executable, drivers/usbhid); rtti/exceptions are C++-only.
+#
+# If a C++ TU turns out to need exceptions the build will fail loudly here;
+# that is intended for this verification step.
+#=============================================================================
+add_compile_options(
+    $<$<COMPILE_LANGUAGE:C>:-fno-unwind-tables>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-unwind-tables>
+    $<$<COMPILE_LANGUAGE:C>:-fno-asynchronous-unwind-tables>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-asynchronous-unwind-tables>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>
+)
+
+#=============================================================================
 # FatFS Library
 #=============================================================================
 add_library(fatfs

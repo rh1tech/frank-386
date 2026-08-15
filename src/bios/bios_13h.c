@@ -584,7 +584,7 @@ static bool bios_13h_08h(CPU* cpu)
     return true;
 }
 
-static void bios_13h_fdc_mediachange(int drive)
+void bios_13h_fdc_mediachange(int drive)
 {
     if (drive >= 0 && drive < 2)
         fdd_changed[drive] = 1;

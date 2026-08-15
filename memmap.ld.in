@@ -25,12 +25,20 @@ MEMORY
 {
     FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 1M
     DOS_API(rx) : ORIGIN = 0x10000000 + 1M, LENGTH = 4096
-    RAM(rwx) : ORIGIN = 0x20000000, LENGTH = 248k  /* SRAM0..3 below reserved blocks */
-    CORE0_STACK_EXT(rwx) : ORIGIN = 0x2003e000, LENGTH = 4k  /* OSD fast SRAM */
+    
+    /* SRAM0..3 blocks */
+    RAM(rwx) : ORIGIN = 0x20000000, LENGTH = 244k
+    CORE0_STACK_EXT(rwx) : ORIGIN = 0x2003D000, LENGTH = 8k  /* OSD fast SRAM, not used in normal flow variables, core0 stack extention are */
     CORE0_STACK(rwx) : ORIGIN = 0x2003f000, LENGTH = 4k  /* core0 native stack */
+
+    /* SRAM4..7 blocks */
     GFX_BUFFER(rwx) : ORIGIN = 0x20040000, LENGTH = 256k  /* complete SRAM4..7 striped group */
-    SCRATCH_X(rwx) : ORIGIN = 0x20080000, LENGTH = 4k /* shared stack in SRAM */
-    SCRATCH_Y(rwx) : ORIGIN = 0x20081000, LENGTH = 4k /* technical stack in SRAM */
+
+    /* SRAM8 block for core1 stack and several "hot" variables */
+    SCRATCH_X(rwx) : ORIGIN = 0x20080000, LENGTH = 4k
+
+    /* SRAM9 block for "hot" variables */
+    SCRATCH_Y(rwx) : ORIGIN = 0x20081000, LENGTH = 4k
 }
 
 ENTRY(_entry_point)

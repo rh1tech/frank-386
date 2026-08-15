@@ -1084,6 +1084,12 @@ static PC *_pc_for_fdc = NULL;
 static void fdc_mediachange_notify(int drive) {
     if (_pc_for_fdc && _pc_for_fdc->fdc)
         fdc_media_changed(_pc_for_fdc->fdc, drive);
+
+    /* disk.c has a single media-change callback slot.  Once the hardware FDC
+       callback replaces bios_13h_init()'s early callback, explicitly keep the
+       BIOS change-line state in sync as well; FDOS C_MEDIACHK reaches it via
+       INT 13h/AH=16h. */
+    bios_13h_fdc_mediachange(drive);
 }
 
 /* CD-ROM media change callback: called by disk layer when a CD-ROM drive
