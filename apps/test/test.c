@@ -1,4 +1,5 @@
 #include "dos-api.h"
+#include <stdio.h>
 
 static int is_resident_arg(const char *arg)
 {
@@ -46,6 +47,8 @@ static int stay_resident(void)
 
 int main(int argc, char **argv)
 {
+    printf("test.com: main entered\r\n");
+
     if (argc == 2 && is_resident_arg(argv[1]))
         return stay_resident();
     return 0;

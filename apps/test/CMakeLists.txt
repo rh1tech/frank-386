@@ -42,9 +42,12 @@ message(STATUS "")
 
 add_executable(${PROJECT_NAME}
     test.c
-#    ${CMAKE_CURRENT_SOURCE_DIR}/../../api/m-os-api-math.c
-#    ${CMAKE_CURRENT_SOURCE_DIR}/../../api/m-os-api-sdtfn.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/crt0.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../api/crt0.S
 )
+
+include(${CMAKE_CURRENT_SOURCE_DIR}/../api/native-dos-runtime.cmake)
+native_dos_runtime_attach(${PROJECT_NAME})
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

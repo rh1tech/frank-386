@@ -23,6 +23,7 @@
 #include <ctype.h>
 #include "fcom/fcom.h"
 #include "../diag.h"
+#include "../../apps/api/ez.h"
 
 #if DIAG
 extern volatile uint32_t dos_diag_kernel_code;
@@ -236,9 +237,20 @@ typedef struct arm_elf_load_meta {
 } arm_elf_load_meta;
 #pragma pack(pop)
 
+typedef struct arm_ez_load_meta {
+  ULONG entry_addr;
+  ULONG argv_addr;
+  ULONG native_stack_addr;
+  ULONG native_stack_size;
+  ULONG dos_stack_size;
+  UWORD dos_stack_mcb;
+  UWORD dos_stack_seg;
+  UWORD argc;
+} arm_ez_load_meta;
+
 /* Metadata reads must still pass through DosRWSft(), whose destination is a
    guest far pointer.  RelocBuf is existing synchronous task.c scratch space
-   and is large enough for the largest ELF record above (52-byte Ehdr). */
+   and is large enough for the largest metadata record read here (64-byte EZ header). */
 #define ElfScratch ((BYTE *)RelocBuf)
 
 static int arm_elf_read_meta(COUNT fd, ULONG file_off, void *dst, UWORD len)
@@ -427,6 +439,12 @@ static void arm_elf_resolve_thm_alu_abs_g0_nc(UWORD *addr, ULONG value)
 static COUNT arm_elf_reject(COUNT rc, const char *reason)
 {
   dos_printf("ARM ELF: %s\r\n", reason);
+  return rc;
+}
+
+static COUNT arm_ez_reject(COUNT rc, const char *reason)
+{
+  dos_printf("ARM EZ: %s\r\n", reason);
   return rc;
 }
 
@@ -1126,11 +1144,13 @@ static int arm_elf_load_root(COUNT fd, UWORD base_seg,
 
 STATIC int ExecMemLargest(UWORD *asize, UWORD threshold);
 STATIC int ExecMemAlloc(UWORD size, seg * para, UWORD * asize);
+ULONG SftGetFsize(int sft_idx);
 STATIC COUNT ChildEnv(exec_blk *exp, UWORD *pChildEnvSeg, char *pathname);
 STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk *exb, BYTE *fnam);
 static dos_far_ptr exec_caller_return_addr(void);
 static COUNT exec_run_arm_elf(UWORD child_psp_seg,
                               arm_elf_load_meta *meta);
+static COUNT exec_run_arm_ez(UWORD child_psp_seg, arm_ez_load_meta *meta);
 
 typedef int (*arm_elf_req_ver_fn)(void);
 
@@ -1316,9 +1336,10 @@ static void arm_elf_native_stack_release(uintptr_t bottom,
  * available, then fall back to conventional memory.  FreeProcessMem() will
  * later release it because the MCB owner is changed to the child PSP.
  */
-static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
+static int arm_native_alloc_dos_stack(ULONG stack_size, UWORD child_psp,
+                                      UWORD *out_mcb, UWORD *out_seg)
 {
-  UWORD paras = (UWORD)((meta->dos_stack_size + 15u) >> 4);
+  UWORD paras = (UWORD)((stack_size + 15u) >> 4);
   UWORD mcb_seg = 0;
   UWORD largest = 0;
   UBYTE old_umb_link = LoL->uppermem_link;
@@ -1336,11 +1357,11 @@ static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
   if (rc != SUCCESS)
     return rc;
 
-  meta->dos_stack_mcb = mcb_seg;
-  meta->dos_stack_seg = mcb_seg + 1;
-  memset(ARM_PTR(MK_FP(meta->dos_stack_seg, 0)), 0, meta->dos_stack_size);
-  if (meta->dos_stack_size >= DOOM_DOS_STACK_GUARD)
-    memset(ARM_PTR(MK_FP(meta->dos_stack_seg, 0)),
+  *out_mcb = mcb_seg;
+  *out_seg = mcb_seg + 1;
+  memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
+  if (stack_size >= DOOM_DOS_STACK_GUARD)
+    memset(ARM_PTR(MK_FP(*out_seg, 0)),
            DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   {
@@ -1350,6 +1371,13 @@ static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
   }
 
   return SUCCESS;
+}
+
+static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
+{
+  return arm_native_alloc_dos_stack(meta->dos_stack_size, child_psp,
+                                    &meta->dos_stack_mcb,
+                                    &meta->dos_stack_seg);
 }
 
 /*
@@ -1519,6 +1547,316 @@ static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
   meta->argv_addr = (ULONG)(uintptr_t)argv;
   meta->cursor = text_off + ARM_ELF_ARG_TEXT_SIZE;
   return SUCCESS;
+}
+
+static int arm_ez_build_argv(UWORD base_seg, arm_ez_load_meta *meta,
+                             ULONG *cursor, ULONG allocation_end,
+                             exec_blk *exp, const BYTE *namep)
+{
+  ULONG argv_off = arm_elf_align_up(*cursor, 4u);
+  ULONG text_off;
+  ULONG argv_end;
+  ULONG *argv;
+  BYTE *text;
+  ULONG text_used = 0;
+  ULONG i;
+  UWORD argc = 0;
+  const CommandTail *tail = NULL;
+  UWORD tail_len = 0;
+
+  if (argv_off == 0xfffffffful ||
+      argv_off > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
+    return DE_NOMEM;
+  argv_end = argv_off + ARM_ELF_ARG_AREA_SIZE;
+  if (argv_end > allocation_end)
+    return DE_NOMEM;
+
+  text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
+  argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
+  text = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg, text_off));
+  memset(argv, 0, ARM_ELF_ARGV_SLOTS * sizeof(ULONG));
+  memset(text, 0, ARM_ELF_ARG_TEXT_SIZE);
+
+  if (namep != NULL && *namep != '\0') {
+    ULONG start = text_used;
+    while (namep[text_used] != '\0' && text_used + 1 < NAMEMAX) {
+      text[text_used] = namep[text_used];
+      ++text_used;
+    }
+    text[text_used++] = '\0';
+    argv[argc++] = (ULONG)(uintptr_t)(text + start);
+  }
+
+  if (!far_is_null(exp->exec.cmd_line) && !far_is_end(exp->exec.cmd_line)) {
+    tail = (const CommandTail *)ARM_PTR(exp->exec.cmd_line);
+    tail_len = tail->ctCount;
+    if (tail_len > sizeof(tail->ctBuffer))
+      tail_len = sizeof(tail->ctBuffer);
+  }
+
+  i = 0;
+  while (i < tail_len) {
+    ULONG start;
+    bool quoted = false;
+
+    while (i < tail_len && (tail->ctBuffer[i] == ' ' ||
+                            tail->ctBuffer[i] == '\t'))
+      ++i;
+    if (i >= tail_len)
+      break;
+    if (argc + 1 >= ARM_ELF_ARGV_SLOTS)
+      return DE_INVLDFMT;
+    if (text_used >= ARM_ELF_ARG_TEXT_SIZE)
+      return DE_NOMEM;
+
+    start = text_used;
+    while (i < tail_len) {
+      BYTE ch = tail->ctBuffer[i++];
+      if (ch == '"') {
+        quoted = !quoted;
+        continue;
+      }
+      if (!quoted && (ch == ' ' || ch == '\t'))
+        break;
+      if (text_used + 1 >= ARM_ELF_ARG_TEXT_SIZE)
+        return DE_NOMEM;
+      text[text_used++] = ch;
+    }
+    text[text_used++] = '\0';
+    argv[argc++] = (ULONG)(uintptr_t)(text + start);
+  }
+
+  argv[argc] = 0;
+  meta->argc = argc;
+  meta->argv_addr = (ULONG)(uintptr_t)argv;
+  *cursor = text_off + ARM_ELF_ARG_TEXT_SIZE;
+  return SUCCESS;
+}
+
+static int arm_ez_apply_reloc(UWORD base_seg,
+                              const struct ez_file_header *header,
+                              const struct ez_reloc *rel)
+{
+  BYTE *base = (BYTE *)ARM_PTR(MK_FP(base_seg, 0));
+  ULONG image_end = EZ_IMAGE_RVA + header->image_mem_size;
+  BYTE *place;
+
+  if (rel->reserved[0] != 0 || rel->reserved[1] != 0 || rel->reserved[2] != 0)
+    return DE_INVLDFMT;
+  if (rel->rva < EZ_IMAGE_RVA || rel->rva > image_end ||
+      image_end - rel->rva < 4u)
+    return DE_INVLDFMT;
+
+  place = base + rel->rva;
+  switch (rel->type) {
+    case EZ_RELOC_ABS32:
+      *(ULONG *)place += (ULONG)(uintptr_t)base;
+      return SUCCESS;
+
+    case EZ_RELOC_THM_ALU_ABS_G0_NC:
+      if ((uintptr_t)place & 1u)
+        return DE_INVLDFMT;
+      arm_elf_resolve_thm_alu_abs_g0_nc((UWORD *)place,
+                                        (ULONG)(uintptr_t)base);
+      return SUCCESS;
+
+    default:
+      dos_printf("ARM EZ: unsupported relocation type %u at RVA %08lx\r\n",
+                 (unsigned)rel->type, rel->rva);
+      return DE_INVLDFMT;
+  }
+}
+
+static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
+{
+  struct ez_file_header header;
+  arm_ez_load_meta *meta = NULL;
+  ULONG image_end;
+  ULONG meta_off;
+  ULONG cursor;
+  ULONG final_end;
+  ULONG file_size;
+  ULONG image_file_end;
+  ULONG reloc_bytes;
+  ULONG reloc_end;
+  ULONG native_stack_size;
+  ULONG dos_stack_size;
+  UWORD final_paras;
+  UWORD alloc_mcb = 0, asize = 0, load_seg;
+  UWORD env_mcb = 0;
+  UWORD fcbcode;
+  ULONG i;
+  int rc;
+
+  if ((mode & 0x7f) == EXEC_OVERLAY)
+    return arm_ez_reject(DE_INVLDFMT, "EZ overlay mode is not supported");
+  if ((mode & 0x7f) == EXEC_LOAD)
+    return arm_ez_reject(DE_INVLDFMT, "EZ load-only mode is not supported");
+
+  rc = arm_elf_read_meta(fd, 0, &header, sizeof(header));
+  if (rc != SUCCESS)
+    return arm_ez_reject((COUNT)rc, "cannot read EZ header");
+
+  if (header.magic != EZ_MAGIC || header.version != EZ_FORMAT_VERSION)
+    return arm_ez_reject(DE_INVLDFMT, "unsupported EZ header");
+  if (header.header_size < sizeof(header))
+    return arm_ez_reject(DE_INVLDFMT, "EZ header is too small");
+  if ((header.flags & ~EZ_FLAG_KNOWN_MASK) != 0 ||
+      (header.flags & EZ_FLAG_THUMB) == 0 ||
+      (header.flags & EZ_FLAG_SOFT_FLOAT) == 0 ||
+      ((header.flags & EZ_FLAG_ARMV6M) && (header.flags & EZ_FLAG_THUMB2)))
+    return arm_ez_reject(DE_INVLDFMT, "unsupported EZ CPU/ABI flags");
+#if defined(PICO_RP2040) && PICO_RP2040
+  if (header.flags & EZ_FLAG_THUMB2)
+    return arm_ez_reject(DE_INVLDFMT, "EZ image requires Thumb-2");
+#endif
+  if (header.required_dos_api_version > DOS_API_VERSION) {
+    dos_printf("ARM EZ: application requires DOS-API version %lu; provided %u\r\n",
+               header.required_dos_api_version, (unsigned)DOS_API_VERSION);
+    return DE_INVLDFMT;
+  }
+  if (header.image_mem_size < header.image_file_size ||
+      header.image_mem_size > 0xffff0ul - EZ_IMAGE_RVA)
+    return arm_ez_reject(DE_INVLDFMT, "invalid EZ image size");
+
+  image_end = EZ_IMAGE_RVA + header.image_mem_size;
+  if ((header.entry_rva & 1u) == 0 ||
+      (header.entry_rva & ~1ul) < EZ_IMAGE_RVA ||
+      (header.entry_rva & ~1ul) >= image_end)
+    return arm_ez_reject(DE_INVLDFMT, "invalid EZ entry RVA");
+
+  if (header.reloc_entry_size < sizeof(struct ez_reloc) ||
+      (header.reloc_count != 0 &&
+       header.reloc_count > 0xfffffffful / header.reloc_entry_size))
+    return arm_ez_reject(DE_INVLDFMT, "invalid EZ relocation table");
+  reloc_bytes = header.reloc_count * header.reloc_entry_size;
+  if (header.image_file_size > 0xfffffffful - (ULONG)header.header_size)
+    return arm_ez_reject(DE_INVLDFMT, "EZ image file range overflows");
+  image_file_end = (ULONG)header.header_size + header.image_file_size;
+  if (header.reloc_offset < image_file_end ||
+      header.reloc_offset > 0xfffffffful - reloc_bytes)
+    return arm_ez_reject(DE_INVLDFMT, "invalid EZ relocation offset");
+  reloc_end = header.reloc_offset + reloc_bytes;
+
+  file_size = SftGetFsize(fd);
+  if ((LONG)file_size < 0) {
+    dos_printf("ARM EZ: cannot determine file size, DOS error %ld\r\n",
+               (LONG)file_size);
+    return (COUNT)file_size;
+  }
+  if (image_file_end > file_size) {
+    dos_printf("ARM EZ: truncated image: file=%lu bytes, need=%lu "
+               "(header=%u image=%lu)\r\n",
+               file_size, image_file_end, (unsigned)header.header_size,
+               header.image_file_size);
+    return DE_INVLDFMT;
+  }
+  if (reloc_end > file_size) {
+    dos_printf("ARM EZ: truncated relocation table: file=%lu bytes, need=%lu "
+               "(offset=%lu count=%lu entry=%u)\r\n",
+               file_size, reloc_end, header.reloc_offset, header.reloc_count,
+               (unsigned)header.reloc_entry_size);
+    return DE_INVLDFMT;
+  }
+
+  native_stack_size = header.native_stack_size != 0
+                    ? header.native_stack_size
+                    : ARM_ELF_DEFAULT_NATIVE_STACK_SIZE;
+  dos_stack_size = header.dos_stack_size != 0
+                 ? header.dos_stack_size
+                 : ARM_ELF_DEFAULT_DOS_STACK_SIZE;
+  native_stack_size = arm_elf_align_up(native_stack_size, 8u);
+  dos_stack_size = arm_elf_align_up(dos_stack_size, 16u);
+  if (native_stack_size == 0xfffffffful || dos_stack_size == 0xfffffffful ||
+      native_stack_size == 0 || dos_stack_size == 0)
+    return arm_ez_reject(DE_INVLDFMT, "invalid EZ stack requirements");
+
+  meta_off = arm_elf_align_up(image_end, 4u);
+  if (meta_off == 0xfffffffful || meta_off > 0xfffffffful - sizeof(*meta))
+    return DE_NOMEM;
+  cursor = meta_off + sizeof(*meta);
+  cursor = arm_elf_align_up(cursor, 4u);
+  if (cursor == 0xfffffffful || cursor > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
+    return DE_NOMEM;
+  final_end = arm_elf_align_up(cursor + ARM_ELF_ARG_AREA_SIZE, 16u);
+  if (final_end == 0xfffffffful || final_end > 0xffff0ul)
+    return DE_NOMEM;
+  final_paras = (UWORD)((final_end + 15u) >> 4);
+
+  rc = ChildEnv(exp, &env_mcb, (char *)namep);
+  if (rc != SUCCESS)
+    return (COUNT)rc;
+  rc = ExecMemAlloc(final_paras, &alloc_mcb, &asize);
+  if (rc != SUCCESS) {
+    DosMemFree(env_mcb);
+    return (COUNT)rc;
+  }
+  load_seg = alloc_mcb + 1;
+
+  if (arm_elf_read_section(fd, load_seg, EZ_IMAGE_RVA,
+                           header.header_size, header.image_file_size) != SUCCESS) {
+    rc = DE_INVLDFMT;
+    goto fail;
+  }
+  if (header.image_mem_size > header.image_file_size)
+    memset(ARM_PTR(arm_elf_guest_ptr(load_seg,
+                                    EZ_IMAGE_RVA + header.image_file_size)),
+           0, header.image_mem_size - header.image_file_size);
+
+  for (i = 0; i < header.reloc_count; ++i) {
+    struct ez_reloc rel;
+    rc = arm_elf_read_meta(fd,
+        header.reloc_offset + i * header.reloc_entry_size,
+        &rel, sizeof(rel));
+    if (rc != SUCCESS)
+      goto fail;
+    rc = arm_ez_apply_reloc(load_seg, &header, &rel);
+    if (rc != SUCCESS)
+      goto fail;
+  }
+
+  meta = (arm_ez_load_meta *)ARM_PTR(arm_elf_guest_ptr(load_seg, meta_off));
+  memset(meta, 0, sizeof(*meta));
+  meta->entry_addr = (ULONG)(uintptr_t)ARM_PTR(
+      arm_elf_guest_ptr(load_seg, header.entry_rva));
+  meta->native_stack_size = native_stack_size;
+  meta->dos_stack_size = dos_stack_size;
+
+  rc = arm_ez_build_argv(load_seg, meta, &cursor, (ULONG)final_paras << 4,
+                         exp, namep);
+  if (rc != SUCCESS)
+    goto fail;
+
+  DosCloseSft(fd, FALSE);
+  setvec(0x22, exec_caller_return_addr());
+  child_psp(load_seg, internal_data->cu_psp, load_seg + final_paras);
+  fcbcode = patchPSP(alloc_mcb, env_mcb, exp, namep);
+  (void)fcbcode;
+
+  rc = arm_native_alloc_dos_stack(meta->dos_stack_size, load_seg,
+                                  &meta->dos_stack_mcb,
+                                  &meta->dos_stack_seg);
+  if (rc != SUCCESS) {
+    dos_printf("ARM EZ: cannot allocate %lu-byte DOS stack\r\n",
+               meta->dos_stack_size);
+    goto fail_closed;
+  }
+
+  CfgDbgPrintf(("ARM EZ loaded: psp=%04x image=%lu entry=%08lx argc=%u "
+                "DOS-stack=%04x:0000 reloc=%lu\n",
+                load_seg, header.image_mem_size, meta->entry_addr,
+                (unsigned)meta->argc, meta->dos_stack_seg,
+                header.reloc_count));
+  return exec_run_arm_ez(load_seg, meta);
+
+fail:
+  DosCloseSft(fd, FALSE);
+fail_closed:
+  if (meta != NULL && meta->dos_stack_mcb != 0)
+    DosMemFree(meta->dos_stack_mcb);
+  DosMemFree(alloc_mcb);
+  DosMemFree(env_mcb);
+  return (COUNT)rc;
 }
 
 static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
@@ -2310,7 +2648,8 @@ enum exec_process_kind
 {
   EXEC_PROCESS_GUEST,
   EXEC_PROCESS_NATIVE_COMMAND,
-  EXEC_PROCESS_ARM_ELF
+  EXEC_PROCESS_ARM_ELF,
+  EXEC_PROCESS_ARM_EZ
 };
 
 struct exec_process_start
@@ -2322,6 +2661,7 @@ struct exec_process_start
   UWORD child_psp;
   enum exec_process_kind kind;
   arm_elf_load_meta *arm_elf;
+  arm_ez_load_meta *arm_ez;
 };
 
 static void exec_set_initial_registers(const struct exec_process_start *start)
@@ -2570,8 +2910,9 @@ static void arm_elf_run_fini_array_reverse(ULONG addr, ULONG count)
   }
 }
 
-static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
+static int __attribute__((noinline)) arm_elf_run_body(void *opaque)
 {
+  arm_elf_load_meta *meta = (arm_elf_load_meta *)opaque;
   void *fini_ctx = NULL;
   int result;
 
@@ -2628,9 +2969,9 @@ static int __attribute__((noinline)) arm_elf_run_body(arm_elf_load_meta *meta)
    only across the two transitions; the application itself runs with the
    caller's original PRIMASK. */
 static int __attribute__((naked, noinline))
-arm_elf_call_on_stack(arm_elf_load_meta *meta, uintptr_t stack_top,
-                      uintptr_t stack_bottom,
-                      int (*body)(arm_elf_load_meta *))
+arm_native_call_on_stack(void *context, uintptr_t stack_top,
+                         uintptr_t stack_bottom,
+                         int (*body)(void *))
 {
   __asm volatile (
       "push {r4-r6, lr}\n"
@@ -2649,6 +2990,14 @@ arm_elf_call_on_stack(arm_elf_load_meta *meta, uintptr_t stack_top,
       "mov  sp, r4\n"
       "msr  primask, r5\n"
       "pop  {r4-r6, pc}\n");
+}
+
+static int arm_ez_run_body(void *opaque)
+{
+  arm_ez_load_meta *meta = (arm_ez_load_meta *)opaque;
+  int (*entry)(int, char **) = (int (*)(int, char **))(uintptr_t)meta->entry_addr;
+
+  return entry(meta->argc, (char **)(uintptr_t)meta->argv_addr);
 }
 
 static COUNT exec_run_process(const struct exec_process_start *start)
@@ -2678,26 +3027,40 @@ static COUNT exec_run_process(const struct exec_process_start *start)
   /* save_ctx() saw the reserved frame at SS:frame_sp.  The process state
      to restore is the pre-reservation stack pointer. */
   saved->cpu.sp = parent_sp;
-  if (start->kind != EXEC_PROCESS_ARM_ELF)
+  if (start->kind != EXEC_PROCESS_ARM_ELF &&
+      start->kind != EXEC_PROCESS_ARM_EZ)
     exec_set_initial_registers(start);
 
-  if (start->kind == EXEC_PROCESS_ARM_ELF)
+  if (start->kind == EXEC_PROCESS_ARM_ELF ||
+      start->kind == EXEC_PROCESS_ARM_EZ)
   {
-    arm_elf_load_meta *meta = start->arm_elf;
+    arm_elf_load_meta *elf_meta = start->arm_elf;
+    arm_ez_load_meta *ez_meta = start->arm_ez;
+    ULONG native_stack_size = elf_meta ? elf_meta->native_stack_size
+                                       : ez_meta->native_stack_size;
+    ULONG dos_stack_size = elf_meta ? elf_meta->dos_stack_size
+                                    : ez_meta->dos_stack_size;
+    UWORD dos_stack_seg = elf_meta ? elf_meta->dos_stack_seg
+                                   : ez_meta->dos_stack_seg;
+    UWORD *dos_stack_mcb = elf_meta ? &elf_meta->dos_stack_mcb
+                                    : &ez_meta->dos_stack_mcb;
     uintptr_t stack_bottom;
     uintptr_t stack_top;
     uintptr_t previous_stack_cursor;
     int exit_code;
 
-    if (arm_elf_native_stack_acquire(meta->native_stack_size, &stack_bottom,
+    if (arm_elf_native_stack_acquire(native_stack_size, &stack_bottom,
                                      &previous_stack_cursor) != SUCCESS) {
-      dos_printf("ARM ELF: native PSRAM stack arena exhausted (%lu bytes)\r\n",
-                 meta->native_stack_size);
+      dos_printf("ARM native: PSRAM stack arena exhausted (%lu bytes)\r\n",
+                 native_stack_size);
       exec_leave_child(saved, start->child_psp);
       return DE_NOMEM;
     }
-    meta->native_stack_addr = (ULONG)stack_bottom;
-    stack_top = stack_bottom + meta->native_stack_size;
+    if (elf_meta)
+      elf_meta->native_stack_addr = (ULONG)stack_bottom;
+    else
+      ez_meta->native_stack_addr = (ULONG)stack_bottom;
+    stack_top = stack_bottom + native_stack_size;
 
     {
       uintptr_t saved_diag_native_bottom = doom_diag_native_stack_bottom;
@@ -2707,12 +3070,16 @@ static COUNT exec_run_process(const struct exec_process_start *start)
 
       doom_diag_native_stack_bottom = stack_bottom;
       doom_diag_native_stack_top = stack_top;
-      doom_diag_dos_stack_seg = meta->dos_stack_seg;
-      doom_diag_dos_stack_size = (UWORD)meta->dos_stack_size;
+      doom_diag_dos_stack_seg = dos_stack_seg;
+      doom_diag_dos_stack_size = (UWORD)dos_stack_size;
 
       diag_native_code_enter();
-      exit_code = arm_elf_call_on_stack(meta, stack_top, stack_bottom,
-                                        arm_elf_run_body);
+      if (elf_meta)
+        exit_code = arm_native_call_on_stack(elf_meta, stack_top, stack_bottom,
+                                             arm_elf_run_body);
+      else
+        exit_code = arm_native_call_on_stack(ez_meta, stack_top, stack_bottom,
+                                             arm_ez_run_body);
       diag_native_code_leave();
 
       doom_diag_native_stack_bottom = saved_diag_native_bottom;
@@ -2722,7 +3089,10 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     }
 
     arm_elf_native_stack_release(stack_bottom, previous_stack_cursor);
-    meta->native_stack_addr = 0;
+    if (elf_meta)
+      elf_meta->native_stack_addr = 0;
+    else
+      ez_meta->native_stack_addr = 0;
 
     /*
      * A TSR keeps its resident ELF image, but neither startup stack is part of
@@ -2735,10 +3105,13 @@ static COUNT exec_run_process(const struct exec_process_start *start)
      * intercept, so retaining either startup stack would only leak memory.
      */
     if (terminate_requested() && term_exit_type == 3 &&
-        meta->dos_stack_mcb != 0) {
-      DosMemFree(meta->dos_stack_mcb);
-      meta->dos_stack_mcb = 0;
-      meta->dos_stack_seg = 0;
+        *dos_stack_mcb != 0) {
+      DosMemFree(*dos_stack_mcb);
+      *dos_stack_mcb = 0;
+      if (elf_meta)
+        elf_meta->dos_stack_seg = 0;
+      else
+        ez_meta->dos_stack_seg = 0;
     }
 
     /* Returning from main() is the native equivalent of INT 21h/4Ch,
@@ -2788,6 +3161,7 @@ COUNT exec_run_native_command(UWORD child_psp_seg, UWORD fcbcode)
   start.child_psp = child_psp_seg;
   start.kind = EXEC_PROCESS_NATIVE_COMMAND;
   start.arm_elf = NULL;
+  start.arm_ez = NULL;
 
   return exec_run_process(&start);
 }
@@ -2805,6 +3179,23 @@ static COUNT exec_run_arm_elf(UWORD child_psp_seg,
   start.child_psp = child_psp_seg;
   start.kind = EXEC_PROCESS_ARM_ELF;
   start.arm_elf = meta;
+  start.arm_ez = NULL;
+  return exec_run_process(&start);
+}
+
+static COUNT exec_run_arm_ez(UWORD child_psp_seg, arm_ez_load_meta *meta)
+{
+  struct exec_process_start start;
+
+  start.entry = MK_FP(child_psp_seg, 0);
+  start.stack = MK_FP(meta->dos_stack_seg,
+                      (UWORD)meta->dos_stack_size);
+  start.dses = child_psp_seg;
+  start.ax_bx = 0;
+  start.child_psp = child_psp_seg;
+  start.kind = EXEC_PROCESS_ARM_EZ;
+  start.arm_elf = NULL;
+  start.arm_ez = meta;
   return exec_run_process(&start);
 }
 
@@ -2820,6 +3211,7 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
   start.child_psp = child_psp_seg;
   start.kind = EXEC_PROCESS_GUEST;
   start.arm_elf = NULL;
+  start.arm_ez = NULL;
 
   return exec_run_process(&start);
 }
@@ -3310,6 +3702,10 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   if (rc == sizeof(exe_header) &&
       (ExeHeader.exSignature == MAGIC || ExeHeader.exSignature == OLD_MAGIC))
     rc = DosExeLoader(lp, &TempExeBlock, mode, fd);
+  else if (rc >= 2 &&
+           ((const UBYTE *)&ExeHeader)[0] == 'E' &&
+           ((const UBYTE *)&ExeHeader)[1] == 'Z')
+    rc = DosArmEzLoader(&TempExeBlock, mode, fd, lp);
   else if (rc >= 4 &&
            ((const UBYTE *)&ExeHeader)[0] == 0x7f &&
            ((const UBYTE *)&ExeHeader)[1] == 'E' &&

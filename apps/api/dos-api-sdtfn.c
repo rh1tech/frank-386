@@ -271,6 +271,20 @@ void strupr(char *s)
     }
 }
 
+void *memchr(const void *s, int c, size_t n)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    const unsigned char ch = (unsigned char)c;
+
+    while (n--)
+    {
+        if (*p == ch)
+            return (void *)p;
+        ++p;
+    }
+    return NULL;
+}
+
 void *memcpy(void *dst, const void *src, size_t n)
 {
     typedef void *(*fn_ptr_t)(void *, const void *, size_t);
