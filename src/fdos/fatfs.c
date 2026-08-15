@@ -1062,6 +1062,15 @@ STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
   dpb_watch_check("rqblockio-after-execrh", _dpbp);
   if ((MediaReqHdrD.r_status & S_ERROR) || !(MediaReqHdrD.r_status & S_DONE))
   {
+    /*
+     * Empty removable media is not a recoverable device-driver fault here.
+     * Return it to the filesystem immediately instead of entering INT 24h;
+     * mounting an image is the only operation that can make the drive ready.
+     */
+    if ((MediaReqHdrD.r_status & (S_ERROR | S_MASK)) ==
+        (S_ERROR | E_NOTRDY))
+      return DE_INVLDDRV;
+
     FOREVER
     {
       switch (block_error(&MediaReqHdrD, dpbp->dpb_unit, dpbp->dpb_device, 0))

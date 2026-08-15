@@ -717,7 +717,9 @@ static bool bios_13h_16h(CPU* cpu)
         return true;
     }
 
-    if (!int13_get_disk(drive, &d)) {
+    if (!int13_get_disk(drive, &d) || d.f == NULL) {
+        /* The virtual drive exists geometrically even with no image mounted.
+         * AH=16h must report that state as not-ready rather than "unchanged". */
         int13_set_status(cpu, drive, INT13_ST_TIMEOUT);
         return true;
     }

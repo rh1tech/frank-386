@@ -55,6 +55,9 @@
    Migrated from dsk.c (#define hd(x) ((x) & DF_FIXED)). */
 #define hd(x)   ((x) & DF_FIXED)
 
+/* Private diskchange() result: drive exists, but no medium is inserted. */
+#define M_NO_MEDIA      2
+
 /*
  * During early kernel bootstrap no guest driver can have hooked INT 13h yet,
  * so the native BIOS may be called directly.  Once the first CONFIG.SYS
@@ -69,7 +72,20 @@ VOID fdos_disk_enable_guest_int13(VOID)
 
 STATIC void fdos_bios_13h(CPU *cpu, const char *owner)
 {
-  if (disk_guest_int13)
+  /*
+   * Loading any CONFIG.SYS driver only means that INT 13h *may* have been
+   * hooked.  Do not force the normal native BIOS path through bios_intcall()
+   * merely because that point in boot has been reached: nested guest calls
+   * add callback state and are unnecessary while IVT[13h] still points at
+   * the native FFE0:0013 trap.  Honor a real guest hook when the vector
+   * actually changes.
+   */
+  const UWORD int13_ip = getmem16(0, 0x13u * 4u);
+  const UWORD int13_cs = getmem16(0, 0x13u * 4u + 2u);
+  const BOOL guest_hooked = disk_guest_int13 &&
+                            (int13_cs != 0xFFE0u || int13_ip != 0x0013u);
+
+  if (guest_hooked)
   {
     bios_intcall(cpu, 0x13, owner);
   }
@@ -239,6 +255,8 @@ STATIC WORD diskchange(CPU *cpu, ddt *pddt)
       result = M_NOT_CHANGED;
     else if (cf && CPU_AH == 0x06)
       result = M_CHANGED;
+    else if (cf && CPU_AH == 0x80)
+      result = M_NO_MEDIA;
     else
       result = M_DONT_KNOW;
 
@@ -272,30 +290,55 @@ STATIC WORD RWzero(CPU *cpu, ddt *pddt, UWORD mode)
 STATIC WORD getbpb(CPU *cpu, ddt *pddt)
 {
   BYTE *buf = (BYTE *)ARM_PTR(DiskTransferBuffer);
-  bpb *pbpbarray = &pddt->ddt_bpb;
+  bpb newbpb;
   ULONG count;
   unsigned secs_per_cyl;
+  WORD media_state;
   WORD ret;
 
-  if (diskchange(cpu, pddt) != M_NOT_CHANGED)
+  media_state = diskchange(cpu, pddt);
+  if (media_state == M_NO_MEDIA)
+  {
+    /* The medium was removed.  Keep the DDT itself alive, but make all
+       subsequent block reads fail until a valid BPB is built after mount. */
+    pddt->ddt_descflags |= DF_NOACCESS;
+    memcpy(&pddt->ddt_bpb, &pddt->ddt_defbpb, sizeof(bpb));
+    return failure(E_NOTRDY);
+  }
+  if (media_state != M_NOT_CHANGED)
     pddt->ddt_descflags |= DF_DISKCHANGE;
 
   ret = RWzero(cpu, pddt, LBA_READ);
   if (ret != 0)
     return ret;
 
-  pbpbarray->bpb_nbyte = fgetword(&buf[BT_BPB]);
+  /*
+   * Parse a replacement BPB transactionally.  Media-change errors must not
+   * leave ddt_bpb half-updated: LBA_Transfer() uses this geometry on the very
+   * next access.
+   */
+  memcpy(&newbpb, &buf[BT_BPB], sizeof(newbpb));
 
   if (buf[0x1fe] != 0x55 || buf[0x1ff] != 0xaa ||
-      pbpbarray->bpb_nbyte == 0 ||
-      pbpbarray->bpb_nbyte % 512)
+      newbpb.bpb_nbyte == 0 ||
+      newbpb.bpb_nbyte % 512)
   {
-    memcpy(pbpbarray, &pddt->ddt_defbpb, sizeof(bpb));
+    memcpy(&pddt->ddt_bpb, &pddt->ddt_defbpb, sizeof(bpb));
     return 0;
   }
 
+  secs_per_cyl = newbpb.bpb_nheads * newbpb.bpb_nsecs;
+  if (secs_per_cyl == 0)
+  {
+    tmark(pddt);
+    return failure(E_FAILURE);
+  }
+
+  count = newbpb.bpb_nsize == 0 ? newbpb.bpb_huge : newbpb.bpb_nsize;
+
+  /* Validation is complete; only now publish the new media geometry. */
+  memcpy(&pddt->ddt_bpb, &newbpb, sizeof(newbpb));
   pddt->ddt_descflags &= ~DF_NOACCESS;
-  memcpy(pbpbarray, &buf[BT_BPB], sizeof(bpb));
 
   {
     struct FS_info *fs;
@@ -306,7 +349,7 @@ STATIC WORD getbpb(CPU *cpu, ddt *pddt)
        the original getbpb() uses. Without it the serial number and the volume
        label of a FAT32 volume are read out of the middle of the FAT32 BPB. */
 #ifdef WITHFAT32
-    if (pbpbarray->bpb_nfsect == 0)
+    if (newbpb.bpb_nfsect == 0)
     {
       fs  = (struct FS_info *)&buf[0x43];
       sig = buf[0x42];
@@ -334,15 +377,6 @@ STATIC WORD getbpb(CPU *cpu, ddt *pddt)
     }
   }
 
-  count = pbpbarray->bpb_nsize == 0 ? pbpbarray->bpb_huge : pbpbarray->bpb_nsize;
-  secs_per_cyl = pbpbarray->bpb_nheads * pbpbarray->bpb_nsecs;
-
-  if (secs_per_cyl == 0)
-  {
-    tmark(pddt);
-    return failure(E_FAILURE);
-  }
-
   /* this field is problematic for partitions > 65535 cylinders,
      in general > 512 GiB. However: we are not using it ourselves. */
   pddt->ddt_ncyl = (UWORD)((count + (secs_per_cyl - 1)) / secs_per_cyl);
@@ -361,6 +395,15 @@ STATIC WORD blk_mediachk(CPU *cpu, request FAR *rq, ddt *pddt)
     rq->r_mcretcode = M_DONT_KNOW;
   } else {
     rq->r_mcretcode = diskchange(cpu, pddt);
+
+    if (rq->r_mcretcode == M_NO_MEDIA)
+    {
+      /* Media check must report a change, not fail immediately.  The DOS
+         filesystem layer will invalidate its cached buffers and then issue
+         C_BLDBPB, which returns E_NOTRDY while the drive is empty. */
+      rq->r_mcretcode = M_CHANGED;
+      return S_DONE;
+    }
 
     if (rq->r_mcretcode == M_DONT_KNOW)
     {
@@ -743,8 +786,8 @@ STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
       return failure(E_FAILURE);
   }
 
-  if (pddt->ddt_descflags & DF_NOACCESS)      /* drive inaccessible */
-    return failure(E_FAILURE);
+  if (pddt->ddt_descflags & DF_NOACCESS)      /* drive has no usable medium */
+    return failure(E_NOTRDY);
 
   tmark(pddt);
   start = (rq->r_start != HUGECOUNT ? rq->r_start : rq->r_huge);

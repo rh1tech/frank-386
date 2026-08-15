@@ -138,6 +138,17 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     if ((IoReqHdrD.r_status & (S_ERROR | S_DONE)) == S_DONE)
       break;
 
+    /*
+     * A present removable drive with no medium is an expected terminal
+     * condition in this emulator.  Do not route E_NOTRDY through INT 24h:
+     * there is nothing Abort/Retry/Ignore can change until the host mounts
+     * an image, and entering the guest critical-error callback from the
+     * native block path is both unnecessary and re-entrant.
+     */
+    if ((IoReqHdrD.r_status & (S_ERROR | S_MASK)) ==
+        (S_ERROR | E_NOTRDY))
+      return IoReqHdrD.r_status;
+
     /* INT25/26 (_SEEMS_ TO) return immediately with 0x8002,
        if drive is not online,...
 
