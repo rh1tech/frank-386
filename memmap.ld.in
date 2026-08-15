@@ -74,6 +74,11 @@ SECTIONS
         KEEP (*(.core0_stack_ext.*))
         __stack_ext_area_end__ = .;
     } > CORE0_STACK_EXT AT > FLASH
+    /* Init source for .stack_ext_area, mirrors __scratch_x_source__. Copied to
+       RAM once at boot (see main()), so `= {0}` / initialized variables placed
+       in .core0_stack_ext behave like normal .data instead of powering up with
+       garbage. */
+    __stack_ext_area_source__ = LOADADDR(.stack_ext_area);
 
     .text : {
         KEEP (*(.reset))

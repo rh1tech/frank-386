@@ -54,7 +54,10 @@ struct MenuSelector
 };
 
 /** Structure below holds the menu-strings */
-STATIC struct MenuSelector MenuStruct[MENULINESMAX] BSS_INIT({0});
+/* Boot-only menu table; parked in CORE0_STACK_EXT. Zero-init now works because
+   main() copies .stack_ext_area from its FLASH image at startup. */
+STATIC struct MenuSelector MenuStruct[MENULINESMAX]
+    __attribute__((section(".core0_stack_ext"))) BSS_INIT({0});
 STATIC int nMenuLine BSS_INIT(0);
 
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
@@ -113,7 +116,15 @@ struct instCmds {
   int mode;
 };
 static int numInstallCmds;
-static struct instCmds InstallCommands[MAX_INSTALL_CMDS];
+/*
+ * Boot-only: filled from CONFIG.SYS INSTALL= directives and executed exactly
+ * once during FDOS init (DoInstall), then never read again. Park it in the
+ * core0 stack-extension SRAM (CORE0_STACK_EXT) instead of the contended main
+ * RAM. Every entry is fully written before it is read (see _CmdInstall /
+ * DoInstall), so it does not rely on the zero-init the main .bss would give.
+ */
+static struct instCmds InstallCommands[MAX_INSTALL_CMDS]
+    __attribute__((section(".core0_stack_ext")));
 
 STATIC void config_init_buffers_ex(int wantedbuffers, int allow_hma)
 {
@@ -1299,13 +1310,14 @@ struct CountrySpecificInfoSmall {
   char  TimeFormat;           /* = 0  # time format: 0/1: 12/24 houres */
 };
 
-struct CountrySpecificInfoSmall specificCountriesSupported[] = {
+/* Read-only table: keep it in FLASH (.rodata) rather than SRAM (.data). */
+const struct CountrySpecificInfoSmall specificCountriesSupported[] = {
 #include "country/kernel.tb1"
 };
 
 STATIC int LoadCountryInfoHardCoded(COUNT ctryCode)
 {
-  struct CountrySpecificInfoSmall *country;
+  const struct CountrySpecificInfoSmall *country;
 
   /* printf("cntry: %u, CP%u, file=\"%s\"\n", ctryCode, codePage, filename);  */
 

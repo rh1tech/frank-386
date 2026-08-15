@@ -1367,6 +1367,19 @@ static void show_welcome_screen(void) {
 //=============================================================================
 
 int main(void) {
+    /* Initialize .core0_stack_ext (CORE0_STACK_EXT) from its FLASH image before
+       anything uses it. Nothing in the SDK crt0 copies this region (unlike
+       .data / scratch), so without this any `= {0}` or initialized variable
+       parked there would power up as garbage. Must run before init_hardware()
+       (video/text buffer) and FDOS. Stack is shallow here, so copying into the
+       stack-extension area is safe. */
+    {
+        extern uint8_t __stack_ext_area__[], __stack_ext_area_end__[];
+        extern uint8_t __stack_ext_area_source__[];
+        memcpy(__stack_ext_area__, __stack_ext_area_source__,
+               (size_t)(__stack_ext_area_end__ - __stack_ext_area__));
+    }
+
     // Initialize stdio (USB Serial or UART depending on USB HID mode)
     stdio_init_all();
     #ifdef PICO_DEFAULT_LED_PIN
