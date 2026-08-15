@@ -114,9 +114,13 @@ static int elf2ez_host_read(int fd, void *buf, unsigned int count)
     if (f == NULL)
         return -1;
     got = fread(buf, 1, count, f);
-    if (got == 0 && ferror(f))
-        return -1;
-    return (int)got; /* 0 at end-of-file */
+    /*
+     * A short read (including 0) ends the caller's read loop: read_exact_at
+     * treats any result <= requested as failure, so EOF and a genuine read
+     * error need not be told apart here. Avoiding ferror()/feof() also keeps
+     * this free of any <stdio.h> declaration quirks on some MinGW setups.
+     */
+    return (int)got;
 }
 
 static int elf2ez_host_write(int fd, const void *buf, unsigned int count)

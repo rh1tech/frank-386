@@ -16,7 +16,7 @@
 # ==========================================================================
 cmake_minimum_required(VERSION 3.13)
 
-option(ELF2EZ_HOST "Build elf2ez as a native Win32/Linux console tool" ON)
+option(ELF2EZ_HOST "Build elf2ez as a native Win32/Linux console tool" OFF)
 
 if(ELF2EZ_HOST)
     project(elf2ez C)
