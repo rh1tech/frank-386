@@ -93,6 +93,9 @@ static native_opl_voice_t opl_voices[NATIVE_OPL_VOICES];
 static uint8_t opl_program[NATIVE_MIDI_CHANNELS];
 static int16_t opl_pitchbend[NATIVE_MIDI_CHANNELS];
 static uint32_t opl_voice_age;
+#if DMX_DIAG
+static int opl_diag_first_note;
+#endif
 
 static uint16_t be16(const unsigned char *p)
 {
@@ -182,13 +185,32 @@ static int opl_alloc_voice(void)
 
 static uint8_t opl_level(uint8_t original, int channel, int velocity)
 {
-    unsigned base = 63u - (original & 0x3fu);
-    unsigned v = (unsigned)velocity * (unsigned)music_channel_volume[channel];
-    v = (v * (unsigned)music_volume) / (127u * 127u * 255u);
-    base = (base * v);
-    if (base > 63u)
-        base = 63u;
-    return (uint8_t)((original & 0xc0u) | (63u - base));
+    /*
+     * OPL total-level is attenuation: 0 = loudest, 63 = silent.
+     *
+     * Keep the whole product until the final division.  The previous code
+     * first reduced velocity*channel_volume*music_volume to an integer in
+     * the range 0..1.  For every value below the absolute maximum it became
+     * zero, so the carrier was programmed with TL=63 and nearly all AdLib
+     * notes were completely muted.
+     *
+     * Maximum numerator:
+     *   63 * 127 * 127 * 255 = 259,112,? < UINT32_MAX
+     * so 32-bit unsigned arithmetic is sufficient.
+     */
+    unsigned loudness = 63u - (original & 0x3fu);
+    uint32_t scaled;
+
+    scaled = (uint32_t)loudness
+           * (uint32_t)(unsigned)velocity
+           * (uint32_t)(unsigned)music_channel_volume[channel]
+           * (uint32_t)(unsigned)music_volume;
+    scaled /= (127u * 127u * 255u);
+
+    if (scaled > 63u)
+        scaled = 63u;
+
+    return (uint8_t)((original & 0xc0u) | (63u - (unsigned)scaled));
 }
 
 static void opl_program_voice(int voice, int channel, int key, int velocity)
@@ -205,6 +227,20 @@ static void opl_program_voice(int voice, int channel, int key, int velocity)
     if (!t)
         return;
 
+#if DMX_DIAG
+    if (!opl_diag_first_note) {
+        DMX_Diag("AdLib note: voice=%d ch=%d key=%d vel=%d prog=%u patch=%d "
+                 "vol=%d chvol=%d\n",
+                 voice, channel, key, velocity,
+                 (unsigned)opl_program[channel], patch,
+                 music_volume, music_channel_volume[channel]);
+        DMX_Diag("AdLib timbre: %02x %02x %02x %02x %02x %02x "
+                 "%02x %02x %02x %02x %02x %02x %02x\n",
+                 t[0], t[1], t[2], t[3], t[4], t[5], t[6],
+                 t[7], t[8], t[9], t[10], t[11], t[12]);
+        opl_diag_first_note = 1;
+    }
+#endif
     opl_write((uint8_t)(0xa0 + voice), 0);
     opl_write((uint8_t)(0xb0 + voice), 0);
 
@@ -234,7 +270,16 @@ static void opl_program_voice(int voice, int channel, int key, int velocity)
     octave = note / 12;
     if (octave > 7) octave = 7;
     fnum = opl_fnum[note % 12];
-
+#if DMX_DIAG
+    if (opl_diag_first_note == 1) {
+        DMX_Diag("AdLib pitch: note=%d octave=%d fnum=0x%03x "
+                 "op0=%u op1=%u levels=%02x/%02x feedback=%02x\n",
+                 note, octave, fnum, op0, op1,
+                 opl_level(t[2], channel, velocity),
+                 opl_level(t[3], channel, velocity), t[10]);
+        opl_diag_first_note = 2;
+    }
+#endif
     opl_write((uint8_t)(0xa0 + voice), (uint8_t)fnum);
     opl_write((uint8_t)(0xb0 + voice),
               (uint8_t)(((fnum >> 8) & 3u) | ((unsigned)octave << 2) | 0x20u));
@@ -906,6 +951,12 @@ int MUSIC_PlaySong(unsigned char *song, int loopflag)
         MUSIC_ErrorCode = rc;
         return rc;
     }
+
+    if (music_device == Adlib)
+        DMX_Diag("AdLib play: tracks=%u division=%u tempo=%lu bank=%s\n",
+                 music_track_count, music_division,
+                 (unsigned long)music_tempo_us,
+                 music_timbre_bank ? "yes" : "NO");
 
     native_music_song_image = song;
     music_loop = loopflag != 0;

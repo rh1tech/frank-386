@@ -155,12 +155,13 @@ static int native_dma_buffer_ensure(void)
      * obtain a 4-KiB ring.
      */
     native_dma_alloc = (unsigned char *)malloc(NATIVE_FX_RING_SIZE + 0x0fffu);
+#if DMX_DIAG
     if (!native_dma_alloc) {
         DMX_Diag("SB DMA: allocation of %u bytes failed\n",
                  (unsigned)(NATIVE_FX_RING_SIZE + 0x0fffu));
         return -1;
     }
-
+#endif
     address = (uintptr_t)native_dma_alloc;
     aligned = address;
 
@@ -171,8 +172,10 @@ static int native_dma_buffer_ensure(void)
     native_dma_linear = dos_ptr_linear(native_dma_buffer);
     if (native_dma_linear == UINT32_MAX)
     {
+#if DMX_DIAG
         DMX_Diag("SB DMA: dos_ptr_linear failed buffer=%p\n",
                  native_dma_buffer);
+#endif
         free(native_dma_alloc);
         native_dma_alloc = NULL;
         native_dma_buffer = NULL;
@@ -192,14 +195,18 @@ static int native_dma8_program_autoinit(void)
     if (native_dma_buffer_ensure() != 0)
         return -1;
     if (native_dma8_ports((unsigned)native_sb.Dma8, &p) != 0) {
+#if DMX_DIAG
         DMX_Diag("SB DMA: unsupported channel %d\n", native_sb.Dma8);
+#endif
         return -1;
     }
 
     addr = native_dma_linear;
+#if DMX_DIAG
     DMX_Diag("SB DMA: channel=%d linear=0x%06lx size=%u\n",
              native_sb.Dma8, (unsigned long)addr,
              (unsigned)NATIVE_FX_RING_SIZE);
+#endif
     count = (uint16_t)(NATIVE_FX_RING_SIZE - 1u);
 
     outp(p.mask_port, 0x04u | p.channel_select);
@@ -419,7 +426,9 @@ static int native_fx_start_dma(void)
     uint16_t block = (uint16_t)(NATIVE_FX_BLOCK_SIZE - 1u);
 
     if (native_dma8_program_autoinit() != 0) {
+#if DMX_DIAG
         DMX_Diag("SB start: DMA programming failed\n");
+#endif
         return -1;
     }
 
@@ -434,8 +443,10 @@ static int native_fx_start_dma(void)
         native_sb_write((uint8_t)(block >> 8)) != 0 ||
         native_sb_write(SB_CMD_SPEAKER_ON) != 0 ||
         native_sb_write(SB_CMD_DMA8_AUTO) != 0) {
+#if DMX_DIAG
         DMX_Diag("SB start: DSP command sequence failed tc=%u block=%u\n",
                  tc, (unsigned)block + 1u);
+#endif
         return -1;
     }
 
@@ -456,9 +467,11 @@ int FX_SetupSoundBlaster(fx_blaster_config blaster,
 
     {
         int rc = native_sb_reset();
+#if DMX_DIAG
         DMX_Diag("SB setup: port=0x%x irq=%d dma=%d reset=%s\n",
                  native_sb.Address, native_sb.Interrupt, native_sb.Dma8,
                  rc == 0 ? "ok" : "FAIL");
+#endif
         return rc == 0 ? FX_Ok : FX_BlasterError;
     }
 }

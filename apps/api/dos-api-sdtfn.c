@@ -981,6 +981,14 @@ int read(int handle, void *buffer, unsigned int count)
 
         memcpy(dst + total, native_io_buffer, regs.w.ax);
         total += regs.w.ax;
+
+        /*
+         * Keep cooperative native services alive during long DOS/FatFS reads.
+         * The outer emulator loop is suspended while a native ELF app owns
+         * core0, so WAD loading otherwise starves music/SFX and keyboard.
+         */
+        TSM_Yield();
+
         #if DIAG
         native_read_diag =
             0x38000000u | (((unsigned)regs.w.ax & 0xffu) << 16)
@@ -1042,6 +1050,7 @@ int write(int handle, const void *buffer, unsigned int count)
             return total ? (int)total : -1;
 
         total += regs.w.ax;
+        TSM_Yield();
         if (regs.w.ax < chunk)
             break;
     }

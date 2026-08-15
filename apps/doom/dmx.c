@@ -80,6 +80,7 @@ int dmx_mus_port = 0;
 int dmx_sdev = 0;
 int dmx_mdev = NumSoundCards;
 
+#if DMX_DIAG
 #define DMX_DIAG_FILE "sounddiag.txt"
 
 void DMX_DiagReset(void)
@@ -107,6 +108,7 @@ void DMX_Diag(const char *format, ...)
         fclose(f);
     }
 }
+#endif
 
 static int dmx_music_started;
 static int dmx_fx_started;
@@ -115,6 +117,11 @@ int mus_rate = 140;
 int mus_active = 0;
 int mus_fadeout = 0;
 int mus_mastervolume = 127;
+
+#if DMX_DIAG
+static int dmx_diag_song_registered;
+static int dmx_diag_song_played;
+#endif
 
 void MUS_PauseSong(int handle) {
     MUSIC_Pause();
@@ -185,9 +192,22 @@ int MUS_RegisterSong(void *data) {
         mus_data = mid_data;
         remove("temp.mid");
         remove("temp.mus");
+#if DMX_DIAG
+        if (!dmx_diag_song_registered) {
+            DMX_Diag("MUS register: MUS len=%u -> MIDI len=%u rate=%d\n",
+                     (unsigned)len, midlen, mus_rate);
+            dmx_diag_song_registered = 1;
+        }
+#endif
         return 0;
     }
     mus_data = data;
+#if DMX_DIAG
+    if (!dmx_diag_song_registered) {
+        DMX_Diag("MUS register: input already MIDI\n");
+        dmx_diag_song_registered = 1;
+    }
+#endif
     return 0;
 }
 int MUS_UnregisterSong(int handle) {
@@ -228,6 +248,13 @@ int MUS_PlaySong(int handle, int volume) {
         return 1;
     }
     status = MUSIC_PlaySong((unsigned char*)mus_data, mus_loop);
+#if DMX_DIAG
+    if (!dmx_diag_song_played) {
+        DMX_Diag("MUS play: loop=%d volume=%d rc=%ld\n",
+                 mus_loop, volume, status);
+        dmx_diag_song_played = 1;
+    }
+#endif
     if (status == MUSIC_Ok)
     {
         mus_active = 1;
@@ -378,10 +405,11 @@ int SB_Detect(int *port, int *irq, int *dma, int *unk) {
     dmx_blaster.Interrupt = *irq;
     dmx_blaster.Dma8 = *dma;
     dmx_blaster.Dma16 = *dma;
-
+#if DMX_DIAG
     DMX_Diag("SB detect: port=0x%04x irq=%d dma=%d hw=0x%02x\n",
              dmx_blaster.Address, dmx_blaster.Interrupt, dmx_blaster.Dma8,
              sound_hw_mask());
+#endif
     return 0;
 }
 void SB_SetCard(int port, int irq, int dma) { } //FIXME
@@ -467,10 +495,10 @@ int DMX_Init(int rate, int maxsng, int mdev, int sdev) {
     dmx_music_started = 0;
     dmx_fx_started = 0;
     dmx_pcfx_started = 0;
-
+#if DMX_DIAG
     DMX_Diag("DMX init: rate=%d music_code=%d sfx_code=%d\n",
              rate, mdev, sdev);
-
+#endif
     /*
      * DMX code 0 means "None".  Do not turn it into NumSoundCards and call
      * MUSIC_Init(): that starts the native sequencer even when DEFAULT.CFG
@@ -517,8 +545,10 @@ int DMX_Init(int rate, int maxsng, int mdev, int sdev) {
         }
 
         status = MUSIC_Init(device, dmx_mus_port);
+#if DMX_DIAG
         DMX_Diag("MUSIC init: device=%ld port=0x%x rc=%ld\n",
                  device, dmx_mus_port, status);
+#endif
         if (status != MUSIC_Ok)
             return -1;
 
@@ -589,8 +619,10 @@ void WAV_PlayMode(int channels, int samplerate) {
     }
 
     status = FX_Init(device, channels, 2, 16, samplerate);
+#if DMX_DIAG
     DMX_Diag("FX init result: device=%ld voices=%d rate=%d rc=%ld\n",
              device, channels, samplerate, status);
+#endif
     if (status == FX_Ok) {
         dmx_fx_started = 1;
         FX_SetVolume(255);

@@ -265,7 +265,8 @@ static INLINE int16_t generate_drum_sample(const midi_voice_t *voice, const uint
         }
     }
 
-    return sample >> 2; // Scale down to prevent clipping
+//    return sample >> 2; // Scale down to prevent clipping
+    return sample; // TODO: ensure, but no clipping found ^
 }
 
 // Modified midi_sample function

@@ -60,13 +60,26 @@ struct AdlibState {
     uint8_t  adlibstatus;
     OPL     *opl;
 
-    int32_t  buf[2][ADLIB_BATCH_SIZE];
+    int16_t  buf[2][ADLIB_BATCH_SIZE];
     volatile uint8_t ready[2];  /* 1 = filled by Core 0, not yet consumed */
     uint8_t  play_buf;          /* Core 1: which buf is being played */
     uint32_t read_pos;          /* Core 1: next sample index in play_buf */
 
     uint32_t underrun_count;
 };
+
+/*
+ * OPL_calc_buffer_linear() produces 32-bit working samples.  Keep only a
+ * small render tile here and convert into the long 16-bit playback queue.
+ *
+ * CORE0_STACK_EXT has spare SRAM in the target layout; using 64 samples costs
+ * only 256 bytes there instead of keeping two 1024-sample int32 queues in the
+ * ordinary heap.
+ */
+#define ADLIB_RENDER_TILE 64u
+static int32_t adlib_render_scratch[ADLIB_RENDER_TILE]
+    __attribute__((aligned(4)))
+    __attribute__((section(".core0_stack_ext.adlib_render")));
 
 void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 {
@@ -128,7 +141,7 @@ int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
         return 0;
     }
 
-    int16_t sample = (int16_t)s->buf[s->play_buf][s->read_pos++];
+    int16_t sample = s->buf[s->play_buf][s->read_pos++];
 
     if (s->read_pos >= ADLIB_BATCH_SIZE) {
         /* Mark this buffer as consumed, switch to the other one. */
@@ -152,10 +165,43 @@ void __not_in_flash_func(adlib_core0)(AdlibState *s) {
         uint8_t fill_buf = (s->play_buf + i) & 1;
         if (s->ready[fill_buf]) continue;  /* already full */
 
-        OPL_calc_buffer_linear(s->opl, s->buf[fill_buf], ADLIB_BATCH_SIZE);
+        /*
+         * Convert the emu8950 working samples to the persistent 16-bit queue.
+         * Volume belongs to the client/backend protocol, not to the shared
+         * emulator driver: other DOS applications already produce correct OPL
+         * levels through this device.
+         *
+         * Render in small tiles so the temporary int32 buffer is only 256 B.
+         * The persistent double-buffer is int16, cutting the 1024-sample queue
+         * from 8 KiB to 4 KiB.
+         */
+        for (uint32_t pos = 0; pos < ADLIB_BATCH_SIZE;
+             pos += ADLIB_RENDER_TILE) {
+            uint32_t count = ADLIB_BATCH_SIZE - pos;
+            if (count > ADLIB_RENDER_TILE)
+                count = ADLIB_RENDER_TILE;
+
+            OPL_calc_buffer_linear(s->opl, adlib_render_scratch, count);
+
+            for (uint32_t j = 0; j < count; ++j) {
+                int32_t sample = adlib_render_scratch[j] * 4; /// TODO: ensure x4
+                if (sample > 32767)
+                    sample = 32767;
+                else if (sample < -32768)
+                    sample = -32768;
+                s->buf[fill_buf][pos + j] = (int16_t)sample;
+            }
+        }
+
         __dmb();
         s->ready[fill_buf] = 1;
-        return;  /* fill one buffer per call */
+
+        /*
+         * Keep going and fill the second free buffer as look-ahead too.
+         * Native ELF applications reach this producer only at cooperative
+         * service points; leaving one buffer empty would throw away half of
+         * the available latency cushion.
+         */
     }
 }
 

@@ -5,7 +5,7 @@
 
 #define FLOAT float
 
-#define ADLIB_BATCH_SIZE 64
+#define ADLIB_BATCH_SIZE 1024
 
 typedef struct AdlibState AdlibState;
 

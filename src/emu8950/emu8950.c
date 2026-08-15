@@ -1697,11 +1697,15 @@ void OPL_calc_buffer_linear(OPL *opl, int32_t *buffer, uint32_t nsamples) {
      * calls (e.g. ADLIB_BATCH_SIZE=64) work correctly.  slot_render.cpp
      * indexes it as lfo_am_buffer_lsl3[s], so the array must be filled for
      * all nsamples before the slot render loops below. */
-    static uint8_t lfo_am_buffer_lsl3[SAMPLE_BUF_SIZE];
+    static uint8_t lfo_am_buffer_lsl3[SAMPLE_BUF_SIZE]
+        __attribute__((aligned(4)))
+        __attribute__((section(".core0_stack_ext.opl_lfo")));
     assert(nsamples <= sizeof(lfo_am_buffer_lsl3));
     opl->lfo_am_buffer_lsl3 = lfo_am_buffer_lsl3;
 #else
-    static uint8_t lfo_am_buffer[SAMPLE_BUF_SIZE];
+    static uint8_t lfo_am_buffer[SAMPLE_BUF_SIZE]
+        __attribute__((aligned(4)))
+        __attribute__((section(".core0_stack_ext.opl_lfo")));
     assert(nsamples <= sizeof(lfo_am_buffer));
     opl->lfo_am_buffer = lfo_am_buffer;
 #endif

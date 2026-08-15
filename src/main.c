@@ -1378,6 +1378,10 @@ int main(void) {
         extern uint8_t __stack_ext_area_source__[];
         memcpy(__stack_ext_area__, __stack_ext_area_source__,
                (size_t)(__stack_ext_area_end__ - __stack_ext_area__));
+        extern uint8_t __text_buffer_area__[], __text_buffer_area_end__[];
+        extern uint8_t __text_buffer_area_source__[];
+        memcpy(__text_buffer_area__, __text_buffer_area_source__,
+               (size_t)(__text_buffer_area_end__ - __text_buffer_area__));
     }
 
     // Initialize stdio (USB Serial or UART depending on USB HID mode)
