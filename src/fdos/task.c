@@ -1693,6 +1693,8 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   UWORD alloc_mcb = 0, asize = 0, load_seg;
   UWORD env_mcb = 0;
   UWORD fcbcode;
+  UBYTE umb_state;
+  UBYTE orig_mem_access;
   ULONG i;
   int rc;
 
@@ -1791,16 +1793,33 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     return DE_NOMEM;
   final_paras = (UWORD)((final_end + 15u) >> 4);
 
+  /*
+   * LOAD_HIGH is part of the EXEC request itself.  Do not depend on the
+   * caller having preconfigured the global UMB link/allocation strategy:
+   * handle AX=4B80h here exactly like the ordinary COM/MZ loaders.
+   */
+  umb_state = LoL->uppermem_link;
+  orig_mem_access = internal_data->mem_access_mode;
+  if (mode & LOAD_HIGH) {
+    DosUmbLink(1);
+    internal_data->mem_access_mode |= 0x80;
+  }
+
   /* Match the ELF loader's allocation contract.  ExecMemAlloc() may fall
      back to the largest available block, so reserve through ExecMemLargest(),
      load into that temporary reservation, then trim it to final_paras before
-     the child starts.  LOADHIGH has already prepared mem_access_mode/UMB
-     blockers before DosExec(), just as for the ELF path. */
+     the child starts. */
   rc = ChildEnv(exp, &env_mcb, (char *)namep);
   if (rc == SUCCESS)
     rc = ExecMemLargest(&asize, final_paras);
   if (rc == SUCCESS)
     rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
+
+  if (mode & LOAD_HIGH) {
+    DosUmbLink(umb_state);
+    internal_data->mem_access_mode = orig_mem_access;
+    mode &= 0x7f;
+  }
 
   if (rc != SUCCESS) {
     if (env_mcb != 0)
@@ -1901,6 +1920,8 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   UWORD env_mcb = 0;
   UWORD fcbcode;
   UWORD final_paras;
+  UBYTE umb_state;
+  UBYTE orig_mem_access;
   int rc;
 
   if ((mode & 0x7f) == EXEC_OVERLAY)
@@ -1953,22 +1974,36 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (paras_long == 0 || paras_long > 0xffffu)
     return arm_elf_reject(DE_NOMEM, "ELF metadata does not fit DOS guest memory");
 
-  rc = ChildEnv(exp, &env_mcb, (char *)namep);
-  if (rc != SUCCESS)
-    return (COUNT)rc;
+  umb_state = LoL->uppermem_link;
+  orig_mem_access = internal_data->mem_access_mode;
+  if (mode & LOAD_HIGH) {
+    DosUmbLink(1);
+    internal_data->mem_access_mode |= 0x80;
+  }
 
-  /*
-   * Reserve the largest available DOS block while loading.  ET_REL discovery
-   * is recursive, so the final image size is not known until all reachable
-   * sections have been relocated.  Owning the whole block avoids growing the
-   * MCB once per newly reached section; the unused tail is returned below by
-   * the existing final DosMemChange().
-   */
-  rc = ExecMemLargest(&asize, (UWORD)paras_long);
-  if (rc == SUCCESS)
-    rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
+  rc = ChildEnv(exp, &env_mcb, (char *)namep);
+  if (rc == SUCCESS) {
+    /*
+     * Reserve the largest available DOS block while loading.  ET_REL discovery
+     * is recursive, so the final image size is not known until all reachable
+     * sections have been relocated.  Owning the whole block avoids growing the
+     * MCB once per newly reached section; the unused tail is returned below by
+     * the existing final DosMemChange().
+     */
+    rc = ExecMemLargest(&asize, (UWORD)paras_long);
+    if (rc == SUCCESS)
+      rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
+  }
+
+  if (mode & LOAD_HIGH) {
+    DosUmbLink(umb_state);
+    internal_data->mem_access_mode = orig_mem_access;
+    mode &= 0x7f;
+  }
+
   if (rc != SUCCESS) {
-    DosMemFree(env_mcb);
+    if (env_mcb != 0)
+      DosMemFree(env_mcb);
     dos_printf("ARM ELF: cannot reserve largest guest block (minimum %lu bytes)\r\n",
                paras_long << 4);
     return (COUNT)rc;
