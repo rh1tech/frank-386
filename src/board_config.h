@@ -11,6 +11,8 @@
 #ifndef BOARD_CONFIG_H
 #define BOARD_CONFIG_H
 
+#define DIAG 1
+
 #include "hardware/structs/sysinfo.h"
 #include "hardware/vreg.h"
 

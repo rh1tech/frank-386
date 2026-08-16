@@ -24,6 +24,9 @@ void pc_step(struct PC* pc, size_t max_ops);
 extern bool terminate_requested(void);
 
 void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
+    uint16_t entry_ax = CPU_AX;
+    uint32_t wait_loops = 0;
+    last_int_call = owner;
     u16 cs = CPU_CS;
     u16 ip = CPU_IP;
     /*
@@ -73,6 +76,14 @@ void bios_intcall(CPU* cpu, uint8_t intnum, const char* owner) {
     cpu_intcall(cpu, intnum);
     cpu->native_done = false;
     while(!params.done) {
+        if (++wait_loops == 256u) {
+            char buf[80];
+            int snprintf(char *s, size_t n, const char *fmt, ...);
+            snprintf(buf, sizeof(buf),
+                     "WAIT INT %02X AX=%04X %s",
+                     intnum, entry_ax, owner ? owner : "?");
+            print_line(buf, 0);
+        }
         /* Break the nested guest burst when a terminate is pending.
            request_terminate() (e.g. LMSW PE=1) latches terminate_flag
            and native_done, but this loop only ends on params.done -

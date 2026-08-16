@@ -1784,7 +1784,6 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   BYTE *image_data;
   uintptr_t psram_image_addr = 0;
   uintptr_t app_psram_begin;
-  uintptr_t app_psram_end;
   UWORD final_paras;
   UWORD alloc_mcb = 0, asize = 0, load_seg;
   UWORD env_mcb = 0;
@@ -2094,7 +2093,8 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 fail:
   dos_printf("ARM EZ: load failed at %s, rc=%d\r\n", fail_stage, rc);
   DosCloseSft(fd, FALSE);
-fail_closed:
+
+//fail_closed:
   if (meta != NULL && meta->dos_stack_mcb != 0)
     DosMemFree(meta->dos_stack_mcb);
   else if (reserved_stack_mcb != 0)

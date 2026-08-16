@@ -20,10 +20,6 @@
 
 static inline void dos_diag_set(uint32_t code)
 {
-    /* Diagnostics disabled. This inlines to nothing at every APP call site. */
-    (void)code;
-    return;
-
     const unsigned long *table =
         (const unsigned long *)DOS_OS_API_SYS_TABLE_BASE;
     volatile uint32_t *latch =

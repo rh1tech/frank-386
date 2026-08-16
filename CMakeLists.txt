@@ -483,6 +483,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     QUIET=1
     #PDB_DEBUG=1
     #INT21_DIAG=1
+    DIAG=1
     #XMS_DEBUG=1
     # FreeDOS FAT32 support
     WITHFAT32=1

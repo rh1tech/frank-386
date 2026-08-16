@@ -1,6 +1,10 @@
 #include "bios/bios.h"
 #include "hdrs.h"
 
+#if DIAG
+extern volatile unsigned int dos_diag_kernel_code;
+#endif
+
 /* DOS calls this to see if it's okay to open the file.
     Returns a file_table entry number to use (>= 0) if okay
     to open.  Otherwise returns < 0 and may generate a critical
