@@ -110,14 +110,14 @@ void TSM_Remove(void)
     native_tsm_dispatching = 0;
 }
 
-void TSM_Yield(void)
+uint32_t TSM_YieldTime(void)
 {
     uint32_t now;
     int id;
 
     now = dos_yield();
     if (native_tsm_dispatching)
-        return;
+        return now;
 
     native_tsm_dispatching = 1;
     for (id = 0; id < NATIVE_TSM_SLOTS; ++id)
@@ -144,6 +144,12 @@ void TSM_Yield(void)
         }
     }
     native_tsm_dispatching = 0;
+    return now;
+}
+
+void TSM_Yield(void)
+{
+    (void)TSM_YieldTime();
 }
 
 uint32_t sound_hw_mask(void)
