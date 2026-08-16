@@ -1760,8 +1760,11 @@ void bios_post(PC *pc) {
     static const char rom_copyright[] = "Copyright (C) 2026 Murmulator Group";
     static const char rom_biosname[]  = "RP2350 ARM Cortex-M33 BIOS";
 
-    rom_puts(0xF0000, rom_biosname);                 /* F000:0000          */
-    rom_puts(0xF0000 + 32, rom_copyright);
+    /* Note: the identity strings are intentionally NOT placed at F000:0000
+       anymore. F0000-F8FFF is handed to the guest as UMB (see umb_native[] /
+       umb_select_map), so anything here would be overwritten. The copies at
+       F000:C600 and F000:E000 below (outside the UMB window) keep SysInfo /
+       CheckIt happy. */
     rom_puts(0xFC600, rom_biosname);                 /* F000:C600 (свободно)*/
     rom_puts(0xFC600 + 32, rom_copyright);
     rom_puts(0xFE000, rom_copyright);                /* F000:E000 — классика*/

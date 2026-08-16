@@ -213,27 +213,22 @@ static umb_t umb_native[] = {
     {0xEA00, 0x0080, 0}, {0xEA80, 0x0080, 0}, {0xEB00, 0x0080, 0}, {0xEB80, 0x0080, 0},
     {0xEC00, 0x0080, 0}, {0xEC80, 0x0080, 0}, {0xED00, 0x0080, 0}, {0xED80, 0x0080, 0},
     {0xEE00, 0x0080, 0}, {0xEE80, 0x0080, 0}, {0xEF00, 0x0080, 0}, {0xEF80, 0x0080, 0},
-/**
-48 КБ здесь, вероятно, можно частично вернуть, но не простым раскомментированием.
-Надо разобрать точные занятые интервалы fake BIOS и сформировать UMB как дырки между ними.
-По уже имеющейся карте как минимум F0000 и FA000+ заняты, но промежуток вроде F1000–F9FFF
- может оказаться реально свободным. Текущий код просто использует консервативное правило «весь F-segment = BIOS».
-
-важная информация для UMB: CheckIt независимо подтверждает, что F0000–F3FFF у нашей машины доступен как RAM. Значит, нынешнее безусловное:
-rom_start = 0xF0000u;
-слишком консервативно.
-конкретная задача: статически построить точную карту реально используемых адресов F0000–F3FFF в native BIOS.
-Тогда станет понятно, какую часть этих обнаруженных CheckIt 16 КБ можно безопасно превратить в UMB.
+/*
+ * F-segment UMB, derived from the static native-BIOS map (not from CheckIt):
+ * the only writes the fake BIOS makes below F9000 are the two identity strings
+ * at F0000, and those have been removed (dupes remain at FC600/FE000). The
+ * first functional data is the INT 10h static table at F9000, then the ROM
+ * fonts at FA000+. So F0000-F8FFF (36 KB) is genuinely free and handed out as
+ * UMB; rom_start is set to 0xF9000 in umb_select_map() to keep F9000+ as BIOS.
  */
-    // 0xF0000–0xF7FFF (32 KB)
-//    {0xF000, 0x0080, 0}, {0xF080, 0x0080, 0}, {0xF100, 0x0080, 0}, {0xF180, 0x0080, 0},
-//    {0xF200, 0x0080, 0}, {0xF280, 0x0080, 0}, {0xF300, 0x0080, 0}, {0xF380, 0x0080, 0},
-//    {0xF400, 0x0080, 0}, {0xF480, 0x0080, 0}, {0xF500, 0x0080, 0}, {0xF580, 0x0080, 0},
-//    {0xF600, 0x0080, 0}, {0xF680, 0x0080, 0}, {0xF700, 0x0080, 0}, {0xF780, 0x0080, 0},
+    // 0xF0000-0xF7FFF (32 KB)
+    {0xF000, 0x0080, 0}, {0xF080, 0x0080, 0}, {0xF100, 0x0080, 0}, {0xF180, 0x0080, 0},
+    {0xF200, 0x0080, 0}, {0xF280, 0x0080, 0}, {0xF300, 0x0080, 0}, {0xF380, 0x0080, 0},
+    {0xF400, 0x0080, 0}, {0xF480, 0x0080, 0}, {0xF500, 0x0080, 0}, {0xF580, 0x0080, 0},
+    {0xF600, 0x0080, 0}, {0xF680, 0x0080, 0}, {0xF700, 0x0080, 0}, {0xF780, 0x0080, 0},
 
-    // 0xF8000–0xFBFFF (16 KB)
-//    {0xF800, 0x0080, 0}, {0xF880, 0x0080, 0}, {0xF900, 0x0080, 0}, {0xF980, 0x0080, 0},
-//    {0xFA00, 0x0080, 0}, {0xFA80, 0x0080, 0}, {0xFB00, 0x0080, 0}, {0xFB80, 0x0080, 0},
+    // 0xF8000-0xF8FFF (8 KB) - F9000+ is the INT 10h static table + fonts
+    {0xF800, 0x0080, 0}, {0xF880, 0x0080, 0},
 };
 static umb_t umb_guest[] = {
     {0xC000, 0x0080, 0}, {0xC080, 0x0080, 0}, {0xC100, 0x0080, 0}, {0xC180, 0x0080, 0},
@@ -295,7 +290,9 @@ void umb_select_map(int native_bios, uint32_t rom_start, int vga_bios_loaded)
     if (native_bios) {
         src = umb_native;
         n = (int)(sizeof(umb_native) / sizeof(umb_t));
-        rom_start = 0xF0000u;
+        rom_start = 0xF9000u;   /* native BIOS occupies F9000-FFFFF only
+                                   (INT 10h static table + fonts + top data);
+                                   F0000-F8FFF is UMB. See umb_native[]. */
         vga_bios_loaded = 0;
     } else {
         src = umb_guest;
