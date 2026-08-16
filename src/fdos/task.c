@@ -250,6 +250,7 @@ typedef struct arm_ez_load_meta {
 } arm_ez_load_meta;
 
 static const native_ez_process_info *arm_ez_active_process_info;
+static int arm_native_process_is_active(void);
 
 const native_ez_process_info *arm_ez_get_process_info(void)
 {
@@ -1344,8 +1345,8 @@ static void arm_elf_native_stack_release(uintptr_t bottom,
  * available, then fall back to conventional memory.  FreeProcessMem() will
  * later release it because the MCB owner is changed to the child PSP.
  */
-static int arm_native_alloc_dos_stack(ULONG stack_size, UWORD child_psp,
-                                      UWORD *out_mcb, UWORD *out_seg)
+static int arm_native_reserve_dos_stack(ULONG stack_size,
+                                        UWORD *out_mcb, UWORD *out_seg)
 {
   UWORD paras = (UWORD)((stack_size + 15u) >> 4);
   UWORD mcb_seg = 0;
@@ -1374,11 +1375,27 @@ static int arm_native_alloc_dos_stack(ULONG stack_size, UWORD child_psp,
 
   {
     mcb *block = (mcb *)ARM_PTR(MK_FP(mcb_seg, 0));
-    block->m_psp = child_psp;
+    /* Temporary owner until the child PSP exists. */
+    block->m_psp = internal_data->cu_psp;
     memcpy(block->m_name, "ARMSTK  ", sizeof(block->m_name));
   }
 
   return SUCCESS;
+}
+
+static void arm_native_assign_dos_stack_owner(UWORD stack_mcb, UWORD child_psp)
+{
+  mcb *block = (mcb *)ARM_PTR(MK_FP(stack_mcb, 0));
+  block->m_psp = child_psp;
+}
+
+static int arm_native_alloc_dos_stack(ULONG stack_size, UWORD child_psp,
+                                      UWORD *out_mcb, UWORD *out_seg)
+{
+  int rc = arm_native_reserve_dos_stack(stack_size, out_mcb, out_seg);
+  if (rc == SUCCESS)
+    arm_native_assign_dos_stack_owner(*out_mcb, child_psp);
+  return rc;
 }
 
 static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
@@ -1641,11 +1658,10 @@ static int arm_ez_build_argv(UWORD base_seg, arm_ez_load_meta *meta,
   return SUCCESS;
 }
 
-static int arm_ez_apply_reloc(UWORD base_seg,
+static int arm_ez_apply_reloc(BYTE *base,
                               const struct ez_file_header *header,
                               const struct ez_reloc *rel)
 {
-  BYTE *base = (BYTE *)ARM_PTR(MK_FP(base_seg, 0));
   ULONG image_end = EZ_IMAGE_RVA + header->image_mem_size;
   BYTE *place;
 
@@ -1675,6 +1691,76 @@ static int arm_ez_apply_reloc(UWORD base_seg,
   }
 }
 
+
+/* Query conventional/guest DOS memory only, ignoring LOADHIGH preference. */
+static int arm_ez_largest_low(UWORD *paras)
+{
+  UBYTE saved_mode = internal_data->mem_access_mode;
+  int rc;
+
+  internal_data->mem_access_mode &= (UBYTE)~0xc0u;
+  rc = DosMemLargest(paras);
+  internal_data->mem_access_mode = saved_mode;
+  return rc;
+}
+
+/* Allocate an exact low-memory DOS block without changing the caller's mode. */
+static int arm_ez_alloc_low(UWORD paras, UWORD *mcb_seg, UWORD *actual)
+{
+  UBYTE saved_mode = internal_data->mem_access_mode;
+  int rc;
+
+  internal_data->mem_access_mode &= (UBYTE)~0xc0u;
+  rc = DosMemAlloc(paras, internal_data->mem_access_mode, mcb_seg, actual);
+  internal_data->mem_access_mode = saved_mode;
+  if (rc == SUCCESS)
+    *actual = paras;
+  return rc;
+}
+
+/*
+ * DosRWSft() transfers only to guest far memory.  A PSRAM-resident EZ image is
+ * therefore read through one temporary guest-DOS chunk below 1 MiB and copied
+ * to its final native address.
+ */
+static int arm_ez_read_native_image(COUNT fd, BYTE *dst,
+                                    ULONG file_off, ULONG size)
+{
+  UWORD paras = (UWORD)((CHUNK + 15u) >> 4);
+  UWORD mcb_seg = 0;
+  UWORD largest = 0;
+  ULONG done = 0;
+  LONG pos;
+  int rc;
+
+  rc = arm_ez_alloc_low(paras, &mcb_seg, &largest);
+  if (rc != SUCCESS)
+    return rc;
+
+  pos = SftSeek(fd, (LONG)file_off, SEEK_SET);
+  if (pos < 0) {
+    DosMemFree(mcb_seg);
+    return DE_INVLDFMT;
+  }
+
+  while (done < size) {
+    UWORD chunk = (UWORD)min((ULONG)CHUNK, size - done);
+    dos_far_ptr stage = MK_FP(mcb_seg + 1, 0);
+    LONG got = DosRWSft(fd, chunk, stage, XFR_READ);
+
+    if (got != chunk) {
+      DosMemFree(mcb_seg);
+      return DE_INVLDFMT;
+    }
+
+    memcpy(dst + done, ARM_PTR(stage), chunk);
+    done += chunk;
+  }
+
+  DosMemFree(mcb_seg);
+  return SUCCESS;
+}
+
 static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 {
   struct ez_file_header header;
@@ -1689,9 +1775,21 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   ULONG reloc_end;
   ULONG native_stack_size;
   ULONG dos_stack_size;
+  ULONG low_meta_off;
+  ULONG low_final_end;
+  UWORD low_required_paras = 0;
+  UWORD low_largest = 0;
+  int image_in_low = FALSE;
+  BYTE *image_base;
+  BYTE *image_data;
+  uintptr_t psram_image_addr = 0;
+  uintptr_t app_psram_begin;
+  uintptr_t app_psram_end;
   UWORD final_paras;
   UWORD alloc_mcb = 0, asize = 0, load_seg;
   UWORD env_mcb = 0;
+  UWORD reserved_stack_mcb = 0, reserved_stack_seg = 0;
+  const char *fail_stage = "preflight";
   UWORD fcbcode;
   UBYTE umb_state;
   UBYTE orig_mem_access;
@@ -1725,11 +1823,12 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
                header.required_dos_api_version, (unsigned)DOS_API_VERSION);
     return DE_INVLDFMT;
   }
-  if (header.image_mem_size < header.image_file_size ||
-      header.image_mem_size > 0xffff0ul - EZ_IMAGE_RVA)
+  if (header.image_mem_size < header.image_file_size)
     return arm_ez_reject(DE_INVLDFMT, "invalid EZ image size");
 
   image_end = EZ_IMAGE_RVA + header.image_mem_size;
+  if (image_end < EZ_IMAGE_RVA)
+    return arm_ez_reject(DE_INVLDFMT, "EZ image size overflows RVA space");
   if ((header.entry_rva & 1u) == 0 ||
       (header.entry_rva & ~1ul) < EZ_IMAGE_RVA ||
       (header.entry_rva & ~1ul) >= image_end)
@@ -1781,17 +1880,18 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
       native_stack_size == 0 || dos_stack_size == 0)
     return arm_ez_reject(DE_INVLDFMT, "invalid EZ stack requirements");
 
-  meta_off = arm_elf_align_up(image_end, 4u);
-  if (meta_off == 0xfffffffful || meta_off > 0xfffffffful - sizeof(*meta))
-    return DE_NOMEM;
-  cursor = meta_off + sizeof(*meta);
-  cursor = arm_elf_align_up(cursor, 4u);
-  if (cursor == 0xfffffffful || cursor > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
-    return DE_NOMEM;
-  final_end = arm_elf_align_up(cursor + ARM_ELF_ARG_AREA_SIZE, 16u);
-  if (final_end == 0xfffffffful || final_end > 0xffff0ul)
-    return DE_NOMEM;
-  final_paras = (UWORD)((final_end + 15u) >> 4);
+  /* First calculate the historical all-in-DOS layout as a candidate. */
+  low_meta_off = arm_elf_align_up(image_end, 4u);
+  if (low_meta_off != 0xfffffffful &&
+      low_meta_off <= 0xfffffffful - sizeof(*meta)) {
+    ULONG low_cursor = arm_elf_align_up(low_meta_off + sizeof(*meta), 4u);
+    if (low_cursor != 0xfffffffful &&
+        low_cursor <= 0xfffffffful - ARM_ELF_ARG_AREA_SIZE) {
+      low_final_end = arm_elf_align_up(low_cursor + ARM_ELF_ARG_AREA_SIZE, 16u);
+      if (low_final_end != 0xfffffffful && low_final_end <= 0xffff0ul)
+        low_required_paras = (UWORD)((low_final_end + 15u) >> 4);
+    }
+  }
 
   /*
    * LOAD_HIGH is part of the EXEC request itself.  Do not depend on the
@@ -1805,15 +1905,63 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     internal_data->mem_access_mode |= 0x80;
   }
 
-  /* Match the ELF loader's allocation contract.  ExecMemAlloc() may fall
-     back to the largest available block, so reserve through ExecMemLargest(),
-     load into that temporary reservation, then trim it to final_paras before
-     the child starts. */
+  /*
+   * Allocate the environment first, then inspect the largest block that is
+   * actually still available below 1 MiB.  Keep the complete EZ image there
+   * whenever it fits.  PSRAM is a fallback, never the preferred placement.
+   */
+  fail_stage = "environment allocation";
   rc = ChildEnv(exp, &env_mcb, (char *)namep);
-  if (rc == SUCCESS)
-    rc = ExecMemLargest(&asize, final_paras);
-  if (rc == SUCCESS)
-    rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
+  if (rc == SUCCESS) {
+    fail_stage = "DOS stack reservation";
+    rc = arm_native_reserve_dos_stack(dos_stack_size,
+                                      &reserved_stack_mcb,
+                                      &reserved_stack_seg);
+  }
+  if (rc == SUCCESS) {
+    int low_rc;
+    fail_stage = "LOW largest-block query";
+    low_rc = arm_ez_largest_low(&low_largest);
+    if (low_rc != SUCCESS)
+      rc = low_rc;
+    else if (low_required_paras != 0 && low_largest >= low_required_paras)
+      image_in_low = TRUE;
+  }
+
+  dos_printf("ARM EZ: file=%lu mem=%lu stack=%lu LOW need=%u largest=%u -> %s\r\n",
+             header.image_file_size, header.image_mem_size, dos_stack_size,
+             (unsigned)low_required_paras, (unsigned)low_largest,
+             image_in_low ? "LOW" : "PSRAM");
+
+  if (rc == SUCCESS && image_in_low) {
+    meta_off = low_meta_off;
+    cursor = arm_elf_align_up(meta_off + sizeof(*meta), 4u);
+    final_end = low_final_end;
+    final_paras = low_required_paras;
+    fail_stage = "LOW process-block allocation";
+    rc = arm_ez_alloc_low(final_paras, &alloc_mcb, &asize);
+  } else if (rc == SUCCESS) {
+    /* Only PSP/metadata/argv consume DOS memory when the image is in PSRAM. */
+    meta_off = arm_elf_align_up(EZ_IMAGE_RVA, 4u);
+    if (meta_off == 0xfffffffful || meta_off > 0xfffffffful - sizeof(*meta))
+      rc = DE_NOMEM;
+    if (rc == SUCCESS) {
+      cursor = arm_elf_align_up(meta_off + sizeof(*meta), 4u);
+      if (cursor == 0xfffffffful ||
+          cursor > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
+        rc = DE_NOMEM;
+    }
+    if (rc == SUCCESS) {
+      final_end = arm_elf_align_up(cursor + ARM_ELF_ARG_AREA_SIZE, 16u);
+      if (final_end == 0xfffffffful || final_end > 0xffff0ul)
+        rc = DE_NOMEM;
+    }
+    if (rc == SUCCESS) {
+      final_paras = (UWORD)((final_end + 15u) >> 4);
+      fail_stage = "PSRAM-fallback process-block allocation";
+      rc = arm_ez_alloc_low(final_paras, &alloc_mcb, &asize);
+    }
+  }
 
   if (mode & LOAD_HIGH) {
     DosUmbLink(umb_state);
@@ -1822,51 +1970,103 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   }
 
   if (rc != SUCCESS) {
+    dos_printf("ARM EZ: load failed at %s, rc=%d\r\n", fail_stage, rc);
+    if (reserved_stack_mcb != 0)
+      DosMemFree(reserved_stack_mcb);
     if (env_mcb != 0)
       DosMemFree(env_mcb);
     return (COUNT)rc;
   }
   load_seg = alloc_mcb + 1;
 
-  if (arm_elf_read_section(fd, load_seg, EZ_IMAGE_RVA,
-                           header.header_size, header.image_file_size) != SUCCESS) {
-    rc = DE_INVLDFMT;
-    goto fail;
+  if (image_in_low) {
+    image_base = (BYTE *)ARM_PTR(MK_FP(load_seg, 0));
+    image_data = image_base + EZ_IMAGE_RVA;
+    if (arm_elf_read_section(fd, load_seg, EZ_IMAGE_RVA,
+                             header.header_size,
+                             header.image_file_size) != SUCCESS) {
+      rc = DE_INVLDFMT;
+      goto fail;
+    }
+    app_psram_begin =
+        (uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET;
+  } else {
+    uintptr_t psram_end = arm_elf_native_stack_arena_begin();
+
+    if (arm_native_process_is_active()) {
+      rc = arm_ez_reject(DE_NOMEM,
+          "PSRAM fallback is unsafe during nested native EXEC");
+      goto fail;
+    }
+    psram_image_addr =
+        (uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET;
+    dos_printf("ARM EZ: PSRAM image=%08lx end=%08lx available=%lu need=%lu\r\n",
+               (ULONG)psram_image_addr, (ULONG)psram_end,
+               (ULONG)(psram_end - psram_image_addr),
+               header.image_mem_size);
+    if (psram_image_addr < EZ_IMAGE_RVA ||
+        header.image_mem_size > (ULONG)(psram_end - psram_image_addr)) {
+      rc = arm_ez_reject(DE_NOMEM, "EZ image does not fit application PSRAM");
+      goto fail;
+    }
+    image_data = (BYTE *)psram_image_addr;
+    image_base = image_data - EZ_IMAGE_RVA;
+    fail_stage = "PSRAM image read/staging";
+    rc = arm_ez_read_native_image(fd, image_data, header.header_size,
+                                  header.image_file_size);
+    if (rc != SUCCESS)
+      goto fail;
+    app_psram_begin =
+        (psram_image_addr + header.image_mem_size + 15u) & ~(uintptr_t)15u;
+    if (app_psram_begin < psram_image_addr || app_psram_begin > psram_end) {
+      rc = arm_ez_reject(DE_NOMEM, "EZ image leaves no valid application PSRAM");
+      goto fail;
+    }
   }
+
   if (header.image_mem_size > header.image_file_size)
-    memset(ARM_PTR(arm_elf_guest_ptr(load_seg,
-                                    EZ_IMAGE_RVA + header.image_file_size)),
-           0, header.image_mem_size - header.image_file_size);
+    memset(image_data + header.image_file_size, 0,
+           header.image_mem_size - header.image_file_size);
 
   for (i = 0; i < header.reloc_count; ++i) {
     struct ez_reloc rel;
+    fail_stage = "relocation-table read";
     rc = arm_elf_read_meta(fd,
         header.reloc_offset + i * header.reloc_entry_size,
         &rel, sizeof(rel));
-    if (rc != SUCCESS)
+    if (rc != SUCCESS) {
+      dos_printf("ARM EZ: relocation %lu read failed, rc=%d\r\n", i, rc);
       goto fail;
-    rc = arm_ez_apply_reloc(load_seg, &header, &rel);
-    if (rc != SUCCESS)
+    }
+    fail_stage = "relocation apply";
+    rc = arm_ez_apply_reloc(image_base, &header, &rel);
+    if (rc != SUCCESS) {
+      dos_printf("ARM EZ: relocation %lu apply failed, rc=%d\r\n", i, rc);
       goto fail;
+    }
   }
 
   meta = (arm_ez_load_meta *)ARM_PTR(arm_elf_guest_ptr(load_seg, meta_off));
   memset(meta, 0, sizeof(*meta));
-  meta->entry_addr = (ULONG)(uintptr_t)ARM_PTR(
-      arm_elf_guest_ptr(load_seg, header.entry_rva));
+  meta->entry_addr = (ULONG)(uintptr_t)(image_base + header.entry_rva);
   meta->native_stack_size = native_stack_size;
   meta->dos_stack_size = dos_stack_size;
+  meta->dos_stack_mcb = reserved_stack_mcb;
+  meta->dos_stack_seg = reserved_stack_seg;
+  reserved_stack_mcb = 0;
+  reserved_stack_seg = 0;
   meta->process_info.native_stack_size = native_stack_size;
   meta->process_info.dos_stack_size = dos_stack_size;
-  meta->process_info.app_psram_begin =
-      (ULONG)((uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET);
+  meta->process_info.app_psram_begin = (ULONG)app_psram_begin;
   meta->process_info.app_psram_end = (ULONG)arm_elf_native_stack_arena_begin();
 
+  fail_stage = "argv construction";
   rc = arm_ez_build_argv(load_seg, meta, &cursor, (ULONG)asize << 4,
                          exp, namep);
   if (rc != SUCCESS)
     goto fail;
 
+  fail_stage = "guest process-block shrink";
   rc = DosMemChange(load_seg, final_paras, NULL);
   if (rc != SUCCESS) {
     dos_printf("ARM EZ: cannot shrink guest block to %u paragraphs\r\n",
@@ -1880,27 +2080,25 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   fcbcode = patchPSP(alloc_mcb, env_mcb, exp, namep);
   (void)fcbcode;
 
-  rc = arm_native_alloc_dos_stack(meta->dos_stack_size, load_seg,
-                                  &meta->dos_stack_mcb,
-                                  &meta->dos_stack_seg);
-  if (rc != SUCCESS) {
-    dos_printf("ARM EZ: cannot allocate %lu-byte DOS stack\r\n",
-               meta->dos_stack_size);
-    goto fail_closed;
-  }
+  arm_native_assign_dos_stack_owner(meta->dos_stack_mcb, load_seg);
 
-  CfgDbgPrintf(("ARM EZ loaded: psp=%04x image=%lu entry=%08lx argc=%u "
+  CfgDbgPrintf(("ARM EZ loaded: psp=%04x image=%s:%08lx+%lu entry=%08lx argc=%u "
                 "DOS-stack=%04x:0000 reloc=%lu\n",
-                load_seg, header.image_mem_size, meta->entry_addr,
+                load_seg, image_in_low ? "LOW" : "PSRAM",
+                (ULONG)(uintptr_t)image_data, header.image_mem_size,
+                meta->entry_addr,
                 (unsigned)meta->argc, meta->dos_stack_seg,
                 header.reloc_count));
   return exec_run_arm_ez(load_seg, meta);
 
 fail:
+  dos_printf("ARM EZ: load failed at %s, rc=%d\r\n", fail_stage, rc);
   DosCloseSft(fd, FALSE);
 fail_closed:
   if (meta != NULL && meta->dos_stack_mcb != 0)
     DosMemFree(meta->dos_stack_mcb);
+  else if (reserved_stack_mcb != 0)
+    DosMemFree(reserved_stack_mcb);
   DosMemFree(alloc_mcb);
   DosMemFree(env_mcb);
   return (COUNT)rc;
@@ -2754,6 +2952,11 @@ typedef void (*arm_elf_fini_fn)(void *);
  * SP in its own metadata.
  */
 static volatile ULONG *arm_elf_active_main_sp;
+
+static int arm_native_process_is_active(void)
+{
+  return arm_elf_active_main_sp != NULL || arm_ez_active_process_info != NULL;
+}
 
 /*
  * Synthetic guest return point used while a native ELF application yields.

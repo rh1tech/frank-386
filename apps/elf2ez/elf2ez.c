@@ -1040,6 +1040,244 @@ static int load_section(int fd, uint8_t *base, elf_load_meta *meta,
     return 0;
 }
 
+
+static int startup_layout_from_states(elf_load_meta *meta, uint32_t off,
+                                      uint32_t *end_off)
+{
+    elf_sec_state *states = elf_states(meta);
+    uint32_t pre_count = 0;
+    uint32_t init_count = 0;
+    uint32_t fini_count = 0;
+    uint32_t total;
+    uint32_t i;
+
+    off = align_up(off, sizeof(uint32_t));
+    if (off == UINT32_MAX)
+        return -1;
+
+    for (i = 0; i < meta->eh.shnum; ++i) {
+        uint32_t n;
+
+        if (states[i].state != ELF_SEC_LOADED)
+            continue;
+        if ((states[i].size & 3u) != 0 &&
+            states[i].startup_kind != ELF_STARTUP_NONE)
+            return -1;
+
+        n = states[i].size / sizeof(uint32_t);
+        if (states[i].startup_kind == ELF_STARTUP_PREINIT)
+            pre_count += n;
+        else if (states[i].startup_kind == ELF_STARTUP_INIT)
+            init_count += n;
+        else if (states[i].startup_kind == ELF_STARTUP_FINI)
+            fini_count += n;
+    }
+
+    total = pre_count + init_count;
+    if (total < pre_count || total > UINT32_MAX - fini_count)
+        return -1;
+    total += fini_count;
+    if (total > UINT32_MAX / sizeof(uint32_t))
+        return -1;
+
+    meta->preinit_array_rva = EZ_IMAGE_RVA + off;
+    meta->preinit_array_count = pre_count;
+    off += pre_count * sizeof(uint32_t);
+
+    meta->init_array_rva = EZ_IMAGE_RVA + off;
+    meta->init_array_count = init_count;
+    off += init_count * sizeof(uint32_t);
+
+    meta->fini_array_rva = EZ_IMAGE_RVA + off;
+    meta->fini_array_count = fini_count;
+    off += fini_count * sizeof(uint32_t);
+
+    *end_off = off;
+    return 0;
+}
+
+static int emit_final_startup_arrays(int fd, uint8_t *base,
+                                     elf_load_meta *meta)
+{
+    uint32_t off;
+    uint32_t count;
+    uint32_t i;
+
+    off = meta->preinit_array_rva - EZ_IMAGE_RVA;
+    if (copy_startup_kind(fd, base, meta, ELF_STARTUP_PREINIT, off,
+                          &count) != 0 ||
+        count != meta->preinit_array_count)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        uint32_t *entry = (uint32_t *)(base + off + i * sizeof(uint32_t));
+        if (*entry != 0 && *entry != UINT32_MAX &&
+            emit_ez_reloc(meta, EZ_IMAGE_RVA + off + i * sizeof(uint32_t),
+                          EZ_RELOC_ABS32) != 0)
+            return -1;
+    }
+
+    off = meta->init_array_rva - EZ_IMAGE_RVA;
+    if (copy_startup_kind(fd, base, meta, ELF_STARTUP_INIT, off,
+                          &count) != 0 ||
+        count != meta->init_array_count)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        uint32_t *entry = (uint32_t *)(base + off + i * sizeof(uint32_t));
+        if (*entry != 0 && *entry != UINT32_MAX &&
+            emit_ez_reloc(meta, EZ_IMAGE_RVA + off + i * sizeof(uint32_t),
+                          EZ_RELOC_ABS32) != 0)
+            return -1;
+    }
+
+    off = meta->fini_array_rva - EZ_IMAGE_RVA;
+    if (copy_startup_kind(fd, base, meta, ELF_STARTUP_FINI, off,
+                          &count) != 0 ||
+        count != meta->fini_array_count)
+        return -1;
+    for (i = 0; i < count; ++i) {
+        uint32_t *entry = (uint32_t *)(base + off + i * sizeof(uint32_t));
+        if (*entry != 0 && *entry != UINT32_MAX &&
+            emit_ez_reloc(meta, EZ_IMAGE_RVA + off + i * sizeof(uint32_t),
+                          EZ_RELOC_ABS32) != 0)
+            return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * The discovery pass above lays sections out in dependency order, which can
+ * interleave SHT_NOBITS with file-backed sections.  EZ v1 requires one
+ * contiguous initialized prefix followed by a zero-only memory tail, so do a
+ * second deterministic layout after the complete reachable graph is known:
+ *
+ *   file-backed ELF sections
+ *   synthesized preinit/init/fini arrays
+ *   SHT_NOBITS sections
+ *
+ * All section relocations are then re-applied using the final RVAs.  The
+ * converter still keeps the full memory image in its work block; only the
+ * zero-only tail is omitted from the output file.
+ */
+static int finalize_image_layout(int fd, uint8_t *base, elf_load_meta *meta,
+                                 uint32_t reloc_store_top,
+                                 uint32_t *file_size, uint32_t *mem_size)
+{
+    elf_sec_state *states = elf_states(meta);
+    uint32_t off = 0;
+    uint32_t startup_end;
+    uint32_t file_end;
+    uint32_t memory_end;
+    uint32_t i;
+
+    /* First assign every reachable file-backed ELF section. */
+    for (i = 0; i < meta->eh.shnum; ++i) {
+        elf32_shdr sh;
+
+        if (states[i].state != ELF_SEC_LOADED)
+            continue;
+        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0)
+            return -1;
+        if (sh.type == SHT_NOBITS)
+            continue;
+
+        off = align_up(off, sh.addralign);
+        if (off == UINT32_MAX || off > UINT32_MAX - sh.size)
+            return -1;
+        states[i].offset = off;
+        states[i].size = sh.size;
+        off += sh.size;
+    }
+
+    /*
+     * Reserve the synthesized startup arrays inside the initialized prefix.
+     * Their concrete RVAs must be known before crt0 relocations are re-applied.
+     */
+    if (startup_layout_from_states(meta, off, &startup_end) != 0)
+        return -1;
+    file_end = align_up(startup_end, 4u);
+    if (file_end == UINT32_MAX)
+        return -1;
+
+    /* Then place every reachable NOBITS section in the zero-only tail. */
+    off = file_end;
+    for (i = 0; i < meta->eh.shnum; ++i) {
+        elf32_shdr sh;
+
+        if (states[i].state != ELF_SEC_LOADED)
+            continue;
+        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0)
+            return -1;
+        if (sh.type != SHT_NOBITS)
+            continue;
+
+        off = align_up(off, sh.addralign);
+        if (off == UINT32_MAX || off > UINT32_MAX - sh.size)
+            return -1;
+        states[i].offset = off;
+        states[i].size = sh.size;
+        off += sh.size;
+    }
+
+    memory_end = align_up(off, 4u);
+    if (memory_end == UINT32_MAX)
+        return -1;
+
+    /*
+     * Throw away relocation records from the discovery layout.  The final pass
+     * emits a fresh table whose RVAs match the compacted image.
+     */
+    meta->cursor = memory_end;
+    meta->reloc_store_addr = reloc_store_top;
+    meta->ez_reloc_count = 0;
+    meta->relocation_progress = 0;
+    if (ensure_capacity(meta, memory_end) != 0)
+        return -1;
+
+    memset(base, 0, memory_end);
+
+    /* Re-read file-backed data at its final offsets; NOBITS stays zero. */
+    for (i = 0; i < meta->eh.shnum; ++i) {
+        elf32_shdr sh;
+
+        if (states[i].state != ELF_SEC_LOADED)
+            continue;
+        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0)
+            return -1;
+        if (sh.type != SHT_NOBITS && sh.size != 0 &&
+            read_section(fd, base, states[i].offset, sh.offset, sh.size) != 0)
+            return -1;
+    }
+
+    /*
+     * Re-apply every relocation now that all final section RVAs are fixed.
+     * symbol_ref() can only encounter already-loaded sections here because the
+     * first pass recursively discovered the complete dependency graph.
+     */
+    for (i = 0; i < meta->eh.shnum; ++i) {
+        elf32_shdr sh;
+
+        if (states[i].state != ELF_SEC_LOADED)
+            continue;
+        if (read_shdr(fd, &meta->eh, (uint16_t)i, &sh) != 0 ||
+            apply_section_relocations(fd, base, meta, (uint16_t)i, &sh,
+                                      states[i].offset) != 0)
+            return -1;
+    }
+
+    /*
+     * The source startup sections now contain their final relocated function
+     * pointers.  Copy them into the contiguous synthesized arrays and emit the
+     * corresponding load-base relocations.
+     */
+    if (emit_final_startup_arrays(fd, base, meta) != 0)
+        return -1;
+
+    *file_size = file_end;
+    *mem_size = memory_end;
+    return 0;
+}
+
 static int find_entry_symbol(int fd, elf_load_meta *meta, uint32_t *entry_idx)
 {
     uint32_t count;
@@ -1146,7 +1384,9 @@ static int convert_elf_to_ez(int input, int output)
     struct ez_reloc *relocs;
     uint32_t metadata_size;
     uint32_t image_store_off;
-    uint32_t image_size;
+    uint32_t image_file_size;
+    uint32_t image_mem_size;
+    uint32_t reloc_store_top;
     uint32_t entry_idx;
     elf_symbol_ref entry;
     int rc = -1;
@@ -1204,6 +1444,7 @@ static int convert_elf_to_ez(int input, int output)
     meta->image_store_addr = (uint32_t)(uintptr_t)image;
     meta->reloc_store_addr = (uint32_t)(uintptr_t)(block.ptr + block.size);
 #endif
+    reloc_store_top = meta->reloc_store_addr;
 
     if (find_tables(input, meta) != 0) {
         printf("Bad ELF: cannot find symbol/string tables\n");
@@ -1242,13 +1483,21 @@ static int convert_elf_to_ez(int input, int output)
         goto out;
     }
 
-    image_size = align_up(meta->cursor, 4u);
-    if (image_size == UINT32_MAX || ensure_capacity(meta, image_size) != 0) {
-        printf("\nELF image/relocations do not fit work block\n");
+    if (finalize_image_layout(input, image, meta, reloc_store_top,
+                              &image_file_size, &image_mem_size) != 0) {
+        printf("\nBad ELF: cannot finalize compact EZ image layout\n");
         goto out;
     }
-    if (image_size > meta->cursor)
-        memset(image + meta->cursor, 0, image_size - meta->cursor);
+
+    /*
+     * __ez_start may have moved with its section during final compaction.
+     * Resolve it again against the final state table before writing the header.
+     */
+    if (symbol_ref(input, image, meta, entry_idx, &entry) != 0 ||
+        !entry.rebase) {
+        printf("\nBad ELF: cannot resolve final EZ entry\n");
+        goto out;
+    }
 
     memset(&header, 0, sizeof(header));
     header.magic = EZ_MAGIC;
@@ -1259,16 +1508,10 @@ static int convert_elf_to_ez(int input, int output)
     header.native_stack_size = requirements.native_stack_size;
     header.dos_stack_size = requirements.dos_stack_size;
 
-    /*
-     * For this first end-to-end implementation the zero-only sections are
-     * deliberately stored in the file as zero bytes too.  Thus file and
-     * memory image sizes are equal; a later optimization can move the final
-     * NOBITS tail out of the file without changing the EZ v1 ABI.
-     */
-    header.image_file_size = image_size;
-    header.image_mem_size = image_size;
+    header.image_file_size = image_file_size;
+    header.image_mem_size = image_mem_size;
     header.entry_rva = entry.value;
-    header.reloc_offset = sizeof(header) + image_size;
+    header.reloc_offset = sizeof(header) + image_file_size;
     header.reloc_count = meta->ez_reloc_count;
     header.reloc_entry_size = sizeof(struct ez_reloc);
 #ifdef ELF2EZ_HOST
@@ -1278,15 +1521,17 @@ static int convert_elf_to_ez(int input, int output)
 #endif
 
     if (write_exact(output, &header, sizeof(header)) != 0 ||
-        write_exact(output, image, image_size) != 0 ||
+        write_exact(output, image, image_file_size) != 0 ||
         write_exact(output, relocs,
                     meta->ez_reloc_count * sizeof(struct ez_reloc)) != 0) {
         rc = 1;
         goto out;
     }
 
-    printf("\nEZ image: %lu bytes, %lu relocations, entry=%08lx\n",
-           (unsigned long)image_size,
+    printf("\nEZ image: %lu bytes file, %lu bytes memory, "
+           "%lu relocations, entry=%08lx\n",
+           (unsigned long)image_file_size,
+           (unsigned long)image_mem_size,
            (unsigned long)meta->ez_reloc_count,
            (unsigned long)header.entry_rva);
     rc = 0;
