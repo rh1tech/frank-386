@@ -4,9 +4,9 @@
 директив CMake, ABI-термины и фрагменты кода намеренно оставлены в исходном
 виде, чтобы документ можно было использовать непосредственно при разработке.
 
-Этот документ описывает the native ARM application layer under `apps/api`, the
-legacy relocatable-ELF execution path, the EZ executable format, and the normal
-`elf2ez` build/conversion workflow.
+Этот документ описывает слой нативных ARM-приложений в `apps/api`,
+устаревший путь выполнения relocatable ELF, формат исполняемых файлов EZ и
+обычный процесс сборки/конвертации через `elf2ez`.
 
 Он рассчитан на два одинаково важных сценария использования:
 
@@ -24,7 +24,7 @@ runtime из одной согласованной версии `apps/api` и н
 произвольные реализации Pico SDK/newlib в нативный DOS executable.
 
 > **Правило версий:** никогда не зашивайте версию API в приложение или host-
-> утилиту. Подключайте `dos_api_version.h` / the project EZ headers and use
+> утилиту. Подключайте `dos_api_version.h` / заголовки EZ проекта и используйте
 > `DOS_API_VERSION`. Таблица только расширяется в конец: номера существующих слотов нельзя
 > перенумеровывать.
 
@@ -34,13 +34,13 @@ runtime из одной согласованной версии `apps/api` и н
 
 Нативная DOS-программа всё равно является DOS-процессом:
 
-- it has a PSP and DOS ownership/lifetime;
-- DOS file handles, current directory, DTA, environment and child process
-  semantics remain DOS semantics;
-- low/conventional memory is guest x86 memory;
-- the application code itself executes natively as ARM/Thumb code on core 0;
-- the parent DOS/x86 execution context is suspended while the native child is
-  running.
+- у него есть PSP и обычные правила владения и времени жизни DOS;
+- файловые дескрипторы DOS, текущий каталог, DTA, environment и семантика
+  дочерних процессов остаются DOS-семантикой;
+- low/conventional memory является гостевой x86-памятью;
+- код приложения выполняется нативно как ARM/Thumb-код на core 0;
+- родительский DOS/x86-контекст выполнения приостанавливается, пока работает
+  нативный дочерний процесс.
 
 Поэтому приложение одновременно существует в двух адресных пространствах:
 
@@ -49,8 +49,7 @@ runtime из одной согласованной версии `apps/api` и н
 2. **гостевое физическое x86/DOS-пространство** — PSP, IVT, BDA, VGA-память,
    conventional memory, DMA-буферы и структуры DOS.
 
-Не разыменовывайте гостевой физический адрес such as `0xA0000` or `0xB8000` as
-an ARM pointer. Use the guest-memory API.
+Не разыменовывайте гостевой физический адрес, например `0xA0000` или `0xB8000`, как ARM-указатель. Используйте API гостевой памяти.
 
 ---
 
@@ -69,7 +68,7 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/../api/native-dos-runtime.cmake)
 native_dos_runtime_attach(${PROJECT_NAME})
 ```
 
-`native_dos_runtime_attach()` adds the libc/compiler-runtime bridge:
+`native_dos_runtime_attach()` добавляет bridge для libc/compiler-runtime:
 
 ```text
 dos-api-sdtfn.c
@@ -77,21 +76,22 @@ dos-api-math.c
 dos-api-divmod.S
 ```
 
-and compiles the C runtime bridge with `-fno-builtin`. This is intentional:
-these files define symbols such as `memcpy`, `printf`, compiler EABI helpers,
-etc.; GCC must not silently replace their bodies with calls back into a
-toolchain libc.
+и компилирует C runtime bridge с `-fno-builtin`. Это сделано намеренно:
+эти файлы определяют такие символы, как `memcpy`, `printf`, вспомогательные
+функции compiler EABI и т. п.; GCC не должен незаметно заменять их тела
+обратными вызовами libc из toolchain.
 
 Приложение должно подключать только конкретный публичный заголовок, нужный
-подсистеме. Avoid including `dos-api.h` merely to get one small service because
-it exposes emulator structures (`PC`, `CPU`) that can collide with application
-names and unnecessarily couples the application to firmware internals.
+подсистеме. Не подключайте `dos-api.h` только ради одного небольшого сервиса:
+он открывает структуры эмулятора (`PC`, `CPU`), которые могут конфликтовать с
+именами приложения и без необходимости связывают приложение с внутренностями
+прошивки.
 
 ### 2.1 Два поддерживаемых варианта структуры проекта
 
 API можно использовать как непосредственно из дерева, так и как локально скопированный userspace SDK.
 
-**In-tree layout:**
+**Структура in-tree:**
 
 ```text
 murm386/
@@ -102,9 +102,9 @@ murm386/
             ...
 ```
 
-The application can use `../api`.
+Приложение может использовать `../api`.
 
-**Standalone/vendored layout:**
+**Структура standalone с локальной копией:**
 
 ```text
 my-port/
@@ -117,8 +117,9 @@ my-port/
         elf2ez[.exe]        <- optional local copy of the host converter
 ```
 
-A standalone project does not need to copy itself into the murm386 source
-tree.  Instead it can set one API-root variable and use paths relative to it:
+Standalone-проект не требуется копировать внутрь дерева исходников murm386.
+Вместо этого можно задать одну переменную корня API и использовать пути
+относительно неё:
 
 ```cmake
 set(NATIVE_DOS_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/api")
@@ -154,9 +155,9 @@ target_sources(${PROJECT_NAME} PRIVATE
 - CRT-код запуска/завершения;
 - общий CMake-модуль подключения runtime.
 
-A copied `stdio.h` from one API revision combined with an older
-`dos-api-sdtfn.c`, for example, can compile while referring to a system-table
-service which the copied runtime does not wrap correctly.
+Например, `stdio.h`, скопированный из одной ревизии API, вместе с более старым
+`dos-api-sdtfn.c` может успешно скомпилироваться, но ссылаться на сервис
+системной таблицы, который эта версия runtime оборачивает неправильно.
 
 Относитесь к локальной копии API как к снимку небольшого SDK:
 
@@ -165,14 +166,15 @@ third_party/native-dos-api/
     ...exact copy of apps/api...
 ```
 
-Record which murm386/API revision it came from.  When updating it, replace or
-merge the **whole API snapshot coherently**, then rebuild and rerun the
-unresolved-symbol check.
+Зафиксируйте, из какой ревизии murm386/API взята копия. При обновлении
+заменяйте или сливайте **весь снимок API согласованно**, затем пересобирайте
+проект и повторно запускайте проверку неразрешённых символов.
 
-Application-specific compatibility code should normally remain outside this
-directory.  If a missing function or service is genuinely generic, add it to
-the canonical `apps/api` first and then refresh the vendored copy.  This avoids
-turning every large port into a private fork of the runtime.
+Специфичный для приложения compatibility-код обычно должен оставаться вне
+этого каталога. Если отсутствующая функция или сервис действительно имеет
+общий характер, сначала добавьте его в канонический `apps/api`, а затем
+обновите локальную копию. Так каждый большой порт не превращается в отдельный
+fork runtime.
 
 ### 2.3 Что не входит в копируемый API
 
@@ -184,81 +186,81 @@ Standalone-приложению всё равно нужен небольшой 
 - проверка unresolved symbols;
 - host-бинарник `elf2ez` либо путь к host-утилите из репозитория.
 
-Для нового проекта `apps/test` лучше подходит как исходный каркас
-чем `apps/doom`: it has a small source set and exercises the same runtime/CRT
-mechanisms without carrying a large game's platform layer.
+Для нового проекта `apps/test` лучше подходит как исходный каркас,
+чем `apps/doom`: у него небольшой набор исходников, но он использует те же
+механизмы runtime/CRT без платформенного слоя большой игры.
 
 ---
 
 ## 3. Системная таблица
 
-The firmware system table starts at:
+Системная таблица прошивки начинается по адресу:
 
 ```c
 #define DOS_OS_API_SYS_TABLE_BASE ((void *)0x10100000ul)
 ```
 
-Wrappers in `apps/api` indirect through this table.
+Обёртки в `apps/api` вызывают сервисы косвенно через эту таблицу.
 
-Important fixed slots include:
+Основные фиксированные слоты:
 
-| Slot | Service |
+| Слот | Сервис |
 |---:|---|
 | 0 | `get_PC()` |
-| 1 | native BIOS handler table (`handlers[]`) |
+| 1 | таблица нативных обработчиков BIOS (`handlers[]`) |
 | 2 | `bios_intcall()` |
-| 3..5 | guest physical read 8/16/32 |
-| 6..8 | guest physical write 8/16/32 |
-| 9 | PSRAM size/service used by the public PSRAM wrapper |
-| 10 | firmware `vsnprintf` backend |
-| 11 | native process exit/unwind |
+| 3..5 | чтение гостевой физической памяти 8/16/32 |
+| 6..8 | запись гостевой физической памяти 8/16/32 |
+| 9 | размер/сервис PSRAM, используемый публичной PSRAM-обёрткой |
+| 10 | backend `vsnprintf` в прошивке |
+| 11 | завершение/unwind нативного процесса |
 | 12 | cooperative `dos_yield()` |
-| 13..18 | early compiler/division helpers retained by ABI |
-| 19..100 | math and ARM EABI/compiler-runtime services |
-| 101 | diagnostic latch |
-| 102 | firmware `vsscanf` backend |
-| 103 | SRAM-resident native-app `memcpy` |
-| 104 | shared SRAM-resident `memset` (`nf_memset`) |
-| 105 | SRAM-resident native-app `memcmp` |
-| 106 | native DOS termination state |
-| 107 | current EZ process information |
+| 13..18 | ранние compiler/division helpers, сохранённые ABI |
+| 19..100 | математические и ARM EABI/compiler-runtime сервисы |
+| 101 | диагностический latch |
+| 102 | backend `vsscanf` в прошивке |
+| 103 | SRAM-resident `memcpy` для нативных приложений |
+| 104 | общий SRAM-resident `memset` (`nf_memset`) |
+| 105 | SRAM-resident `memcmp` для нативных приложений |
+| 106 | состояние завершения native DOS |
+| 107 | информация о текущем EZ-процессе |
 
-Only append new services. A program requiring a newer slot must declare a
-newer `DOS_API_VERSION`; the loader rejects it before execution on an older
-firmware.
+Новые сервисы добавляйте только в конец. Программа, которой нужен более новый
+слот, должна объявлять более новый `DOS_API_VERSION`; загрузчик старой прошивки
+отклонит её до начала выполнения.
 
-Slots 19..100 are defined symbolically in `dos_math_api.h`. Do not duplicate
-their numeric constants elsewhere.
+Слоты 19..100 символически определены в `dos_math_api.h`. Не дублируйте их
+числовые значения в других местах.
 
 ---
 
-## 4. Core low-level services
+## 4. Базовые низкоуровневые сервисы
 
 ### 4.1 `dos-api.h`
 
-Use this header only when direct access to the emulator CPU/PC object is
-actually required.
+Используйте этот заголовок только тогда, когда действительно нужен прямой
+доступ к объекту CPU/PC эмулятора.
 
 ```c
 PC *pc = get_PC();
 bios_intcall(pc->cpu, 0x21, "owner string");
 ```
 
-It also defines the conventional guest-RAM mapping helpers:
+Он также определяет вспомогательные функции отображения conventional guest RAM:
 
 ```c
 void *dos_guest_linear_ptr(uint32_t linear);
 void *dos_guest_far_ptr(uint16_t seg, uint16_t off);
 ```
 
-Guest RAM is mapped to the native application at `DOS_GUEST_RAM_BASE`
-(`0x11000000` in the current ABI). These helpers are for standard DOS data
-structures that genuinely reside in conventional guest RAM.
+Guest RAM отображается в адресное пространство нативного приложения начиная с
+`DOS_GUEST_RAM_BASE` (`0x11000000` в текущем ABI). Эти функции предназначены
+для стандартных структур DOS, действительно находящихся в conventional guest RAM.
 
 ### 4.2 `dos_phys.h`
 
-Use for **physical/emulated memory accesses**, particularly memory whose
-semantics are implemented by devices:
+Используйте для **доступа к физической/эмулируемой памяти**, особенно к памяти,
+семантика которой реализуется устройствами:
 
 ```c
 uint8_t  dos_phys_read8(uint32_t addr);
@@ -270,19 +272,19 @@ void dos_phys_write16(uint32_t addr, uint16_t value);
 void dos_phys_write32(uint32_t addr, uint32_t value);
 ```
 
-Examples:
+Примеры:
 
 ```c
 dos_phys_write8(0xA0000, pixel);   /* VGA aperture */
 dos_phys_write16(0xB8000, cell);   /* text VRAM */
 ```
 
-This is different from `dos_guest_far_ptr()`: a direct native pointer does not
-reproduce VGA plane/write-mode/device semantics.
+Это не то же самое, что `dos_guest_far_ptr()`: прямой native pointer не
+воспроизводит семантику VGA planes/write mode/устройства.
 
 ### 4.3 `conio.h`
 
-Native port I/O:
+Нативный ввод-вывод через порты:
 
 ```c
 uint8_t  inp(uint16_t port);
@@ -291,13 +293,13 @@ void outp(uint16_t port, uint8_t value);
 void outpw(uint16_t port, uint16_t value);
 ```
 
-These access the emulated PC I/O bus, not RP2xxx hardware registers.
+Эти функции обращаются к эмулируемой шине PC I/O, а не к аппаратным регистрам RP2xxx.
 
 ---
 
-## 5. DOS memory
+## 5. Память DOS
 
-`dos_mem.h` provides conventional-memory allocation and address conversion:
+`dos_mem.h` предоставляет выделение conventional memory и преобразование адресов:
 
 ```c
 void *dos_alloc_low(size_t size);
@@ -307,18 +309,17 @@ uint32_t dos_ptr_linear(const void *ptr);
 
 ### `dos_alloc_low`
 
-Allocates a DOS conventional-memory block and returns a native pointer into
-guest RAM.
+Выделяет блок conventional memory DOS и возвращает native pointer в guest RAM.
 
-Use it for buffers that must be visible to real-mode DOS/BIOS APIs.
+Используйте его для буферов, которые должны быть видимы real-mode DOS/BIOS API.
 
 ### `dos_ptr_segment`
 
-Converts a paragraph-aligned pointer returned from DOS conventional memory to
-a DOS segment. It returns zero when the pointer is outside conventional RAM or
-is not paragraph aligned.
+Преобразует выровненный по параграфу указатель на conventional memory DOS в
+DOS-сегмент. Возвращает ноль, если указатель находится вне conventional RAM
+или не выровнен по параграфу.
 
-Typical use:
+Типичный пример:
 
 ```c
 void *buf = dos_alloc_low(4096);
@@ -328,21 +329,21 @@ uint16_t seg = dos_ptr_segment(buf);
 
 ### `dos_ptr_linear`
 
-Returns the exact 20-bit guest physical/linear address of any pointer inside
-the first MiB guest RAM, or `UINT32_MAX` on failure.
+Возвращает точный 20-битный гостевой физический/линейный адрес любого
+указателя внутри первого MiB guest RAM либо `UINT32_MAX` при ошибке.
 
-Use this for ISA DMA programming where the precise byte address matters.
+Используйте это при программировании ISA DMA, когда важен точный адрес байта.
 
 ---
 
-## 6. DOS file and directory API
+## 6. API файлов и каталогов DOS
 
-Native applications do not use firmware/newlib `FILE` objects for DOS files.
-The file layer is backed by DOS handles.
+Нативные приложения не используют объекты `FILE` firmware/newlib для файлов
+DOS. Файловый слой основан на DOS handles.
 
-### 6.1 Low-level file descriptors
+### 6.1 Низкоуровневые файловые дескрипторы
 
-Headers:
+Заголовки:
 
 ```text
 fcntl.h
@@ -351,7 +352,7 @@ direct.h
 sys/stat.h
 ```
 
-Public surface:
+Публичный интерфейс:
 
 ```c
 int open(const char *path, int flags, ...);
@@ -368,7 +369,7 @@ int mkdir(const char *path, int mode);
 int remove(const char *path);
 ```
 
-Supported open flags currently include:
+Сейчас поддерживаются следующие флаги open:
 
 ```c
 O_RDONLY
@@ -378,22 +379,23 @@ O_TRUNC
 O_BINARY
 ```
 
-`O_BINARY` is currently zero in the compatibility header. Do not assume that
-the native stream layer performs host-style CR/LF translation.
+`O_BINARY` сейчас равен нулю в compatibility-заголовке. Не предполагайте, что
+native stream layer выполняет характерное для host-среды преобразование CR/LF.
 
-Long `read()` / `write()` operations are cooperative service points: the
-runtime yields between DOS I/O chunks so timers, emulated devices and pending
-guest IRQ work continue to progress while a native process owns core 0.
+Длинные операции `read()` / `write()` являются cooperative service points:
+между порциями DOS I/O runtime выполняет yield, чтобы таймеры, эмулируемые
+устройства и ожидающие guest IRQ продолжали обслуживаться, пока core 0 занят
+нативным процессом.
 
 ### 6.2 `stdio.h`
 
-`FILE` is deliberately opaque:
+`FILE` намеренно является opaque-типом:
 
 ```c
 typedef struct native_dos_FILE FILE;
 ```
 
-Available interface includes:
+Доступный интерфейс включает:
 
 ```c
 FILE *fopen(...);
@@ -422,110 +424,107 @@ int sscanf(...);
 int fscanf(...);
 ```
 
-Formatting/scanning policy:
+Политика форматирования/сканирования:
 
-- DOS stream ownership and actual file I/O remain in the native DOS runtime;
-- neutral formatting/scanning primitives should reuse the firmware libc
-  backend where practical;
-- `vsnprintf` is the basic formatting backend;
-- `vsscanf` is the basic scanning backend;
-- do not grow a second independent libc parser in `apps/api`.
+- владение DOS stream и реальный файловый I/O остаются в native DOS runtime;
+- нейтральные примитивы форматирования/сканирования по возможности должны повторно использовать backend libc прошивки;
+- `vsnprintf` является базовым backend форматирования;
+- `vsscanf` является базовым backend сканирования;
+- не создавайте в `apps/api` второй независимый parser libc.
 
-This split avoids passing native DOS `FILE *` objects to firmware libc, while
-still reusing libc for format grammar.
-
----
-
-## 7. General libc compatibility
-
-Headers such as `string.h`, `stdlib.h`, `ctype.h`, and `math.h` expose only
-functions the native runtime actually supplies.
-
-Do **not** treat these headers as aliases for the toolchain libc.
-
-Notable points:
-
-- `malloc/calloc/realloc/free` are native DOS runtime implementations;
-- `exit()` is a native process/CRT operation, not Pico SDK process exit;
-- `memcpy/memset/memcmp` use explicit firmware/SRAM services rather than
-  arbitrary flash libc implementations;
-- compiler-generated `__aeabi_*` and math operations are provided by
-  `dos-api-math.c` / `dos-api-divmod.S`.
-
-When adding a missing standard function, first decide which category it belongs
-to:
-
-1. neutral operation suitable for one firmware system-table primitive;
-2. DOS-specific adapter (files, console, process);
-3. trivial local inline/helper.
-
-Do not automatically reimplement full libc subsystems in userspace.
+Такое разделение не позволяет передавать объекты native DOS `FILE *` в libc
+прошивки, но позволяет повторно использовать libc для грамматики форматов.
 
 ---
 
-## 8. Process termination
+## 7. Общая совместимость с libc
 
-### 8.1 DOS termination state
+Такие заголовки, как `string.h`, `stdlib.h`, `ctype.h` и `math.h`, объявляют
+только функции, которые действительно предоставляет native runtime.
 
-`dos_process.h` provides:
+**Не** считайте эти заголовки алиасами libc из toolchain.
+
+Важные моменты:
+
+- `malloc/calloc/realloc/free` реализованы native DOS runtime;
+- `exit()` — операция native process/CRT, а не завершение процесса Pico SDK;
+- `memcpy/memset/memcmp` используют явные firmware/SRAM-сервисы, а не произвольные реализации flash libc;
+- сгенерированные компилятором `__aeabi_*` и математические операции предоставляются `dos-api-math.c` / `dos-api-divmod.S`.
+
+При добавлении отсутствующей стандартной функции сначала определите, к какой
+категории она относится:
+
+1. нейтральная операция, подходящая для одного примитива системной таблицы прошивки;
+2. DOS-специфичный адаптер (файлы, консоль, процесс);
+3. тривиальный локальный inline/helper.
+
+Не следует автоматически заново реализовывать целые подсистемы libc в userspace.
+
+---
+
+## 8. Завершение процесса
+
+### 8.1 Состояние завершения DOS
+
+`dos_process.h` предоставляет:
 
 ```c
 void dos_process_exit(int status) __attribute__((noreturn));
 bool dos_termination_requested(void);
 ```
 
-`dos_process_exit()` is the kernel-owned termination path used by the legacy
+`dos_process_exit()` — принадлежащий ядру путь завершения, используемый legacy
 ELF runtime.
 
-`dos_termination_requested()` is important for C runtime cleanup. If the
-program has already terminated through DOS semantics (for example TSR
-termination), destructors/fini processing must not tear down resident state.
+`dos_termination_requested()` важен для очистки C runtime. Если программа уже
+завершилась через DOS-семантику (например, TSR termination), обработка
+destructors/fini не должна разрушать резидентное состояние.
 
 ### 8.2 `exit()`
 
-Applications call the standard:
+Приложения вызывают стандартный:
 
 ```c
 exit(status);
 ```
 
-The runtime selects the correct underlying mechanism:
+Runtime выбирает соответствующий внутренний механизм:
 
-- legacy ELF: unwind to the kernel-owned native main trampoline;
-- EZ: unwind locally to the EZ CRT main trampoline, so `main()` appears to have
-  returned `status`, then execute the normal userspace fini sequence.
+- legacy ELF: unwind к принадлежащему ядру native main trampoline;
+- EZ: локальный unwind к EZ CRT main trampoline, так что снаружи это выглядит
+  как возврат `status` из `main()`, после чего выполняется обычная userspace fini sequence.
 
-Application code must not save/restore the native ARM SP itself.
+Код приложения не должен самостоятельно сохранять/восстанавливать native ARM SP.
 
 ---
 
-## 9. Cooperative execution and `dos_yield()`
+## 9. Кооперативное выполнение и `dos_yield()`
 
-A native application executes synchronously on core 0. While its `main()` is
-active, the ordinary outer emulator CPU loop is suspended.
+Нативное приложение выполняется синхронно на core 0. Пока его `main()` активен,
+обычный внешний CPU loop эмулятора приостановлен.
 
-Therefore native applications that wait/poll for time or devices must reach
-cooperative service points.
+Поэтому нативные приложения, ожидающие/опрашивающие время или устройства,
+должны достигать cooperative service points.
 
 ```c
 uint32_t now_us = dos_yield();
 ```
 
-The service point:
+Service point:
 
-1. services emulated devices/host input;
-2. allows cooperative native timer services to run;
-3. allows pending guest hardware IRQ handlers to execute through the normal
-   PIC -> IVT path without resuming the frozen parent process CS:IP;
-4. returns the emulator microsecond clock.
+1. обслуживает эмулируемые устройства и host input;
+2. позволяет выполнять cooperative native timer services;
+3. позволяет ожидающим guest hardware IRQ handlers выполняться по обычному пути
+   PIC -> IVT, не возобновляя замороженный CS:IP родительского процесса;
+4. возвращает микросекундные часы эмулятора.
 
-The guest-IRQ execution uses a synthetic return boundary. The final `IRET`
-returns to that boundary and the guest CPU slice stops immediately; the
-suspended parent execution address is not allowed to run.
+Выполнение guest IRQ использует синтетическую границу возврата. Финальный
+`IRET` возвращается на эту границу, после чего guest CPU slice немедленно
+останавливается; выполнение по приостановленному адресу родителя не допускается.
 
-### Practical rule
+### Практическое правило
 
-Any native busy wait must yield.
+Любой native busy wait обязан выполнять yield.
 
 Bad:
 
@@ -545,10 +544,10 @@ Long DOS reads/writes already yield internally between chunks.
 
 ---
 
-## 10. Cooperative timer service (`TSM_*`)
+## 10. Кооперативный сервис таймеров (`TSM_*`)
 
-The runtime provides the DMX-style cooperative timer API used by ports such as
-DOOM:
+Runtime предоставляет cooperative timer API в стиле DMX, используемый такими
+портами, как DOOM:
 
 ```c
 void TSM_Install(int rate);
@@ -560,18 +559,18 @@ void TSM_Remove(void);
 void TSM_Yield(void);
 ```
 
-Callbacks execute in normal application context at service points. They are not
-RP2xxx asynchronous timer IRQ callbacks.
+Callbacks выполняются в обычном контексте приложения в service points. Это не
+асинхронные timer IRQ callbacks RP2xxx.
 
-This is intentional: arbitrary application C code is not run concurrently
-against the same native stack/runtime state.
+Так сделано намеренно: произвольный C-код приложения не выполняется конкурентно
+с тем же native stack/runtime state.
 
 ---
 
-## 11. Native interrupt-vector replacement
+## 11. Нативная замена векторов прерываний
 
-`dos_vect.h` provides a native counterpart to DOS `_dos_getvect/_dos_setvect`
-ownership:
+`dos_vect.h` предоставляет нативный аналог механизма владения DOS
+`_dos_getvect/_dos_setvect`:
 
 ```c
 typedef bool (*dos_native_vector_handler_t)(void *cpu);
@@ -591,30 +590,30 @@ bool dos_native_setvect(dos_native_vector_t *state,
 void dos_native_restorevect(dos_native_vector_t *state);
 ```
 
-A native ARM function cannot be written directly into the x86 IVT. Installation
-therefore saves **both** displaced layers:
+Нативную ARM-функцию нельзя непосредственно записать в x86 IVT. Поэтому при
+установке сохраняются **оба** вытесняемых уровня:
 
-- old x86 IVT vector;
-- old native BIOS `handlers[intno]` entry.
+- старый x86 IVT vector;
+- старый native BIOS entry `handlers[intno]`.
 
-Then it points the IVT entry to the standard native BIOS FFE0 hook and installs
-the ARM callback in `handlers[]`.
+Затем IVT entry направляется на стандартный native BIOS hook FFE0, а ARM callback
+устанавливается в `handlers[]`.
 
-Restoration puts both displaced owners back.
+При восстановлении возвращаются оба вытесненных владельца.
 
-There is no implicit chaining. This matches normal DOS `setvect` ownership:
-applications that completely replace an IRQ handler (classic DOOM keyboard
-IRQ1 is an example) do not automatically call the displaced handler.
+Неявного chaining нет. Это соответствует обычной DOS-семантике владения
+`setvect`: приложения, полностью заменяющие IRQ handler (классический пример —
+keyboard IRQ1 в DOOM), не обязаны автоматически вызывать вытесненный handler.
 
-Always restore an installed vector before normal process shutdown. The process
-runtime should also ensure abandoned native callbacks cannot survive the
-process that owns their code.
+Перед обычным shutdown процесса установленный vector всегда следует
+восстановить. Runtime процесса также должен гарантировать, что оставленные
+native callbacks не переживут процесс, которому принадлежит их код.
 
 ---
 
-## 12. Hardware availability
+## 12. Доступность оборудования
 
-`sound_hw.h` reports devices actually instantiated/enabled by the emulator:
+`sound_hw.h` сообщает об устройствах, реально созданных/включённых эмулятором:
 
 ```c
 uint32_t sound_hw_mask(void);
@@ -632,8 +631,7 @@ SOUND_HW_MPU401
 SOUND_HW_DSS
 ```
 
-Use this instead of re-reading firmware configuration files from an
-application.
+Используйте это вместо повторного чтения файлов конфигурации прошивки из приложения.
 
 ---
 
@@ -646,8 +644,8 @@ application.
 ### 13.1 Проект внутри дерева murm386
 
 Создайте новый каталог рядом с `apps/test`, используйте `../api` и сначала оставьте
-в программе только `main()` и общий CRT/runtime.  This gives the shortest
-path to a known-good build.
+в программе только `main()` и общий CRT/runtime. Это самый короткий путь к
+заведомо рабочей сборке.
 
 ### 13.2 Самостоятельный сторонний порт
 
@@ -689,7 +687,7 @@ path to a known-good build.
 
 ## 14. Общий каркас CMake
 
-A native application starts as a relocatable ARM image:
+Нативное приложение сначала собирается как relocatable ARM image:
 
 ```cmake
 project(myapp C CXX ASM)
@@ -726,28 +724,28 @@ target_link_options(${PROJECT_NAME} PRIVATE
 target_compile_definitions(${PROJECT_NAME} PRIVATE ELF_MODE)
 ```
 
-Important points:
+Важные моменты:
 
-- `-r` is intentional: the intermediate output is ET_REL, not a normal
-  RP2xxx firmware executable;
-- do not link `pico_runtime`, `pico_stdlib`, host stdio, etc. into the
-  application unless a particular userspace design explicitly supports it;
-- `-fno-jump-tables` is commonly used for Thumb-1 builds to avoid unwanted
+- `-r` используется намеренно: промежуточный результат — ET_REL, а не обычный
+  executable прошивки RP2xxx;
+- не линкуйте в приложение `pico_runtime`, `pico_stdlib`, host stdio и т. п.,
+  если конкретная userspace-архитектура явно этого не поддерживает;
+- `-fno-jump-tables` обычно используется для Thumb-1, чтобы избежать нежелательных
   compiler runtime symbols;
-- unresolved symbols must be checked after the relocatable link.
+- после relocatable link обязательно проверяйте unresolved symbols.
 
 ---
 
 ## 15. Проверка неразрешённых символов
 
-A relocatable link accepts unresolved symbols by design. A native DOS
-application has no normal dynamic linker, so unexpected unresolved references
-must fail the build.
+Relocatable link по определению допускает unresolved symbols. У native DOS
+application нет обычного dynamic linker, поэтому неожиданные unresolved
+references должны приводить к ошибке сборки.
 
-The application build should run `nm -u` through `check_unresolved.cmake`.
+Сборка приложения должна запускать `nm -u` через `check_unresolved.cmake`.
 
-For an EZ build, only the six CRT array-boundary pseudo-symbols are expected to
-remain unresolved in ET_REL:
+При сборке EZ только шесть CRT pseudo-symbols границ массивов должны оставаться
+unresolved в ET_REL:
 
 ```text
 __ez_preinit_array_start
@@ -758,38 +756,38 @@ __ez_fini_array_start
 __ez_fini_array_end
 ```
 
-`elf2ez` synthesizes these after it discovers and lays out the reachable
+`elf2ez` синтезирует их после обнаружения и размещения достижимых
 startup-array sections.
 
-Every other unresolved symbol is a build error.
+Любой другой unresolved symbol является ошибкой сборки.
 
 ---
 
-# Part III — Legacy ELF mode
+# Часть III — Режим legacy ELF
 
-## 15. Legacy native ELF format
+## 16. Формат legacy native ELF
 
-The legacy loader consumes the relocatable ARM ELF directly.
+Legacy loader непосредственно загружает relocatable ARM ELF.
 
-The kernel loader is responsible for much more than ordinary DOS loading:
+Kernel loader отвечает за значительно большее, чем обычная DOS-загрузка:
 
-- parses ELF sections, symbols and relocations;
-- discovers reachable dependencies;
-- lays sections out;
-- applies relocations;
-- locates the API-version callback;
-- locates process-requirements metadata;
-- locates `_init`, `main`, `_fini`, signal hooks and startup arrays;
-- prepares native and guest DOS stacks;
-- executes CRT sequencing in kernel-owned code;
-- owns the native `main()` recovery frame used by `exit()`.
+- разбирает ELF sections, symbols и relocations;
+- обнаруживает достижимые зависимости;
+- размещает sections;
+- применяет relocations;
+- находит callback версии API;
+- находит metadata требований процесса;
+- находит `_init`, `main`, `_fini`, signal hooks и startup arrays;
+- подготавливает native и guest DOS stacks;
+- выполняет последовательность CRT в коде ядра;
+- владеет native recovery frame `main()`, используемым `exit()`.
 
-This path is useful for development and compatibility, but it makes the kernel
-an ELF linker/CRT implementation.
+Этот путь полезен для разработки и совместимости, но превращает ядро в
+реализацию ELF linker/CRT.
 
-### Legacy process requirements
+### Требования legacy-процесса
 
-`native_process.h` defines the legacy ELF record:
+`native_process.h` определяет структуру legacy ELF:
 
 ```c
 typedef struct native_dos_process_requirements {
@@ -803,14 +801,14 @@ typedef struct native_dos_process_requirements {
 } native_dos_process_requirements;
 ```
 
-An application exposes:
+Приложение экспортирует:
 
 ```c
 native_dos_process_requirements *
 __native_dos_process_requirements(void);
 ```
 
-The first fields are input requests; later fields are loader output.
+Первые поля являются входными требованиями; последующие поля заполняет loader.
 
 Example:
 
@@ -831,13 +829,13 @@ __native_dos_process_requirements(void)
 
 ---
 
-# Part IV — EZ mode
+# Часть IV — Режим EZ
 
-## 16. Why EZ exists
+## 17. Зачем нужен EZ
 
-EZ moves ELF/linker knowledge out of the DOS kernel.
+EZ выносит знание ELF/linker из ядра DOS.
 
-The build-time `elf2ez` tool performs the expensive work once:
+Build-time утилита `elf2ez` выполняет дорогостоящую работу один раз:
 
 ```text
 ET_REL ARM ELF
@@ -847,49 +845,48 @@ ET_REL ARM ELF
 EZ executable (.exe)
 ```
 
-The DOS loader then handles a compact fixed executable ABI rather than parsing
-ELF section/symbol/string tables.
+После этого DOS loader работает с компактным фиксированным executable ABI,
+а не разбирает ELF section/symbol/string tables.
 
-The design boundary is:
+Граница ответственности устроена так:
 
-### `elf2ez` owns
+### За что отвечает `elf2ez`
 
-- ELF parsing;
-- dependency discovery;
-- final image layout;
-- resolution of image-internal relocations;
-- CRT/startup-array layout;
-- conversion of the small remaining load-base-dependent relocation set to EZ
-  relocation records.
+- разбор ELF;
+- обнаружение зависимостей;
+- окончательное размещение image;
+- разрешение внутренних relocations image;
+- размещение CRT/startup arrays;
+- преобразование небольшого оставшегося набора relocations, зависящих от load base, в relocation records EZ.
 
-### DOS EZ loader owns
+### За что отвечает DOS EZ loader
 
-- validate the EZ header;
-- allocate the DOS process block/PSP;
-- load initialized image bytes at RVA `0x100`;
-- zero any memory-only tail;
-- apply the compact EZ relocation table;
-- allocate/assign native and DOS stacks;
-- construct `argc/argv`;
-- publish runtime process information;
-- call exactly one entry point.
+- проверка EZ header;
+- выделение блока DOS-процесса/PSP;
+- загрузка инициализированных байтов image по RVA `0x100`;
+- обнуление хвоста, существующего только в памяти;
+- применение компактной таблицы EZ relocations;
+- выделение/назначение native и DOS stacks;
+- формирование `argc/argv`;
+- публикация runtime-информации процесса;
+- вызов ровно одной entry point.
 
-### EZ CRT owns
+### За что отвечает EZ CRT
 
 - preinit array;
 - init array;
-- optional `_init`;
+- необязательный `_init`;
 - `main`;
-- normal `exit()` unwind;
-- optional `_fini`;
-- reverse fini array.
+- обычный unwind `exit()`;
+- необязательный `_fini`;
+- fini array в обратном порядке.
 
-The kernel never needs to know where `main`, `_init`, `_fini`, constructors or
-destructors are in an EZ file.
+Ядру не требуется знать, где в EZ-файле находятся `main`, `_init`, `_fini`,
+constructors или destructors.
 
 ---
 
-## 17. EZ v1 file layout
+## 18. Структура файла EZ v1
 
 Constants:
 
@@ -899,7 +896,7 @@ EZ_FORMAT_VERSION = 1
 EZ_IMAGE_RVA      = 0x00000100
 ```
 
-Logical file layout:
+Логическая структура файла:
 
 ```text
 offset 0
@@ -915,27 +912,27 @@ offset 0
 +-------------------------------+
 ```
 
-RVA convention:
+Правило RVA:
 
 ```text
 runtime_address = process_base + rva
 ```
 
-`process_base` is the native pointer corresponding to PSP segment offset 0.
+`process_base` — native pointer, соответствующий нулевому смещению сегмента PSP.
 
-The first stored image byte is at:
+Первый сохранённый байт image находится по адресу:
 
 ```text
 process_base + EZ_IMAGE_RVA
 ```
 
-Therefore the 0x100-byte PSP remains at the front of the DOS process block.
+Таким образом, 0x100-байтный PSP остаётся в начале блока DOS-процесса.
 
 ---
 
-## 18. EZ v1 header
+## 19. Заголовок EZ v1
 
-The fixed v1 header is 64 bytes and includes:
+Фиксированный header v1 имеет размер 64 байта и содержит:
 
 ```text
 magic
@@ -954,46 +951,44 @@ reloc_entry_size
 reserved fields
 ```
 
-Important semantics:
+Важная семантика:
 
 ### `required_dos_api_version`
 
-Minimum firmware API required by the image. The loader validates this **before
-executing application code**.
+Минимальная версия API прошивки, требуемая image. Загрузчик проверяет её
+**до выполнения кода приложения**.
 
 ### `native_stack_size`
 
-Requested native ARM stack size. Zero means loader default; non-zero is a
-minimum request and can be rounded upward.
+Запрошенный размер native ARM stack. Ноль означает значение loader по умолчанию; ненулевое значение является минимумом и может быть округлено вверх.
 
 ### `dos_stack_size`
 
-Guest DOS stack used when native code enters DOS/BIOS/guest IRQ execution.
-Zero means loader default.
+Guest DOS stack, используемый когда native code входит в DOS/BIOS/guest IRQ execution. Ноль означает значение loader по умолчанию.
 
 ### `image_file_size`
 
-Initialized bytes physically stored in the executable.
+Инициализированные байты, физически сохранённые в executable.
 
 ### `image_mem_size`
 
-Total image bytes in memory, including the zero-initialized tail.
+Полный размер image в памяти, включая zero-initialized tail.
 
 ### `entry_rva`
 
-The one callable native entry point, normally `__ez_start`.
+Единственная вызываемая native entry point, обычно `__ez_start`.
 
-Thumb function-pointer bit 0 is retained.
+Бит 0 Thumb function pointer сохраняется.
 
 ### `reloc_offset`, `reloc_count`, `reloc_entry_size`
 
-Location and shape of the compact runtime relocation table.
+Расположение и формат компактной runtime relocation table.
 
 ---
 
-## 19. EZ image flags
+## 20. Флаги образа EZ
 
-EZ v1 defines:
+EZ v1 определяет:
 
 ```text
 EZ_FLAG_THUMB
@@ -1002,20 +997,18 @@ EZ_FLAG_THUMB2
 EZ_FLAG_SOFT_FLOAT
 ```
 
-`ARMV6M` and `THUMB2` describe mutually incompatible minimum instruction-set
-requirements for v1.
+`ARMV6M` и `THUMB2` задают взаимно несовместимые минимальные требования к instruction set для v1.
 
-Hard-float images are not part of the current ABI; native DOS uses the
-soft-float procedure-call ABI.
+Hard-float images не входят в текущий ABI; native DOS использует soft-float procedure-call ABI.
 
 ---
 
-## 20. EZ relocations
+## 21. Релокации EZ
 
-EZ relocations are **not** raw ELF `R_ARM_*` records.
+EZ relocations — **не** сырые ELF records `R_ARM_*`.
 
-`elf2ez` resolves everything that depends only on positions inside the finished
-image. The loader receives only remaining base-dependent fixups.
+`elf2ez` разрешает всё, что зависит только от положения внутри готового image.
+Загрузчик получает только оставшиеся base-dependent fixups.
 
 EZ v1 types:
 
@@ -1030,7 +1023,7 @@ EZ v1 types:
 7  EZ_RELOC_THM_MOVT_ABS
 ```
 
-Each record is:
+Каждая запись:
 
 ```c
 struct ez_reloc {
@@ -1040,28 +1033,28 @@ struct ez_reloc {
 };
 ```
 
-and is exactly 8 bytes in EZ v1.
+и имеет размер ровно 8 байт в EZ v1.
 
-The loader must reject unknown non-zero relocation types.
+Загрузчик обязан отклонять неизвестные ненулевые relocation types.
 
 ---
 
-## 21. EZ CRT
+## 22. EZ CRT
 
-An EZ build links:
+EZ-сборка линкует:
 
 ```text
 apps/api/crt0.c
 apps/api/crt0.S
 ```
 
-The canonical entry point is:
+Каноническая entry point:
 
 ```c
 int __ez_start(int argc, char **argv);
 ```
 
-Startup order:
+Порядок запуска:
 
 ```text
 preinit_array
@@ -1077,19 +1070,15 @@ optional _fini
 fini_array in reverse order
 ```
 
-The fini path is skipped if DOS has already requested process termination
-through semantics that must preserve state, for example TSR termination.
+Fini path пропускается, если DOS уже запросил завершение процесса через семантику, которая должна сохранить состояние, например TSR termination.
 
-`exit(status)` during `main()` does not require the kernel to know the
-application stack frame. `crt0.S` records the EZ-local recovery SP and unwinds
-back to the CRT as if `main()` returned `status`.
+`exit(status)` внутри `main()` не требует от ядра знания stack frame приложения. `crt0.S` сохраняет локальный для EZ recovery SP и делает unwind обратно в CRT так, как если бы `main()` вернул `status`.
 
 ---
 
-## 22. EZ process requirements and runtime information
+## 23. Требования EZ-процесса и runtime-информация
 
-For EZ, static requirements are build metadata, not a callback executed by the
-kernel.
+Для EZ статические требования являются build metadata, а не callback, выполняемым ядром.
 
 `ez.h` defines:
 
@@ -1100,7 +1089,7 @@ typedef struct native_ez_process_requirements {
 } native_ez_process_requirements;
 ```
 
-`crt0` provides a weak all-zero default. An application can override it:
+`crt0` предоставляет weak default со всеми нулями. Приложение может его переопределить:
 
 ```c
 #include <ez.h>
@@ -1111,8 +1100,7 @@ const native_ez_process_requirements __native_ez_process_requirements = {
 };
 ```
 
-`elf2ez` reads this object from ET_REL and copies the values into the EZ
-header. No application code is run during conversion.
+`elf2ez` читает этот объект из ET_REL и копирует значения в EZ header. Во время конвертации код приложения не выполняется.
 
 At runtime:
 
@@ -1127,8 +1115,7 @@ typedef struct native_ez_process_info {
 const native_ez_process_info *native_ez_get_process_info(void);
 ```
 
-This returns the resources actually assigned by the loader to the current EZ
-process.
+Возвращаются ресурсы, реально назначенные loader текущему EZ-процессу.
 
 ---
 
@@ -1136,67 +1123,67 @@ process.
 
 ## 23. Командная строка
 
-Typical command:
+Типичная команда:
 
 ```text
 elf2ez /y program.crt
 ```
 
-Output filename is derived by replacing the source extension with:
+Имя выходного файла получается заменой расширения исходного файла на:
 
 ```text
 .exe
 ```
 
-`/y` suppresses the overwrite prompt.
+`/y` отключает запрос подтверждения перезаписи.
 
-Without `/y`, an existing output file is confirmed interactively.
+Без `/y` перезапись существующего выходного файла подтверждается интерактивно.
 
-Typical successful diagnostic:
+Типичная диагностика успешного выполнения:
 
 ```text
 EZ image: 6804 bytes, 38 relocations, entry=00000131
 ```
 
-The exact numbers depend on the application.
+Точные числа зависят от приложения.
 
 ---
 
 ## 24. Что делает `elf2ez`
 
-Conceptually:
+Концептуально:
 
-1. open the ET_REL input;
-2. validate ARM ELF format and relevant section/symbol tables;
-3. find the EZ CRT entry symbol;
-4. recursively load reachable sections/symbol dependencies;
-5. lay them out beginning at `EZ_IMAGE_RVA`;
-6. resolve PC-relative and fully image-relative relocations;
-7. emit an `ez_reloc` only when the final value still depends on
+1. открывает входной ET_REL;
+2. проверяет формат ARM ELF и нужные section/symbol tables;
+3. находит entry symbol EZ CRT;
+4. рекурсивно загружает достижимые sections/зависимости symbols;
+5. размещает их начиная с `EZ_IMAGE_RVA`;
+6. разрешает PC-relative и полностью image-relative relocations;
+7. создаёт `ez_reloc` только когда итоговое значение всё ещё зависит от
    `process_base`;
-8. build/synthesize startup-array ranges required by `crt0`;
-9. read static EZ process requirements;
-10. construct the 64-byte EZ header;
-11. write header + image + relocation table;
-12. report final image size, relocation count and entry RVA.
+8. строит/синтезирует диапазоны startup arrays, необходимые `crt0`;
+9. читает статические требования EZ-процесса;
+10. формирует 64-байтный EZ header;
+11. записывает header + image + relocation table;
+12. выводит итоговый размер image, число relocations и entry RVA.
 
-The final EZ file deliberately contains no ELF symbol/string/section tables.
+Итоговый EZ-файл намеренно не содержит ELF symbol/string/section tables.
 
 ---
 
 ## 25. Host- и DOS-сборки `elf2ez`
 
-`elf2ez.c` is designed so the actual conversion logic can be built in two
-environments:
+`elf2ez.c` спроектирован так, чтобы сама логика конвертации могла собираться
+в двух средах:
 
-- as a native DOS application using `apps/api`;
-- as a host tool under `tools/elf2ez` using a small host shim.
+- как native DOS application с использованием `apps/api`;
+- как host tool в `tools/elf2ez` с небольшим host shim.
 
-The host shim must duplicate only the tiny platform layer needed by the tool
-(file descriptors and constants), not EZ on-disk structures. Format and process
-metadata types come from the project's authoritative `apps/api` headers.
+Host shim должен дублировать только небольшой platform layer, необходимый
+утилите (file descriptors и constants), но не on-disk структуры EZ. Типы
+формата и metadata процесса берутся из авторитетных заголовков `apps/api` проекта.
 
-The host tool is what application CMake normally invokes after producing ET_REL.
+Именно host tool обычно вызывается CMake приложения после получения ET_REL.
 
 ---
 
@@ -1222,7 +1209,7 @@ program.crt               temporary staging name
 program.exe               EZ v1
 ```
 
-Representative CMake:
+Пример CMake:
 
 ```cmake
 set(OUTPUT_DIR "${CMAKE_SOURCE_DIR}/../../bin/${CMAKE_BUILD_TYPE}")
@@ -1270,16 +1257,16 @@ add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
 )
 ```
 
-### About `ELF_MODE`
+### О `ELF_MODE`
 
-`ELF_MODE` historically means "native ARM DOS port rather than Watcom/x86
-build" in application source. It can therefore still appear while producing
-the ET_REL intermediate that is immediately converted to EZ.
+Исторически `ELF_MODE` означает в исходниках приложения «native ARM DOS port,
+а не Watcom/x86 build». Поэтому он может присутствовать и при создании
+промежуточного ET_REL, который сразу конвертируется в EZ.
 
-Do not interpret every `#ifdef ELF_MODE` as "the final file on disk is ELF".
-Long term, code that really depends on **loader format** should use a
-format-specific abstraction rather than overloading this legacy source-port
-define.
+Не следует трактовать каждый `#ifdef ELF_MODE` как «конечный файл на диске —
+ELF». В перспективе код, реально зависящий от **формата loader**, должен
+использовать format-specific abstraction, а не перегружать этот legacy define
+исходного порта.
 
 ---
 
@@ -1289,19 +1276,19 @@ define.
 
 ### Runtime/сборка
 
-- [ ] choose either direct in-tree API use or one coherent vendored `apps/api`
-      snapshot;
-- [ ] for a standalone port, define one `NATIVE_DOS_API_DIR` and make all API/CRT
-      paths derive from it;
-- [ ] keep application-specific shims outside the vendored API directory;
-- [ ] record/update the vendored API revision as a unit;
-- [ ] attach `native-dos-runtime.cmake`;
-- [ ] use relocatable link `-r`;
-- [ ] use `-fno-jump-tables` where required by the Thumb-1 target;
-- [ ] run unresolved-symbol validation;
-- [ ] for EZ: link `crt0.c` + `crt0.S`;
-- [ ] for EZ: run host `elf2ez` after the ET_REL build;
-- [ ] do not link arbitrary Pico SDK runtime libraries into the app.
+- [ ] выбрать либо прямое использование in-tree API, либо один согласованный
+      снимок `apps/api`;
+- [ ] для standalone-порта задать один `NATIVE_DOS_API_DIR` и строить от него
+      все пути API/CRT;
+- [ ] держать специфичные для приложения shims вне локальной копии API;
+- [ ] фиксировать/обновлять ревизию локального API как единое целое;
+- [ ] подключить `native-dos-runtime.cmake`;
+- [ ] использовать relocatable link `-r`;
+- [ ] использовать `-fno-jump-tables`, где это требуется для Thumb-1;
+- [ ] выполнять проверку unresolved symbols;
+- [ ] для EZ: линковать `crt0.c` + `crt0.S`;
+- [ ] для EZ: запускать host `elf2ez` после сборки ET_REL;
+- [ ] не линковать в приложение произвольные runtime-библиотеки Pico SDK.
 
 ### Память
 
@@ -1310,30 +1297,30 @@ define.
 - [ ] использовать `dos_alloc_low()` для conventional memory, видимой real-mode/DMA;
 - [ ] проверять правила 64-КиБ границы ISA DMA там, где они применимы;
 - [ ] запрашивать достаточные размеры native и DOS stack;
-- [ ] use the assigned application PSRAM interval rather than assuming all
-      PSRAM belongs to the app.
+- [ ] использовать назначенный приложению диапазон PSRAM, а не считать, что
+      приложению принадлежит вся PSRAM.
 
 ### Тайминг/прерывания
 
 - [ ] не использовать native busy loop без cooperative yield;
 - [ ] для длинных вычислительных циклов явно предусматривать service strategy;
-- [ ] use `dos_native_setvect()` when native code replaces an x86 interrupt;
+- [ ] использовать `dos_native_setvect()`, когда native code заменяет x86 interrupt;
 - [ ] восстанавливать векторы при shutdown;
-- [ ] do not bypass PIC/IVT merely to deliver an IRQ callback.
+- [ ] не обходить PIC/IVT только ради доставки IRQ callback.
 
 ### libc
 
 - [ ] использовать только объявления из `apps/api`;
-- [ ] if a neutral libc primitive is missing, prefer one firmware backend over a
-      second parser/formatter implementation;
-- [ ] keep DOS `FILE` semantics in the DOS adapter;
+- [ ] если отсутствует нейтральный примитив libc, предпочитать один backend
+      прошивки второй реализации parser/formatter;
+- [ ] сохранять семантику DOS `FILE` в DOS-адаптере;
 - [ ] verify no unresolved newlib/Pico SDK symbols remain.
 
 ### Завершение
 
 - [ ] обычный `return` из `main()` допустим;
 - [ ] обычный `exit(status)` допустим;
-- [ ] DOS termination/TSR paths must not run normal fini teardown afterward.
+- [ ] DOS termination/TSR paths не должны после этого выполнять обычный fini teardown.
 
 ---
 
@@ -1349,13 +1336,13 @@ define.
 у настоящего TSR, устанавливающего резидентные IRQ/service callbacks, появляются
 дополнительные вопросы владения и выгрузки, описанные ниже.
 
-The reference program uses a switch such as:
+Референсная программа использует ключ вида:
 
 ```text
 test.exe -r
 ```
 
-to enter its resident path.  Its important steps are the following.
+для перехода в resident path. Основные шаги следующие.
 
 ### 32.1 Получение текущего PSP
 
@@ -1517,13 +1504,13 @@ install/query/uninstall protocol для резидентного IRQ-серви�
 
 ### Direct VGA dereference
 
-Wrong:
+Неправильно:
 
 ```c
 memset((void *)0xA0000, 0, 65536);
 ```
 
-Correct:
+Правильно:
 
 ```c
 for (uint32_t p = 0xA0000; p < 0xB0000; ++p)
@@ -1532,7 +1519,7 @@ for (uint32_t p = 0xA0000; p < 0xB0000; ++p)
 
 ### Waiting for an exact timer tick
 
-Wrong:
+Неправильно:
 
 ```c
 target = ticcount + 30;
@@ -1542,7 +1529,7 @@ while (ticcount != target)
 
 A yield can advance more than one tick.
 
-Correct:
+Правильно:
 
 ```c
 start = ticcount;
@@ -1550,23 +1537,23 @@ while ((unsigned)(ticcount - start) < 30u)
     TSM_Yield();
 ```
 
-### Loading a whole host libc
+### Подключение целой host libc
 
-A missing `sscanf()` feature is not a reason to link an independent libc into
-the application. Export/use the neutral firmware primitive (`vsscanf`) and keep
-DOS stream adaptation local.
+Отсутствующая возможность `sscanf()` — не причина линковать в приложение
+отдельную libc. Экспортируйте/используйте нейтральный примитив прошивки
+(`vsscanf`), а адаптацию DOS stream оставляйте локальной.
 
 ### Treating parent x86 `CS:IP` as runnable during native execution
 
-The parent process is suspended until the native child returns. Guest IRQ
-execution during `dos_yield()` must return to a synthetic boundary, never fall
-through into the parent instruction stream.
+Родительский процесс приостановлен до возврата нативного дочернего процесса.
+Выполнение guest IRQ во время `dos_yield()` должно возвращаться на синтетическую
+границу и никогда не продолжать поток инструкций родителя.
 
 ---
 
 ## 29. Карта исходников
 
-The important files are:
+Основные файлы:
 
 ```text
 apps/api/dos_api_version.h      API version
@@ -1613,46 +1600,46 @@ src/fdos/task.c                 DOS native ELF/EZ loaders/process execution
 
 ## 30. Правила стабильности ABI
 
-When extending the native DOS API:
+При расширении native DOS API:
 
-For standalone ports, first remember that a vendored `apps/api` copy is an SDK
-snapshot.  Keep its headers, implementations, CRT and version definitions from
-the same revision; do not casually mix files from different API generations.
+Для standalone-портов важно помнить: локальная копия `apps/api` является
+снимком SDK. Заголовки, реализации, CRT и определения версий должны относиться
+к одной ревизии; не смешивайте без необходимости файлы разных поколений API.
 
-1. never reorder an existing system-table slot;
-2. append the new slot;
-3. increment `DOS_API_VERSION`;
-4. update the authoritative public header;
-5. make EZ files record the required version from their input metadata;
-6. keep on-disk EZ v1 structure sizes fixed;
-7. reserve new EZ behavior through explicit version/flags/extended header
-   mechanisms rather than silently changing v1 interpretation;
-8. preserve old `native_dos_process_requirements` prefixes using `struct_size`;
-9. do not expose firmware-private C structure layout unless it is intentionally
-   declared part of the public ABI.
+1. никогда не менять порядок существующих слотов системной таблицы;
+2. добавлять новый слот в конец;
+3. увеличивать `DOS_API_VERSION`;
+4. обновлять авторитетный публичный заголовок;
+5. обеспечивать запись требуемой версии в EZ-файлы из их входной metadata;
+6. сохранять фиксированные размеры on-disk структур EZ v1;
+7. добавлять новое поведение EZ через явные version/flags/extended-header
+   механизмы, а не молча менять трактовку v1;
+8. сохранять старые префиксы `native_dos_process_requirements` с помощью `struct_size`;
+9. не раскрывать firmware-private layout C-структур, если он намеренно не
+   объявлен частью публичного ABI.
 
 ---
 
 ## 31. ELF и EZ: краткое сравнение
 
-| Property | Legacy ELF | EZ |
+| Свойство | Legacy ELF | EZ |
 |---|---|---|
-| File parser in kernel | full ELF | fixed EZ header |
-| Symbol table needed at load | yes | no |
-| Section table needed at load | yes | no |
-| Dependency discovery | kernel | `elf2ez` |
-| General ELF relocations | kernel | `elf2ez` |
-| Runtime relocations | ELF-derived | compact EZ types |
-| CRT sequencing | kernel-owned | userspace `crt0` |
-| `main` known to kernel | yes | no |
-| Process entry points | several discovered symbols | one `entry_rva` |
-| API requirement | executable callback/metadata | static EZ header |
-| Stack requirements | legacy requirements record | static EZ metadata |
-| Loader complexity | high | low |
-| Preferred final distribution | compatibility/debug | **yes** |
+| Парсер файла в ядре | полный ELF | фиксированный EZ header |
+| Symbol table нужна при загрузке | да | нет |
+| Section table нужна при загрузке | да | нет |
+| Поиск зависимостей | ядро | `elf2ez` |
+| Общие ELF relocations | ядро | `elf2ez` |
+| Runtime relocations | производные ELF | компактные типы EZ |
+| Последовательность CRT | принадлежит ядру | userspace `crt0` |
+| Ядро знает о `main` | да | нет |
+| Entry points процесса | несколько найденных symbols | один `entry_rva` |
+| Требование API | callback/metadata executable | статический EZ header |
+| Требования stack | legacy requirements record | статическая EZ metadata |
+| Сложность loader | высокая | низкая |
+| Предпочтительный конечный формат | compatibility/debug | **да** |
 
 Для новых приложений используйте EZ как обычный формат распространения, если
-specific loader/debugging task requires direct legacy ELF execution.  For a
-new source tree, the shortest practical path is usually: copy/vendor
-`apps/api`, copy the small `apps/test` build skeleton, prove a trivial EZ
-`main()`, then integrate the real application incrementally.
+конкретная задача loader/debugging не требует непосредственного legacy ELF.
+Для нового дерева исходников самый короткий практический путь обычно такой:
+скопировать `apps/api`, взять небольшой build skeleton из `apps/test`, проверить
+тривиальный EZ `main()`, а затем постепенно подключать реальное приложение.
