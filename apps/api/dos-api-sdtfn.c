@@ -1658,3 +1658,134 @@ void exit(int status)
         __ez_crt_exit(status);
     dos_process_exit(status);
 }
+
+/* Open Watcom/DOS process-control and directory-search compatibility. */
+void _disable(void)
+{
+    get_PC()->cpu->flags.bits.IF = 0;
+}
+
+void _enable(void)
+{
+    get_PC()->cpu->flags.bits.IF = 1;
+}
+
+static int dos_ptr_to_far(const void *ptr, uint16_t *seg, uint16_t *off)
+{
+    uintptr_t p = (uintptr_t)ptr;
+    uint32_t linear;
+
+    if (p < (uintptr_t)DOS_GUEST_RAM_BASE)
+        return -1;
+    linear = (uint32_t)(p - (uintptr_t)DOS_GUEST_RAM_BASE);
+    if (linear > 0xfffffu)
+        return -1;
+
+    *seg = (uint16_t)(linear >> 4);
+    *off = (uint16_t)(linear & 15u);
+    return 0;
+}
+
+/* DOS 2+ findfirst/findnext DTA layout. */
+static unsigned char dos_find_dta[64];
+
+static int dos_set_find_dta(void)
+{
+    union REGS inregs;
+    union REGS outregs;
+    struct SREGS segregs;
+    uint16_t seg;
+    uint16_t off;
+
+    if (dos_ptr_to_far(dos_find_dta, &seg, &off) != 0)
+        return -1;
+
+    memset(&inregs, 0, sizeof(inregs));
+    memset(&outregs, 0, sizeof(outregs));
+    segread(&segregs);
+    segregs.ds = seg;
+    inregs.h.ah = 0x1a;
+    inregs.w.dx = off;
+    int386x(0x21, &inregs, &outregs, &segregs);
+    return outregs.x.cflag ? (int)outregs.w.ax : 0;
+}
+
+static void dos_copy_find_result(struct find_t *info)
+{
+    unsigned int i;
+
+    info->attrib = dos_find_dta[21];
+    for (i = 0; i < 13 && dos_find_dta[30 + i] != 0; ++i)
+        info->name[i] = (char)dos_find_dta[30 + i];
+    info->name[i] = '\0';
+}
+
+int _dos_findfirst(const char *pattern, unsigned attrib, struct find_t *info)
+{
+    union REGS inregs;
+    union REGS outregs;
+    struct SREGS segregs;
+    uint16_t seg;
+    uint16_t off;
+    int rc;
+
+    rc = dos_set_find_dta();
+    if (rc != 0)
+        return rc;
+    if (dos_ptr_to_far(pattern, &seg, &off) != 0)
+        return -1;
+
+    memset(&inregs, 0, sizeof(inregs));
+    memset(&outregs, 0, sizeof(outregs));
+    segread(&segregs);
+    segregs.ds = seg;
+    inregs.h.ah = 0x4e;
+    inregs.w.cx = (uint16_t)attrib;
+    inregs.w.dx = off;
+    int386x(0x21, &inregs, &outregs, &segregs);
+    if (outregs.x.cflag)
+        return (int)outregs.w.ax;
+
+    dos_copy_find_result(info);
+    return 0;
+}
+
+int _dos_findnext(struct find_t *info)
+{
+    union REGS inregs;
+    union REGS outregs;
+    int rc;
+
+    rc = dos_set_find_dta();
+    if (rc != 0)
+        return rc;
+
+    memset(&inregs, 0, sizeof(inregs));
+    memset(&outregs, 0, sizeof(outregs));
+    inregs.h.ah = 0x4f;
+    int386(0x21, &inregs, &outregs);
+    if (outregs.x.cflag)
+        return (int)outregs.w.ax;
+
+    dos_copy_find_result(info);
+    return 0;
+}
+
+/* Standard C clock(), backed by the DOS/BIOS 18.2 Hz tick source. */
+#include <time.h>
+clock_t clock(void)
+{
+    union REGS inregs;
+    union REGS outregs;
+    uint32_t ticks;
+    uint64_t scaled;
+
+    memset(&inregs, 0, sizeof(inregs));
+    memset(&outregs, 0, sizeof(outregs));
+    inregs.h.ah = 0x00;
+    int386(0x1a, &inregs, &outregs);
+
+    ticks = ((uint32_t)outregs.w.cx << 16) | (uint32_t)outregs.w.dx;
+    scaled = (uint64_t)ticks * (uint64_t)CLOCKS_PER_SEC * 65536ull;
+    return (clock_t)(scaled / 1193182ull);
+}

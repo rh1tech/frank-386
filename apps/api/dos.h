@@ -65,5 +65,15 @@ void segread(struct SREGS *segregs);
 void _disable(void);
 void _enable(void);
 
+/* Open Watcom-compatible DOS directory search interface. */
+struct find_t
+{
+    unsigned attrib;
+    char name[260];
+};
+
+int _dos_findfirst(const char *pattern, unsigned attrib, struct find_t *info);
+int _dos_findnext(struct find_t *info);
+
 
 #endif /* __NATIVE_DOS_DOS_H__ */
