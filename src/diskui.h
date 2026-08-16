@@ -45,6 +45,11 @@ void diskui_close(void);
 // Check if disk menu is currently open
 bool diskui_is_open(void);
 
+// Handle a USB-host-initiated disconnect of the exported MSC device: does the
+// same work as pressing Esc in the DEVICE-mode Disk Manager (save config back
+// to HOST, shut down TinyUSB, reboot). No-op outside USB_MODE_DEVICE.
+void diskui_usb_device_disconnected(void);
+
 // Handle keyboard input
 // keycode: Linux keycode
 // is_down: true for key press, false for release

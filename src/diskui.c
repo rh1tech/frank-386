@@ -204,6 +204,15 @@ static void usb_device_exit_to_host(void) {
 // Public API
 // --------------------------------------------------------------------------
 
+void diskui_usb_device_disconnected(void) {
+    /* The USB host dropped the exported MSC device. Perform the same work as
+       Esc in the DEVICE-mode Disk Manager, unconditionally and regardless of
+       the current menu state: save config back to HOST mode, shut down
+       TinyUSB, reboot. Self-guards on USB_MODE_DEVICE, so it is a no-op in
+       other modes. */
+    usb_device_exit_to_host();
+}
+
 void diskui_init(void) {
     osd_init();
     menu_state    = MENU_CLOSED;

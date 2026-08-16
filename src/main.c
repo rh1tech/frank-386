@@ -1573,6 +1573,15 @@ int main(void) {
                     usbmsc_device_task();
                     sleep_ms(1);
                 }
+                /*
+                 * Host closed the USB link (eject / bus reset / cable pull).
+                 * Run the same cleanup as Esc in the Win+F12 Disk Manager,
+                 * unconditionally: save config back to HOST mode, shut down
+                 * TinyUSB, reboot. (No-op if we somehow are not in DEVICE mode.)
+                 */
+                if (usbmsc_device_host_disconnected()) {
+                    diskui_usb_device_disconnected();
+                }
             } else
 #endif
             {

@@ -7,6 +7,7 @@
 #include "tusb.h"
 #include "ff.h"
 #include "disk.h"
+#include "debug.h"
 
 #define USBMSC_BLOCK_DISK 512u
 
@@ -103,6 +104,63 @@ void usbmsc_device_init(void)
 void __not_in_flash_func(usbmsc_device_task)(void)
 {
     tud_task();
+}
+
+/*
+ * Host-initiated disconnect detection.
+ *
+ * tud_mount_cb() fires once the host has configured us; tud_umount_cb() fires
+ * when the host drops the device (eject, bus reset, cable pull). We latch a
+ * mounted -> unmounted transition so the main loop can treat it exactly like
+ * the user pressing Esc in the Win+F12 Disk Manager. The initial
+ * not-yet-mounted state is ignored (usb_was_mounted gates it), so only a real
+ * host-side disconnect is reported.
+ */
+static volatile bool usb_was_mounted  = false;
+static volatile bool usb_host_dropped  = false;
+
+void tud_mount_cb(void)
+{
+    DBG_PRINT("USB MSC: tud_mount_cb (host configured device)\n");
+    usb_was_mounted = true;
+}
+
+void tud_umount_cb(void)
+{
+    DBG_PRINT("USB MSC: tud_umount_cb (bus disconnect / unconfigure)\n");
+    if (usb_was_mounted) {
+        usb_was_mounted = false;
+        usb_host_dropped = true;
+    }
+}
+
+/*
+ * Windows "Safely Remove / Eject" of a FIXED-disk MSC device usually neither
+ * ejects (no START STOP UNIT) nor unconfigures (no tud_umount_cb): it just
+ * selectively suspends the port, so tud_suspend_cb() is the reliable
+ * host-disconnect signal here. Gated on a prior mount so an early idle-suspend
+ * during enumeration cannot trigger it.
+ */
+void tud_suspend_cb(bool remote_wakeup_en)
+{
+    (void)remote_wakeup_en;
+    DBG_PRINT("USB MSC: tud_suspend_cb (host stopped SOF)\n");
+    if (usb_was_mounted)
+        usb_host_dropped = true;
+}
+
+void tud_resume_cb(void)
+{
+    DBG_PRINT("USB MSC: tud_resume_cb (host resumed)\n");
+}
+
+bool usbmsc_device_host_disconnected(void)
+{
+    if (usb_host_dropped) {
+        usb_host_dropped = false;   /* one-shot: consume the event */
+        return true;
+    }
+    return false;
 }
 
 void usbmsc_device_shutdown(void)
@@ -230,8 +288,16 @@ bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition,
                            bool start, bool load_eject)
 {
     (void)power_condition;
-    (void)start;
-    (void)load_eject;
+
+    /* Host "Safely Remove / Eject" issues SCSI START STOP UNIT with
+     * load_eject=1, start=0. This - not a USB bus disconnect - is how a host
+     * normally drops an MSC device, so tud_umount_cb() does NOT fire. Latch it
+     * as a host-initiated disconnect so the DEVICE loop runs the exit-to-host
+     * cleanup (same as Esc in the Disk Manager). */
+    if (load_eject && !start)
+        usb_host_dropped = true;
+    if (load_eject && !start)
+        DBG_PRINT("USB MSC: START STOP UNIT eject (load_eject, !start)\n");
 
     /* START STOP UNIT is not a write-cache flush request.  Returning a FatFs
      * f_sync() error here makes Windows treat an otherwise readable LUN as
