@@ -3652,10 +3652,14 @@ static void fcom_copy_exec_tail(char *dst, size_t dst_size, const CommandTail *t
 static uint32_t native_stack_free(void)
 {
 #if defined(__arm__) || defined(__thumb__)
-  extern uint32_t __StackBottom;
+  /* Floor is the bottom of TEXT_BUFFER (= MSPLIM), the lowest the core0 stack
+     may reach. Below it lies main RAM / the heap. The stack legitimately
+     extends down through CORE0_STACK_EXT and TEXT_BUFFER, so measure the free
+     bytes to that floor, not to the old CORE0_STACK bottom. */
+  extern uint32_t __text_buffer_area__;
   uint32_t sp;
   __asm volatile ("mov %0, sp" : "=r" (sp));
-  return sp - (uint32_t)(uintptr_t)&__StackBottom;
+  return sp - (uint32_t)(uintptr_t)&__text_buffer_area__;
 #else
   return 0xffffffffu;   /* host-сборки для статического анализа */
 #endif

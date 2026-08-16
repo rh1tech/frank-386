@@ -113,6 +113,11 @@ static char *diag_str(char *p, const char *s)
    rest of SCRATCH_Y and then SCRATCH_X - which is core1's stack. */
 extern uint32_t __StackBottom;
 extern uint32_t __StackTop;
+/* Bottom of the TEXT_BUFFER region (0x2003D000) and the hard floor for the
+   core0 stack. The stack may legitimately extend down from CORE0_STACK through
+   CORE0_STACK_EXT (boot-only junk) and into TEXT_BUFFER (text_buffer_sram),
+   but must never drop below this - past it lies main RAM / the heap. */
+extern uint32_t __text_buffer_area__;
 
 static uint32_t *diag_lo, *diag_hi;
 
@@ -373,10 +378,12 @@ void diag_init(void)
     /* report the real fault class instead of a bare escalation */
     scb_hw->shcsr |= (1u << 16) | (1u << 17) | (1u << 18);
 
-    /* ARMv8-M stack limit: turn a silent overflow into a precise UsageFault
-       instead of letting core0 walk down into core1's stack in SCRATCH_X. */
+    /* ARMv8-M stack limit: turn a silent overflow into a precise UsageFault.
+       Floor is the bottom of TEXT_BUFFER, so the stack is allowed to grow all
+       the way down through CORE0_STACK_EXT and TEXT_BUFFER; only a push below
+       __text_buffer_area__ (into main RAM / the heap) faults. */
     __asm volatile ("msr msplim, %0"
-                    :: "r" ((uint32_t)(uintptr_t)&__StackBottom + 32));
+                    :: "r" ((uint32_t)(uintptr_t)&__text_buffer_area__));
 
     diag_alarm_num = (int)hardware_alarm_claim_unused(true);
     irq_set_exclusive_handler((uint)(DIAG_TIMER_IRQ_BASE + diag_alarm_num),

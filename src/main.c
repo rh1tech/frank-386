@@ -451,6 +451,24 @@ static __attribute__((noreturn)) void hard_reboot(void)
         tight_loop_contents();
 }
 
+#if CONTROL_STACK
+/* Refuse to open an OSD dialog (Win+F11/F12) when the core0 stack has grown so
+   deep that rendering it would descend into TEXT_BUFFER and corrupt
+   text_buffer_sram (the OSD text buffer). __stack_ext_area__ is the top of
+   TEXT_BUFFER; OSD_STACK_HEADROOM reserves room for the OSD render call chain
+   above it. Companion to the DosExec() guard in task.c (same CONTROL_STACK
+   toggle, same "keep a reserve" idea). */
+extern uint8_t __stack_ext_area__[];
+#ifndef OSD_STACK_HEADROOM
+#define OSD_STACK_HEADROOM 2048u
+#endif
+static inline bool osd_stack_ok(void) {
+    uint32_t sp;
+    __asm volatile ("mov %0, sp" : "=r" (sp));
+    return sp >= (uint32_t)(uintptr_t)&__stack_ext_area__ + OSD_STACK_HEADROOM;
+}
+#endif
+
 // Process a single keycode, handling host and UI hotkeys
 // Returns true if key should be passed to emulator, false if consumed
 static bool process_keycode(int is_down, int keycode) {
@@ -491,6 +509,12 @@ static bool process_keycode(int is_down, int keycode) {
 
     // Win+F12: enter Disk Manager, or switch to it from Settings.
     if (is_down && keycode == KEY_F12 && win_key_pressed) {
+#if CONTROL_STACK
+        if (!osd_stack_ok()) {
+            DBG_PRINT("OSD (Win+F12) refused: native stack low\n");
+            return false;
+        }
+#endif
         if (settingsui_is_open()) {
             settingsui_close();
             diskui_open();
@@ -506,6 +530,12 @@ static bool process_keycode(int is_down, int keycode) {
 
     // Win+F11: enter Settings, or switch to it from Disk Manager.
     if (is_down && keycode == KEY_F11 && win_key_pressed) {
+#if CONTROL_STACK
+        if (!osd_stack_ok()) {
+            DBG_PRINT("OSD (Win+F11) refused: native stack low\n");
+            return false;
+        }
+#endif
         if (diskui_is_open()) {
             diskui_close();
             settingsui_open();

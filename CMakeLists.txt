@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -99,6 +99,9 @@ option(DEBUG_ENABLED "Enable verbose debug output" OFF)
 # Profiling (for performance analysis)
 option(PROFILE_ENABLED "Enable i386 instruction profiling" OFF)
 option(DIAG_ENABLED "Enable on-device core0 fault/hang catcher (src/diag.c)" OFF)
+# Refuse a new EXEC level (task.c DosExec) and refuse opening the OSD dialogs
+# (main.c Win+F11/F12) when the core0 native stack is too close to its floor.
+option(CONTROL_STACK "Guard core0 stack: refuse deep EXEC / OSD when stack low" ON)
 
 # Coarse per-subsystem cycle accounting on core 0 (docs/C2_SPLIT_PLAN.md).
 # Distinct from PROFILE_ENABLED, which profiles instructions.
@@ -556,6 +559,10 @@ endif()
 if(DIAG_ENABLED)
     target_sources(${BUILD_NAME} PRIVATE src/diag.c)
     target_compile_definitions(${BUILD_NAME} PRIVATE DIAG_ENABLED=1)
+endif()
+
+if(CONTROL_STACK)
+    target_compile_definitions(${BUILD_NAME} PRIVATE CONTROL_STACK=1)
 endif()
 
 # Ignore cpu_freq/psram_freq from the SD card's config.ini. Needed for any
