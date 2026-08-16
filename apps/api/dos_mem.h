@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 void *dos_alloc_low(size_t size);
+void dos_free_low(void *ptr);
 
 /*
  * Convert a paragraph-aligned pointer returned by dos_alloc_low() back to

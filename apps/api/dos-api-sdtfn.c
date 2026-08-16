@@ -525,6 +525,24 @@ void *dos_alloc_low(size_t size)
     return dos_guest_far_ptr(regs.w.ax, 0);
 }
 
+void dos_free_low(void *ptr)
+{
+    union REGS regs = {0};
+    struct SREGS sregs = {0};
+    uint16_t segment;
+
+    if (ptr == NULL)
+        return;
+
+    segment = dos_ptr_segment(ptr);
+    if (segment == 0)
+        return;
+
+    regs.h.ah = 0x49;
+    sregs.es = segment;
+    int386x(0x21, &regs, &regs, &sregs);
+}
+
 #define NATIVE_DOS_ALLOC_MAGIC 0x4d414c4cu
 
 typedef struct
