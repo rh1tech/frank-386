@@ -87,7 +87,8 @@ static int8_t pm_table[8][PM_PG_WIDTH] = {
         {0, 3, 7, 3, 0, -3, -7, -3}, // fnum = 111xxxxx
 };
 // todo we are probably fine with pm_table_half[x] = pm_table[x/2] >> 1 as an approcimation, but keeping separate for diff for now
-static int8_t pm_table_half[8][PM_PG_WIDTH] = {
+static int8_t pm_table_half[8][PM_PG_WIDTH]
+        __attribute__((section(".text_buffer.opl_pm_half"))) = {
         {0 >> 1, 0 >> 1, 0 >> 1, 0 >> 1, 0 >> 1, 0 >> 1,  0 >> 1,  0 >> 1},    // fnum = 000xxxxx
         {0 >> 1, 0 >> 1, 1 >> 1, 0 >> 1, 0 >> 1, 0 >> 1,  -1 >> 1, 0 >> 1},   // fnum = 001xxxxx
         {0 >> 1, 1 >> 1, 2 >> 1, 1 >> 1, 0 >> 1, -1 >> 1, -2 >> 1, -1 >> 1}, // fnum = 010xxxxx
@@ -172,7 +173,9 @@ static uint16_t SLOT_RENDER_DATA logsin_table[LOGSIN_TABLE_SIZE] = {
 //  _  _
 // / \/ \ which is abs(sine) wave
 //
-static uint16_t wav_or_table_lookup[4][4] = {
+static uint16_t wav_or_table_lookup[4][4]
+        __attribute__((aligned(2)))
+        __attribute__((section(".text_buffer.opl_wav_or"))) = {
         {0x0000, 0x0000, 0x8000, 0x8000}, // .. negate second half
         {0x0000, 0x0000, 0x0fff, 0x0fff}, // .. attenuate second half
         {0x0000, 0x0000, 0x0000, 0x0000}, // .. leave second half alone

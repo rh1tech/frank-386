@@ -202,7 +202,9 @@ static int16_t kl_tablex16[16] = {dB2x16(0.000), dB2x16(9.000), dB2x16(12.000), 
 #if !EMU8950_NO_TLL
 static uint32_t tll_table[8 * 16][1 << TL_BITS][4];
 #endif
-static int32_t rks_table[2][32][2];
+static int32_t rks_table[2][32][2]
+        __attribute__((aligned(4)))
+        __attribute__((section(".core0_stack_ext.opl_rks")));
 
 #define min(i, j) (((i) < (j)) ? (i) : (j))
 #define max(i, j) (((i) > (j)) ? (i) : (j))
