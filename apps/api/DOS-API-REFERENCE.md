@@ -4,10 +4,20 @@ This document describes the native ARM application layer under `apps/api`, the
 legacy relocatable-ELF execution path, the EZ executable format, and the normal
 `elf2ez` build/conversion workflow.
 
+It is intended for two equally important use cases:
+
+1. **in-tree applications** under `murm386/apps`, which reference the repository
+   `apps/api` directory directly;
+2. **standalone ports/projects**, which vendor a coherent copy of `apps/api`
+   into their own source tree and build against that copy.  This is often the
+   cleaner model for a large third-party codebase because the port can carry
+   its own known-good userspace SDK snapshot without being physically moved
+   under `murm386/apps`.
+
 The native DOS API is an ABI between firmware/kernel code and ARM applications.
 It is **not** the Pico SDK libc ABI. Applications must use the headers and
-runtime in `apps/api` and must not accidentally pull arbitrary Pico SDK/newlib
-implementations into a native DOS executable.
+runtime from one coherent `apps/api` version and must not accidentally pull
+arbitrary Pico SDK/newlib implementations into a native DOS executable.
 
 > **Version rule:** never hard-code the API version in an application or host
 > tool. Include `dos_api_version.h` / the project EZ headers and use
@@ -71,6 +81,106 @@ Applications should include only the specific public header needed by a
 subsystem. Avoid including `dos-api.h` merely to get one small service because
 it exposes emulator structures (`PC`, `CPU`) that can collide with application
 names and unnecessarily couples the application to firmware internals.
+
+### 2.1 Two supported project layouts
+
+The API is usable either in place or as a vendored userspace SDK.
+
+**In-tree layout:**
+
+```text
+murm386/
+    apps/
+        api/
+        myapp/
+            CMakeLists.txt
+            ...
+```
+
+The application can use `../api`.
+
+**Standalone/vendored layout:**
+
+```text
+my-port/
+    api/                    <- copied from murm386/apps/api
+    src/
+    CMakeLists.txt
+    memmap.ld.in
+    check_unresolved.cmake
+    tools/
+        elf2ez[.exe]        <- optional local copy of the host converter
+```
+
+A standalone project does not need to copy itself into the murm386 source
+tree.  Instead it can set one API-root variable and use paths relative to it:
+
+```cmake
+set(NATIVE_DOS_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/api")
+
+include("${NATIVE_DOS_API_DIR}/native-dos-runtime.cmake")
+native_dos_runtime_attach(${PROJECT_NAME})
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+    "${NATIVE_DOS_API_DIR}"
+)
+
+target_sources(${PROJECT_NAME} PRIVATE
+    "${NATIVE_DOS_API_DIR}/crt0.c"
+    "${NATIVE_DOS_API_DIR}/crt0.S"
+)
+```
+
+`native-dos-runtime.cmake` locates its implementation files relative to its own
+directory, so the same module works after `apps/api` has been copied elsewhere.
+
+### 2.2 What should be copied
+
+For a standalone port, prefer copying **the complete `apps/api` directory as
+one versioned unit**, not a hand-picked collection of headers.
+
+The directory contains several layers which evolve together:
+
+- public ABI headers and slot definitions;
+- DOS/libc adapters;
+- ARM EABI/compiler-runtime glue;
+- EZ definitions;
+- CRT startup/exit code;
+- the common CMake attachment module.
+
+A copied `stdio.h` from one API revision combined with an older
+`dos-api-sdtfn.c`, for example, can compile while referring to a system-table
+service which the copied runtime does not wrap correctly.
+
+Treat the vendored API directory much like a small SDK snapshot:
+
+```text
+third_party/native-dos-api/
+    ...exact copy of apps/api...
+```
+
+Record which murm386/API revision it came from.  When updating it, replace or
+merge the **whole API snapshot coherently**, then rebuild and rerun the
+unresolved-symbol check.
+
+Application-specific compatibility code should normally remain outside this
+directory.  If a missing function or service is genuinely generic, add it to
+the canonical `apps/api` first and then refresh the vendored copy.  This avoids
+turning every large port into a private fork of the runtime.
+
+### 2.3 What is not part of the vendored API
+
+A standalone application still needs a small amount of project/build
+scaffolding which is not intrinsically part of `apps/api`:
+
+- an application `CMakeLists.txt`;
+- a suitable relocatable-link linker script/template (`memmap.ld.in`);
+- the unresolved-symbol check;
+- a host `elf2ez` binary or a path to the repository host tool.
+
+For a new project, `apps/test` is a better starting point for this scaffolding
+than `apps/doom`: it has a small source set and exercises the same runtime/CRT
+mechanisms without carrying a large game's platform layer.
 
 ---
 
@@ -523,7 +633,54 @@ application.
 
 # Part II — Building native applications
 
-## 13. Common CMake skeleton
+## 13. Starting a new application from scratch
+
+There are two reasonable bootstrap strategies.
+
+### 13.1 In-tree project
+
+Create a new sibling of `apps/test`, reference `../api`, and initially keep the
+program to one `main()` plus the common CRT/runtime.  This gives the shortest
+path to a known-good build.
+
+### 13.2 Standalone third-party port
+
+For a large existing source tree, vendor `apps/api` into the port rather than
+moving the port underneath murm386.  A practical sequence is:
+
+1. copy the complete `apps/api` directory into the project;
+2. copy/adapt the small CMake/linker/unresolved-symbol skeleton from
+   `apps/test`;
+3. point `NATIVE_DOS_API_DIR` at the local API copy;
+4. build a trivial `main()` first and verify that it becomes a valid EZ
+   executable;
+5. only then enable the third-party source files in groups;
+6. add project-local compatibility adapters for platform-specific code;
+7. move functionality into `apps/api` only when it is generally useful to
+   other native DOS applications.
+
+This separates two kinds of work which are easy to confuse during a port:
+
+- **userspace SDK work** — generic DOS API/libc/compiler-runtime facilities;
+- **application adaptation** — renderer, sound backend, configuration, legacy
+  compiler assumptions, application-specific IRQ ownership, etc.
+
+The second category belongs in the port.  The first belongs in `apps/api`.
+
+### 13.3 Choose the smallest reference application
+
+Use these repository examples for different purposes:
+
+- `apps/test` — minimal runtime, CRT, argument/exit behavior and TSR lifecycle;
+- `apps/doom` — complex example of guest physical VGA memory, native IRQ
+  replacement, cooperative timing, audio hardware and a large legacy C port;
+- `apps/elf2ez` — converter source and an example of code which is deliberately
+  buildable in both native-DOS and host-tool environments.
+
+For independent development, start with `apps/test` and consult the larger
+ports only for the subsystem you actually need.
+
+## 14. Common CMake skeleton
 
 A native application starts as a relocatable ARM image:
 
@@ -536,11 +693,18 @@ add_executable(${PROJECT_NAME}
     # ...
 )
 
-include(${CMAKE_CURRENT_SOURCE_DIR}/../api/native-dos-runtime.cmake)
+# In-tree:
+#set(NATIVE_DOS_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../api")
+
+# Standalone/vendored:
+set(NATIVE_DOS_API_DIR "${CMAKE_CURRENT_SOURCE_DIR}/api")
+
+include("${NATIVE_DOS_API_DIR}/native-dos-runtime.cmake")
 native_dos_runtime_attach(${PROJECT_NAME})
 
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    "${NATIVE_DOS_API_DIR}"
 )
 
 configure_file(memmap.ld.in memmap.ld @ONLY)
@@ -567,7 +731,7 @@ Important points:
 
 ---
 
-## 14. Unresolved-symbol check
+## 15. Unresolved-symbol check
 
 A relocatable link accepts unresolved symbols by design. A native DOS
 application has no normal dynamic linker, so unexpected unresolved references
@@ -1118,6 +1282,12 @@ define.
 
 ### Runtime/build
 
+- [ ] choose either direct in-tree API use or one coherent vendored `apps/api`
+      snapshot;
+- [ ] for a standalone port, define one `NATIVE_DOS_API_DIR` and make all API/CRT
+      paths derive from it;
+- [ ] keep application-specific shims outside the vendored API directory;
+- [ ] record/update the vendored API revision as a unit;
 - [ ] attach `native-dos-runtime.cmake`;
 - [ ] use relocatable link `-r`;
 - [ ] use `-fno-jump-tables` where required by the Thumb-1 target;
@@ -1157,6 +1327,180 @@ define.
 - [ ] ordinary `return` from `main()` is valid;
 - [ ] ordinary `exit(status)` is valid;
 - [ ] DOS termination/TSR paths must not run normal fini teardown afterward.
+
+---
+
+# Part VIII — Native TSR applications
+
+## 32. `apps/test` as the TSR reference
+
+`apps/test` is the recommended reference for the **process-lifetime and memory
+ownership** side of a native TSR.  It is intentionally small enough that the
+important DOS steps are visible without a large application's platform code.
+
+It should not be read as a complete interrupt-driven TSR framework: a real TSR
+which installs resident IRQ/service callbacks has additional ownership and
+unload concerns described below.
+
+The reference program uses a switch such as:
+
+```text
+test.exe -r
+```
+
+to enter its resident path.  Its important steps are the following.
+
+### 32.1 Obtain the current PSP
+
+The native program still owns a normal DOS PSP.  The test asks DOS for it with
+INT 21h/AH=51h:
+
+```c
+PC *machine = get_PC();
+CPU *cpu = machine->cpu;
+
+cpu->gprx[regax].r16 = 0x5100;
+bios_intcall(cpu, 0x21, "test.exe get PSP");
+psp_seg = cpu->gprx[regbx].r16;
+```
+
+Using the DOS service is preferable to inventing a private assumption about the
+current PSP.
+
+### 32.2 Determine the resident main-block size
+
+`PSP:0002` contains the segment immediately beyond the main process
+allocation:
+
+```c
+end_seg =
+    *(volatile uint16_t *)dos_guest_far_ptr(psp_seg, 2);
+```
+
+With the **current native runtime layout**, neither startup stack belongs to
+this main MCB:
+
+- the guest DOS stack is a separate DOS allocation;
+- the native ARM stack is taken from the PSRAM native-stack arena.
+
+Therefore the resident size of the main block is simply:
+
+```c
+resident_paragraphs = end_seg - psp_seg;
+```
+
+Do **not** subtract a hard-coded native-stack or DOS-stack size from this value.
+That was appropriate only to older experimental layouts where stacks were
+placed inside the process MCB.
+
+After the TSR request unwinds, the runtime can release the startup-only stack
+allocations independently while preserving the main resident MCB.
+
+### 32.3 Free the environment if the TSR does not need it
+
+A DOS EXEC child normally owns a separate environment block referenced by
+`PSP:002Ch`.
+
+INT 21h/AH=31h keeps child-owned DOS blocks.  A small TSR which does not need
+its inherited environment should therefore free it explicitly before becoming
+resident:
+
+```c
+volatile uint16_t *ps_env =
+    (volatile uint16_t *)dos_guest_far_ptr(psp_seg, 0x2c);
+uint16_t env_seg = *ps_env;
+
+if (env_seg != 0) {
+    union REGS regs = {0};
+    struct SREGS sregs;
+
+    segread(&sregs);
+    sregs.es = env_seg;
+    regs.h.ah = 0x49;             /* free DOS memory block */
+    int386x(0x21, &regs, &regs, &sregs);
+
+    if (regs.x.cflag)
+        return 3;
+
+    *ps_env = 0;
+}
+```
+
+This is optional.  Do not free the environment if resident code intentionally
+uses it later.
+
+### 32.4 Request DOS TSR termination
+
+The actual stay-resident operation is the standard DOS service:
+
+```c
+cpu->gprx[regax].r16 = 0x3100;  /* AH=31h, AL=exit code */
+cpu->gprx[regdx].r16 = resident_paragraphs;
+bios_intcall(cpu, 0x21, "test.exe TSR");
+```
+
+The native bridge itself has to unwind back through C code, so the call site
+may regain control even though DOS has already marked the child as
+terminated/resident.  The application must treat that state as terminal: do
+not continue ordinary program work or run a second normal shutdown sequence.
+
+The runtime/CRT checks the DOS termination state and suppresses the normal fini
+path for this case.
+
+A simple resident helper should therefore return immediately after the
+`bios_intcall()` bridge has unwound.
+
+## 33. What remains resident
+
+The main process MCB is the resident image.  Code/data required later must be
+reachable from that preserved image or another intentionally retained
+allocation.
+
+Do not leave resident state pointing at:
+
+- the native ARM startup stack;
+- the separate guest DOS startup stack;
+- an environment block you explicitly freed;
+- ordinary temporary allocations which the termination path releases;
+- local automatic variables whose C frame disappears during unwind.
+
+For resident control blocks, vector-save structures, callback state and
+similar data, prefer static/global storage inside the resident image.
+
+## 34. TSR interrupt/service hooks
+
+A TSR which installs a native callback must keep both the callback code and all
+state it dereferences resident.
+
+`dos_native_setvect()` can be used to replace a DOS/x86 interrupt with a native
+ARM handler while preserving the displaced IVT/native-handler ownership.
+
+For a normal foreground application, shutdown restores the vector.  For a TSR,
+the hook is precisely what is being left installed, so the resident path must
+**not** restore it before AH=31h.
+
+This immediately creates an unload problem: a later uninstaller cannot free
+the resident image until it has proved that it still owns the vector and has
+restored the displaced handler.  Design that ownership protocol explicitly;
+do not simply free the MCB behind a live ARM callback.
+
+`apps/test` currently demonstrates the resident memory/lifetime mechanics, not
+a complete install/query/uninstall protocol for a resident IRQ service.
+
+## 35. Why `apps/test` is also useful for non-TSR development
+
+Its CMake setup links the same EZ CRT (`crt0.c`/`crt0.S`) and attaches
+`native-dos-runtime.cmake`, while its source is small.  It is therefore the best
+reference to copy when creating:
+
+- a new native utility;
+- a standalone port skeleton;
+- a regression test for a new API slot;
+- an exit/argument/CRT test;
+- a TSR lifecycle test.
+
+Use a larger application as the starting template only when its extra platform
+layer is actually required.
 
 ---
 
@@ -1249,6 +1593,9 @@ apps/api/native-dos-runtime.cmake
 apps/elf2ez/elf2ez.c            converter source
 tools/elf2ez                    host converter build/output
 
+apps/test/CMakeLists.txt         minimal EZ/runtime build reference
+apps/test/test.c                 minimal application + TSR lifecycle reference
+
 src/dos_api.c                   firmware system table
 src/fdos/task.c                 DOS native ELF/EZ loaders/process execution
 ```
@@ -1258,6 +1605,10 @@ src/fdos/task.c                 DOS native ELF/EZ loaders/process execution
 ## 30. Stability rules for the ABI
 
 When extending the native DOS API:
+
+For standalone ports, first remember that a vendored `apps/api` copy is an SDK
+snapshot.  Keep its headers, implementations, CRT and version definitions from
+the same revision; do not casually mix files from different API generations.
 
 1. never reorder an existing system-table slot;
 2. append the new slot;
@@ -1292,4 +1643,7 @@ When extending the native DOS API:
 | Preferred final distribution | compatibility/debug | **yes** |
 
 For new applications, use EZ as the normal distributable format unless a
-specific loader/debugging task requires direct legacy ELF execution.
+specific loader/debugging task requires direct legacy ELF execution.  For a
+new source tree, the shortest practical path is usually: copy/vendor
+`apps/api`, copy the small `apps/test` build skeleton, prove a trivial EZ
+`main()`, then integrate the real application incrementally.
