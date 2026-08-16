@@ -545,6 +545,42 @@ void dos_free_low(void *ptr)
 
 #define NATIVE_DOS_ALLOC_MAGIC 0x4d414c4cu
 
+static dos_malloc_policy_t native_dos_malloc_policy =
+    DOS_MALLOC_POLICY_RETURN_NULL;
+
+void dos_malloc_set_policy(dos_malloc_policy_t policy)
+{
+    switch (policy)
+    {
+    case DOS_MALLOC_POLICY_RETURN_NULL:
+    case DOS_MALLOC_POLICY_EXIT:
+    case DOS_MALLOC_POLICY_MESSAGE_EXIT:
+        native_dos_malloc_policy = policy;
+        break;
+    default:
+        native_dos_malloc_policy = DOS_MALLOC_POLICY_RETURN_NULL;
+        break;
+    }
+}
+
+dos_malloc_policy_t dos_malloc_get_policy(void)
+{
+    return native_dos_malloc_policy;
+}
+
+static void *native_dos_malloc_failed(size_t size)
+{
+    if (native_dos_malloc_policy == DOS_MALLOC_POLICY_MESSAGE_EXIT)
+        printf("Out of memory: malloc(%lu) failed\r\n",
+               (unsigned long)size);
+
+    if (native_dos_malloc_policy == DOS_MALLOC_POLICY_EXIT ||
+        native_dos_malloc_policy == DOS_MALLOC_POLICY_MESSAGE_EXIT)
+        exit(1);
+
+    return NULL;
+}
+
 typedef struct
 {
     uint32_t magic;
@@ -578,18 +614,18 @@ void *malloc(size_t size)
         size = 1;
 
     if (size > UINT32_MAX - sizeof(*header))
-        return NULL;
+        return native_dos_malloc_failed(size);
 
     total = (uint32_t)size + (uint32_t)sizeof(*header);
     paragraphs = (total + 15u) >> 4;
     if (paragraphs == 0 || paragraphs > 0xffffu)
-        return NULL;
+        return native_dos_malloc_failed(size);
 
     regs.h.ah = 0x48;
     regs.w.bx = (uint16_t)paragraphs;
     int386(0x21, &regs, &regs);
     if (regs.x.cflag)
-        return NULL;
+        return native_dos_malloc_failed(size);
 
     segment = regs.w.ax;
     header = (native_dos_alloc_header_t *)dos_guest_far_ptr(segment, 0);
@@ -627,7 +663,7 @@ void *calloc(size_t count, size_t size)
     void *ptr;
 
     if (count != 0 && size > (size_t)-1 / count)
-        return NULL;
+        return native_dos_malloc_failed((size_t)-1);
 
     total = count * size;
     ptr = malloc(total);
@@ -660,12 +696,12 @@ void *realloc(void *ptr, size_t size)
         return NULL;
 
     if (size > UINT32_MAX - sizeof(*header))
-        return NULL;
+        return native_dos_malloc_failed(size);
 
     total = (uint32_t)size + (uint32_t)sizeof(*header);
     paragraphs = (total + 15u) >> 4;
     if (paragraphs == 0 || paragraphs > 0xffffu)
-        return NULL;
+        return native_dos_malloc_failed(size);
 
     old_size = header->size;
 

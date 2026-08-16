@@ -13,6 +13,16 @@ extern "C" {
  * actually provides them. Do not expose the toolchain libc by accident.
  */
 /* Native implementations are provided by the FDOS runtime layer. */
+typedef enum dos_malloc_policy
+{
+    DOS_MALLOC_POLICY_RETURN_NULL = 0,
+    DOS_MALLOC_POLICY_EXIT,
+    DOS_MALLOC_POLICY_MESSAGE_EXIT
+} dos_malloc_policy_t;
+
+void dos_malloc_set_policy(dos_malloc_policy_t policy);
+dos_malloc_policy_t dos_malloc_get_policy(void);
+
 void *malloc(size_t size);
 void *calloc(size_t count, size_t size);
 void *realloc(void *ptr, size_t size);
