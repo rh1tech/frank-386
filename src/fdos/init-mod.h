@@ -142,6 +142,8 @@ _Static_assert(X86_SZ_BUF_OFF + SZ_BUF_LEN <= 0x240E /* DYN_BUFFER */,
  */
 #define SDA_DISK_TOS_OFF   ((UWORD)(X86_INTERNAL_DATA_OFF + \
                                     offsetof(struct dos_data, char_stack)))
+#define SDA_CHAR_TOS_OFF   ((UWORD)(SDA_DISK_TOS_OFF + \
+                                    sizeof(internal_data->char_stack)))
 #define SDA_TEMPCDS_OFF    ((UWORD)((SDA_DISK_TOS_OFF - sizeof(struct cds)) & ~3u))
 #define SDA_EXEC_TAIL_LEN  132u
 #define SDA_EXEC_TAIL_OFF  ((UWORD)((SDA_TEMPCDS_OFF - SDA_EXEC_TAIL_LEN) & ~3u))

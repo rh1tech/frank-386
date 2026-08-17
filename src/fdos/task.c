@@ -2868,25 +2868,50 @@ static void exec_leave_child(struct exec_child_context *saved,
 {
   bool outer_terminate = saved->terminate;
   bool outer_native_done = saved->native_done;
+  UWORD cleanup_sp = SDA_CHAR_TOS_OFF;
+  UWORD parent_frame_sp;
 
-  /* Cleanup runs with LOCAL, quiescent signals: the child has already
-     terminated (its request_terminate() left terminate_flag=true /
-     native_done=true on this level), and the OUTER level's pending
-     state must not be visible either - DosClose()/FcbCloseAll()/
-     FreeProcessMem() below may perform nested DOS/device calls (device
-     driver close goes through cpu_far_call() and its pc_step() loop),
-     and those must not be aborted by a signal that belongs to a
-     different nesting level. The outer values are re-armed LAST, when
-     this level is fully dismantled.
+  /*
+   * The child is dead from this point on.  Two independent guards keep
+   * cleanup from ever running on that dead execution context:
+   *
+   *   1. native_done remains set, so an accidental pc_step() cannot execute
+   *      even one instruction at the dead child's CS:IP;
+   *   2. SS:SP is detached from the child's MCB-backed DOS stack before any
+   *      handle/FCB/memory teardown and moved to the resident SDA char stack.
+   *
+   * cpu_far_call() and bios_intcall() already stack native_done and clear it
+   * only for their own synchronous guest burst, so sanctioned device/BIOS
+   * calls still run and restore the dead-context guard on return.
+   *
+   * Usually the full SDA char stack (0600h..0780h) is available.  If the
+   * suspended parent itself lives on that stack, however, its long-lived
+   * exec_child_context is immediately below the parent's original SP.
+   * Continue below that frame instead of resetting SP to 0780h; this keeps
+   * nested EXEC from a cleanup-time driver call from overwriting the frame
+   * that restore_ctx() still has to consume.
+   */
+  parent_frame_sp =
+      (UWORD)((saved->cpu.sp - sizeof(*saved)) & (UWORD)~1u);
+  if (saved->cpu.ss == DOS_PSP &&
+      parent_frame_sp >= SDA_DISK_TOS_OFF &&
+      parent_frame_sp <= SDA_CHAR_TOS_OFF)
+    cleanup_sp = parent_frame_sp;
 
-     term_exit_code/term_exit_type stay untouched throughout: they are
-     the single DOS-global AH=4Dh status the child just left for the
-     parent, and exec_release_child() reads term_exit_type for the
-     keep-resident (TSR) decision. cu_psp is still the child's until
-     exec_release_child() finishes - DosClose() locates the handle
-     table through it. */
-  cpu->native_done = false;
+  /* Keep the OUTER level's terminate state invisible during cleanup: nested
+     driver calls must not inherit a signal belonging to a different EXEC
+     level.  The outer values are re-armed LAST, after the parent CPU context
+     has been restored.
+
+     term_exit_code/term_exit_type stay untouched throughout: they are the
+     single DOS-global AH=4Dh status the child just left for the parent, and
+     exec_release_child() reads term_exit_type for the keep-resident (TSR)
+     decision. cu_psp is still the child's until exec_release_child()
+     finishes - DosClose() locates the handle table through it. */
+  cpu->native_done = true;
   terminate_flag = false;
+  SET_SS(DOS_PSP);
+  CPU_SP = cleanup_sp;
   internal_data->InDOS = saved->indos;
   /* Match return_user(): suppress recursive critical-error aborts
      while vectors, handles, FCBs and process memory are released. */
