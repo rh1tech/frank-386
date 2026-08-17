@@ -590,15 +590,62 @@ UBYTE FcbClose(dos_far_ptr lpXfcb)
 /* close all files the current process opened by FCBs */
 VOID FcbCloseAll(void)
 {
-  COUNT idx;
-  dos_far_ptr _sftp;
+  extern volatile uint32_t dos_diag_kernel_code;
+  dos_far_ptr block = LoL->sfthead;
+  COUNT idx = 0;
+  unsigned blocks = 0;
 
-  for (idx = 0; !far_is_end(_sftp = idx_to_sft(idx)); idx++)
+  /*
+   * Walk the SFT chain once.  The old implementation called idx_to_sft()
+   * for idx=0,1,...; each call restarted at LoL->sfthead, so a corrupt
+   * cyclic sftt_next chain could trap process teardown forever.
+   */
+  while (!far_is_end(block))
   {
-    sft *sftp = (sft *) ARM_PTR (_sftp);
-    if ((sftp->sft_mode & O_FCB) && sftp->sft_psp == internal_data->cu_psp)
-      DosCloseSft(idx, FALSE);
+    sfttbl *sp;
+    dos_far_ptr next;
+    COUNT j;
+
+    if (++blocks > 64u)
+    {
+      dos_diag_kernel_code = 0x63fe0000u | (blocks & 0xffffu);
+      return;
+    }
+
+    sp = (sfttbl *)ARM_PTR(block);
+    if (sp->sftt_count < 0 || sp->sftt_count > SFTMAX)
+    {
+      dos_diag_kernel_code =
+          0x63fd0000u | ((unsigned)sp->sftt_count & 0xffffu);
+      return;
+    }
+
+    dos_diag_kernel_code =
+        0x63000000u | ((blocks & 0xffu) << 16) | ((unsigned)idx & 0xffffu);
+
+    for (j = 0; j < sp->sftt_count; ++j, ++idx)
+    {
+      sft *sftp = &sp->sftt_table[j];
+      if ((sftp->sft_mode & O_FCB) && sftp->sft_psp == internal_data->cu_psp)
+      {
+        dos_diag_kernel_code = 0x63100000u | ((unsigned)idx & 0xffffu);
+        DosCloseSft(idx, FALSE);
+        dos_diag_kernel_code = 0x63200000u | ((unsigned)idx & 0xffffu);
+      }
+    }
+
+    next = sp->sftt_next;
+    if (!far_is_end(next) &&
+        FP_SEG(next) == FP_SEG(block) && FP_OFF(next) == FP_OFF(block))
+    {
+      dos_diag_kernel_code =
+          0x63fc0000u | ((unsigned)FP_OFF(block) & 0xffffu);
+      return;
+    }
+    block = next;
   }
+
+  dos_diag_kernel_code = 0x63ff0000u | ((unsigned)idx & 0xffffu);
 }
 
 UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)

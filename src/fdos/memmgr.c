@@ -416,8 +416,10 @@ COUNT FreeProcessMem(UWORD ps)
      up there get freed as well */
   DosUmbLink(1);
 
-  for (pseg = LoL->first_mcb;; pseg = nxtMCBseg(pseg, p))
+  for (pseg = LoL->first_mcb;;)
   {
+    seg next;
+
     p = para2far(pseg);
 
     if (!mcbValid(p))
@@ -428,6 +430,13 @@ COUNT FreeProcessMem(UWORD ps)
 
     if (p->m_type == MCB_LAST)
       break;
+
+    next = nxtMCBseg(pseg, p);
+    /* A valid DOS MCB chain is strictly increasing.  A wrapped/backward
+       link can otherwise make process teardown spin forever. */
+    if (next <= pseg)
+      return DE_MCBDESTRY;
+    pseg = next;
   }
 
   DosUmbLink(oldumbstate);
@@ -456,11 +465,17 @@ void DosUmbLink(unsigned n)
 
   while (pseg != LoL->uppermem_root && p->m_type != MCB_LAST)
   {
+    seg next;
+
     if (!mcbValid(p))
       return;
     qseg = pseg;
     q = p;
-    pseg = nxtMCBseg(pseg, p);
+    next = nxtMCBseg(pseg, p);
+    /* Never follow a corrupt MCB link backwards or through 16-bit wrap. */
+    if (next <= pseg)
+      return;
+    pseg = next;
     p = para2far(pseg);
   }
 
