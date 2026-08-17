@@ -359,6 +359,32 @@ uint8_t disk_raw_sd_hdd_enabled(void) {
     return raw_sd_hdd_enabled;
 }
 
+uint32_t disk_raw_sd_sectors(void) {
+    return raw_sd_hdd_enabled ? raw_sd_hdd_sectors : 0u;
+}
+
+bool disk_raw_sd_readonly(void) {
+    return (disk_status(0) & STA_PROTECT) != 0;
+}
+
+bool disk_raw_sd_read(uint32_t lba, void *buf, uint32_t count) {
+    if (!raw_sd_hdd_enabled || !count) return false;
+    if (lba >= raw_sd_hdd_sectors || count > raw_sd_hdd_sectors - lba) return false;
+    return disk_read(0, (BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+}
+
+bool disk_raw_sd_write(uint32_t lba, const void *buf, uint32_t count) {
+    if (!raw_sd_hdd_enabled || !count) return false;
+    if (disk_status(0) & STA_PROTECT) return false;
+    if (lba >= raw_sd_hdd_sectors || count > raw_sd_hdd_sectors - lba) return false;
+    return disk_write(0, (const BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+}
+
+bool disk_raw_sd_sync(void) {
+    if (!raw_sd_hdd_enabled) return false;
+    return disk_ioctl(0, CTRL_SYNC, NULL) == RES_OK;
+}
+
 uint8_t bios_hdd_count(void) {
     return (uint8_t)(ata_hdd_count() + (raw_sd_hdd_enabled ? 1u : 0u));
 }

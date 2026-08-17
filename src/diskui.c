@@ -37,6 +37,8 @@ static const DriveInfo drive_table[DRIVE_TOTAL] = {
     { "ATA0-1", "ATA Disk" },  // DRIVE_ATA0_1
     { "ATA1-0", "ATA Disk" },  // DRIVE_ATA1_0
     { "ATA1-1", "ATA Disk" },  // DRIVE_ATA1_1
+    { "SD-CARD", "Via BIOS only" },  // DRIVE_SD_CARD  (On/Off toggle)
+    { "USB:",   ""         },  // DRIVE_USB_MODE (HOST/DEVICE toggle)
     { "BIOS",   "System"   },  // DRIVE_BIOS
 };
 
@@ -56,6 +58,12 @@ static int file_scroll_offset = 0;
 static char pending_filename[DRIVE_TOTAL][MAX_FILENAME_LEN];
 static bool pending_changed[DRIVE_TOTAL];  // true if user modified this drive
 static bool reboot_required;               // true if any ATA drive was changed
+
+// Pending values for the two config toggles (SD-CARD raw / USB mode). They are
+// only written to the config on "Save and Reboot" so config_get_usb_mode()
+// keeps reflecting the *running* mode until then. Initialised in diskui_open().
+static int pending_raw_sd;                 // 0/1
+static int pending_usb_mode;               // USB_MODE_HOST / USB_MODE_DEVICE
 static char file_list[MAX_FILES][MAX_FILENAME_LEN];
 static int  file_count   = 0;
 static int  plasma_frame = 0;  // Animation frame counter
@@ -86,19 +94,28 @@ static void apply_and_close(void);
 static void reset_pending(void);
 static int first_attached_drive(void);
 static void usb_device_exit_to_host(void);
+static void toggle_sd_card(void);
+static void toggle_usb_mode(void);
+static void esc_apply_temp_and_close(void);
+static bool row_is_toggle(int row);
 
 // --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
+
+static bool row_is_toggle(int row) {
+    return row == DRIVE_SD_CARD || row == DRIVE_USB_MODE;
+}
 
 static const char *get_drive_filename(int drive_idx) {
     if (drive_idx == DRIVE_BIOS) {
         return config_get_bios_file();           // NULL = Native BIOS
     } else if (drive_idx < 2) {
         return fdd_get_filename(drive_idx);      // FDD-0 / FDD-1
-    } else {
+    } else if (drive_idx >= DRIVE_ATA0_0 && drive_idx <= DRIVE_ATA1_1) {
         return ata_get_filename(drive_idx - 2);  // ATA0-0 .. ATA1-1
     }
+    return NULL;                                 // SD-CARD / USB toggles: no file
 }
 
 // Get the display filename for a drive (pending or current)
@@ -229,8 +246,24 @@ void diskui_open(void) {
 
     if (config_get_usb_mode() == USB_MODE_DEVICE) {
         int drive = first_attached_drive();
-        selected_row = (drive >= 0) ? drive : DRIVE_FDD0;
+        if (drive >= 0) {
+            selected_row = drive;
+        } else {
+            /* No image attached: auto-enable the raw SD card so USB DEVICE
+               still exports a drive, and move the highlight onto that row.
+               Enable it live (disk_set_raw_sd_hdd) because usbmsc_device_init()
+               binds the exported medium right after this call. */
+            if (!config_get_raw_sd_hdd()) {
+                config_set_raw_sd_hdd(1);
+                disk_set_raw_sd_hdd(1);
+            }
+            selected_row = disk_raw_sd_hdd_enabled() ? DRIVE_SD_CARD : DRIVE_FDD0;
+        }
     }
+
+    /* Toggle rows start from the current (running) config. */
+    pending_raw_sd   = config_get_raw_sd_hdd();
+    pending_usb_mode = config_get_usb_mode();
 
     menu_state = MENU_MAIN;
     osd_clear();
@@ -274,6 +307,17 @@ static void draw_main_menu(void) {
         char line[64];
         snprintf(line, sizeof(line), "[%-7s] %-10s", drive_table[i].label, drive_table[i].type_name);
         osd_print(MENU_X + 2, y, line, attr);
+
+        // Config toggle rows: right-aligned < value >, no file/[Select]/[Eject]
+        if (row_is_toggle(i)) {
+            const char *val;
+            if (i == DRIVE_SD_CARD)
+                val = pending_raw_sd ? "< On >" : "< Off >";
+            else
+                val = (pending_usb_mode == USB_MODE_DEVICE) ? "< DEVICE >" : "< HOST >";
+            osd_print(MENU_X + MENU_W - 4 - (int)strlen(val), y, val, attr);
+            continue;
+        }
 
         const char *filename = get_display_filename(i);
         if (filename) {
@@ -456,8 +500,39 @@ static void eject_pending(void) {
     draw_main_menu();
 }
 
+// SD-CARD / USB toggles: only change the pending value here. They need a
+// reboot to take effect, so mark reboot_required; the config is written in
+// apply_and_close(). This keeps config_get_usb_mode() = the running mode.
+static void toggle_sd_card(void) {
+    pending_raw_sd = pending_raw_sd ? 0 : 1;
+    reboot_required = true;
+    draw_main_menu();
+}
+
+static void toggle_usb_mode(void) {
+    pending_usb_mode = (pending_usb_mode == USB_MODE_DEVICE)
+                       ? USB_MODE_HOST : USB_MODE_DEVICE;
+    reboot_required = true;
+    draw_main_menu();
+}
+
+// Apply only pending FLOPPY changes to the live system, without persisting to
+// config, then close. This is the Esc action in HOST mode: a quick temporary
+// floppy insert/eject. Reboot-requiring pending changes (ATA/BIOS and the SD /
+// USB toggles) are discarded.
+static void esc_apply_temp_and_close(void) {
+    for (int i = DRIVE_FDD0; i <= DRIVE_FDD1; i++) {
+        if (!pending_changed[i]) continue;
+        if (pending_filename[i][0] == '\0')
+            ejectdisk(i, true);
+        else
+            insertdisk(i, true, false, pending_filename[i]);
+    }
+    diskui_close();
+}
+
 static void apply_and_close(void) {
-    // Apply all pending changes
+    // Apply all pending disk changes
     for (int i = 0; i < DRIVE_TOTAL; i++) {
         if (!pending_changed[i]) continue;
 
@@ -467,7 +542,7 @@ static void apply_and_close(void) {
                 config_set_bios_file(NULL);
             } else if (i < 2) {
                 ejectdisk(i, true);
-            } else {
+            } else if (i >= DRIVE_ATA0_0 && i <= DRIVE_ATA1_1) {
                 ejectdisk(i - 2, false);
             }
         } else {
@@ -476,7 +551,7 @@ static void apply_and_close(void) {
                 config_set_bios_file(pending_filename[i]);
             } else if (i < 2) {
                 insertdisk(i, true, false, pending_filename[i]);
-            } else {
+            } else if (i >= DRIVE_ATA0_0 && i <= DRIVE_ATA1_1) {
                 int ata_index = i - 2;
                 bool is_cdrom = file_is_iso(pending_filename[i]);
                 insertdisk(ata_index, false, is_cdrom, pending_filename[i]);
@@ -484,7 +559,16 @@ static void apply_and_close(void) {
         }
     }
 
-    config_save_disks();
+    // Config toggles (SD raw / USB mode) take effect on the reboot below.
+    if (pending_raw_sd != config_get_raw_sd_hdd())
+        config_set_raw_sd_hdd(pending_raw_sd);
+    if (pending_usb_mode != config_get_usb_mode())
+        config_set_usb_mode(pending_usb_mode);
+
+    if (reboot_required)
+        config_save_all();     // persist disks + SD/USB/BIOS before reboot
+    else
+        config_save_disks();
 
     if (reboot_required) {
         *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52;
@@ -521,6 +605,8 @@ bool diskui_handle_key(int keycode, bool is_down) {
                         apply_and_close();
                         break;
                     }
+                    if (selected_row == DRIVE_SD_CARD) { toggle_sd_card(); break; }
+                    if (selected_row == DRIVE_USB_MODE) { toggle_usb_mode(); break; }
                     const char *filename = get_display_filename(selected_row);
                     if (selected_row == DRIVE_BIOS || !filename) {
                         scan_disk_images(selected_row);
@@ -532,11 +618,20 @@ bool diskui_handle_key(int keycode, bool is_down) {
                     break;
                 }
 
+                case KEY_LEFT:
+                case KEY_RIGHT:
+                    if (selected_row == DRIVE_SD_CARD) toggle_sd_card();
+                    else if (selected_row == DRIVE_USB_MODE) toggle_usb_mode();
+                    break;
+
                 case KEY_ESC:
+                    // In DEVICE mode Esc exits to HOST + reboots. config isn't
+                    // changed by the toggles (pending only), so this still
+                    // reflects the running mode.
                     if (config_get_usb_mode() == USB_MODE_DEVICE)
                         usb_device_exit_to_host();
                     else
-                        diskui_close();
+                        esc_apply_temp_and_close();
                     break;
 
                 // Quick selection by drive number

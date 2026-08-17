@@ -23,8 +23,10 @@ typedef enum {
     DRIVE_ATA0_1 = 3,
     DRIVE_ATA1_0 = 4,
     DRIVE_ATA1_1 = 5,
-    DRIVE_BIOS = 6,
-    DRIVE_TOTAL = 7
+    DRIVE_SD_CARD = 6,   // SD card as raw drive (Via BIOS only) - On/Off toggle
+    DRIVE_USB_MODE = 7,  // USB HOST/DEVICE toggle
+    DRIVE_BIOS = 8,
+    DRIVE_TOTAL = 9
 } DiskUIDrive;
 
 // Drive info for UI display

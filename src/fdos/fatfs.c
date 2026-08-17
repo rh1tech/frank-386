@@ -1,6 +1,9 @@
 #include "hdrs.h"
 
 static const char *media_check_source = "?";
+#if DIAG
+extern volatile unsigned int dos_diag_kernel_code;
+#endif
 
 /*
     fnode scratch nodes - internal file nodes used while servicing a
@@ -876,8 +879,18 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
        * then issue a Close request to the driver
        */
       dos_far_ptr devp = sftp->sft_dev;
+#if DIAG
+      dos_diag_kernel_code = 0x43400000u
+                           | (((unsigned)sft_idx & 0xffu) << 16)
+                           | ((unsigned)sftp->sft_count & 0xffffu);
+#endif
       if (BinaryCharIO(&devp, 0, MK_FP(0,0), C_CLOSE) != SUCCESS)
         return DE_INVLDHNDL;
+#if DIAG
+      dos_diag_kernel_code = 0x43500000u
+                           | (((unsigned)sft_idx & 0xffu) << 16)
+                           | ((unsigned)sftp->sft_count & 0xffffu);
+#endif
     }
     /* now just drop the count if a device */
     if (!commitonly)
@@ -914,6 +927,11 @@ COUNT DosClose(COUNT hndl)
 {
   psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
   int sft_idx = get_sft_idx(hndl);
+#if DIAG
+  dos_diag_kernel_code = 0x43100000u
+                       | (((unsigned)sft_idx & 0xffu) << 16)
+                       | ((unsigned)hndl & 0xffffu);
+#endif
   dos_far_ptr /* -> sft */ s = idx_to_sft(sft_idx);
   UBYTE *jft;
   if (far_is_end(s))
@@ -927,8 +945,21 @@ COUNT DosClose(COUNT hndl)
   /* may occur, else e.g. ABORT will try to close the file twice,    */
   /* the second time after stdout is already closed */
   jft[hndl] = 0xff;
+#if DIAG
+  dos_diag_kernel_code = 0x43200000u
+                       | (((unsigned)sft_idx & 0xffu) << 16)
+                       | ((unsigned)hndl & 0xffffu);
+#endif
   /* Get the SFT block that contains the SFT      */
-  return DosCloseSft(sft_idx, FALSE);
+  {
+    COUNT rc = DosCloseSft(sft_idx, FALSE);
+#if DIAG
+    dos_diag_kernel_code = 0x43300000u
+                         | (((unsigned)sft_idx & 0xffu) << 16)
+                         | ((unsigned)hndl & 0xffffu);
+#endif
+    return rc;
+  }
 }
 
 /*                                                                      */

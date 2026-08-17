@@ -12,7 +12,9 @@
 #define USBMSC_BLOCK_DISK 512u
 
 typedef struct {
-    FIL *fp;
+    FIL *fp;              /* file-backed disk; NULL when is_sd */
+    bool is_sd;           /* true = whole raw SD card (no FIL) */
+    uint32_t sd_sectors;  /* SD size in 512-byte sectors (is_sd only) */
     uint16_t block_size;
 } usbmsc_disk_t;
 
@@ -21,6 +23,8 @@ static usbmsc_disk_t usb_disk;
 static void bind_first_disk(void)
 {
     usb_disk.fp = NULL;
+    usb_disk.is_sd = false;
+    usb_disk.sd_sectors = 0;
     usb_disk.block_size = USBMSC_BLOCK_DISK;
 
     for (uint8_t i = 0; i < 2; ++i) {
@@ -39,11 +43,31 @@ static void bind_first_disk(void)
             return;
         }
     }
+
+    /* No floppy/ATA image attached: fall back to exporting the whole SD card,
+       so the host still sees a drive (e.g. to copy images onto the card).
+       Available only while the SD raw HDD option is enabled. */
+    uint32_t sectors = disk_raw_sd_sectors();
+    if (sectors) {
+        usb_disk.is_sd = true;
+        usb_disk.sd_sectors = sectors;
+    }
 }
 
+/* True when LUN 0 is bound to a medium (file image or raw SD). */
+static bool lun_bound(uint8_t lun)
+{
+    if (lun != 0)
+        return false;
+    if (usb_disk.is_sd)
+        return usb_disk.sd_sectors != 0;
+    return usb_disk.fp && usb_disk.fp->obj.fs;
+}
+
+/* File handle for the FILE-backed path only (NULL for raw SD). */
 static FIL *lun_file(uint8_t lun)
 {
-    if (lun != 0 || !usb_disk.fp || !usb_disk.fp->obj.fs)
+    if (lun != 0 || usb_disk.is_sd || !usb_disk.fp || !usb_disk.fp->obj.fs)
         return NULL;
     return usb_disk.fp;
 }
@@ -51,10 +75,17 @@ static FIL *lun_file(uint8_t lun)
 static bool lun_info(uint8_t lun, uint32_t *block_count,
                      uint16_t *block_size, bool *writable)
 {
-    FIL *fp = lun_file(lun);
-    if (!fp || !block_count || !block_size || !writable)
+    if (!lun_bound(lun) || !block_count || !block_size || !writable)
         return false;
 
+    if (usb_disk.is_sd) {
+        *block_size = USBMSC_BLOCK_DISK;
+        *block_count = usb_disk.sd_sectors;
+        *writable = !disk_raw_sd_readonly();
+        return *block_count != 0;
+    }
+
+    FIL *fp = usb_disk.fp;
     FSIZE_t bytes = f_size(fp);
     if (bytes < usb_disk.block_size)
         return false;
@@ -67,13 +98,16 @@ static bool lun_info(uint8_t lun, uint32_t *block_count,
 
 static bool lun_present(uint8_t lun)
 {
-    return lun_file(lun) != NULL;
+    return lun_bound(lun);
 }
 
 static bool lun_readonly(uint8_t lun)
 {
-    FIL *fp = lun_file(lun);
-    return fp && !(fp->flag & FA_WRITE);
+    if (!lun_bound(lun))
+        return false;
+    if (usb_disk.is_sd)
+        return disk_raw_sd_readonly();
+    return !(usb_disk.fp->flag & FA_WRITE);
 }
 
 static bool lun_seek(uint8_t lun, uint32_t lba, uint32_t offset,
@@ -167,13 +201,17 @@ void usbmsc_device_shutdown(void)
 {
     tud_disconnect();
 
-    if (usb_disk.fp && usb_disk.fp->obj.fs) {
+    if (usb_disk.is_sd) {
+        (void)disk_raw_sd_sync();
+    } else if (usb_disk.fp && usb_disk.fp->obj.fs) {
         if (usb_disk.fp->flag & FA_WRITE)
             (void)f_sync(usb_disk.fp);
         (void)f_close(usb_disk.fp);
     }
 
     usb_disk.fp = NULL;
+    usb_disk.is_sd = false;
+    usb_disk.sd_sectors = 0;
 }
 
 uint8_t const *tud_descriptor_device_cb(void)
@@ -248,7 +286,8 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
     memcpy(vendor_id, "MURM", 4);
     memset(product_id, ' ', 16);
     if (lun == 0)
-        memcpy(product_id, "disk_a", 6);
+        memcpy(product_id, usb_disk.is_sd ? "sd_card" : "disk_a",
+               usb_disk.is_sd ? 7 : 6);
     memcpy(product_rev, "1.0 ", 4);
 }
 
@@ -313,6 +352,17 @@ int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
     FIL *fp;
     UINT done = 0;
 
+    if (usb_disk.is_sd && lun == 0) {
+        /* TinyUSB reads a whole block per call, so offset is 0 and bufsize is a
+           512-multiple. */
+        if (offset != 0 || (bufsize % USBMSC_BLOCK_DISK) != 0 ||
+            !disk_raw_sd_read(lba, buffer, bufsize / USBMSC_BLOCK_DISK)) {
+            tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x11, 0x00);
+            return -1;
+        }
+        return (int32_t)bufsize;
+    }
+
     if (!lun_seek(lun, lba, offset, bufsize, &fp) ||
         f_read(fp, buffer, (UINT)bufsize, &done) != FR_OK ||
         done != (UINT)bufsize) {
@@ -332,6 +382,15 @@ int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
     if (lun_readonly(lun)) {
         tud_msc_set_sense(lun, SCSI_SENSE_DATA_PROTECT, 0x27, 0x00);
         return -1;
+    }
+
+    if (usb_disk.is_sd && lun == 0) {
+        if (offset != 0 || (bufsize % USBMSC_BLOCK_DISK) != 0 ||
+            !disk_raw_sd_write(lba, buffer, bufsize / USBMSC_BLOCK_DISK)) {
+            tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x02);
+            return -1;
+        }
+        return (int32_t)bufsize;
     }
 
     if (!lun_seek(lun, lba, offset, bufsize, &fp) ||

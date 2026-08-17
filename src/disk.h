@@ -44,6 +44,15 @@ typedef struct {
 
 void disk_set_raw_sd_hdd(uint8_t enabled);
 uint8_t disk_raw_sd_hdd_enabled(void);
+
+/* Whole-SD-card raw sector access for the USB MSC fallback (used when no
+   floppy/ATA image is attached). Only usable while the SD raw HDD option is
+   enabled (disk_set_raw_sd_hdd). Sizes/LBA are in 512-byte sectors. */
+uint32_t disk_raw_sd_sectors(void);
+bool     disk_raw_sd_readonly(void);
+bool     disk_raw_sd_read(uint32_t lba, void *buf, uint32_t count);
+bool     disk_raw_sd_write(uint32_t lba, const void *buf, uint32_t count);
+bool     disk_raw_sd_sync(void);
 uint8_t bios_hdd_count(void);
 bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info);
 bool bios_hdd_read(uint8_t bios_index, uint32_t lba, void *buf, uint16_t count);

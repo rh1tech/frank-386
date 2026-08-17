@@ -410,6 +410,7 @@ COUNT FreeProcessMem(UWORD ps)
 {
   seg pseg;
   mcb *p;
+  COUNT rc = SUCCESS;
   BYTE oldumbstate = LoL->uppermem_link & 1;
 
   /* link in upper memory too, so blocks a terminating process owns
@@ -423,7 +424,10 @@ COUNT FreeProcessMem(UWORD ps)
     p = para2far(pseg);
 
     if (!mcbValid(p))
-      return DE_MCBDESTRY;
+    {
+      rc = DE_MCBDESTRY;
+      break;
+    }
 
     if (p->m_psp == ps)
       DosMemFree(pseg);
@@ -435,13 +439,19 @@ COUNT FreeProcessMem(UWORD ps)
     /* A valid DOS MCB chain is strictly increasing.  A wrapped/backward
        link can otherwise make process teardown spin forever. */
     if (next <= pseg)
-      return DE_MCBDESTRY;
+    {
+      rc = DE_MCBDESTRY;
+      break;
+    }
     pseg = next;
   }
 
+  /* Restoring the caller's UMB-link state is part of this operation even
+     when the chain is found damaged.  Leaving it linked on an error turns
+     one corrupt teardown into persistent global DOS memory-state damage. */
   DosUmbLink(oldumbstate);
 
-  return SUCCESS;
+  return rc;
 }
 
 /*

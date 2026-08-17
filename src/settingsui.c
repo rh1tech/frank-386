@@ -33,7 +33,6 @@ typedef enum {
     SETTING_CPU,
     SETTING_FPU,
     SETTING_REDIRECTOR,
-    SETTING_RAW_SD_HDD,
     SETTING_PCSPEAKER,
     SETTING_ADLIB,
     SETTING_SOUNDBLASTER,
@@ -45,7 +44,6 @@ typedef enum {
     SETTING_NES_MOUSE,
     SETTING_NES_JOYSTICK,
     SETTING_USB_JOYSTICK,
-    SETTING_USB_MODE,
     SETTING_MOUSE_INVERT_Y,
     SETTING_CPU_FREQ,
     SETTING_VOLTAGE,
@@ -104,9 +102,9 @@ static bool restart_requested = false;
 static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
-static int orig_mem, orig_cpu, orig_fpu, orig_redirector, orig_raw_sd_hdd;
+static int orig_mem, orig_cpu, orig_fpu, orig_redirector;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
-static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y, orig_usb_mode;
+static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y;
 
 // UI dimensions
 #define MENU_X      10
@@ -135,7 +133,6 @@ void settingsui_open(void) {
     orig_cpu = config_get_cpu_gen();
     orig_fpu = config_get_fpu();
     orig_redirector = config_get_redirector();
-    orig_raw_sd_hdd = config_get_raw_sd_hdd();
     orig_pcspeaker = config_get_pcspeaker();
     orig_adlib = config_get_adlib();
     orig_soundblaster = config_get_soundblaster();
@@ -152,7 +149,6 @@ void settingsui_open(void) {
     orig_volume = audio_get_volume();
     orig_voltage = config_get_voltage();
     orig_mouse_invert_y = config_get_mouse_invert_y();
-    orig_usb_mode = config_get_usb_mode();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
@@ -169,13 +165,11 @@ void settingsui_close(void) {
         config_set_cpu_gen(orig_cpu);
         config_set_fpu(orig_fpu);
         config_set_redirector(orig_redirector);
-        config_set_raw_sd_hdd(orig_raw_sd_hdd);
         config_set_cpu_freq(orig_cpu_freq);
         config_set_psram_freq(orig_psram_freq);
         config_set_flash_freq(orig_flash_freq);
         config_set_voltage(orig_voltage);
         config_set_mouse_invert_y(orig_mouse_invert_y);
-        config_set_usb_mode(orig_usb_mode);
         audio_set_volume(orig_volume);
         config_clear_changes();
     }
@@ -240,10 +234,6 @@ static void cycle_option(int direction) {
             config_set_redirector(config_get_redirector() ? 0 : 1);
             break;
 
-        case SETTING_RAW_SD_HDD:
-            config_set_raw_sd_hdd(config_get_raw_sd_hdd() ? 0 : 1);
-            break;
-
         case SETTING_PCSPEAKER:
             config_set_pcspeaker(config_get_pcspeaker() ? 0 : 1);
             break;
@@ -296,11 +286,6 @@ static void cycle_option(int direction) {
             /* Not exclusive with the NES pad: both feed the same
              * emulated stick, so either can drive it. */
             config_set_usb_joystick(config_get_usb_joystick() ? 0 : 1);
-            break;
-
-        case SETTING_USB_MODE:
-            config_set_usb_mode(config_get_usb_mode() == USB_MODE_DEVICE
-                                ? USB_MODE_HOST : USB_MODE_DEVICE);
             break;
 
         case SETTING_MOUSE_INVERT_Y:
@@ -359,7 +344,6 @@ static void draw_settings_menu(void) {
         "CPU Type:",
         "FPU (387):",
         "SD cart as H drive:",
-        "SD card as raw drive:",
         "PC Speaker:",
         "AdLib:",
         "SoundBlaster:",
@@ -371,7 +355,6 @@ static void draw_settings_menu(void) {
         "NES Mouse:",
         "NES Joystick:",
         "USB Joystick:",
-        "USB:",
         "Invert Mouse Y:",
         "RP2350 Freq:",
         "CPU Voltage:",
@@ -411,9 +394,6 @@ static void draw_settings_menu(void) {
             case SETTING_REDIRECTOR:
                 snprintf(value, sizeof(value), "< %s >", config_get_redirector() ? "Enabled" : "Disabled");
                 break;
-            case SETTING_RAW_SD_HDD:
-                snprintf(value, sizeof(value), "< %s >", config_get_raw_sd_hdd() ? "Enabled" : "Disabled");
-                break;
             case SETTING_PCSPEAKER:
                 snprintf(value, sizeof(value), "< %s >", config_get_pcspeaker() ? "Enabled" : "Disabled");
                 break;
@@ -446,10 +426,6 @@ static void draw_settings_menu(void) {
                 break;
             case SETTING_USB_JOYSTICK:
                 snprintf(value, sizeof(value), "< %s >", config_get_usb_joystick() ? "Enabled" : "Disabled");
-                break;
-            case SETTING_USB_MODE:
-                snprintf(value, sizeof(value), "< %s >",
-                         config_get_usb_mode() == USB_MODE_DEVICE ? "DEVICE" : "HOST");
                 break;
             case SETTING_MOUSE_INVERT_Y:
                 snprintf(value, sizeof(value), "< %s >", config_get_mouse_invert_y() ? "Yes" : "No");

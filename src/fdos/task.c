@@ -1348,7 +1348,16 @@ static void arm_elf_native_stack_release(uintptr_t bottom,
 static int arm_native_reserve_dos_stack(ULONG stack_size,
                                         UWORD *out_mcb, UWORD *out_seg)
 {
-  UWORD paras = (UWORD)((stack_size + 15u) >> 4);
+  UWORD paras;
+
+  /* Guest SS:SP is 16-bit.  64 KiB is representable with SP=0000h
+     (the first push wraps to FFFEh), but anything larger would make the
+     paragraph count truncate below while only a 64 KiB stack window is
+     addressable by the child. */
+  if (stack_size == 0 || stack_size > 0x10000ul)
+    return DE_INVLDFMT;
+
+  paras = (UWORD)((stack_size + 15u) >> 4);
   UWORD mcb_seg = 0;
   UWORD largest = 0;
   UBYTE old_umb_link = LoL->uppermem_link;
@@ -1446,7 +1455,7 @@ static int arm_elf_preflight(arm_elf_load_meta *meta)
   native_size = arm_elf_align_up(native_size, 8u);
   dos_size = arm_elf_align_up(dos_size, 16u);
   if (native_size == 0xfffffffful || dos_size == 0xfffffffful ||
-      native_size == 0 || dos_size == 0) {
+      native_size == 0 || dos_size == 0 || dos_size > 0x10000ul) {
     dos_printf("ARM ELF: invalid process stack requirements\r\n");
     return DE_INVLDFMT;
   }
@@ -1876,7 +1885,8 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   native_stack_size = arm_elf_align_up(native_stack_size, 8u);
   dos_stack_size = arm_elf_align_up(dos_stack_size, 16u);
   if (native_stack_size == 0xfffffffful || dos_stack_size == 0xfffffffful ||
-      native_stack_size == 0 || dos_stack_size == 0)
+      native_stack_size == 0 || dos_stack_size == 0 ||
+      dos_stack_size > 0x10000ul)
     return arm_ez_reject(DE_INVLDFMT, "invalid EZ stack requirements");
 
   /* First calculate the historical all-in-DOS layout as a candidate. */
