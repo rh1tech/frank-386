@@ -488,6 +488,8 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     # FreeDOS FAT32 support
     WITHFAT32=1
     WITHLFNAPI=1
+    #FDOS_BUFFER_NOCACHE=1
+    #FDOS_BUFFER_NOCACHE_UNIT=2
 
     # Board configuration
     BOARD_${BOARD}

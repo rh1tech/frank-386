@@ -380,7 +380,23 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 
   if (!(bp->b_flag & BFR_UNCACHE))
   {
+#ifdef FDOS_BUFFER_NOCACHE
+    /* Diagnostic: force a re-read of every clean read hit. Dirty buffers
+       (an un-flushed write must not be dropped) and overwrite requests
+       (caller fills the whole block) stay on the fast path. Falling
+       through: flush1() is a no-op on a clean buffer, and the
+       dskxfer(...,DSKREAD) below refills THIS buffer exactly as on a
+       genuine cache miss. */
+    if (((bp->b_flag & BFR_DIRTY) || overwrite)
+#ifdef FDOS_BUFFER_NOCACHE_UNIT
+        || dsk != (FDOS_BUFFER_NOCACHE_UNIT)
+#endif
+       )
+      return bp;
+    /* else fall through to the miss/refill path below */
+#else
     return bp;
+#endif
   }
 
   /* The block we need is not in a buffer, we must make a buffer  */

@@ -122,7 +122,8 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
 #define DOS_API_VERSION         13
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
-#define ARM_ELF_DEFAULT_DOS_STACK_SIZE    256u
+#define ARM_ELF_MIN_DOS_STACK_SIZE        4096u
+#define ARM_ELF_DEFAULT_DOS_STACK_SIZE    ARM_ELF_MIN_DOS_STACK_SIZE
 #define ARM_ELF_ARGV_SLOTS      66u
 #define ARM_ELF_ARG_TEXT_SIZE   (NAMEMAX + sizeof(((CommandTail *)0)->ctBuffer) + 2u)
 #define ARM_ELF_ARG_AREA_SIZE   (ARM_ELF_ARGV_SLOTS * sizeof(ULONG) + ARM_ELF_ARG_TEXT_SIZE)
@@ -1454,6 +1455,8 @@ static int arm_elf_preflight(arm_elf_load_meta *meta)
 
   native_size = arm_elf_align_up(native_size, 8u);
   dos_size = arm_elf_align_up(dos_size, 16u);
+  if (dos_size != 0xfffffffful && dos_size < ARM_ELF_MIN_DOS_STACK_SIZE)
+    dos_size = ARM_ELF_MIN_DOS_STACK_SIZE;
   if (native_size == 0xfffffffful || dos_size == 0xfffffffful ||
       native_size == 0 || dos_size == 0 || dos_size > 0x10000ul) {
     dos_printf("ARM ELF: invalid process stack requirements\r\n");
@@ -1884,6 +1887,9 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
                  : ARM_ELF_DEFAULT_DOS_STACK_SIZE;
   native_stack_size = arm_elf_align_up(native_stack_size, 8u);
   dos_stack_size = arm_elf_align_up(dos_stack_size, 16u);
+  if (dos_stack_size != 0xfffffffful &&
+      dos_stack_size < ARM_ELF_MIN_DOS_STACK_SIZE)
+    dos_stack_size = ARM_ELF_MIN_DOS_STACK_SIZE;
   if (native_stack_size == 0xfffffffful || dos_stack_size == 0xfffffffful ||
       native_stack_size == 0 || dos_stack_size == 0 ||
       dos_stack_size > 0x10000ul)
