@@ -389,16 +389,20 @@ enum
     NATIVE_SEG_GS = 5
 };
 
-int int386(int intnum, const union REGS *inregs, union REGS *outregs)
+static int int386_core(int intnum, const union REGS *inregs, union REGS *outregs,
+                       bool preserve_ss)
 {
     PC *pc = get_PC();
     CPU *cpu = pc->cpu;
 
     gprx_t saved_gprx[8];
     x86_flags_t saved_flags = cpu->flags;
+    uint16_t saved_ss = 0;
 
     for (int i = 0; i < 8; ++i)
         saved_gprx[i] = cpu->gprx[i];
+    if (preserve_ss)
+        saved_ss = cpu->ext_accessors->get_seg16(cpu, NATIVE_SEG_SS);
 
     cpu->gprx[regax].r32 = inregs->x.eax;
     cpu->gprx[regbx].r32 = inregs->x.ebx;
@@ -419,9 +423,16 @@ int int386(int intnum, const union REGS *inregs, union REGS *outregs)
 
     for (int i = 0; i < 8; ++i)
         cpu->gprx[i] = saved_gprx[i];
+    if (preserve_ss)
+        cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_SS, saved_ss);
     cpu->flags = saved_flags;
 
     return (int)outregs->x.eax;
+}
+
+int int386(int intnum, const union REGS *inregs, union REGS *outregs)
+{
+    return int386_core(intnum, inregs, outregs, true);
 }
 
 void segread(struct SREGS *segregs)
@@ -456,7 +467,7 @@ int int386x(int intnum, const union REGS *inregs, union REGS *outregs,
     cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_FS, segregs->fs);
     cpu->ext_accessors->set_seg16(cpu, NATIVE_SEG_GS, segregs->gs);
 
-    rc = int386(intnum, inregs, outregs);
+    rc = int386_core(intnum, inregs, outregs, false);
 
     /* Return the segment state produced by the interrupt to the caller. */
     segread(segregs);
