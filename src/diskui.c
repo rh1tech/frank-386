@@ -37,9 +37,9 @@ static const DriveInfo drive_table[DRIVE_TOTAL] = {
     { "ATA0-1", "ATA Disk" },  // DRIVE_ATA0_1
     { "ATA1-0", "ATA Disk" },  // DRIVE_ATA1_0
     { "ATA1-1", "ATA Disk" },  // DRIVE_ATA1_1
-    { "SD-CARD", "Via BIOS only" },  // DRIVE_SD_CARD  (On/Off toggle)
-    { "USB:",   ""         },  // DRIVE_USB_MODE (HOST/DEVICE toggle)
-    { "BIOS",   "System"   },  // DRIVE_BIOS
+    { "SD-CARD", "Via BIOS  [only]" },  // DRIVE_SD_CARD  (On/Off toggle)
+    { "  USB",   " mode"         },  // DRIVE_USB_MODE (HOST/DEVICE toggle)
+    { " BIOS",   "System"   },  // DRIVE_BIOS
 };
 
 // File listing (reduced size to save SRAM)
