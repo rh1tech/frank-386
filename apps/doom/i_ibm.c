@@ -26,9 +26,7 @@
 #endif
 #include "DoomDef.h"
 #ifdef ELF_MODE
-#include "psram.h"
 #include "i_native_memory.h"
-#include "native_process.h"
 #include "dos_mem.h"
 #endif
 #include "R_local.h"
@@ -1705,23 +1703,29 @@ int I_GetHeapSize (void)
 byte *I_ZoneBase (int *size)
 {
 #ifdef ELF_MODE
-    uintptr_t zone_start = (uintptr_t)PSRAM_BASE_ADDR + NATIVE_ZONE_OFFSET;
-    uintptr_t zone_end = native_dos_app_psram_end();
+    size_t largest;
+    byte *zone;
 
-    /*
-     * The process loader owns the upper PSRAM reservation used by its native
-     * stack.  DOOM only consumes the range explicitly assigned to the
-     * application; it no longer assumes that psram_size() means "all mine".
-     */
-    if (zone_end <= zone_start)
-        I_Error("Insufficient application PSRAM!");
+    /* Reserve the software screens first so the zone can consume the largest
+       remaining contiguous block without knowing anything about PSRAM layout. */
+    if (!native_screens_base)
+    {
+        native_screens_base = malloc(NATIVE_SCREENS_SIZE);
+        if (!native_screens_base)
+            I_Error("Insufficient memory for DOOM screens!");
+    }
 
-    *size = (int)(zone_end - zone_start);
-    if (*size < 0x180000)
-        I_Error("Insufficient PSRAM for DOOM zone!");
+    largest = malloc_largest_block();
+    if (largest < 0x180000u)
+        I_Error("Insufficient memory for DOOM zone!");
 
-    printf("PSRAM memory: %d (%dK) allocated for zone\n", *size, (*size) >> 10);
-    return (byte *)(uintptr_t)(PSRAM_BASE_ADDR + NATIVE_ZONE_OFFSET);
+    zone = (byte *)malloc(largest);
+    if (!zone)
+        I_Error("Unable to allocate DOOM zone!");
+
+    *size = (int)largest;
+    printf("Native memory: 0x%x allocated for zone\n", *size);
+    return zone;
 #else
 	int             meminfo[32];
 	int             heap;

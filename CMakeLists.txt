@@ -483,13 +483,14 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     QUIET=1
     #PDB_DEBUG=1
     #INT21_DIAG=1
-    DIAG=1
+    #DIAG=1
     #XMS_DEBUG=1
     # FreeDOS FAT32 support
     WITHFAT32=1
     WITHLFNAPI=1
     #FDOS_BUFFER_NOCACHE=1
     #FDOS_BUFFER_NOCACHE_UNIT=2
+    #FDOS_FAT_DIAG=1
 
     # Board configuration
     BOARD_${BOARD}

@@ -120,7 +120,7 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define DOS_API_VERSION         13
+#define DOS_API_VERSION         16
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_MIN_DOS_STACK_SIZE        4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    ARM_ELF_MIN_DOS_STACK_SIZE
@@ -1942,12 +1942,12 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     else if (low_required_paras != 0 && low_largest >= low_required_paras)
       image_in_low = TRUE;
   }
-
+#if DIAG
   dos_printf("ARM EZ: file=%lu mem=%lu stack=%lu LOW need=%u largest=%u -> %s\r\n",
              header.image_file_size, header.image_mem_size, dos_stack_size,
              (unsigned)low_required_paras, (unsigned)low_largest,
              image_in_low ? "LOW" : "PSRAM");
-
+#endif
   if (rc == SUCCESS && image_in_low) {
     meta_off = low_meta_off;
     cursor = arm_elf_align_up(meta_off + sizeof(*meta), 4u);
@@ -2015,10 +2015,12 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     }
     psram_image_addr =
         (uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET;
+#if DIAG
     dos_printf("ARM EZ: PSRAM image=%08lx end=%08lx available=%lu need=%lu\r\n",
                (ULONG)psram_image_addr, (ULONG)psram_end,
                (ULONG)(psram_end - psram_image_addr),
                header.image_mem_size);
+#endif
     if (psram_image_addr < EZ_IMAGE_RVA ||
         header.image_mem_size > (ULONG)(psram_end - psram_image_addr)) {
       rc = arm_ez_reject(DE_NOMEM, "EZ image does not fit application PSRAM");

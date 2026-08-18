@@ -316,6 +316,26 @@ COUNT DosMemFree(UWORD para)
 }
 
 /*
+ * Return the usable size, in bytes, of an allocated DOS block.  The input
+ * is the data segment returned by INT 21h/AH=48h.  Native applications use
+ * this only to implement realloc() without storing allocator metadata in the
+ * application's memory.
+ */
+ULONG DosMemBlockSize(UWORD para)
+{
+  mcb *p;
+
+  if (!para)
+    return 0;
+
+  p = para2far((seg)(para - 1));
+  if (!mcbValid(p) || p->m_psp != internal_data->cu_psp)
+    return 0;
+
+  return (ULONG)p->m_size << 4;
+}
+
+/*
  * Resize an allocated memory block. para is the segment of the *data*
  * portion of the block (para - 1 is the MCB itself) - this matches
  * INT 21h AH=4Ah's BX=segment convention directly.

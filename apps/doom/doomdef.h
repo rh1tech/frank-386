@@ -197,8 +197,8 @@ typedef struct
 #else
 typedef struct
 {
-	char		forwardmove;		// *2048 for move
-	char		sidemove;			// *2048 for move
+	signed char	forwardmove;		// *2048 for move
+	signed char	sidemove;			// *2048 for move
 	short		angleturn;			// <<16 for angle delta
 	short		consistancy;		// checks for net game
 	byte		chatchar;

@@ -13,6 +13,8 @@ extern void arm_elf_process_exit(int status);
 extern uint32_t arm_elf_yield(void);
 extern bool terminate_requested(void);
 extern const void *arm_ez_get_process_info(void);
+extern uint32_t DosMemBlockSize(uint16_t para);
+extern int DosMemLargest(uint16_t *size);
 
 /*
  * Native-ELF diagnostic latch.
@@ -227,6 +229,63 @@ static void *__not_in_flash_func(dos_api_memcpy)(void *dst,
     return dst;
 }
 
+static uint32_t dos_api_largest_free_block(void)
+{
+    uint16_t paragraphs = 0;
+
+    if (DosMemLargest(&paragraphs) != 0)
+        return 0;
+    return (uint32_t)paragraphs << 4;
+}
+
+static void *__not_in_flash_func(dos_api_memmove)(void *dst,
+                                                   const void *src,
+                                                   size_t len)
+{
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    uintptr_t da = (uintptr_t)d;
+    uintptr_t sa = (uintptr_t)s;
+
+    if (len == 0u || da == sa)
+        return dst;
+
+    /* Forward copy is safe when the ranges do not overlap, or when the
+       destination starts below the source. Reuse the SRAM memcpy path. */
+    if (da < sa || da - sa >= len)
+        return dos_api_memcpy(dst, src, len);
+
+    /* Overlap with dst inside src: copy backwards. Word transfers are safe
+       only when source and destination have the same alignment. */
+    d += len;
+    s += len;
+
+    if ((((uintptr_t)d ^ (uintptr_t)s) & 3u) == 0u) {
+        while (len && ((uintptr_t)d & 3u)) {
+            *--d = *--s;
+            --len;
+        }
+
+        if (len >= 4u) {
+            uint32_t *d32 = (uint32_t *)d;
+            const uint32_t *s32 = (const uint32_t *)s;
+            size_t n32 = len >> 2;
+
+            while (n32--)
+                *--d32 = *--s32;
+
+            d = (uint8_t *)d32;
+            s = (const uint8_t *)s32;
+            len &= 3u;
+        }
+    }
+
+    while (len--)
+        *--d = *--s;
+
+    return dst;
+}
+
 static int __not_in_flash_func(dos_api_memcmp)(const void *a,
                                                 const void *b,
                                                 size_t len)
@@ -376,5 +435,8 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)dos_api_memcmp, /* 105: SRAM native-app memcmp */
     (unsigned long)terminate_requested, /* 106: native process termination state */
     (unsigned long)arm_ez_get_process_info, /* 107: current EZ process info */
+    (unsigned long)DosMemBlockSize, /* 108: DOS block size by data segment */
+    (unsigned long)dos_api_memmove, /* 109: SRAM native-app memmove */
+    (unsigned long)dos_api_largest_free_block, /* 110: largest free DOS block, bytes */
     0
 };

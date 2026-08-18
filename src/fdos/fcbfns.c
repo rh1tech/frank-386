@@ -590,7 +590,9 @@ UBYTE FcbClose(dos_far_ptr lpXfcb)
 /* close all files the current process opened by FCBs */
 VOID FcbCloseAll(void)
 {
+#if DIAG
   extern volatile uint32_t dos_diag_kernel_code;
+#endif
   dos_far_ptr block = LoL->sfthead;
   COUNT idx = 0;
   unsigned blocks = 0;
@@ -608,29 +610,38 @@ VOID FcbCloseAll(void)
 
     if (++blocks > 64u)
     {
+#if DIAG
       dos_diag_kernel_code = 0x63fe0000u | (blocks & 0xffffu);
+#endif
       return;
     }
 
     sp = (sfttbl *)ARM_PTR(block);
     if (sp->sftt_count < 0 || sp->sftt_count > SFTMAX)
     {
+#if DIAG
       dos_diag_kernel_code =
           0x63fd0000u | ((unsigned)sp->sftt_count & 0xffffu);
+#endif
       return;
     }
 
+#if DIAG
     dos_diag_kernel_code =
         0x63000000u | ((blocks & 0xffu) << 16) | ((unsigned)idx & 0xffffu);
-
+#endif
     for (j = 0; j < sp->sftt_count; ++j, ++idx)
     {
       sft *sftp = &sp->sftt_table[j];
       if ((sftp->sft_mode & O_FCB) && sftp->sft_psp == internal_data->cu_psp)
       {
+#if DIAG
         dos_diag_kernel_code = 0x63100000u | ((unsigned)idx & 0xffffu);
+#endif
         DosCloseSft(idx, FALSE);
+#if DIAG
         dos_diag_kernel_code = 0x63200000u | ((unsigned)idx & 0xffffu);
+#endif
       }
     }
 
@@ -638,14 +649,17 @@ VOID FcbCloseAll(void)
     if (!far_is_end(next) &&
         FP_SEG(next) == FP_SEG(block) && FP_OFF(next) == FP_OFF(block))
     {
+#if DIAG
       dos_diag_kernel_code =
           0x63fc0000u | ((unsigned)FP_OFF(block) & 0xffffu);
+#endif
       return;
     }
     block = next;
   }
-
+#if DIAG
   dos_diag_kernel_code = 0x63ff0000u | ((unsigned)idx & 0xffffu);
+#endif
 }
 
 UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)

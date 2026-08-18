@@ -1,6 +1,6 @@
 #ifndef __NATIVE_DOS_API_VERSION_H__
 #define __NATIVE_DOS_API_VERSION_H__
 
-#define DOS_API_VERSION (13)
+#define DOS_API_VERSION (16)
 
 #endif /* __NATIVE_DOS_API_VERSION_H__ */

@@ -17,6 +17,7 @@
 #include "sound_hw.h"
 #include "dos_yield.h"
 #include "crt0.h"
+#include "native_process.h"
 #include <stdarg.h>
 
 
@@ -24,6 +25,36 @@ const native_ez_process_info *native_ez_get_process_info(void)
 {
     typedef const native_ez_process_info *(*fn_ptr_t)(void);
     return ((fn_ptr_t)_sys_table_ptrs[107])();
+}
+
+__attribute__((weak))
+native_dos_process_requirements *__native_dos_process_requirements(void)
+{
+    return 0;
+}
+
+uintptr_t native_dos_app_psram_begin(void)
+{
+    const native_ez_process_info *ez = native_ez_get_process_info();
+    native_dos_process_requirements *r;
+
+    if (ez != 0)
+        return (uintptr_t)ez->app_psram_begin;
+    r = __native_dos_process_requirements();
+    return r != 0 && r->struct_size >= NATIVE_DOS_PROCESS_REQUIREMENTS_V3_SIZE
+        ? (uintptr_t)r->app_psram_begin : 0;
+}
+
+uintptr_t native_dos_app_psram_end(void)
+{
+    const native_ez_process_info *ez = native_ez_get_process_info();
+    native_dos_process_requirements *r;
+
+    if (ez != 0)
+        return (uintptr_t)ez->app_psram_end;
+    r = __native_dos_process_requirements();
+    return r != 0 && r->struct_size >= NATIVE_DOS_PROCESS_REQUIREMENTS_V3_SIZE
+        ? (uintptr_t)r->app_psram_end : 0;
 }
 
 
@@ -312,6 +343,12 @@ void *memset(void *dst, int value, size_t n)
     return ((fn_ptr_t)_sys_table_ptrs[104])(dst, value, n);
 }
 
+void *memmove(void *dst, const void *src, size_t n)
+{
+    typedef void *(*fn_ptr_t)(void *, const void *, size_t);
+    return ((fn_ptr_t)_sys_table_ptrs[109])(dst, src, n);
+}
+
 int memcmp(const void *a, const void *b, size_t n)
 {
     typedef int (*fn_ptr_t)(const void *, const void *, size_t);
@@ -554,8 +591,6 @@ void dos_free_low(void *ptr)
     int386x(0x21, &regs, &regs, &sregs);
 }
 
-#define NATIVE_DOS_ALLOC_MAGIC 0x4d414c4cu
-
 static dos_malloc_policy_t native_dos_malloc_policy =
     DOS_MALLOC_POLICY_RETURN_NULL;
 
@@ -592,15 +627,6 @@ static void *native_dos_malloc_failed(size_t size)
     return NULL;
 }
 
-typedef struct
-{
-    uint32_t magic;
-    uint32_t size;
-    uint16_t segment;
-    uint16_t paragraphs;
-    uint32_t reserved;
-} native_dos_alloc_header_t;
-
 static int native_int21_with_es(uint16_t es, union REGS *regs)
 {
     CPU *cpu = get_PC()->cpu;
@@ -613,59 +639,387 @@ static int native_int21_with_es(uint16_t es, union REGS *regs)
     return rc;
 }
 
-void *malloc(size_t size)
+static uint32_t native_dos_block_size(uint16_t segment)
 {
-    union REGS regs = {0};
-    uint32_t total;
-    uint32_t paragraphs;
-    uint16_t segment;
-    native_dos_alloc_header_t *header;
+    typedef uint32_t (*fn_ptr_t)(uint16_t);
+    return ((fn_ptr_t)_sys_table_ptrs[108])(segment);
+}
+
+static uint32_t native_dos_largest_free_block(void)
+{
+    typedef uint32_t (*fn_ptr_t)(void);
+    return ((fn_ptr_t)_sys_table_ptrs[110])();
+}
+
+static int native_dos_size_to_paragraphs(size_t size, uint16_t *paragraphs)
+{
+    uint32_t value;
 
     if (size == 0)
         size = 1;
+    if (size > 0x000ffff0u)
+        return 0;
 
-    if (size > UINT32_MAX - sizeof(*header))
-        return native_dos_malloc_failed(size);
+    value = ((uint32_t)size + 15u) >> 4;
+    if (value == 0 || value > 0xffffu)
+        return 0;
 
-    total = (uint32_t)size + (uint32_t)sizeof(*header);
-    paragraphs = (total + 15u) >> 4;
-    if (paragraphs == 0 || paragraphs > 0xffffu)
-        return native_dos_malloc_failed(size);
+    *paragraphs = (uint16_t)value;
+    return 1;
+}
+
+/*
+ * Native process PSRAM heap.
+ *
+ * The loader publishes a private interval [app_psram_begin, app_psram_end).
+ * Keep a conventional boundary-tag heap entirely inside that interval.  DOS
+ * allocations remain headerless: PSRAM pointers are distinguished from DOS
+ * pointers solely by their address range.
+ */
+#define NATIVE_PSRAM_HEAP_ALIGN       16u
+#define NATIVE_PSRAM_BLOCK_FREE       1u
+#define NATIVE_PSRAM_BLOCK_MAGIC      0x5053524du /* "PSRM" */
+#define NATIVE_PSRAM_MIN_PAYLOAD      16u
+
+typedef struct native_psram_block
+{
+    uint32_t size_flags; /* total block size including this header */
+    uint32_t prev_size;  /* total size of the physically previous block */
+    uint32_t magic;
+    uint32_t reserved;
+} native_psram_block;
+
+_Static_assert(sizeof(native_psram_block) == NATIVE_PSRAM_HEAP_ALIGN,
+               "PSRAM heap header must preserve 16-byte malloc alignment");
+
+static uintptr_t native_psram_heap_begin;
+static uintptr_t native_psram_heap_end;
+static int native_psram_heap_ready;
+
+static uintptr_t native_psram_align_up(uintptr_t value)
+{
+    return (value + (NATIVE_PSRAM_HEAP_ALIGN - 1u)) &
+           ~(uintptr_t)(NATIVE_PSRAM_HEAP_ALIGN - 1u);
+}
+
+static uint32_t native_psram_block_size(const native_psram_block *block)
+{
+    return block->size_flags & ~NATIVE_PSRAM_BLOCK_FREE;
+}
+
+static int native_psram_block_is_free(const native_psram_block *block)
+{
+    return (block->size_flags & NATIVE_PSRAM_BLOCK_FREE) != 0;
+}
+
+static int native_psram_heap_init(void)
+{
+    uintptr_t begin;
+    uintptr_t end;
+    native_psram_block *first;
+
+    if (native_psram_heap_ready)
+        return native_psram_heap_begin != 0;
+
+    native_psram_heap_ready = 1;
+    begin = native_psram_align_up(native_dos_app_psram_begin());
+    end = native_dos_app_psram_end() &
+          ~(uintptr_t)(NATIVE_PSRAM_HEAP_ALIGN - 1u);
+
+    if (begin == 0 || end <= begin ||
+        end - begin < sizeof(native_psram_block) + NATIVE_PSRAM_MIN_PAYLOAD)
+        return 0;
+
+    native_psram_heap_begin = begin;
+    native_psram_heap_end = end;
+
+    first = (native_psram_block *)begin;
+    first->size_flags = (uint32_t)(end - begin) | NATIVE_PSRAM_BLOCK_FREE;
+    first->prev_size = 0;
+    first->magic = NATIVE_PSRAM_BLOCK_MAGIC;
+    first->reserved = 0;
+    return 1;
+}
+
+static int native_psram_owns(const void *ptr)
+{
+    uintptr_t p;
+
+    if (!ptr || !native_psram_heap_init())
+        return 0;
+
+    p = (uintptr_t)ptr;
+    return p >= native_psram_heap_begin + sizeof(native_psram_block) &&
+           p < native_psram_heap_end;
+}
+
+static native_psram_block *native_psram_next(native_psram_block *block)
+{
+    uintptr_t next = (uintptr_t)block + native_psram_block_size(block);
+    return next < native_psram_heap_end ? (native_psram_block *)next : NULL;
+}
+
+static native_psram_block *native_psram_prev(native_psram_block *block)
+{
+    if (block->prev_size == 0)
+        return NULL;
+    if ((uintptr_t)block < native_psram_heap_begin + block->prev_size)
+        return NULL;
+    return (native_psram_block *)((uintptr_t)block - block->prev_size);
+}
+
+static int native_psram_block_valid(const native_psram_block *block)
+{
+    uintptr_t p = (uintptr_t)block;
+    uint32_t size;
+
+    if (p < native_psram_heap_begin || p >= native_psram_heap_end ||
+        block->magic != NATIVE_PSRAM_BLOCK_MAGIC)
+        return 0;
+
+    size = native_psram_block_size(block);
+    return size >= sizeof(native_psram_block) + NATIVE_PSRAM_MIN_PAYLOAD &&
+           (size & (NATIVE_PSRAM_HEAP_ALIGN - 1u)) == 0 &&
+           size <= native_psram_heap_end - p;
+}
+
+static void native_psram_fix_next_prev(native_psram_block *block)
+{
+    native_psram_block *next = native_psram_next(block);
+    if (next)
+        next->prev_size = native_psram_block_size(block);
+}
+
+static void native_psram_split_allocated(native_psram_block *block,
+                                          uint32_t wanted)
+{
+    uint32_t old_size = native_psram_block_size(block);
+    uint32_t remainder = old_size - wanted;
+
+    if (remainder >= sizeof(native_psram_block) + NATIVE_PSRAM_MIN_PAYLOAD)
+    {
+        native_psram_block *tail =
+            (native_psram_block *)((uintptr_t)block + wanted);
+
+        block->size_flags = wanted;
+        tail->size_flags = remainder | NATIVE_PSRAM_BLOCK_FREE;
+        tail->prev_size = wanted;
+        tail->magic = NATIVE_PSRAM_BLOCK_MAGIC;
+        tail->reserved = 0;
+        native_psram_fix_next_prev(tail);
+    }
+    else
+    {
+        block->size_flags = old_size;
+        native_psram_fix_next_prev(block);
+    }
+}
+
+static size_t native_psram_largest_free_payload(void)
+{
+    uintptr_t cursor;
+    size_t largest = 0;
+
+    if (!native_psram_heap_init())
+        return 0;
+
+    for (cursor = native_psram_heap_begin;
+         cursor < native_psram_heap_end; )
+    {
+        native_psram_block *block = (native_psram_block *)cursor;
+        uint32_t total;
+
+        if (!native_psram_block_valid(block))
+            return 0;
+
+        total = native_psram_block_size(block);
+        if (native_psram_block_is_free(block) &&
+            total > sizeof(native_psram_block))
+        {
+            size_t payload = total - sizeof(native_psram_block);
+            if (payload > largest)
+                largest = payload;
+        }
+
+        cursor += total;
+    }
+
+    return largest;
+}
+
+static void *native_psram_malloc(size_t size)
+{
+    native_psram_block *block;
+    uint32_t wanted;
+    uintptr_t cursor;
+
+    if (size == 0)
+        size = 1;
+    if (!native_psram_heap_init() ||
+        size > UINT32_MAX - sizeof(native_psram_block) -
+               (NATIVE_PSRAM_HEAP_ALIGN - 1u))
+        return NULL;
+
+    wanted = (uint32_t)(size + sizeof(native_psram_block) +
+                        (NATIVE_PSRAM_HEAP_ALIGN - 1u)) &
+             ~(NATIVE_PSRAM_HEAP_ALIGN - 1u);
+
+    for (cursor = native_psram_heap_begin;
+         cursor < native_psram_heap_end; )
+    {
+        block = (native_psram_block *)cursor;
+        if (!native_psram_block_valid(block))
+            return NULL;
+
+        if (native_psram_block_is_free(block) &&
+            native_psram_block_size(block) >= wanted)
+        {
+            native_psram_split_allocated(block, wanted);
+            return (void *)(block + 1);
+        }
+        cursor += native_psram_block_size(block);
+    }
+
+    return NULL;
+}
+
+static void native_psram_free(void *ptr)
+{
+    native_psram_block *block;
+    native_psram_block *next;
+    native_psram_block *prev;
+    uint32_t size;
+
+    block = ((native_psram_block *)ptr) - 1;
+    if (!native_psram_block_valid(block) || native_psram_block_is_free(block))
+        return;
+
+    size = native_psram_block_size(block);
+    block->size_flags = size | NATIVE_PSRAM_BLOCK_FREE;
+
+    next = native_psram_next(block);
+    if (next && native_psram_block_valid(next) && native_psram_block_is_free(next))
+    {
+        block->size_flags = (size + native_psram_block_size(next)) |
+                            NATIVE_PSRAM_BLOCK_FREE;
+        size = native_psram_block_size(block);
+        native_psram_fix_next_prev(block);
+    }
+
+    prev = native_psram_prev(block);
+    if (prev && native_psram_block_valid(prev) && native_psram_block_is_free(prev))
+    {
+        prev->size_flags = (native_psram_block_size(prev) + size) |
+                           NATIVE_PSRAM_BLOCK_FREE;
+        native_psram_fix_next_prev(prev);
+    }
+}
+
+static void *native_psram_realloc(void *ptr, size_t size)
+{
+    native_psram_block *block = ((native_psram_block *)ptr) - 1;
+    native_psram_block *next;
+    uint32_t old_total;
+    uint32_t old_payload;
+    uint32_t wanted;
+    void *new_ptr;
+
+    if (!native_psram_block_valid(block) || native_psram_block_is_free(block))
+        return NULL;
+
+    if (size > UINT32_MAX - sizeof(native_psram_block) -
+               (NATIVE_PSRAM_HEAP_ALIGN - 1u))
+        return NULL;
+
+    old_total = native_psram_block_size(block);
+    old_payload = old_total - sizeof(native_psram_block);
+    wanted = (uint32_t)(size + sizeof(native_psram_block) +
+                        (NATIVE_PSRAM_HEAP_ALIGN - 1u)) &
+             ~(NATIVE_PSRAM_HEAP_ALIGN - 1u);
+
+    if (wanted <= old_total)
+    {
+        native_psram_split_allocated(block, wanted);
+        return ptr;
+    }
+
+    next = native_psram_next(block);
+    if (next && native_psram_block_valid(next) && native_psram_block_is_free(next) &&
+        old_total + native_psram_block_size(next) >= wanted)
+    {
+        block->size_flags = old_total + native_psram_block_size(next);
+        native_psram_split_allocated(block, wanted);
+        return ptr;
+    }
+
+    new_ptr = native_psram_malloc(size);
+    if (!new_ptr)
+        return NULL;
+
+    memcpy(new_ptr, ptr, old_payload < size ? old_payload : size);
+    native_psram_free(ptr);
+    return new_ptr;
+}
+
+static void *native_dos_malloc_raw(size_t size)
+{
+    union REGS regs = {0};
+    uint16_t paragraphs;
+
+    if (!native_dos_size_to_paragraphs(size, &paragraphs))
+        return NULL;
 
     regs.h.ah = 0x48;
-    regs.w.bx = (uint16_t)paragraphs;
+    regs.w.bx = paragraphs;
     int386(0x21, &regs, &regs);
     if (regs.x.cflag)
-        return native_dos_malloc_failed(size);
+        return NULL;
 
-    segment = regs.w.ax;
-    header = (native_dos_alloc_header_t *)dos_guest_far_ptr(segment, 0);
-    header->magic = NATIVE_DOS_ALLOC_MAGIC;
-    header->size = (uint32_t)size;
-    header->segment = segment;
-    header->paragraphs = (uint16_t)paragraphs;
-    header->reserved = 0;
+    return dos_guest_far_ptr(regs.w.ax, 0);
+}
 
-    return (void *)(header + 1);
+size_t malloc_largest_block(void)
+{
+    size_t psram_largest = native_psram_largest_free_payload();
+    size_t dos_largest = (size_t)native_dos_largest_free_block();
+
+    return psram_largest > dos_largest ? psram_largest : dos_largest;
+}
+
+void *malloc(size_t size)
+{
+    void *ptr = native_psram_malloc(size);
+
+    if (ptr)
+        return ptr;
+
+    ptr = native_dos_malloc_raw(size);
+    if (ptr)
+        return ptr;
+
+    return native_dos_malloc_failed(size);
 }
 
 void free(void *ptr)
 {
-    native_dos_alloc_header_t *header;
     union REGS regs = {0};
+    uint16_t segment;
 
     if (!ptr)
         return;
 
-    header = ((native_dos_alloc_header_t *)ptr) - 1;
-    if (header->magic != NATIVE_DOS_ALLOC_MAGIC)
+    if (native_psram_owns(ptr))
+    {
+        native_psram_free(ptr);
+        return;
+    }
+
+    segment = dos_ptr_segment(ptr);
+    if (segment == 0)
         return;
 
     regs.h.ah = 0x49;
-    native_int21_with_es(header->segment, &regs);
-
-    if (!regs.x.cflag)
-        header->magic = 0;
+    native_int21_with_es(segment, &regs);
 }
 
 void *calloc(size_t count, size_t size)
@@ -686,11 +1040,11 @@ void *calloc(size_t count, size_t size)
 
 void *realloc(void *ptr, size_t size)
 {
-    native_dos_alloc_header_t *header;
     union REGS regs = {0};
-    uint32_t total;
-    uint32_t paragraphs;
-    size_t old_size;
+    uint16_t segment;
+    uint16_t paragraphs;
+    uint16_t old_paragraphs;
+    uint32_t old_size;
     void *new_ptr;
 
     if (!ptr)
@@ -702,28 +1056,54 @@ void *realloc(void *ptr, size_t size)
         return NULL;
     }
 
-    header = ((native_dos_alloc_header_t *)ptr) - 1;
-    if (header->magic != NATIVE_DOS_ALLOC_MAGIC)
+    if (native_psram_owns(ptr))
+    {
+        native_psram_block *block = ((native_psram_block *)ptr) - 1;
+        size_t old_payload;
+
+        if (!native_psram_block_valid(block) || native_psram_block_is_free(block))
+            return NULL;
+        old_payload = native_psram_block_size(block) - sizeof(*block);
+
+        new_ptr = native_psram_realloc(ptr, size);
+        if (new_ptr)
+            return new_ptr;
+
+        /* No suitable PSRAM block remains: fall through to the common
+           allocator, which tries PSRAM once more and then DOS AH=48. */
+        new_ptr = native_dos_malloc_raw(size);
+        if (!new_ptr)
+            return native_dos_malloc_failed(size);
+        memcpy(new_ptr, ptr, old_payload < size ? old_payload : size);
+        native_psram_free(ptr);
+        return new_ptr;
+    }
+
+    segment = dos_ptr_segment(ptr);
+    if (segment == 0)
         return NULL;
 
-    if (size > UINT32_MAX - sizeof(*header))
-        return native_dos_malloc_failed(size);
+    old_size = native_dos_block_size(segment);
+    if (old_size == 0 || (old_size & 15u) != 0 || old_size > 0x000ffff0u)
+        return NULL;
+    old_paragraphs = (uint16_t)(old_size >> 4);
 
-    total = (uint32_t)size + (uint32_t)sizeof(*header);
-    paragraphs = (total + 15u) >> 4;
-    if (paragraphs == 0 || paragraphs > 0xffffu)
-        return native_dos_malloc_failed(size);
-
-    old_size = header->size;
-
-    regs.h.ah = 0x4a;
-    regs.w.bx = (uint16_t)paragraphs;
-    native_int21_with_es(header->segment, &regs);
-    if (!regs.x.cflag)
+    if (native_dos_size_to_paragraphs(size, &paragraphs))
     {
-        header->size = (uint32_t)size;
-        header->paragraphs = (uint16_t)paragraphs;
-        return ptr;
+        regs.h.ah = 0x4a;
+        regs.w.bx = paragraphs;
+        native_int21_with_es(segment, &regs);
+        if (!regs.x.cflag)
+            return ptr;
+
+        /* DosMemChange() may join following free MCBs before reporting
+           DE_NOMEM.  Restore the original size before moving the block. */
+        regs = (union REGS){0};
+        regs.h.ah = 0x4a;
+        regs.w.bx = old_paragraphs;
+        native_int21_with_es(segment, &regs);
+        if (regs.x.cflag)
+            return NULL;
     }
 
     new_ptr = malloc(size);
@@ -734,7 +1114,6 @@ void *realloc(void *ptr, size_t size)
     free(ptr);
     return new_ptr;
 }
-
 
 enum
 {

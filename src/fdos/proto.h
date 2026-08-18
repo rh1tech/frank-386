@@ -267,6 +267,7 @@ VOID FAR *adjust_far(const void FAR * fp);
 COUNT DosMemAlloc(UWORD size, COUNT mode, seg * para, UWORD * asize);
 COUNT DosMemLargest(UWORD * size);
 COUNT DosMemFree(UWORD para);
+ULONG DosMemBlockSize(UWORD para);
 COUNT DosMemChange(UWORD para, UWORD size, UWORD * maxSize);
 COUNT DosMemCheck(void);
 COUNT FreeProcessMem(UWORD ps);

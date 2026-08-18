@@ -19,7 +19,7 @@
 
 #include "DoomDef.h"
 #ifdef ELF_MODE
-#include "psram.h"
+#include <stdlib.h>
 #include "i_native_memory.h"
 #include <dos_phys.h>
 #include <conio.h>
@@ -33,6 +33,10 @@ byte		*screens[4];
 byte		*screens[5];
 #endif
 int			dirtybox[4];
+
+#ifdef ELF_MODE
+void *native_screens_base;
+#endif
 
 
 
@@ -373,12 +377,13 @@ void V_Init (void)
 	byte	*base;
 
 #ifdef ELF_MODE
-	/*
-	 * The low 0x110000 bytes of PSRAM are guest-owned x86 memory (including
-	 * HMA).  Put native software screens above that range; never write them at
-	 * PSRAM_BASE_ADDR itself.
-	 */
-	base = (byte *)(uintptr_t)(PSRAM_BASE_ADDR + NATIVE_SCREENS_OFFSET);
+	if (!native_screens_base)
+	{
+		native_screens_base = malloc(NATIVE_SCREENS_SIZE);
+		if (!native_screens_base)
+			I_Error("Insufficient memory for DOOM screens!");
+	}
+	base = (byte *)native_screens_base;
 	memset(base, 0, NATIVE_SCREENS_SIZE);
 #else
 	// stick these in low dos memory on PCs
