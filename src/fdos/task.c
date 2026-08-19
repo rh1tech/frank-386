@@ -1202,6 +1202,18 @@ static int arm_elf_section_runtime_addr(UWORD base_seg,
   return DE_INVLDFMT;
 }
 
+static ULONG arm_elf_symbol_section_offset(const arm_elf32_sym *sym)
+{
+  /*
+   * ELF32/ARM marks a Thumb function by setting bit 0 of st_value.  That bit
+   * belongs to the callable function address, not to the byte offset/range
+   * occupied by the symbol inside its section.
+   */
+  if ((sym->info & 0x0fu) == STT_FUNC)
+    return sym->value & ~1ul;
+  return sym->value;
+}
+
 static int arm_elf_safe_piece_end(COUNT fd, const arm_elf_load_meta *meta,
                                   UWORD sec_num, ULONG start, ULONG capacity,
                                   ULONG section_size, ULONG *piece_end)
@@ -1222,21 +1234,23 @@ static int arm_elf_safe_piece_end(COUNT fd, const arm_elf_load_meta *meta,
     changed = FALSE;
     for (i = 0; i < count; ++i) {
       arm_elf32_sym sym;
+      ULONG sym_off;
       ULONG sym_end;
       int rc = arm_elf_read_symbol(fd, meta, i, &sym);
       if (rc != SUCCESS)
         return rc;
       if (sym.shndx != sec_num || sym.size == 0)
         continue;
-      if (sym.value > section_size || sym.size > section_size - sym.value)
+      sym_off = arm_elf_symbol_section_offset(&sym);
+      if (sym_off > section_size || sym.size > section_size - sym_off)
         return DE_INVLDFMT;
-      sym_end = sym.value + sym.size;
-      if (sym.value < start && sym_end > start)
+      sym_end = sym_off + sym.size;
+      if (sym_off < start && sym_end > start)
         return DE_INVLDFMT;
-      if (sym.value < cut && sym_end > cut) {
-        if (sym.value < start)
+      if (sym_off < cut && sym_end > cut) {
+        if (sym_off < start)
           return DE_INVLDFMT;
-        cut = sym.value;
+        cut = sym_off;
         changed = TRUE;
       }
     }
@@ -1267,24 +1281,26 @@ static int arm_elf_find_blocking_symbol(COUNT fd,
 
   for (i = 0; i < count; ++i) {
     arm_elf32_sym sym;
+    ULONG sym_off;
     ULONG sym_end;
     int rc = arm_elf_read_symbol(fd, meta, i, &sym);
     if (rc != SUCCESS)
       return rc;
     if (sym.shndx != sec_num || sym.size == 0)
       continue;
-    if (sym.value > 0xfffffffful - sym.size)
+    sym_off = arm_elf_symbol_section_offset(&sym);
+    if (sym_off > 0xfffffffful - sym.size)
       return DE_INVLDFMT;
-    sym_end = sym.value + sym.size;
-    if (sym.value <= logical_off && sym_end > logical_off) {
+    sym_end = sym_off + sym.size;
+    if (sym_off <= logical_off && sym_end > logical_off) {
       best = sym;
       best_index = i;
       break;
     }
-    if (sym.value >= logical_off && sym.value < best_value) {
+    if (sym_off >= logical_off && sym_off < best_value) {
       best = sym;
       best_index = i;
-      best_value = sym.value;
+      best_value = sym_off;
     }
   }
 
@@ -1659,6 +1675,8 @@ static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
   arm_elf32_sym sym;
   arm_elf32_shdr sec;
   ULONG sec_addr;
+  ULONG sym_off;
+  ULONG thumb_bit;
   int rc = arm_elf_read_symbol(fd, meta, sym_index, &sym);
 
   if (rc != SUCCESS)
@@ -1689,14 +1707,20 @@ static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
     return DE_INVLDFMT;
   }
 
+  sym_off = arm_elf_symbol_section_offset(&sym);
+  thumb_bit = ((sym.info & 0x0fu) == STT_FUNC) ? (sym.value & 1u) : 0u;
+
   rc = arm_elf_read_shdr(fd, &meta->eh, sym.shndx, &sec);
-  if (rc != SUCCESS || sym.value > sec.size)
+  if (rc != SUCCESS || sym_off > sec.size)
     return DE_INVLDFMT;
   rc = arm_elf_load_section(fd, base_seg, meta, sym.shndx, &sec_addr);
   if (rc != SUCCESS)
     return rc;
-  return arm_elf_section_runtime_addr(base_seg, meta, sym.shndx,
-                                      sym.value, 0, sym_addr);
+  rc = arm_elf_section_runtime_addr(base_seg, meta, sym.shndx,
+                                     sym_off, 0, sym_addr);
+  if (rc == SUCCESS)
+    *sym_addr |= thumb_bit;
+  return rc;
 }
 
 /*
@@ -1751,6 +1775,62 @@ static void arm_elf_loader_progress_end(arm_elf_load_meta *meta)
   }
 }
 
+static void arm_elf_report_relocation_failure(COUNT fd,
+                                              arm_elf_load_meta *meta,
+                                              int error,
+                                              UWORD target_section,
+                                              UWORD rel_section,
+                                              ULONG record,
+                                              ULONG offset,
+                                              UBYTE type,
+                                              ULONG symbol)
+{
+  arm_elf32_sym sym;
+  arm_elf32_shdr sh;
+  BYTE target_name[64];
+  BYTE symbol_name[64];
+  BYTE symbol_section_name[64];
+  int have_sym = FALSE;
+  int have_target_name = FALSE;
+  int have_symbol_name = FALSE;
+  int have_symbol_section_name = FALSE;
+
+  arm_elf_loader_progress_end(meta);
+
+  if (target_section < meta->eh.shnum &&
+      arm_elf_read_shdr(fd, &meta->eh, target_section, &sh) == SUCCESS)
+    have_target_name = arm_elf_section_name(fd, meta, &sh, target_name,
+                                            sizeof(target_name));
+
+  if (arm_elf_read_symbol(fd, meta, symbol, &sym) == SUCCESS) {
+    have_sym = TRUE;
+    have_symbol_name = arm_elf_symbol_name(fd, meta, &sym, symbol_name,
+                                           sizeof(symbol_name));
+    if (sym.shndx < meta->eh.shnum &&
+        arm_elf_read_shdr(fd, &meta->eh, sym.shndx, &sh) == SUCCESS)
+      have_symbol_section_name = arm_elf_section_name(
+          fd, meta, &sh, symbol_section_name, sizeof(symbol_section_name));
+  }
+
+  dos_printf("ARM ELF: relocation failed: error=%d target=%u%s%s "
+             "relsec=%u record=%lu offset=%lu type=%u\r\n",
+             error, (unsigned)target_section,
+             have_target_name ? " " : "",
+             have_target_name ? (const char *)target_name : "",
+             (unsigned)rel_section, record, offset, (unsigned)type);
+  if (have_sym) {
+    dos_printf("  symbol=%s%s#%lu type=%u shndx=%u%s%s value=%lu size=%lu\r\n",
+               have_symbol_name ? (const char *)symbol_name : "",
+               have_symbol_name ? " " : "", symbol,
+               (unsigned)(sym.info & 0x0fu), (unsigned)sym.shndx,
+               have_symbol_section_name ? " " : "",
+               have_symbol_section_name ? (const char *)symbol_section_name : "",
+               sym.value, sym.size);
+  } else {
+    dos_printf("  symbol=#%lu (symbol record cannot be read)\r\n", symbol);
+  }
+}
+
 static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
                                              arm_elf_load_meta *meta,
                                              UWORD sec_num,
@@ -1798,16 +1878,24 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
       sym_index = rel.info >> 8;
       type = (UBYTE)(rel.info & 0xffu);
       rc = arm_elf_read_symbol(fd, meta, sym_index, &rel_sym);
-      if (rc != SUCCESS)
+      if (rc != SUCCESS) {
+        arm_elf_report_relocation_failure(fd, meta, rc, sec_num, i, j,
+                                          rel.offset, type, sym_index);
         return rc;
+      }
       sym_type = rel_sym.info & 0x0fu;
       rc = arm_elf_symbol_addr(fd, base_seg, meta, sym_index, &sym_addr);
-      if (rc != SUCCESS)
+      if (rc != SUCCESS) {
+        arm_elf_report_relocation_failure(fd, meta, rc, sec_num, i, j,
+                                          rel.offset, type, sym_index);
         return rc;
+      }
 
       rc = arm_elf_section_runtime_addr(base_seg, meta, sec_num,
                                         rel.offset, 4, &place_addr);
       if (rc != SUCCESS) {
+        arm_elf_report_relocation_failure(fd, meta, rc, sec_num, i, j,
+                                          rel.offset, type, sym_index);
         dos_printf("ARM ELF: relocation field crosses section block boundary "
                    "(section %u, offset %lu)\r\n",
                    (unsigned)sec_num, rel.offset);
@@ -1833,8 +1921,11 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
             ULONG addend = *(ULONG *)place;
             rc = arm_elf_section_runtime_addr(base_seg, meta, rel_sym.shndx,
                                               addend, 0, &target_addr);
-            if (rc != SUCCESS)
+            if (rc != SUCCESS) {
+              arm_elf_report_relocation_failure(fd, meta, rc, sec_num, i, j,
+                                                rel.offset, type, sym_index);
               return rc;
+            }
             *(ULONG *)place = target_addr;
           } else {
             *(ULONG *)place += sym_addr;
@@ -1846,8 +1937,11 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
             ULONG addend = *(ULONG *)place;
             rc = arm_elf_section_runtime_addr(base_seg, meta, rel_sym.shndx,
                                               addend, 0, &target_addr);
-            if (rc != SUCCESS)
+            if (rc != SUCCESS) {
+              arm_elf_report_relocation_failure(fd, meta, rc, sec_num, i, j,
+                                                rel.offset, type, sym_index);
               return rc;
+            }
             *(ULONG *)place = target_addr - paddr;
           } else {
             *(ULONG *)place = sym_addr + *(ULONG *)place - paddr;
@@ -1856,6 +1950,9 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
         case R_ARM_THM_PC22:
           if (sym_type == STT_SECTION && rel_sym.shndx < meta->shnum &&
               arm_elf_states(meta)[rel_sym.shndx].extra_chunks != 0) {
+            arm_elf_report_relocation_failure(fd, meta, DE_INVLDFMT,
+                                                sec_num, i, j, rel.offset,
+                                                type, sym_index);
             dos_printf("ARM ELF: section-symbol Thumb relocation into split "
                        "section %u is not supported\r\n",
                        (unsigned)rel_sym.shndx);
@@ -1866,6 +1963,9 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
         case R_ARM_THM_JUMP24:
           if (sym_type == STT_SECTION && rel_sym.shndx < meta->shnum &&
               arm_elf_states(meta)[rel_sym.shndx].extra_chunks != 0) {
+            arm_elf_report_relocation_failure(fd, meta, DE_INVLDFMT,
+                                                sec_num, i, j, rel.offset,
+                                                type, sym_index);
             dos_printf("ARM ELF: section-symbol Thumb relocation into split "
                        "section %u is not supported\r\n",
                        (unsigned)rel_sym.shndx);
@@ -1874,6 +1974,9 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
           rc = arm_elf_resolve_thm_jump24((UWORD *)place,
                                           (UWORD *)place, sym_addr);
           if (rc != SUCCESS) {
+            arm_elf_report_relocation_failure(fd, meta, rc,
+                                                sec_num, i, j, rel.offset,
+                                                type, sym_index);
             dos_printf("ARM ELF: Thumb JUMP24 relocation out of range "
                        "(section %u, offset %lu)\r\n",
                        (unsigned)sec_num, rel.offset);
@@ -1883,13 +1986,23 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
         case R_ARM_THM_ALU_ABS_G0_NC:
           if (sym_type == STT_SECTION && rel_sym.shndx < meta->shnum &&
               arm_elf_states(meta)[rel_sym.shndx].extra_chunks != 0) {
+            arm_elf_report_relocation_failure(fd, meta, DE_INVLDFMT,
+                                                sec_num, i, j, rel.offset,
+                                                type, sym_index);
             dos_printf("ARM ELF: section-symbol MOV relocation into split "
                        "section %u is not supported\r\n",
                        (unsigned)rel_sym.shndx);
             return DE_INVLDFMT;
           }
-          if ((uintptr_t)place & 1u)
+          if ((uintptr_t)place & 1u) {
+            arm_elf_report_relocation_failure(fd, meta, DE_INVLDFMT,
+                                                sec_num, i, j, rel.offset,
+                                                type, sym_index);
+            dos_printf("ARM ELF: MOV relocation place is not halfword aligned "
+                       "(section %u, offset %lu, address=%08lx)\r\n",
+                       (unsigned)sec_num, rel.offset, place_addr);
             return DE_INVLDFMT;
+          }
           arm_elf_resolve_thm_alu_abs_g0_nc((UWORD *)place, sym_addr);
           break;
         default:
@@ -1897,6 +2010,9 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
           arm_elf32_sym diag_sym;
           BYTE name[64];
 
+          arm_elf_report_relocation_failure(fd, meta, DE_INVLDFMT,
+                                              sec_num, i, j, rel.offset,
+                                              type, sym_index);
           if (arm_elf_read_symbol(fd, meta, sym_index, &diag_sym) == SUCCESS &&
               arm_elf_symbol_name(fd, meta, &diag_sym, name, sizeof(name)))
             dos_printf("ARM ELF: unsupported relocation type %u "
@@ -2525,6 +2641,59 @@ static void arm_elf_native_stack_release(uintptr_t bottom,
  * available, then fall back to conventional memory.  FreeProcessMem() will
  * later release it because the MCB owner is changed to the child PSP.
  */
+static int arm_native_alloc_low_exact(UWORD paras,
+                                      UWORD *mcb_seg, UWORD *actual)
+{
+  UBYTE saved_umb_link = LoL->uppermem_link;
+  UBYTE saved_mode = internal_data->mem_access_mode;
+  int rc;
+
+  DosUmbLink(0);
+  internal_data->mem_access_mode &= (UBYTE)~0xc0u;
+  rc = DosMemAlloc(paras, internal_data->mem_access_mode, mcb_seg, actual);
+  internal_data->mem_access_mode = saved_mode;
+  DosUmbLink(saved_umb_link);
+
+  if (rc == SUCCESS)
+    *actual = paras;
+  return rc;
+}
+
+static int arm_native_reserve_dos_stack_low(ULONG stack_size,
+                                            UWORD *out_mcb, UWORD *out_seg)
+{
+  UWORD paras;
+  UWORD mcb_seg = 0;
+  UWORD actual = 0;
+  int rc;
+
+  if (stack_size == 0 || stack_size > 0x10000ul)
+    return DE_INVLDFMT;
+
+  paras = (UWORD)((stack_size + 15u) >> 4);
+  if (paras == 0)
+    return DE_NOMEM;
+
+  rc = arm_native_alloc_low_exact(paras, &mcb_seg, &actual);
+  if (rc != SUCCESS)
+    return rc;
+
+  *out_mcb = mcb_seg;
+  *out_seg = mcb_seg + 1;
+  memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
+  if (stack_size >= DOOM_DOS_STACK_GUARD)
+    memset(ARM_PTR(MK_FP(*out_seg, 0)),
+           DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
+
+  {
+    mcb *block = (mcb *)ARM_PTR(MK_FP(mcb_seg, 0));
+    block->m_psp = internal_data->cu_psp;
+    memcpy(block->m_name, "ARMSTK  ", sizeof(block->m_name));
+  }
+
+  return SUCCESS;
+}
+
 static int arm_native_reserve_dos_stack(ULONG stack_size,
                                         UWORD *out_mcb, UWORD *out_seg)
 {
@@ -2600,6 +2769,24 @@ static int arm_elf_alloc_dos_stack(arm_elf_load_meta *meta, UWORD child_psp)
  * optional requirements hook then selects the native ARM and guest DOS stack
  * independently; absent/zero fields retain the historical defaults.
  */
+static int arm_elf_set_stack_sizes(arm_elf_load_meta *meta,
+                                   ULONG native_size, ULONG dos_size)
+{
+  native_size = arm_elf_align_up(native_size, 8u);
+  dos_size = arm_elf_align_up(dos_size, 16u);
+  if (dos_size != 0xfffffffful && dos_size < ARM_ELF_MIN_DOS_STACK_SIZE)
+    dos_size = ARM_ELF_MIN_DOS_STACK_SIZE;
+  if (native_size == 0xfffffffful || dos_size == 0xfffffffful ||
+      native_size == 0 || dos_size == 0 || dos_size > 0x10000ul) {
+    dos_printf("ARM ELF: invalid process stack requirements\r\n");
+    return DE_INVLDFMT;
+  }
+
+  meta->native_stack_size = native_size;
+  meta->dos_stack_size = dos_size;
+  return SUCCESS;
+}
+
 static int arm_elf_preflight(arm_elf_load_meta *meta)
 {
   arm_elf_process_requirements *requirements = NULL;
@@ -2641,19 +2828,7 @@ static int arm_elf_preflight(arm_elf_load_meta *meta)
     return DE_INVLDFMT;
   }
 
-  native_size = arm_elf_align_up(native_size, 8u);
-  dos_size = arm_elf_align_up(dos_size, 16u);
-  if (dos_size != 0xfffffffful && dos_size < ARM_ELF_MIN_DOS_STACK_SIZE)
-    dos_size = ARM_ELF_MIN_DOS_STACK_SIZE;
-  if (native_size == 0xfffffffful || dos_size == 0xfffffffful ||
-      native_size == 0 || dos_size == 0 || dos_size > 0x10000ul) {
-    dos_printf("ARM ELF: invalid process stack requirements\r\n");
-    return DE_INVLDFMT;
-  }
-
-  meta->native_stack_size = native_size;
-  meta->dos_stack_size = dos_size;
-  return SUCCESS;
+  return arm_elf_set_stack_sizes(meta, native_size, dos_size);
 }
 
 /*
@@ -3389,8 +3564,21 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
      * the existing final DosMemChange().
      */
     rc = ExecMemLargest(&asize, (UWORD)paras_long);
-    if (rc == SUCCESS)
-      rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
+    if (rc == SUCCESS) {
+      /*
+       * Leave 64 KiB outside the primary ELF MCB until CRT requirements are
+       * known.  Unlike allocating a provisional stack MCB first, this preserves
+       * the primary image base and therefore does not force earlier section
+       * splitting merely because stack space was reserved.
+       */
+      if (asize <= 0x1000u ||
+          (UWORD)(asize - 0x1000u) < (UWORD)paras_long) {
+        rc = DE_NOMEM;
+      } else {
+        asize = (UWORD)(asize - 0x1000u);
+        rc = ExecMemAlloc(asize, &alloc_mcb, &asize);
+      }
+    }
   }
 
   if (mode & LOAD_HIGH) {
@@ -3450,8 +3638,42 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
       goto fail;
     }
     meta->required_api_version = crt_requirements.required_dos_api_version;
-    meta->native_stack_size = crt_requirements.native_stack_size;
-    meta->dos_stack_size = crt_requirements.dos_stack_size;
+
+    rc = arm_elf_set_stack_sizes(
+        meta,
+        crt_requirements.native_stack_size != 0
+            ? crt_requirements.native_stack_size
+            : ARM_ELF_DEFAULT_NATIVE_STACK_SIZE,
+        crt_requirements.dos_stack_size != 0
+            ? crt_requirements.dos_stack_size
+            : ARM_ELF_DEFAULT_DOS_STACK_SIZE);
+    if (rc != SUCCESS)
+      goto fail;
+
+    if (meta->required_api_version == 0)
+      meta->required_api_version = DOS_API_VERSION;
+    if (meta->required_api_version > DOS_API_VERSION) {
+      dos_printf("ARM ELF: application requires DOS-API version %ld; provided %u\r\n",
+                 meta->required_api_version, (unsigned)DOS_API_VERSION);
+      rc = DE_INVLDFMT;
+      goto fail;
+    }
+
+    /*
+     * A 64 KiB tail was left outside the primary ELF MCB before loading began.
+     * Requirements are known now, so allocate only the exact low-memory stack
+     * size.  The unused part of that reservation remains available for later
+     * LOW section chunks.
+     */
+    rc = arm_native_reserve_dos_stack_low(meta->dos_stack_size,
+                                          &meta->dos_stack_mcb,
+                                          &meta->dos_stack_seg);
+    if (rc != SUCCESS) {
+      arm_elf_loader_progress_end(meta);
+      dos_printf("ARM ELF: cannot reserve %lu-byte low DOS stack\r\n",
+                 meta->dos_stack_size);
+      goto fail;
+    }
 
     /*
      * New CRT ABI: __ez_start is the only application root.  It owns the
@@ -3559,11 +3781,15 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   fcbcode = patchPSP(alloc_mcb, env_mcb, exp, namep);
   (void)fcbcode;
 
-  rc = arm_elf_alloc_dos_stack(meta, load_seg);
-  if (rc != SUCCESS) {
-    dos_printf("ARM ELF: cannot allocate %lu-byte DOS stack\r\n",
-               meta->dos_stack_size);
-    goto fail;
+  if (meta->dos_stack_mcb != 0) {
+    arm_native_assign_dos_stack_owner(meta->dos_stack_mcb, load_seg);
+  } else {
+    rc = arm_elf_alloc_dos_stack(meta, load_seg);
+    if (rc != SUCCESS) {
+      dos_printf("ARM ELF: cannot allocate %lu-byte DOS stack\r\n",
+                 meta->dos_stack_size);
+      goto fail;
+    }
   }
 
   CfgDbgPrintf(("ARM ELF loaded: psp=%04x size=%lu argc=%u "
@@ -3576,6 +3802,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   return exec_run_arm_elf(load_seg, meta);
 
 reloc_fail:
+  arm_elf_loader_progress_end(meta);
   dos_printf("ARM ELF: dependency loading/relocation failed, DOS error %d\r\n",
              (int)rc);
 fail:
