@@ -561,6 +561,7 @@ void dos_free_low(void *ptr)
     if (segment == 0)
         return;
 
+    segread(&sregs);
     regs.h.ah = 0x49;
     sregs.es = segment;
     int386x(0x21, &regs, &regs, &sregs);
