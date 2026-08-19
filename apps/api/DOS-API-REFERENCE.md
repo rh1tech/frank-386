@@ -216,13 +216,18 @@ Important fixed slots include:
 | 105 | SRAM-resident native-app `memcmp` |
 | 106 | native DOS termination state |
 | 107 | current EZ process information |
+| 108 | DOS block size by data segment |
+| 109 | SRAM-resident native-app `memmove` |
+| 110 | largest free DOS block size in bytes |
+| 111..115 | kernel-owned native-app allocator: `malloc/calloc/realloc/free/largest` |
 
 Only append new services. A program requiring a newer slot must declare a
 newer `DOS_API_VERSION`; the loader rejects it before execution on an older
 firmware.
 
 Slots 19..100 are defined symbolically in `dos_math_api.h`. Do not duplicate
-their numeric constants elsewhere.
+their numeric constants elsewhere. The current ABI is `DOS_API_VERSION 18`;
+slots 111..115 were added when native-app allocation moved into the kernel.
 
 ---
 
@@ -439,9 +444,17 @@ Do **not** treat these headers as aliases for the toolchain libc.
 
 Notable points:
 
-- `malloc/calloc/realloc/free` are native DOS runtime implementations;
+- public `malloc/calloc/realloc/free` remain part of the userspace libc API,
+  but since API v17 allocation itself is kernel-owned through slots 111..115;
+- the allocator tries the current native EXEC's private PSRAM interval first,
+  then DOS conventional memory; allocator state is process-owned and is
+  saved/restored correctly across nested EXEC;
+- `malloc_largest_block()` returns the larger of the biggest free process-local
+  PSRAM heap block and the biggest available DOS block;
+- `dos_malloc_set_policy()` selects userspace OOM behavior: return `NULL`,
+  `exit(1)`, or print an error before exiting;
 - `exit()` is a native process/CRT operation, not Pico SDK process exit;
-- `memcpy/memset/memcmp` use explicit firmware/SRAM services rather than
+- `memcpy/memset/memcmp/memmove` use explicit firmware/SRAM services rather than
   arbitrary flash libc implementations;
 - compiler-generated `__aeabi_*` and math operations are provided by
   `dos-api-math.c` / `dos-api-divmod.S`.
@@ -552,7 +565,12 @@ void TSM_PauseService(int id);
 void TSM_ResumeService(int id);
 void TSM_Remove(void);
 void TSM_Yield(void);
+uint32_t TSM_YieldTime(void);
 ```
+
+`TSM_Yield()` services timers and discards the returned time;
+`TSM_YieldTime()` performs the same service point and returns the current
+emulator time in microseconds.
 
 Callbacks execute in normal application context at service points. They are not
 RP2xxx asynchronous timer IRQ callbacks.

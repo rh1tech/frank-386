@@ -224,13 +224,18 @@ Standalone-приложению всё равно нужен небольшой 
 | 105 | SRAM-resident `memcmp` для нативных приложений |
 | 106 | состояние завершения native DOS |
 | 107 | информация о текущем EZ-процессе |
+| 108 | размер DOS-блока по сегменту данных |
+| 109 | SRAM-resident `memmove` для native app |
+| 110 | размер крупнейшего свободного DOS-блока в байтах |
+| 111..115 | принадлежащий ядру allocator native app: `malloc/calloc/realloc/free/largest` |
 
 Новые сервисы добавляйте только в конец. Программа, которой нужен более новый
 слот, должна объявлять более новый `DOS_API_VERSION`; загрузчик старой прошивки
 отклонит её до начала выполнения.
 
 Слоты 19..100 символически определены в `dos_math_api.h`. Не дублируйте их
-числовые значения в других местах.
+числовые значения в других местах. Текущая версия ABI — `DOS_API_VERSION 18`;
+слоты 111..115 появились вместе с переносом allocator native app в ядро.
 
 ---
 
@@ -446,9 +451,17 @@ int fscanf(...);
 
 Важные моменты:
 
-- `malloc/calloc/realloc/free` реализованы native DOS runtime;
+- публичные `malloc/calloc/realloc/free` остаются частью userspace libc API, но
+  само выделение памяти с API v17 выполняет ядро через слоты 111..115;
+- allocator сначала использует приватный PSRAM-интервал текущего native EXEC,
+  затем DOS conventional memory; его состояние принадлежит процессу и корректно
+  сохраняется/восстанавливается при nested EXEC;
+- `malloc_largest_block()` возвращает максимум из крупнейшего свободного блока
+  process-local PSRAM heap и крупнейшего доступного DOS-блока;
+- `dos_malloc_set_policy()` выбирает поведение userspace-обёртки при OOM:
+  вернуть `NULL`, выполнить `exit(1)` либо сначала вывести сообщение и выйти;
 - `exit()` — операция native process/CRT, а не завершение процесса Pico SDK;
-- `memcpy/memset/memcmp` используют явные firmware/SRAM-сервисы, а не произвольные реализации flash libc;
+- `memcpy/memset/memcmp/memmove` используют явные firmware/SRAM-сервисы, а не произвольные реализации flash libc;
 - сгенерированные компилятором `__aeabi_*` и математические операции предоставляются `dos-api-math.c` / `dos-api-divmod.S`.
 
 При добавлении отсутствующей стандартной функции сначала определите, к какой
@@ -557,7 +570,12 @@ void TSM_PauseService(int id);
 void TSM_ResumeService(int id);
 void TSM_Remove(void);
 void TSM_Yield(void);
+uint32_t TSM_YieldTime(void);
 ```
+
+`TSM_Yield()` обслуживает таймеры и отбрасывает возвращённое время;
+`TSM_YieldTime()` выполняет тот же service point и возвращает текущее время
+эмулятора в микросекундах.
 
 Callbacks выполняются в обычном контексте приложения в service points. Это не
 асинхронные timer IRQ callbacks RP2xxx.
