@@ -15,6 +15,11 @@ extern bool terminate_requested(void);
 extern const void *arm_ez_get_process_info(void);
 extern uint32_t DosMemBlockSize(uint16_t para);
 extern int DosMemLargest(uint16_t *size);
+extern void *arm_native_app_malloc(size_t size);
+extern void *arm_native_app_calloc(size_t count, size_t size);
+extern void *arm_native_app_realloc(void *ptr, size_t size);
+extern void arm_native_app_free(void *ptr);
+extern size_t arm_native_app_malloc_largest(void);
 
 /*
  * Native-ELF diagnostic latch.
@@ -438,5 +443,10 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)DosMemBlockSize, /* 108: DOS block size by data segment */
     (unsigned long)dos_api_memmove, /* 109: SRAM native-app memmove */
     (unsigned long)dos_api_largest_free_block, /* 110: largest free DOS block, bytes */
+    (unsigned long)arm_native_app_malloc, /* 111: application malloc */
+    (unsigned long)arm_native_app_calloc, /* 112: application calloc */
+    (unsigned long)arm_native_app_realloc, /* 113: application realloc */
+    (unsigned long)arm_native_app_free, /* 114: application free */
+    (unsigned long)arm_native_app_malloc_largest, /* 115: largest application block */
     0
 };

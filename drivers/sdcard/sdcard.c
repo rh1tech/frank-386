@@ -286,7 +286,27 @@ int rcvr_datablock (	/* 1:OK, 0:Error */
 	if(token != 0xFE) return 0;		/* Function fails if invalid DataStart token or timeout */
 
 	rcvr_spi_multi(buff, btr);		/* Store trailing data to the buffer */
-	xchg_spi(0xFF); xchg_spi(0xFF);			/* Discard CRC */
+	{
+		BYTE crc_hi = xchg_spi(0xFF);	/* CRC16 high byte */
+		BYTE crc_lo = xchg_spi(0xFF);	/* CRC16 low  byte */
+#ifdef SDCARD_VERIFY_CRC
+		/* The data packet always carries a valid CRC16-CCITT in SPI mode,
+		   regardless of CMD59. Verify it so a corrupted transfer is not
+		   silently accepted as a zero/garbage block. */
+		uint16_t rx = ((uint16_t)crc_hi << 8) | crc_lo;
+		uint16_t crc = 0;
+		UINT i; int k;
+		for (i = 0; i < btr; i++) {
+			crc ^= (uint16_t)buff[i] << 8;
+			for (k = 0; k < 8; k++)
+				crc = (crc & 0x8000) ? (uint16_t)((crc << 1) ^ 0x1021)
+				                     : (uint16_t)(crc << 1);
+		}
+		if (crc != rx) return 0;	/* CRC mismatch -> error; caller retries */
+#else
+		(void)crc_hi; (void)crc_lo;
+#endif
+	}
 
 	return 1;						/* Function succeeded */
 }
@@ -438,9 +458,13 @@ static DRESULT disk_read_impl (
 	if (!(CardType & CT_BLOCK)) sector *= 512;	/* LBA ot BA conversion (byte addressing cards) */
 
 	if (count == 1) {	/* Single sector read */
-		if ((send_cmd(CMD17, sector) == 0)	/* READ_SINGLE_BLOCK */
-			&& rcvr_datablock(buff, 512)) {
-			count = 0;
+		int tries = 5;
+		while (tries--) {	/* retry on CRC/token failure */
+			if ((send_cmd(CMD17, sector) == 0)	/* READ_SINGLE_BLOCK */
+				&& rcvr_datablock(buff, 512)) {
+				count = 0;
+				break;
+			}
 		}
 	}
 	else {				/* Multiple sector read */

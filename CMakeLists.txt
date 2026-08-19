@@ -202,6 +202,7 @@ target_compile_definitions(sdcard PRIVATE
     BOARD_${BOARD}
     RP2350_BUILD=1
     # SDCARD_PIO=1  # Disabled - use hardware SPI instead
+    SDCARD_VERIFY_CRC=1
 )
 target_link_libraries(sdcard pico_stdlib hardware_spi hardware_pio hardware_dma)
 pico_generate_pio_header(sdcard ${CMAKE_CURRENT_LIST_DIR}/drivers/sdcard/spi.pio)
@@ -491,6 +492,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     #FDOS_BUFFER_NOCACHE=1
     #FDOS_BUFFER_NOCACHE_UNIT=2
     #FDOS_FAT_DIAG=1
+    FDOS_RAWSD_DIAG=1
 
     # Board configuration
     BOARD_${BOARD}

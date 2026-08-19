@@ -1,5 +1,7 @@
 #include "crt0.h"
+#define NATIVE_EZ_PROCESS_REQUIREMENTS_ATTR
 #include "ez.h"
+#undef NATIVE_EZ_PROCESS_REQUIREMENTS_ATTR
 #include "dos_process.h"
 #include "dos_api_version.h"
 #include <stddef.h>
@@ -24,7 +26,8 @@ extern void (*__ez_fini_array_end[])(void);
 extern int main(int argc, char **argv);
 
 /* Default EZ resource requirements; applications override this weak object. */
-const native_ez_process_requirements __attribute__((weak))
+const native_ez_process_requirements
+__attribute__((weak, used, section(NATIVE_EZ_PROCESS_DEFAULT_SECTION)))
 __native_ez_process_requirements = {
     0,
     0,

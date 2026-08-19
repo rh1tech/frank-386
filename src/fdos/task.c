@@ -114,13 +114,15 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
 #define SHF_ALLOC               0x2u
 #define STB_GLOBAL              1u
 #define STB_WEAK                2u
+#define STT_OBJECT              1u
 #define STT_FUNC                2u
+#define STT_SECTION             3u
 #define R_ARM_ABS32             2u
 #define R_ARM_REL32             3u
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define DOS_API_VERSION         16
+#define DOS_API_VERSION         18
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_MIN_DOS_STACK_SIZE        4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    ARM_ELF_MIN_DOS_STACK_SIZE
@@ -192,9 +194,28 @@ typedef struct arm_elf32_rel {
   ULONG info;
 } arm_elf32_rel;
 
+typedef struct arm_elf_sec_chunk {
+  ULONG next_addr;          /* native address of the next descriptor, or 0 */
+  ULONG logical_start;      /* section-relative first byte in this block */
+  ULONG logical_end;        /* section-relative byte just past this block */
+  ULONG data_addr;          /* native base of descriptor/allocation */
+  ULONG data_off;           /* byte offset from data_addr to payload */
+  UWORD mcb_seg;            /* DOS MCB segment, 0 for application heap */
+  UWORD data_seg;           /* DOS data segment, 0 for application heap */
+} arm_elf_sec_chunk;
+
+typedef struct arm_app_heap_context {
+  ULONG begin;
+  ULONG end;
+  UBYTE ready;
+  UBYTE reserved[3];
+} arm_app_heap_context;
+
 typedef struct arm_elf_sec_state {
-  ULONG offset;
+  ULONG offset;             /* primary-block offset for logical section 0 */
   ULONG size;
+  ULONG primary_size;       /* bytes kept in the primary process block */
+  ULONG extra_chunks;       /* native arm_elf_sec_chunk* linked list */
   UBYTE state;
   UBYTE startup_kind;
   UBYTE startup_plain;
@@ -210,6 +231,7 @@ typedef struct arm_elf_load_meta {
   ULONG allocation_end;
   ULONG required_api_addr;
   ULONG requirements_addr;
+  ULONG entry_addr;
   ULONG init_addr;
   ULONG main_addr;
   ULONG fini_addr;
@@ -235,6 +257,12 @@ typedef struct arm_elf_load_meta {
   UWORD argc;
   UWORD shnum;
   UWORD symtab_index;
+  UWORD extra_block_count;
+  ULONG extra_block_bytes;
+  UBYTE allocation_high;
+  UBYTE allocation_reserved[3];
+  native_ez_process_info process_info;
+  arm_app_heap_context app_heap;
 } arm_elf_load_meta;
 #pragma pack(pop)
 
@@ -248,14 +276,442 @@ typedef struct arm_ez_load_meta {
   UWORD dos_stack_seg;
   UWORD argc;
   native_ez_process_info process_info;
+  arm_app_heap_context app_heap;
 } arm_ez_load_meta;
 
 static const native_ez_process_info *arm_ez_active_process_info;
+static arm_app_heap_context *arm_app_active_heap;
 static int arm_native_process_is_active(void);
 
 const native_ez_process_info *arm_ez_get_process_info(void)
 {
   return arm_ez_active_process_info;
+}
+
+/*
+ * Process-local native application heap.  The heap context belongs to the
+ * EXEC child metadata, so nested native EXEC saves/restores allocator state
+ * together with the active process.
+ *
+ * Allocation policy is unchanged from the former apps/api implementation:
+ * application PSRAM first, ordinary DOS allocation second.
+ */
+#define ARM_APP_HEAP_ALIGN       16u
+#define ARM_APP_BLOCK_FREE       1u
+#define ARM_APP_BLOCK_MAGIC      0x5053524du /* "PSRM" */
+#define ARM_APP_MIN_PAYLOAD      16u
+
+typedef struct arm_app_heap_block {
+  ULONG size_flags;
+  ULONG prev_size;
+  ULONG magic;
+  ULONG reserved;
+} arm_app_heap_block;
+
+_Static_assert(sizeof(arm_app_heap_block) == ARM_APP_HEAP_ALIGN,
+               "native application heap header alignment");
+
+static uintptr_t arm_app_align_up(uintptr_t value)
+{
+  return (value + (ARM_APP_HEAP_ALIGN - 1u)) &
+         ~(uintptr_t)(ARM_APP_HEAP_ALIGN - 1u);
+}
+
+static ULONG arm_app_block_size(const arm_app_heap_block *block)
+{
+  return block->size_flags & ~ARM_APP_BLOCK_FREE;
+}
+
+static int arm_app_block_is_free(const arm_app_heap_block *block)
+{
+  return (block->size_flags & ARM_APP_BLOCK_FREE) != 0;
+}
+
+static uintptr_t arm_app_heap_begin(void)
+{
+  return arm_app_active_heap != NULL ? (uintptr_t)arm_app_active_heap->begin : 0;
+}
+
+static uintptr_t arm_app_heap_end(void)
+{
+  return arm_app_active_heap != NULL ? (uintptr_t)arm_app_active_heap->end : 0;
+}
+
+static int arm_app_heap_init(void)
+{
+  uintptr_t begin;
+  uintptr_t end;
+  arm_app_heap_block *first;
+
+  if (arm_app_active_heap == NULL)
+    return FALSE;
+  if (arm_app_active_heap->ready)
+    return arm_app_active_heap->begin != 0;
+
+  arm_app_active_heap->ready = TRUE;
+  begin = arm_app_align_up((uintptr_t)arm_app_active_heap->begin);
+  end = (uintptr_t)arm_app_active_heap->end &
+        ~(uintptr_t)(ARM_APP_HEAP_ALIGN - 1u);
+
+  if (begin == 0 || end <= begin ||
+      end - begin < sizeof(arm_app_heap_block) + ARM_APP_MIN_PAYLOAD)
+    return FALSE;
+
+  arm_app_active_heap->begin = (ULONG)begin;
+  arm_app_active_heap->end = (ULONG)end;
+  first = (arm_app_heap_block *)begin;
+  first->size_flags = (ULONG)(end - begin) | ARM_APP_BLOCK_FREE;
+  first->prev_size = 0;
+  first->magic = ARM_APP_BLOCK_MAGIC;
+  first->reserved = 0;
+  return TRUE;
+}
+
+static arm_app_heap_block *arm_app_next(arm_app_heap_block *block)
+{
+  uintptr_t next = (uintptr_t)block + arm_app_block_size(block);
+  return next < arm_app_heap_end() ? (arm_app_heap_block *)next : NULL;
+}
+
+static arm_app_heap_block *arm_app_prev(arm_app_heap_block *block)
+{
+  uintptr_t begin = arm_app_heap_begin();
+
+  if (block->prev_size == 0 ||
+      (uintptr_t)block < begin + block->prev_size)
+    return NULL;
+  return (arm_app_heap_block *)((uintptr_t)block - block->prev_size);
+}
+
+static int arm_app_block_valid(const arm_app_heap_block *block)
+{
+  uintptr_t begin = arm_app_heap_begin();
+  uintptr_t end = arm_app_heap_end();
+  uintptr_t p = (uintptr_t)block;
+  ULONG size;
+
+  if (begin == 0 || p < begin || p >= end ||
+      block->magic != ARM_APP_BLOCK_MAGIC)
+    return FALSE;
+
+  size = arm_app_block_size(block);
+  return size >= sizeof(arm_app_heap_block) + ARM_APP_MIN_PAYLOAD &&
+         (size & (ARM_APP_HEAP_ALIGN - 1u)) == 0 &&
+         size <= end - p;
+}
+
+static void arm_app_fix_next_prev(arm_app_heap_block *block)
+{
+  arm_app_heap_block *next = arm_app_next(block);
+  if (next != NULL)
+    next->prev_size = arm_app_block_size(block);
+}
+
+static void arm_app_split_allocated(arm_app_heap_block *block, ULONG wanted)
+{
+  ULONG old_size = arm_app_block_size(block);
+  ULONG remainder = old_size - wanted;
+
+  if (remainder >= sizeof(arm_app_heap_block) + ARM_APP_MIN_PAYLOAD) {
+    arm_app_heap_block *tail =
+        (arm_app_heap_block *)((uintptr_t)block + wanted);
+
+    block->size_flags = wanted;
+    tail->size_flags = remainder | ARM_APP_BLOCK_FREE;
+    tail->prev_size = wanted;
+    tail->magic = ARM_APP_BLOCK_MAGIC;
+    tail->reserved = 0;
+    arm_app_fix_next_prev(tail);
+  } else {
+    block->size_flags = old_size;
+    arm_app_fix_next_prev(block);
+  }
+}
+
+static void *arm_app_psram_malloc(size_t size)
+{
+  uintptr_t cursor;
+  ULONG wanted;
+
+  if (size == 0)
+    size = 1;
+  if (!arm_app_heap_init() ||
+      size > 0xfffffffful - sizeof(arm_app_heap_block) -
+             (ARM_APP_HEAP_ALIGN - 1u))
+    return NULL;
+
+  wanted = (ULONG)(size + sizeof(arm_app_heap_block) +
+                   (ARM_APP_HEAP_ALIGN - 1u)) &
+           ~(ARM_APP_HEAP_ALIGN - 1u);
+
+  for (cursor = arm_app_heap_begin(); cursor < arm_app_heap_end(); ) {
+    arm_app_heap_block *block = (arm_app_heap_block *)cursor;
+
+    if (!arm_app_block_valid(block))
+      return NULL;
+    if (arm_app_block_is_free(block) &&
+        arm_app_block_size(block) >= wanted) {
+      arm_app_split_allocated(block, wanted);
+      return (void *)(block + 1);
+    }
+    cursor += arm_app_block_size(block);
+  }
+  return NULL;
+}
+
+static size_t arm_app_psram_largest(void)
+{
+  uintptr_t cursor;
+  size_t largest = 0;
+
+  if (!arm_app_heap_init())
+    return 0;
+
+  for (cursor = arm_app_heap_begin(); cursor < arm_app_heap_end(); ) {
+    arm_app_heap_block *block = (arm_app_heap_block *)cursor;
+    ULONG total;
+
+    if (!arm_app_block_valid(block))
+      return 0;
+    total = arm_app_block_size(block);
+    if (arm_app_block_is_free(block) && total > sizeof(*block)) {
+      size_t payload = total - sizeof(*block);
+      if (payload > largest)
+        largest = payload;
+    }
+    cursor += total;
+  }
+  return largest;
+}
+
+static int arm_app_psram_owns(const void *ptr)
+{
+  uintptr_t p;
+
+  if (ptr == NULL || !arm_app_heap_init())
+    return FALSE;
+  p = (uintptr_t)ptr;
+  return p >= arm_app_heap_begin() + sizeof(arm_app_heap_block) &&
+         p < arm_app_heap_end();
+}
+
+static void arm_app_psram_free(void *ptr)
+{
+  arm_app_heap_block *block = ((arm_app_heap_block *)ptr) - 1;
+  arm_app_heap_block *next;
+  arm_app_heap_block *prev;
+  ULONG size;
+
+  if (!arm_app_block_valid(block) || arm_app_block_is_free(block))
+    return;
+
+  size = arm_app_block_size(block);
+  block->size_flags = size | ARM_APP_BLOCK_FREE;
+
+  next = arm_app_next(block);
+  if (next != NULL && arm_app_block_valid(next) &&
+      arm_app_block_is_free(next)) {
+    block->size_flags =
+        (size + arm_app_block_size(next)) | ARM_APP_BLOCK_FREE;
+    size = arm_app_block_size(block);
+    arm_app_fix_next_prev(block);
+  }
+
+  prev = arm_app_prev(block);
+  if (prev != NULL && arm_app_block_valid(prev) &&
+      arm_app_block_is_free(prev)) {
+    prev->size_flags =
+        (arm_app_block_size(prev) + size) | ARM_APP_BLOCK_FREE;
+    arm_app_fix_next_prev(prev);
+  }
+}
+
+static void *arm_app_psram_realloc(void *ptr, size_t size)
+{
+  arm_app_heap_block *block = ((arm_app_heap_block *)ptr) - 1;
+  arm_app_heap_block *next;
+  ULONG old_total;
+  ULONG wanted;
+
+  if (!arm_app_block_valid(block) || arm_app_block_is_free(block) ||
+      size > 0xfffffffful - sizeof(*block) - (ARM_APP_HEAP_ALIGN - 1u))
+    return NULL;
+
+  old_total = arm_app_block_size(block);
+  wanted = (ULONG)(size + sizeof(*block) + (ARM_APP_HEAP_ALIGN - 1u)) &
+           ~(ARM_APP_HEAP_ALIGN - 1u);
+
+  if (wanted <= old_total) {
+    arm_app_split_allocated(block, wanted);
+    return ptr;
+  }
+
+  next = arm_app_next(block);
+  if (next != NULL && arm_app_block_valid(next) &&
+      arm_app_block_is_free(next) &&
+      old_total + arm_app_block_size(next) >= wanted) {
+    block->size_flags = old_total + arm_app_block_size(next);
+    arm_app_split_allocated(block, wanted);
+    return ptr;
+  }
+  return NULL;
+}
+
+static UWORD arm_app_dos_segment(const void *ptr)
+{
+  uintptr_t guest_base = (uintptr_t)ARM_PTR(MK_FP(0, 0));
+  uintptr_t address = (uintptr_t)ptr;
+  uintptr_t linear;
+
+  if (address < guest_base)
+    return 0;
+  linear = address - guest_base;
+  if ((linear & 15u) != 0 || linear > 0x000ffff0ul)
+    return 0;
+  return (UWORD)(linear >> 4);
+}
+
+static ULONG arm_app_dos_block_size(UWORD segment)
+{
+  mcb *p;
+
+  if (segment == 0)
+    return 0;
+  p = para2far((seg)(segment - 1));
+  if ((p->m_type != MCB_NORMAL &&
+       p->m_type != MCB_LAST) ||
+      p->m_psp != internal_data->cu_psp)
+    return 0;
+  return (ULONG)p->m_size << 4;
+}
+
+static void *arm_app_dos_malloc(size_t size)
+{
+  ULONG paras_long;
+  UWORD mcb_seg = 0;
+  UWORD largest = 0;
+
+  if (size == 0)
+    size = 1;
+  if (size > 0x000ffff0ul)
+    return NULL;
+
+  paras_long = ((ULONG)size + 15u) >> 4;
+  if (paras_long == 0 || paras_long > 0xffffu)
+    return NULL;
+
+  if (DosMemAlloc((UWORD)paras_long, internal_data->mem_access_mode,
+                  &mcb_seg, &largest) != SUCCESS)
+    return NULL;
+  return ARM_PTR(MK_FP((UWORD)(mcb_seg + 1), 0));
+}
+
+void *arm_native_app_malloc(size_t size)
+{
+  void *ptr = arm_app_psram_malloc(size);
+  return ptr != NULL ? ptr : arm_app_dos_malloc(size);
+}
+
+void arm_native_app_free(void *ptr)
+{
+  UWORD segment;
+
+  if (ptr == NULL)
+    return;
+  if (arm_app_psram_owns(ptr)) {
+    arm_app_psram_free(ptr);
+    return;
+  }
+
+  segment = arm_app_dos_segment(ptr);
+  if (arm_app_dos_block_size(segment) != 0)
+    (void)DosMemFree((UWORD)(segment - 1));
+}
+
+void *arm_native_app_calloc(size_t count, size_t size)
+{
+  size_t total;
+  void *ptr;
+
+  if (count != 0 && size > (size_t)-1 / count)
+    return NULL;
+  total = count * size;
+  ptr = arm_native_app_malloc(total);
+  if (ptr != NULL)
+    memset(ptr, 0, total);
+  return ptr;
+}
+
+void *arm_native_app_realloc(void *ptr, size_t size)
+{
+  UWORD segment;
+  ULONG old_size;
+  void *new_ptr;
+
+  if (ptr == NULL)
+    return arm_native_app_malloc(size);
+  if (size == 0) {
+    arm_native_app_free(ptr);
+    return NULL;
+  }
+
+  if (arm_app_psram_owns(ptr)) {
+    arm_app_heap_block *block = ((arm_app_heap_block *)ptr) - 1;
+    size_t old_payload;
+
+    if (!arm_app_block_valid(block) || arm_app_block_is_free(block))
+      return NULL;
+    old_payload = arm_app_block_size(block) - sizeof(*block);
+
+    new_ptr = arm_app_psram_realloc(ptr, size);
+    if (new_ptr != NULL)
+      return new_ptr;
+
+    new_ptr = arm_app_dos_malloc(size);
+    if (new_ptr == NULL)
+      return NULL;
+    memcpy(new_ptr, ptr, old_payload < size ? old_payload : size);
+    arm_app_psram_free(ptr);
+    return new_ptr;
+  }
+
+  segment = arm_app_dos_segment(ptr);
+  old_size = arm_app_dos_block_size(segment);
+  if (old_size == 0)
+    return NULL;
+
+  if (size <= 0x000ffff0ul) {
+    ULONG paras_long = ((ULONG)size + 15u) >> 4;
+
+    if (paras_long != 0 && paras_long <= 0xffffu) {
+      UWORD old_paras = (UWORD)(old_size >> 4);
+
+      if (DosMemChange(segment, (UWORD)paras_long, NULL) == SUCCESS)
+        return ptr;
+
+      /* DosMemChange may join following free MCBs before reporting failure. */
+      if (DosMemChange(segment, old_paras, NULL) != SUCCESS)
+        return NULL;
+    }
+  }
+
+  new_ptr = arm_native_app_malloc(size);
+  if (new_ptr == NULL)
+    return NULL;
+  memcpy(new_ptr, ptr, old_size < size ? old_size : size);
+  arm_native_app_free(ptr);
+  return new_ptr;
+}
+
+size_t arm_native_app_malloc_largest(void)
+{
+  UWORD paragraphs = 0;
+  size_t psram_largest = arm_app_psram_largest();
+  size_t dos_largest = 0;
+
+  if (DosMemLargest(&paragraphs) == SUCCESS)
+    dos_largest = (size_t)paragraphs << 4;
+  return psram_largest > dos_largest ? psram_largest : dos_largest;
 }
 
 /* Metadata reads must still pass through DosRWSft(), whose destination is a
@@ -316,6 +772,10 @@ static ULONG arm_elf_metadata_size(UWORD shnum)
   return arm_elf_align_up(total + table_size, 4u);
 }
 
+static void arm_elf_loader_progress_end(arm_elf_load_meta *meta);
+STATIC int ExecMemLargest(UWORD *asize, UWORD threshold);
+STATIC int ExecMemAlloc(UWORD size, seg *para, UWORD *asize);
+
 static int arm_elf_read_shdr(COUNT fd, const arm_elf32_ehdr *eh,
                              UWORD sec_num, arm_elf32_shdr *sh)
 {
@@ -356,6 +816,33 @@ static int arm_elf_read_section(COUNT fd, UWORD base_seg, ULONG dst_off,
                         arm_elf_guest_ptr(base_seg, dst_off + done), XFR_READ);
     if (got != chunk)
       return DE_INVLDFMT;
+    done += chunk;
+  }
+  return SUCCESS;
+}
+
+/* DosRWSft() accepts a guest far pointer, while application-heap storage is a
+   native PSRAM address.  Stage small pieces through the existing synchronous
+   ELF scratch buffer and copy them into the native destination. */
+#define ARM_ELF_NATIVE_READ_CHUNK 64u
+
+static int arm_elf_read_native_section(COUNT fd, void *dst,
+                                       ULONG file_off, ULONG size)
+{
+  BYTE *out = (BYTE *)dst;
+  ULONG done = 0;
+  LONG pos = SftSeek(fd, (LONG)file_off, SEEK_SET);
+
+  if (pos < 0)
+    return DE_INVLDFMT;
+
+  while (done < size) {
+    UWORD chunk = (UWORD)min((ULONG)ARM_ELF_NATIVE_READ_CHUNK, size - done);
+    LONG got = DosRWSft(fd, chunk,
+                        x86_FAR_PTR(DOS_PSP, ElfScratch), XFR_READ);
+    if (got != chunk)
+      return DE_INVLDFMT;
+    memcpy(out + done, ElfScratch, chunk);
     done += chunk;
   }
   return SUCCESS;
@@ -561,6 +1048,343 @@ static int arm_elf_section_name(COUNT fd, const arm_elf_load_meta *meta,
   return TRUE;
 }
 
+/* Allocate from one DOS arena only.  Normal ARM ELF loading consumes LOW
+   first and switches to UMB only when the next whole symbol no longer fits;
+   LOADHIGH keeps the inverse preference (UMB first, then LOW). */
+static int arm_elf_alloc_largest_pool(UBYTE use_umb,
+                                      UWORD *mcb_seg, UWORD *paras)
+{
+  UBYTE umb_state = LoL->uppermem_link;
+  UBYTE mem_access = internal_data->mem_access_mode;
+  int rc;
+
+  if (use_umb) {
+    DosUmbLink(1);
+    internal_data->mem_access_mode &= ~0x80;
+    internal_data->mem_access_mode |= 0x40; /* UMB-only, as in ExecMemLargest */
+  } else {
+    DosUmbLink(0);
+    internal_data->mem_access_mode &= ~0xc0; /* conventional memory only */
+  }
+
+  rc = DosMemLargest(paras);
+  if (rc == SUCCESS && *paras != 0)
+    rc = DosMemAlloc(*paras, internal_data->mem_access_mode, mcb_seg, paras);
+  else if (rc == SUCCESS)
+    rc = DE_NOMEM;
+
+  DosUmbLink(umb_state);
+  internal_data->mem_access_mode = mem_access;
+  return rc;
+}
+
+static void arm_elf_pool_free_stats(UBYTE use_umb,
+                                    ULONG *total_bytes, ULONG *largest_bytes)
+{
+  UBYTE umb_state = LoL->uppermem_link;
+  seg pseg;
+  mcb *p;
+  ULONG total = 0;
+  ULONG largest = 0;
+  ULONG guard = 0;
+
+  if (use_umb) {
+    if (LoL->uppermem_root == 0xffffu) {
+      *total_bytes = 0;
+      *largest_bytes = 0;
+      return;
+    }
+    DosUmbLink(1);
+    pseg = LoL->uppermem_root;
+  } else {
+    DosUmbLink(0);
+    pseg = LoL->first_mcb;
+  }
+
+  for (;;) {
+    p = para2far(pseg);
+    if (p->m_size == 0xffffu ||
+        (p->m_type != MCB_NORMAL && p->m_type != MCB_LAST))
+      break;
+    if (p->m_psp == FREE_PSP) {
+      ULONG bytes = (ULONG)p->m_size << 4;
+      if (bytes > largest)
+        largest = bytes;
+      if (total <= 0xfffffffful - bytes)
+        total += bytes;
+      else
+        total = 0xfffffffful;
+    }
+    if (p->m_type == MCB_LAST)
+      break;
+    pseg = (seg)(pseg + p->m_size + 1u);
+    if (++guard > 0xfffful)
+      break;
+  }
+
+  DosUmbLink(umb_state);
+  *total_bytes = total;
+  *largest_bytes = largest;
+}
+
+static ULONG arm_elf_chunk_payload_off_native(uintptr_t base,
+                                              ULONG logical_start,
+                                              ULONG align)
+{
+  ULONG off = (ULONG)sizeof(arm_elf_sec_chunk);
+
+  if (align > 1) {
+    ULONG rem = (ULONG)((base + off - logical_start) % align);
+    if (rem != 0)
+      off += align - rem;
+  }
+  return off;
+}
+
+static ULONG arm_elf_chunk_payload_off(UWORD data_seg, ULONG logical_start,
+                                       ULONG align)
+{
+  return arm_elf_chunk_payload_off_native(
+      (uintptr_t)ARM_PTR(MK_FP(data_seg, 0)), logical_start, align);
+}
+
+static int arm_elf_section_runtime_addr(UWORD base_seg,
+                                        arm_elf_load_meta *meta,
+                                        UWORD sec_num, ULONG logical_off,
+                                        ULONG width, ULONG *addr)
+{
+  arm_elf_sec_state *states = arm_elf_states(meta);
+  arm_elf_sec_state *state;
+  ULONG chunk_addr;
+
+  if (sec_num >= meta->shnum || addr == NULL)
+    return DE_INVLDFMT;
+  state = &states[sec_num];
+  if (logical_off > state->size || width > state->size - logical_off)
+    return DE_INVLDFMT;
+
+  if (logical_off < state->primary_size &&
+      width <= state->primary_size - logical_off) {
+    *addr = (ULONG)(uintptr_t)ARM_PTR(
+        arm_elf_guest_ptr(base_seg, state->offset + logical_off));
+    return SUCCESS;
+  }
+  if (state->size == 0 && logical_off == 0 && width == 0) {
+    *addr = (ULONG)(uintptr_t)ARM_PTR(
+        arm_elf_guest_ptr(base_seg, state->offset));
+    return SUCCESS;
+  }
+
+  chunk_addr = state->extra_chunks;
+  while (chunk_addr != 0) {
+    arm_elf_sec_chunk *chunk = (arm_elf_sec_chunk *)(uintptr_t)chunk_addr;
+    if (logical_off >= chunk->logical_start &&
+        logical_off < chunk->logical_end &&
+        width <= chunk->logical_end - logical_off) {
+      *addr = chunk->data_addr + chunk->data_off +
+              logical_off - chunk->logical_start;
+      return SUCCESS;
+    }
+    if (width == 0 && logical_off == state->size &&
+        logical_off == chunk->logical_end && chunk->next_addr == 0) {
+      *addr = chunk->data_addr + chunk->data_off +
+              chunk->logical_end - chunk->logical_start;
+      return SUCCESS;
+    }
+    chunk_addr = chunk->next_addr;
+  }
+  if (width == 0 && logical_off == state->size &&
+      state->primary_size == state->size) {
+    *addr = (ULONG)(uintptr_t)ARM_PTR(
+        arm_elf_guest_ptr(base_seg, state->offset + state->size));
+    return SUCCESS;
+  }
+  return DE_INVLDFMT;
+}
+
+static int arm_elf_safe_piece_end(COUNT fd, const arm_elf_load_meta *meta,
+                                  UWORD sec_num, ULONG start, ULONG capacity,
+                                  ULONG section_size, ULONG *piece_end)
+{
+  ULONG entsize = meta->symtab.entsize ? meta->symtab.entsize
+                                        : sizeof(arm_elf32_sym);
+  ULONG count;
+  ULONG cut;
+  int changed;
+
+  if (entsize < sizeof(arm_elf32_sym) || piece_end == NULL)
+    return DE_INVLDFMT;
+  count = meta->symtab.size / entsize;
+  cut = section_size - start < capacity ? section_size : start + capacity;
+
+  do {
+    ULONG i;
+    changed = FALSE;
+    for (i = 0; i < count; ++i) {
+      arm_elf32_sym sym;
+      ULONG sym_end;
+      int rc = arm_elf_read_symbol(fd, meta, i, &sym);
+      if (rc != SUCCESS)
+        return rc;
+      if (sym.shndx != sec_num || sym.size == 0)
+        continue;
+      if (sym.value > section_size || sym.size > section_size - sym.value)
+        return DE_INVLDFMT;
+      sym_end = sym.value + sym.size;
+      if (sym.value < start && sym_end > start)
+        return DE_INVLDFMT;
+      if (sym.value < cut && sym_end > cut) {
+        if (sym.value < start)
+          return DE_INVLDFMT;
+        cut = sym.value;
+        changed = TRUE;
+      }
+    }
+  } while (changed);
+
+  *piece_end = cut;
+  return SUCCESS;
+}
+
+static int arm_elf_find_blocking_symbol(COUNT fd,
+                                        const arm_elf_load_meta *meta,
+                                        UWORD sec_num, ULONG logical_off,
+                                        ULONG *sym_index,
+                                        arm_elf32_sym *blocking)
+{
+  ULONG entsize = meta->symtab.entsize ? meta->symtab.entsize
+                                        : sizeof(arm_elf32_sym);
+  ULONG count;
+  ULONG i;
+  ULONG best_index = ARM_ELF_NO_SYMBOL;
+  ULONG best_value = 0xfffffffful;
+  arm_elf32_sym best;
+
+  if (entsize < sizeof(arm_elf32_sym))
+    return DE_INVLDFMT;
+  count = meta->symtab.size / entsize;
+  memset(&best, 0, sizeof(best));
+
+  for (i = 0; i < count; ++i) {
+    arm_elf32_sym sym;
+    ULONG sym_end;
+    int rc = arm_elf_read_symbol(fd, meta, i, &sym);
+    if (rc != SUCCESS)
+      return rc;
+    if (sym.shndx != sec_num || sym.size == 0)
+      continue;
+    if (sym.value > 0xfffffffful - sym.size)
+      return DE_INVLDFMT;
+    sym_end = sym.value + sym.size;
+    if (sym.value <= logical_off && sym_end > logical_off) {
+      best = sym;
+      best_index = i;
+      break;
+    }
+    if (sym.value >= logical_off && sym.value < best_value) {
+      best = sym;
+      best_index = i;
+      best_value = sym.value;
+    }
+  }
+
+  if (best_index == ARM_ELF_NO_SYMBOL)
+    return DE_NOMEM;
+  if (sym_index != NULL)
+    *sym_index = best_index;
+  if (blocking != NULL)
+    *blocking = best;
+  return SUCCESS;
+}
+
+static void arm_elf_report_symbol_oom(COUNT fd, arm_elf_load_meta *meta,
+                                      UWORD sec_num, const arm_elf32_shdr *sh,
+                                      ULONG logical_off, ULONG largest_payload)
+{
+  ULONG sym_index = ARM_ELF_NO_SYMBOL;
+  arm_elf32_sym sym;
+  BYTE sec_name[64];
+  BYTE sym_name[64];
+  ULONG low_free, low_largest;
+  ULONG umb_free, umb_largest;
+  size_t app_largest;
+  arm_app_heap_context *saved_app_heap;
+  int have_sym;
+
+  arm_elf_loader_progress_end(meta);
+  if (!arm_elf_section_name(fd, meta, sh, sec_name, sizeof(sec_name)))
+    strcpy((char *)sec_name, "?");
+  have_sym = arm_elf_find_blocking_symbol(fd, meta, sec_num, logical_off,
+                                           &sym_index, &sym) == SUCCESS;
+  if (!have_sym ||
+      !arm_elf_symbol_name(fd, meta, &sym, sym_name, sizeof(sym_name)))
+    strcpy((char *)sym_name, "?");
+  arm_elf_pool_free_stats(FALSE, &low_free, &low_largest);
+  arm_elf_pool_free_stats(TRUE, &umb_free, &umb_largest);
+  saved_app_heap = arm_app_active_heap;
+  arm_app_active_heap = &meta->app_heap;
+  app_largest = arm_app_psram_largest();
+  arm_app_active_heap = saved_app_heap;
+
+  if (have_sym)
+    dos_printf("ARM ELF: symbol %s in section %u %s does not fit DOS memory\r\n",
+               sym_name, (unsigned)sec_num, sec_name);
+  else
+    dos_printf("ARM ELF: section %u %s cannot continue at offset %lu\r\n",
+               (unsigned)sec_num, sec_name, logical_off);
+  if (have_sym)
+    dos_printf("  symbol-offset=%lu symbol-size=%lu largest-next-payload=%lu\r\n",
+               sym.value, sym.size, largest_payload);
+  dos_printf("  occupied-blocks=%u allocated=%lu\r\n",
+             (unsigned)(meta->extra_block_count + 1u),
+             meta->allocation_end + meta->extra_block_bytes);
+  dos_printf("  LOW free=%lu largest=%lu; UMB free=%lu largest=%lu\r\n",
+             low_free, low_largest, umb_free, umb_largest);
+  dos_printf("  APP largest=%lu\r\n", (ULONG)app_largest);
+}
+
+static void arm_elf_append_chunk(arm_elf_sec_state *state,
+                                 arm_elf_sec_chunk *chunk)
+{
+  ULONG *link = &state->extra_chunks;
+
+  while (*link != 0) {
+    arm_elf_sec_chunk *cur = (arm_elf_sec_chunk *)(uintptr_t)*link;
+    link = &cur->next_addr;
+  }
+  *link = (ULONG)(uintptr_t)chunk;
+}
+
+static void arm_elf_free_extra_blocks(arm_elf_load_meta *meta)
+{
+  arm_elf_sec_state *states;
+  arm_app_heap_context *saved_app_heap;
+  UWORD i;
+
+  if (meta == NULL)
+    return;
+  saved_app_heap = arm_app_active_heap;
+  arm_app_active_heap = &meta->app_heap;
+  states = arm_elf_states(meta);
+  for (i = 0; i < meta->shnum; ++i) {
+    ULONG chunk_addr = states[i].extra_chunks;
+    while (chunk_addr != 0) {
+      arm_elf_sec_chunk *chunk = (arm_elf_sec_chunk *)(uintptr_t)chunk_addr;
+      ULONG next_addr = chunk->next_addr;
+      UWORD mcb_seg = chunk->mcb_seg;
+      if (mcb_seg != 0)
+        DosMemFree(mcb_seg);
+      else
+        arm_native_app_free(chunk);
+      chunk_addr = next_addr;
+    }
+    states[i].extra_chunks = 0;
+  }
+  meta->extra_block_count = 0;
+  meta->extra_block_bytes = 0;
+  arm_app_active_heap = saved_app_heap;
+}
+
 static UBYTE arm_elf_startup_kind(const BYTE *name, ULONG type,
                                   UBYTE *is_plain)
 {
@@ -764,8 +1588,14 @@ static int arm_elf_build_startup_arrays(COUNT fd, UWORD base_seg,
   if (off == 0xfffffffful || off > 0xfffffffful - bytes)
     return DE_NOMEM;
   rc = arm_elf_ensure_capacity(meta, off + bytes);
-  if (rc != SUCCESS)
+  if (rc != SUCCESS) {
+    arm_elf_loader_progress_end(meta);
+    dos_printf("ARM ELF: startup arrays do not fit guest image\r\n");
+    dos_printf("  entries=%lu bytes=%lu cursor=%lu aligned=%lu end=%lu reserved=%lu\r\n",
+               total_entries, bytes, meta->cursor, off, off + bytes,
+               meta->allocation_end);
     return rc;
+  }
 
   meta->preinit_array_addr = (ULONG)(uintptr_t)ARM_PTR(
       arm_elf_guest_ptr(base_seg, off));
@@ -799,6 +1629,29 @@ static int arm_elf_build_startup_arrays(COUNT fd, UWORD base_seg,
 }
 
 
+static int arm_elf_crt_boundary_addr(const arm_elf_load_meta *meta,
+                                     const BYTE *name, ULONG *sym_addr)
+{
+  if (strcmp((const char *)name, "__ez_preinit_array_start") == 0)
+    *sym_addr = meta->preinit_array_addr;
+  else if (strcmp((const char *)name, "__ez_preinit_array_end") == 0)
+    *sym_addr = meta->preinit_array_addr +
+        meta->preinit_array_count * sizeof(ULONG);
+  else if (strcmp((const char *)name, "__ez_init_array_start") == 0)
+    *sym_addr = meta->init_array_addr;
+  else if (strcmp((const char *)name, "__ez_init_array_end") == 0)
+    *sym_addr = meta->init_array_addr +
+        meta->init_array_count * sizeof(ULONG);
+  else if (strcmp((const char *)name, "__ez_fini_array_start") == 0)
+    *sym_addr = meta->fini_array_addr;
+  else if (strcmp((const char *)name, "__ez_fini_array_end") == 0)
+    *sym_addr = meta->fini_array_addr +
+        meta->fini_array_count * sizeof(ULONG);
+  else
+    return FALSE;
+  return TRUE;
+}
+
 static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
                                arm_elf_load_meta *meta, ULONG sym_index,
                                ULONG *sym_addr)
@@ -812,10 +1665,13 @@ static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
     return rc;
   if (sym.shndx == SHN_UNDEF) {
     BYTE name[64];
-    if (arm_elf_symbol_name(fd, meta, &sym, name, sizeof(name)))
+    if (arm_elf_symbol_name(fd, meta, &sym, name, sizeof(name))) {
+      if (arm_elf_crt_boundary_addr(meta, name, sym_addr))
+        return SUCCESS;
       dos_printf("ARM ELF: undefined symbol: %s\r\n", name);
-    else
+    } else {
       dos_printf("ARM ELF: undefined symbol #%lu\r\n", sym_index);
+    }
     return DE_INVLDFMT;
   }
   if (sym.shndx == SHN_ABS) {
@@ -839,8 +1695,8 @@ static int arm_elf_symbol_addr(COUNT fd, UWORD base_seg,
   rc = arm_elf_load_section(fd, base_seg, meta, sym.shndx, &sec_addr);
   if (rc != SUCCESS)
     return rc;
-  *sym_addr = sec_addr + sym.value;
-  return SUCCESS;
+  return arm_elf_section_runtime_addr(base_seg, meta, sym.shndx,
+                                      sym.value, 0, sym_addr);
 }
 
 /*
@@ -884,11 +1740,21 @@ static int arm_elf_loader_progress(arm_elf_load_meta *meta,
   return TRUE;
 }
 
+static void arm_elf_loader_progress_end(arm_elf_load_meta *meta)
+{
+  if (meta != NULL && meta->is_long_running_job) {
+    dos_printf("\r\n");
+    /* Prevent a second diagnostic on the same failure path from adding an
+       extra blank line.  A later progress point will re-enable output because
+       loader_started_us is unchanged. */
+    meta->is_long_running_job = FALSE;
+  }
+}
+
 static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
                                              arm_elf_load_meta *meta,
                                              UWORD sec_num,
-                                             const arm_elf32_shdr *target,
-                                             ULONG target_off)
+                                             const arm_elf32_shdr *target)
 {
   UWORD i;
 
@@ -913,9 +1779,12 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
 
     for (j = 0; j < relsec.size / rel_entsize; ++j) {
       arm_elf32_rel rel;
+      arm_elf32_sym rel_sym;
       ULONG sym_addr;
       ULONG sym_index;
+      ULONG place_addr;
       UBYTE type;
+      UBYTE sym_type;
       BYTE *place;
       ULONG paddr;
 
@@ -928,13 +1797,24 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
 
       sym_index = rel.info >> 8;
       type = (UBYTE)(rel.info & 0xffu);
+      rc = arm_elf_read_symbol(fd, meta, sym_index, &rel_sym);
+      if (rc != SUCCESS)
+        return rc;
+      sym_type = rel_sym.info & 0x0fu;
       rc = arm_elf_symbol_addr(fd, base_seg, meta, sym_index, &sym_addr);
       if (rc != SUCCESS)
         return rc;
 
-      place = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg,
-                                                target_off + rel.offset));
-      paddr = (ULONG)(uintptr_t)place;
+      rc = arm_elf_section_runtime_addr(base_seg, meta, sec_num,
+                                        rel.offset, 4, &place_addr);
+      if (rc != SUCCESS) {
+        dos_printf("ARM ELF: relocation field crosses section block boundary "
+                   "(section %u, offset %lu)\r\n",
+                   (unsigned)sec_num, rel.offset);
+        return rc;
+      }
+      place = (BYTE *)(uintptr_t)place_addr;
+      paddr = place_addr;
       /*
        * Relocations are the useful fine-grained loader progress signal.
        * Do not print every record: thousands of DOS console writes would make
@@ -948,15 +1828,49 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
 
       switch (type) {
         case R_ARM_ABS32:
-          *(ULONG *)place += sym_addr;
+          if (sym_type == STT_SECTION) {
+            ULONG target_addr;
+            ULONG addend = *(ULONG *)place;
+            rc = arm_elf_section_runtime_addr(base_seg, meta, rel_sym.shndx,
+                                              addend, 0, &target_addr);
+            if (rc != SUCCESS)
+              return rc;
+            *(ULONG *)place = target_addr;
+          } else {
+            *(ULONG *)place += sym_addr;
+          }
           break;
         case R_ARM_REL32:
-          *(ULONG *)place = sym_addr + *(ULONG *)place - paddr;
+          if (sym_type == STT_SECTION) {
+            ULONG target_addr;
+            ULONG addend = *(ULONG *)place;
+            rc = arm_elf_section_runtime_addr(base_seg, meta, rel_sym.shndx,
+                                              addend, 0, &target_addr);
+            if (rc != SUCCESS)
+              return rc;
+            *(ULONG *)place = target_addr - paddr;
+          } else {
+            *(ULONG *)place = sym_addr + *(ULONG *)place - paddr;
+          }
           break;
         case R_ARM_THM_PC22:
+          if (sym_type == STT_SECTION && rel_sym.shndx < meta->shnum &&
+              arm_elf_states(meta)[rel_sym.shndx].extra_chunks != 0) {
+            dos_printf("ARM ELF: section-symbol Thumb relocation into split "
+                       "section %u is not supported\r\n",
+                       (unsigned)rel_sym.shndx);
+            return DE_INVLDFMT;
+          }
           arm_elf_resolve_thm_pc22((UWORD *)place, (UWORD *)place, sym_addr);
           break;
         case R_ARM_THM_JUMP24:
+          if (sym_type == STT_SECTION && rel_sym.shndx < meta->shnum &&
+              arm_elf_states(meta)[rel_sym.shndx].extra_chunks != 0) {
+            dos_printf("ARM ELF: section-symbol Thumb relocation into split "
+                       "section %u is not supported\r\n",
+                       (unsigned)rel_sym.shndx);
+            return DE_INVLDFMT;
+          }
           rc = arm_elf_resolve_thm_jump24((UWORD *)place,
                                           (UWORD *)place, sym_addr);
           if (rc != SUCCESS) {
@@ -967,6 +1881,13 @@ static int arm_elf_apply_section_relocations(COUNT fd, UWORD base_seg,
           }
           break;
         case R_ARM_THM_ALU_ABS_G0_NC:
+          if (sym_type == STT_SECTION && rel_sym.shndx < meta->shnum &&
+              arm_elf_states(meta)[rel_sym.shndx].extra_chunks != 0) {
+            dos_printf("ARM ELF: section-symbol MOV relocation into split "
+                       "section %u is not supported\r\n",
+                       (unsigned)rel_sym.shndx);
+            return DE_INVLDFMT;
+          }
           if ((uintptr_t)place & 1u)
             return DE_INVLDFMT;
           arm_elf_resolve_thm_alu_abs_g0_nc((UWORD *)place, sym_addr);
@@ -1003,54 +1924,262 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
   arm_elf_sec_state *state;
   arm_elf32_shdr sh;
   ULONG off;
+  ULONG logical = 0;
+  ULONG piece_end;
+  UBYTE use_umb;
+  UBYTE second_pool;
   int rc;
 
   if (sec_num >= meta->shnum)
     return DE_INVLDFMT;
   state = &states[sec_num];
   if (state->state == ARM_ELF_SEC_LOADING ||
-      state->state == ARM_ELF_SEC_LOADED) {
-    *sec_addr = (ULONG)(uintptr_t)ARM_PTR(
-        arm_elf_guest_ptr(base_seg, state->offset));
-    return SUCCESS;
-  }
+      state->state == ARM_ELF_SEC_LOADED)
+    return arm_elf_section_runtime_addr(base_seg, meta, sec_num, 0, 0,
+                                        sec_addr);
 
   rc = arm_elf_read_shdr(fd, &meta->eh, sec_num, &sh);
   if (rc != SUCCESS)
     return rc;
 
   off = arm_elf_align_up(meta->cursor, sh.addralign);
-  if (off == 0xfffffffful || off > 0xfffffffful - sh.size)
+  if (off == 0xfffffffful)
     return DE_INVLDFMT;
-
-  rc = arm_elf_ensure_capacity(meta, off + sh.size);
-  if (rc != SUCCESS) {
-    dos_printf("ARM ELF: cannot grow guest block for section %u to %lu bytes\r\n",
-               (unsigned)sec_num, off + sh.size);
-    return rc;
-  }
 
   state->offset = off;
   state->size = sh.size;
+  state->primary_size = 0;
+  state->extra_chunks = 0;
   state->state = ARM_ELF_SEC_LOADING;
-  meta->cursor = off + sh.size;
+  use_umb = meta->allocation_high ? TRUE : FALSE;
+  second_pool = use_umb ? FALSE : TRUE;
 
-  if (sh.size != 0) {
-    if (sh.type == SHT_NOBITS) {
-      memset(ARM_PTR(arm_elf_guest_ptr(base_seg, off)), 0, sh.size);
+  /* Use the remainder of the primary process block first, but never cut an
+     ELF symbol.  Once a symbol no longer fits, the section continues in the
+     next largest DOS block instead of requiring the whole section to be
+     contiguous. */
+  if (logical < sh.size && off < meta->allocation_end) {
+    ULONG capacity = meta->allocation_end - off;
+    if (capacity >= sh.size - logical) {
+      piece_end = sh.size;
     } else {
-      rc = arm_elf_read_section(fd, base_seg, off, sh.offset, sh.size);
-      if (rc != SUCCESS) {
-        dos_printf("ARM ELF: cannot read section %u (%lu bytes at file offset %lu)\r\n",
-                   (unsigned)sec_num, sh.size, sh.offset);
+      rc = arm_elf_safe_piece_end(fd, meta, sec_num, logical, capacity,
+                                  sh.size, &piece_end);
+      if (rc != SUCCESS)
         return rc;
+    }
+    if (piece_end > logical) {
+      ULONG piece_size = piece_end - logical;
+      if (sh.type == SHT_NOBITS) {
+        memset(ARM_PTR(arm_elf_guest_ptr(base_seg, off)), 0, piece_size);
+      } else {
+        rc = arm_elf_read_section(fd, base_seg, off, sh.offset, piece_size);
+        if (rc != SUCCESS) {
+          dos_printf("ARM ELF: cannot read section %u bytes 0..%lu\r\n",
+                     (unsigned)sec_num, piece_end);
+          return rc;
+        }
       }
+      state->primary_size = piece_end;
+      meta->cursor = off + piece_size;
+      logical = piece_end;
     }
   }
 
-  *sec_addr = (ULONG)(uintptr_t)ARM_PTR(arm_elf_guest_ptr(base_seg, off));
-  rc = arm_elf_apply_section_relocations(fd, base_seg, meta,
-                                         sec_num, &sh, off);
+  while (logical < sh.size) {
+    UWORD mcb_seg = 0;
+    UWORD paras = 0;
+    UWORD data_seg;
+    ULONG block_bytes;
+    ULONG data_off;
+    ULONG capacity;
+    ULONG piece_size;
+    ULONG used_bytes;
+    UWORD used_paras;
+    arm_elf_sec_chunk *chunk;
+
+retry_pool:
+    rc = arm_elf_alloc_largest_pool(use_umb, &mcb_seg, &paras);
+    if (rc != SUCCESS || paras == 0) {
+      if (use_umb != second_pool) {
+        use_umb = second_pool;
+        mcb_seg = 0;
+        paras = 0;
+        goto retry_pool;
+      }
+      goto app_heap_fallback;
+    }
+
+    data_seg = (UWORD)(mcb_seg + 1u);
+    block_bytes = (ULONG)paras << 4;
+    data_off = arm_elf_chunk_payload_off(data_seg, logical, sh.addralign);
+    capacity = data_off < block_bytes ? block_bytes - data_off : 0;
+
+    if (capacity >= sh.size - logical) {
+      piece_end = sh.size;
+    } else {
+      rc = arm_elf_safe_piece_end(fd, meta, sec_num, logical, capacity,
+                                  sh.size, &piece_end);
+      if (rc != SUCCESS) {
+        DosMemFree(mcb_seg);
+        return rc;
+      }
+    }
+    if (piece_end <= logical) {
+      DosMemFree(mcb_seg);
+      if (use_umb != second_pool) {
+        use_umb = second_pool;
+        mcb_seg = 0;
+        paras = 0;
+        goto retry_pool;
+      }
+      goto app_heap_fallback;
+    }
+
+    piece_size = piece_end - logical;
+    if (sh.type == SHT_NOBITS) {
+      memset(ARM_PTR(arm_elf_guest_ptr(data_seg, data_off)), 0, piece_size);
+    } else {
+      rc = arm_elf_read_section(fd, data_seg, data_off,
+                                sh.offset + logical, piece_size);
+      if (rc != SUCCESS) {
+        DosMemFree(mcb_seg);
+        dos_printf("ARM ELF: cannot read section %u bytes %lu..%lu\r\n",
+                   (unsigned)sec_num, logical, piece_end);
+        return rc;
+      }
+    }
+
+    used_bytes = data_off + piece_size;
+    used_paras = (UWORD)((used_bytes + 15u) >> 4);
+    if (used_paras == 0 || used_paras > paras) {
+      DosMemFree(mcb_seg);
+      return DE_NOMEM;
+    }
+    if (used_paras < paras) {
+      rc = DosMemChange(data_seg, used_paras, NULL);
+      if (rc != SUCCESS) {
+        DosMemFree(mcb_seg);
+        return rc;
+      }
+    }
+
+    /* DosMemChange() assigns the caller as owner.  These blocks belong to the
+       child PSP, exactly like its separate DOS-stack MCB, so normal process
+       teardown/TSR ownership sees them as part of the child. */
+    para2far(mcb_seg)->m_psp = base_seg;
+
+    chunk = (arm_elf_sec_chunk *)ARM_PTR(MK_FP(data_seg, 0));
+    chunk->next_addr = 0;
+    chunk->logical_start = logical;
+    chunk->logical_end = piece_end;
+    chunk->data_addr = (ULONG)(uintptr_t)ARM_PTR(MK_FP(data_seg, 0));
+    chunk->data_off = data_off;
+    chunk->mcb_seg = mcb_seg;
+    chunk->data_seg = data_seg;
+    arm_elf_append_chunk(state, chunk);
+
+    ++meta->extra_block_count;
+    meta->extra_block_bytes += (ULONG)used_paras << 4;
+    logical = piece_end;
+    continue;
+
+app_heap_fallback:
+    {
+      arm_app_heap_context *saved_app_heap = arm_app_active_heap;
+      size_t largest;
+      size_t overhead;
+      size_t alloc_size;
+      void *allocation;
+      uintptr_t native_base;
+
+      arm_app_active_heap = &meta->app_heap;
+      largest = arm_app_psram_largest();
+      overhead = sizeof(arm_elf_sec_chunk) +
+                 (sh.addralign > 1 ? (size_t)sh.addralign - 1u : 0u);
+      if (largest <= overhead) {
+        arm_app_active_heap = saved_app_heap;
+        arm_elf_report_symbol_oom(fd, meta, sec_num, &sh, logical, 0);
+        return DE_NOMEM;
+      }
+
+      capacity = (ULONG)(largest - overhead);
+      if (capacity >= sh.size - logical) {
+        piece_end = sh.size;
+      } else {
+        rc = arm_elf_safe_piece_end(fd, meta, sec_num, logical, capacity,
+                                    sh.size, &piece_end);
+        if (rc != SUCCESS) {
+          arm_app_active_heap = saved_app_heap;
+          return rc;
+        }
+      }
+      if (piece_end <= logical) {
+        arm_app_active_heap = saved_app_heap;
+        arm_elf_report_symbol_oom(fd, meta, sec_num, &sh, logical, capacity);
+        return DE_NOMEM;
+      }
+
+      piece_size = piece_end - logical;
+      alloc_size = overhead + piece_size;
+      allocation = arm_native_app_malloc(alloc_size);
+      if (allocation == NULL || !arm_app_psram_owns(allocation)) {
+        if (allocation != NULL)
+          arm_native_app_free(allocation);
+        arm_app_active_heap = saved_app_heap;
+        arm_elf_report_symbol_oom(fd, meta, sec_num, &sh, logical, capacity);
+        return DE_NOMEM;
+      }
+
+      chunk = (arm_elf_sec_chunk *)allocation;
+      native_base = (uintptr_t)allocation;
+      data_off = arm_elf_chunk_payload_off_native(native_base, logical,
+                                                  sh.addralign);
+      if ((size_t)data_off + piece_size > alloc_size) {
+        arm_native_app_free(allocation);
+        arm_app_active_heap = saved_app_heap;
+        return DE_NOMEM;
+      }
+
+      if (sh.type == SHT_NOBITS) {
+        memset((BYTE *)allocation + data_off, 0, piece_size);
+      } else {
+        rc = arm_elf_read_native_section(fd, (BYTE *)allocation + data_off,
+                                         sh.offset + logical, piece_size);
+        if (rc != SUCCESS) {
+          arm_native_app_free(allocation);
+          arm_app_active_heap = saved_app_heap;
+          dos_printf("ARM ELF: cannot read section %u bytes %lu..%lu "
+                     "into application heap\r\n",
+                     (unsigned)sec_num, logical, piece_end);
+          return rc;
+        }
+      }
+
+      chunk->next_addr = 0;
+      chunk->logical_start = logical;
+      chunk->logical_end = piece_end;
+      chunk->data_addr = (ULONG)native_base;
+      chunk->data_off = data_off;
+      chunk->mcb_seg = 0;
+      chunk->data_seg = 0;
+      arm_elf_append_chunk(state, chunk);
+
+      ++meta->extra_block_count;
+      meta->extra_block_bytes += (ULONG)alloc_size;
+      logical = piece_end;
+      arm_app_active_heap = saved_app_heap;
+    }
+  }
+
+  if (sh.size == 0)
+    meta->cursor = off;
+
+  rc = arm_elf_section_runtime_addr(base_seg, meta, sec_num, 0, 0, sec_addr);
+  if (rc != SUCCESS)
+    return rc;
+
+  rc = arm_elf_apply_section_relocations(fd, base_seg, meta, sec_num, &sh);
   if (rc != SUCCESS)
     return rc;
   state->state = ARM_ELF_SEC_LOADED;
@@ -1061,13 +2190,57 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
   return SUCCESS;
 }
 
+static int arm_elf_read_crt_requirements(
+  COUNT fd,
+  arm_elf_load_meta *meta,
+  native_ez_process_requirements *requirements
+) {
+  arm_elf32_shdr fallback;
+  UBYTE have_fallback = FALSE;
+  UWORD i;
+
+  memset(requirements, 0, sizeof(*requirements));
+  memset(&fallback, 0, sizeof(fallback));
+
+  for (i = 0; i < meta->eh.shnum; ++i) {
+    arm_elf32_shdr sh;
+    BYTE name[64];
+    int rc = arm_elf_read_shdr(fd, &meta->eh, i, &sh);
+
+    if (rc != SUCCESS)
+      return rc;
+    if (sh.type == SHT_NOBITS || sh.size != sizeof(*requirements))
+      continue;
+    if (!arm_elf_section_name(fd, meta, &sh, name, sizeof(name)))
+      continue;
+
+    if (strcmp((const char *)name,
+               NATIVE_EZ_PROCESS_REQUIREMENTS_SECTION) == 0)
+      return arm_elf_read_meta(fd, sh.offset, requirements,
+                               sizeof(*requirements));
+
+    if (!have_fallback &&
+        strcmp((const char *)name, NATIVE_EZ_PROCESS_DEFAULT_SECTION) == 0) {
+      fallback = sh;
+      have_fallback = TRUE;
+    }
+  }
+
+  if (have_fallback)
+    return arm_elf_read_meta(fd, fallback.offset, requirements,
+                             sizeof(*requirements));
+  return SUCCESS;
+}
+
 static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
                               ULONG *req_idx, ULONG *requirements_idx,
-                              ULONG *init_idx, ULONG *main_idx,
-                              ULONG *fini_idx, ULONG *sig_idx)
+                              ULONG *entry_idx, ULONG *init_idx,
+                              ULONG *main_idx, ULONG *fini_idx,
+                              ULONG *sig_idx)
 {
   ULONG count;
   ULONG i;
+  ULONG weak_entry = ARM_ELF_NO_SYMBOL;
   ULONG weak_init = ARM_ELF_NO_SYMBOL;
   ULONG weak_fini = ARM_ELF_NO_SYMBOL;
   ULONG entsize = meta->symtab.entsize ? meta->symtab.entsize
@@ -1076,8 +2249,8 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
   if (entsize < sizeof(arm_elf32_sym))
     return DE_INVLDFMT;
   count = meta->symtab.size / entsize;
-  *req_idx = *requirements_idx = *init_idx = *main_idx = *fini_idx =
-      *sig_idx = ARM_ELF_NO_SYMBOL;
+  *req_idx = *requirements_idx = *entry_idx = *init_idx =
+      *main_idx = *fini_idx = *sig_idx = ARM_ELF_NO_SYMBOL;
 
   for (i = 0; i < count; ++i) {
     arm_elf32_sym sym;
@@ -1102,12 +2275,20 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
 
     bind = sym.info >> 4;
     type = sym.info & 0x0fu;
-    if (type != STT_FUNC || (bind != STB_GLOBAL && bind != STB_WEAK))
+    if (bind != STB_GLOBAL && bind != STB_WEAK)
+      continue;
+
+    if (type != STT_FUNC)
       continue;
     if (!arm_elf_symbol_name(fd, meta, &sym, name, sizeof(name)))
       continue;
 
-    if (strcmp((const char *)name, "_init") == 0) {
+    if (strcmp((const char *)name, "__ez_start") == 0) {
+      if (bind == STB_GLOBAL)
+        *entry_idx = i;
+      else
+        weak_entry = i;
+    } else if (strcmp((const char *)name, "_init") == 0) {
       if (bind == STB_GLOBAL)
         *init_idx = i;
       else
@@ -1134,6 +2315,8 @@ static int arm_elf_find_roots(COUNT fd, arm_elf_load_meta *meta,
     }
   }
 
+  if (*entry_idx == ARM_ELF_NO_SYMBOL)
+    *entry_idx = weak_entry;
   if (*init_idx == ARM_ELF_NO_SYMBOL)
     *init_idx = weak_init;
   if (*fini_idx == ARM_ELF_NO_SYMBOL)
@@ -1166,13 +2349,11 @@ typedef int (*arm_elf_req_ver_fn)(void);
 
 #define ARM_ELF_PROCESS_REQUIREMENTS_V1_SIZE 12u
 #define ARM_ELF_PROCESS_REQUIREMENTS_V2_SIZE 20u
-#define ARM_ELF_PROCESS_REQUIREMENTS_V3_SIZE 28u
-
 /*
  * Keep native application stacks out of DOS memory without making the rest of
- * PSRAM a kernel heap.  The fixed arena is excluded from every application's
- * published PSRAM range, so nested native EXEC can safely consume it LIFO
- * without colliding with a parent's application allocations.
+ * PSRAM a kernel heap.  The fixed arena is excluded from the application heap,
+ * so nested native EXEC can safely consume it LIFO without colliding with a
+ * parent's application allocations.
  */
 #define ARM_ELF_NATIVE_STACK_ARENA_SIZE (256u * 1024u)
 #define ARM_ELF_APP_PSRAM_BEGIN_OFFSET  0x00110000ul
@@ -1183,15 +2364,13 @@ typedef struct __attribute__((aligned(4))) arm_elf_process_requirements {
   ULONG dos_stack_size __attribute__((aligned(4)));
   ULONG assigned_native_stack_size __attribute__((aligned(4)));
   ULONG assigned_dos_stack_size __attribute__((aligned(4)));
-  ULONG app_psram_begin __attribute__((aligned(4)));
-  ULONG app_psram_end __attribute__((aligned(4)));
 } arm_elf_process_requirements;
 
 _Static_assert(sizeof(ULONG) == 4, "ARM ELF process ABI requires 32-bit ULONG");
 _Static_assert(__alignof__(arm_elf_process_requirements) == 4,
                "ARM ELF process requirements alignment");
 _Static_assert(sizeof(arm_elf_process_requirements) ==
-               ARM_ELF_PROCESS_REQUIREMENTS_V3_SIZE,
+               ARM_ELF_PROCESS_REQUIREMENTS_V2_SIZE,
                "ARM ELF process requirements layout");
 
 typedef arm_elf_process_requirements *
@@ -1202,9 +2381,9 @@ typedef arm_elf_process_requirements *
  *
  * PSRAM_SIZE_BYTES already excludes the EMS backing store when LTEMS is
  * enabled, so this arena is carved from the top of the application-visible
- * PSRAM portion, not from EMS.  Every application receives an app_psram_end
- * below the entire arena.  Stack lifetimes follow synchronous nested EXEC, so
- * a LIFO allocator is sufficient and cannot fragment.
+ * PSRAM portion, not from EMS.  The application heap ends below this entire
+ * arena.  Stack lifetimes follow synchronous nested EXEC, so a LIFO allocator
+ * is sufficient and cannot fragment.
  */
 static uintptr_t arm_elf_native_stack_cursor;
 
@@ -1427,30 +2606,39 @@ static int arm_elf_preflight(arm_elf_load_meta *meta)
   ULONG native_size = ARM_ELF_DEFAULT_NATIVE_STACK_SIZE;
   ULONG dos_size = ARM_ELF_DEFAULT_DOS_STACK_SIZE;
 
-  meta->required_api_version = DOS_API_VERSION;
-  if (meta->required_api_addr != 0)
-    meta->required_api_version =
-        ((arm_elf_req_ver_fn)(uintptr_t)meta->required_api_addr)();
+  if (meta->entry_addr != 0) {
+    if (meta->required_api_version == 0)
+      meta->required_api_version = DOS_API_VERSION;
+    if (meta->native_stack_size != 0)
+      native_size = meta->native_stack_size;
+    if (meta->dos_stack_size != 0)
+      dos_size = meta->dos_stack_size;
+  } else {
+    meta->required_api_version = DOS_API_VERSION;
+    if (meta->required_api_addr != 0) {
+      meta->required_api_version = ((arm_elf_req_ver_fn)(uintptr_t)meta->required_api_addr)();
+    }
+    if (meta->requirements_addr != 0) {
+      requirements = ((arm_elf_requirements_fn)(uintptr_t)meta->requirements_addr)();
+      if (requirements != NULL) {
+        if (requirements->struct_size < ARM_ELF_PROCESS_REQUIREMENTS_V1_SIZE) {
+          dos_printf("ARM ELF: process requirements structure is too small (%lu)\r\n",
+                    requirements->struct_size);
+          return DE_INVLDFMT;
+        }
+        if (requirements->native_stack_size != 0) {
+          native_size = requirements->native_stack_size;
+        }
+        if (requirements->dos_stack_size != 0) {
+          dos_size = requirements->dos_stack_size;
+        }
+      }
+    }
+  }
   if (meta->required_api_version > DOS_API_VERSION) {
     dos_printf("ARM ELF: application requires DOS-API version %ld; provided %u\r\n",
                meta->required_api_version, (unsigned)DOS_API_VERSION);
     return DE_INVLDFMT;
-  }
-
-  if (meta->requirements_addr != 0) {
-    requirements = ((arm_elf_requirements_fn)(uintptr_t)
-        meta->requirements_addr)();
-    if (requirements != NULL) {
-      if (requirements->struct_size < ARM_ELF_PROCESS_REQUIREMENTS_V1_SIZE) {
-        dos_printf("ARM ELF: process requirements structure is too small (%lu)\r\n",
-                   requirements->struct_size);
-        return DE_INVLDFMT;
-      }
-      if (requirements->native_stack_size != 0)
-        native_size = requirements->native_stack_size;
-      if (requirements->dos_stack_size != 0)
-        dos_size = requirements->dos_stack_size;
-    }
   }
 
   native_size = arm_elf_align_up(native_size, 8u);
@@ -1492,12 +2680,6 @@ static void arm_elf_publish_process_requirements(arm_elf_load_meta *meta)
   requirements->assigned_native_stack_size = meta->native_stack_size;
   requirements->assigned_dos_stack_size = meta->dos_stack_size;
 
-  if (requirements->struct_size >= ARM_ELF_PROCESS_REQUIREMENTS_V3_SIZE) {
-    requirements->app_psram_begin =
-        (ULONG)((uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET);
-    requirements->app_psram_end = (ULONG)arm_elf_native_stack_arena_begin();
-  }
-
   /*
    * Temporary visible cross-check: DOOM prints the same object later.  If the
    * values differ, the problem is no longer stack selection but object/image
@@ -1523,8 +2705,14 @@ static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
       argv_off > 0xfffffffful - ARM_ELF_ARG_AREA_SIZE)
     return DE_NOMEM;
   argv_end = argv_off + ARM_ELF_ARG_AREA_SIZE;
-  if (arm_elf_ensure_capacity(meta, argv_end) != SUCCESS)
+  if (arm_elf_ensure_capacity(meta, argv_end) != SUCCESS) {
+    arm_elf_loader_progress_end(meta);
+    dos_printf("ARM ELF: argv area does not fit guest image\r\n");
+    dos_printf("  cursor=%lu aligned=%lu argv-bytes=%lu end=%lu reserved=%lu\r\n",
+               meta->cursor, argv_off, (ULONG)ARM_ELF_ARG_AREA_SIZE,
+               argv_end, meta->allocation_end);
     return DE_NOMEM;
+  }
   text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
   argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
   text = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg, text_off));
@@ -1703,18 +2891,6 @@ static int arm_ez_apply_reloc(BYTE *base,
   }
 }
 
-
-/* Query conventional/guest DOS memory only, ignoring LOADHIGH preference. */
-static int arm_ez_largest_low(UWORD *paras)
-{
-  UBYTE saved_mode = internal_data->mem_access_mode;
-  int rc;
-
-  internal_data->mem_access_mode &= (UBYTE)~0xc0u;
-  rc = DosMemLargest(paras);
-  internal_data->mem_access_mode = saved_mode;
-  return rc;
-}
 
 /* Allocate an exact low-memory DOS block without changing the caller's mode. */
 static int arm_ez_alloc_low(UWORD paras, UWORD *mcb_seg, UWORD *actual)
@@ -1928,15 +3104,9 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   fail_stage = "environment allocation";
   rc = ChildEnv(exp, &env_mcb, (char *)namep);
   if (rc == SUCCESS) {
-    fail_stage = "DOS stack reservation";
-    rc = arm_native_reserve_dos_stack(dos_stack_size,
-                                      &reserved_stack_mcb,
-                                      &reserved_stack_seg);
-  }
-  if (rc == SUCCESS) {
     int low_rc;
-    fail_stage = "LOW largest-block query";
-    low_rc = arm_ez_largest_low(&low_largest);
+    fail_stage = "guest largest-block query";
+    low_rc = ExecMemLargest(&low_largest, low_required_paras);
     if (low_rc != SUCCESS)
       rc = low_rc;
     else if (low_required_paras != 0 && low_largest >= low_required_paras)
@@ -1953,8 +3123,8 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     cursor = arm_elf_align_up(meta_off + sizeof(*meta), 4u);
     final_end = low_final_end;
     final_paras = low_required_paras;
-    fail_stage = "LOW process-block allocation";
-    rc = arm_ez_alloc_low(final_paras, &alloc_mcb, &asize);
+    fail_stage = "guest process-block allocation";
+    rc = ExecMemAlloc(final_paras, &alloc_mcb, &asize);
   } else if (rc == SUCCESS) {
     /* Only PSP/metadata/argv consume DOS memory when the image is in PSRAM. */
     meta_off = arm_elf_align_up(EZ_IMAGE_RVA, 4u);
@@ -1974,7 +3144,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     if (rc == SUCCESS) {
       final_paras = (UWORD)((final_end + 15u) >> 4);
       fail_stage = "PSRAM-fallback process-block allocation";
-      rc = arm_ez_alloc_low(final_paras, &alloc_mcb, &asize);
+      rc = ExecMemAlloc(final_paras, &alloc_mcb, &asize);
     }
   }
 
@@ -1982,6 +3152,13 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     DosUmbLink(umb_state);
     internal_data->mem_access_mode = orig_mem_access;
     mode &= 0x7f;
+  }
+
+  if (rc == SUCCESS) {
+    fail_stage = "DOS stack reservation";
+    rc = arm_native_reserve_dos_stack(dos_stack_size,
+                                      &reserved_stack_mcb,
+                                      &reserved_stack_seg);
   }
 
   if (rc != SUCCESS) {
@@ -2074,8 +3251,8 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   reserved_stack_seg = 0;
   meta->process_info.native_stack_size = native_stack_size;
   meta->process_info.dos_stack_size = dos_stack_size;
-  meta->process_info.app_psram_begin = (ULONG)app_psram_begin;
-  meta->process_info.app_psram_end = (ULONG)arm_elf_native_stack_arena_begin();
+  meta->app_heap.begin = (ULONG)app_psram_begin;
+  meta->app_heap.end = (ULONG)arm_elf_native_stack_arena_begin();
 
   fail_stage = "argv construction";
   rc = arm_ez_build_argv(load_seg, meta, &cursor, (ULONG)asize << 4,
@@ -2125,20 +3302,25 @@ fail:
 static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 {
   arm_elf32_ehdr eh;
-  arm_elf_load_meta *meta;
+  arm_elf_load_meta *meta = NULL;
   ULONG metadata_size;
   ULONG metadata_off;
   ULONG initial_cursor;
   ULONG final_end;
   ULONG paras_long;
-  ULONG req_idx, requirements_idx, init_idx, main_idx, fini_idx, sig_idx;
+  ULONG req_idx, requirements_idx;
+  ULONG entry_idx, init_idx, main_idx, fini_idx, sig_idx;
+  native_ez_process_requirements crt_requirements;
   UWORD alloc_mcb, asize = 0, load_seg;
   UWORD env_mcb = 0;
   UWORD fcbcode;
   UWORD final_paras;
   UBYTE umb_state;
   UBYTE orig_mem_access;
+  UBYTE load_high_requested;
   int rc;
+
+  load_high_requested = (mode & LOAD_HIGH) != 0;
 
   if ((mode & 0x7f) == EXEC_OVERLAY)
     return arm_elf_reject(DE_INVLDFMT, "EXEC overlay mode is not supported");
@@ -2234,70 +3416,103 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   meta->shnum = eh.shnum;
   meta->cursor = initial_cursor;
   meta->allocation_end = (ULONG)asize << 4;
+  meta->allocation_high = load_high_requested;
+  meta->app_heap.begin =
+      (ULONG)((uintptr_t)PSRAM_BASE_ADDR + ARM_ELF_APP_PSRAM_BEGIN_OFFSET);
+  meta->app_heap.end = (ULONG)arm_elf_native_stack_arena_begin();
+
+  /*
+   * argv is permanent child runtime state, not part of the relocatable ELF
+   * image.  Reserve it before recursive section placement so LOW/UMB chunks
+   * cannot consume the tail of the primary guest block first.
+   */
+  rc = arm_elf_build_argv(load_seg, meta, exp, namep);
+  if (rc != SUCCESS) {
+    dos_printf("ARM ELF: cannot reserve argv area in child memory\r\n");
+    goto fail;
+  }
 
   rc = arm_elf_find_tables(fd, meta);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot find a valid SHT_SYMTAB/SHT_STRTAB pair\r\n");
     goto fail;
   }
-  rc = arm_elf_find_roots(fd, meta, &req_idx, &requirements_idx,
+  rc = arm_elf_find_roots(fd, meta, &req_idx, &requirements_idx, &entry_idx,
                           &init_idx, &main_idx, &fini_idx, &sig_idx);
   if (rc != SUCCESS) {
     dos_printf("ARM ELF: cannot scan application entry symbols\r\n");
     goto fail;
   }
-  if (main_idx == ARM_ELF_NO_SYMBOL) {
-    rc = DE_INVLDFMT;
-    dos_printf("ARM ELF: global main() entry symbol not found\r\n");
-    goto fail;
+  if (entry_idx != ARM_ELF_NO_SYMBOL) {
+    rc = arm_elf_read_crt_requirements(fd, meta, &crt_requirements);
+    if (rc != SUCCESS) {
+      dos_printf("ARM ELF: invalid __native_ez_process_requirements\r\n");
+      goto fail;
+    }
+    meta->required_api_version = crt_requirements.required_dos_api_version;
+    meta->native_stack_size = crt_requirements.native_stack_size;
+    meta->dos_stack_size = crt_requirements.dos_stack_size;
+
+    /*
+     * New CRT ABI: __ez_start is the only application root.  It owns the
+     * complete startup/shutdown sequence, so the kernel must not separately
+     * root or invoke _init/main/_fini/signal.  Build the ET_REL startup arrays
+     * first because __ez_start refers to their linker boundary symbols.
+     */
+    rc = arm_elf_build_startup_arrays(fd, load_seg, meta);
+    if (rc != SUCCESS) {
+      dos_printf("ARM ELF: cannot build startup init arrays\r\n");
+      goto reloc_fail;
+    }
+    rc = arm_elf_load_root(fd, load_seg, meta, entry_idx, &meta->entry_addr);
+    if (rc != SUCCESS)
+      goto reloc_fail;
+  } else {
+    if (main_idx == ARM_ELF_NO_SYMBOL) {
+      rc = DE_INVLDFMT;
+      dos_printf("ARM ELF: global main() entry symbol not found\r\n");
+      goto fail;
+    }
+
+    /* Legacy native ELF ABI.  Keep its independent kernel-owned roots. */
+    rc = arm_elf_load_root(fd, load_seg, meta, req_idx,
+                           &meta->required_api_addr);
+    if (rc != SUCCESS)
+      goto reloc_fail;
+    rc = arm_elf_load_root(fd, load_seg, meta, requirements_idx,
+                           &meta->requirements_addr);
+    if (rc != SUCCESS)
+      goto reloc_fail;
+    rc = arm_elf_load_root(fd, load_seg, meta, init_idx, &meta->init_addr);
+    if (rc != SUCCESS)
+      goto reloc_fail;
+    rc = arm_elf_load_root(fd, load_seg, meta, main_idx, &meta->main_addr);
+    if (rc != SUCCESS)
+      goto reloc_fail;
+    rc = arm_elf_load_root(fd, load_seg, meta, fini_idx, &meta->fini_addr);
+    if (rc != SUCCESS)
+      goto reloc_fail;
+    rc = arm_elf_load_root(fd, load_seg, meta, sig_idx, &meta->signal_addr);
+    if (rc != SUCCESS)
+      goto reloc_fail;
+
+    rc = arm_elf_build_startup_arrays(fd, load_seg, meta);
+    if (rc != SUCCESS) {
+      dos_printf("ARM ELF: cannot build startup init arrays\r\n");
+      goto reloc_fail;
+    }
   }
 
-  /* These are the same roots used by murmulator-os2.  load_root() recursively
-     follows relocation references and assigns each reached section its final
-     runtime address before descending further, so cycles are harmless. */
-  rc = arm_elf_load_root(fd, load_seg, meta, req_idx,
-                         &meta->required_api_addr);
-  if (rc != SUCCESS)
-    goto reloc_fail;
-  rc = arm_elf_load_root(fd, load_seg, meta, requirements_idx,
-                         &meta->requirements_addr);
-  if (rc != SUCCESS)
-    goto reloc_fail;
-  rc = arm_elf_load_root(fd, load_seg, meta, init_idx, &meta->init_addr);
-  if (rc != SUCCESS)
-    goto reloc_fail;
-  rc = arm_elf_load_root(fd, load_seg, meta, main_idx, &meta->main_addr);
-  if (rc != SUCCESS)
-    goto reloc_fail;
-  rc = arm_elf_load_root(fd, load_seg, meta, fini_idx, &meta->fini_addr);
-  if (rc != SUCCESS)
-    goto reloc_fail;
-  rc = arm_elf_load_root(fd, load_seg, meta, sig_idx, &meta->signal_addr);
-  if (rc != SUCCESS)
-    goto reloc_fail;
-
-  /*
-   * ET_REL has not passed through the normal final linker script.  Make the
-   * linker-owned startup array sections explicit roots and synthesize the
-   * contiguous arrays which crt startup code normally receives.
-   */
-  rc = arm_elf_build_startup_arrays(fd, load_seg, meta);
-  if (rc != SUCCESS) {
-    dos_printf("ARM ELF: cannot build startup init arrays\r\n");
-    goto reloc_fail;
-  }
+  /* Do not let a diagnostic continue on the sparse progress line. */
+  arm_elf_loader_progress_end(meta);
 
   rc = arm_elf_preflight(meta);
   if (rc != SUCCESS)
     goto fail;
 
-  /* Do not emit a blank line for loads completed before the threshold. */
-  if (meta->is_long_running_job)
-    dos_printf("\r\n");
-  rc = arm_elf_build_argv(load_seg, meta, exp, namep);
-  if (rc != SUCCESS) {
-    dos_printf("ARM ELF: cannot build argv in child memory\r\n");
-    goto fail;
+  if (meta->entry_addr != 0) {
+    meta->process_info.native_stack_size = meta->native_stack_size;
+    meta->process_info.dos_stack_size = meta->dos_stack_size;
   }
 
   /*
@@ -2314,8 +3529,14 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 
   rc = arm_elf_ensure_capacity(meta, final_end);
   if (rc != SUCCESS) {
-    dos_printf("ARM ELF: final image exceeds reserved guest block (%lu bytes)\r\n",
-               final_end);
+    ULONG hard_limit = 0xffff0ul;
+    ULONG usable_limit = meta->allocation_end < hard_limit
+                         ? meta->allocation_end : hard_limit;
+    arm_elf_loader_progress_end(meta);
+    dos_printf("ARM ELF: final image does not fit guest block\r\n");
+    dos_printf("  cursor=%lu final=%lu reserved=%lu usable-limit=%lu shortfall=%lu\r\n",
+               meta->cursor, final_end, meta->allocation_end, usable_limit,
+               final_end > usable_limit ? final_end - usable_limit : 0);
     goto fail;
   }
   final_paras = (UWORD)((final_end + 15u) >> 4);
@@ -2360,6 +3581,8 @@ reloc_fail:
 fail:
   if (meta != NULL && meta->dos_stack_mcb != 0)
     DosMemFree(meta->dos_stack_mcb);
+  if (meta != NULL)
+    arm_elf_free_extra_blocks(meta);
   DosMemFree(alloc_mcb);
   DosMemFree(env_mcb);
   DosCloseSft(fd, FALSE);
@@ -3226,7 +4449,21 @@ static int __attribute__((noinline)) arm_elf_run_body(void *opaque)
   int result;
 
   /*
-   * Standard final-link/crt startup semantics:
+   * New CRT ABI owns startup completely.  The kernel only supplies argc/argv
+   * and the native stack; __ez_start performs init/main/fini itself.
+   */
+  if (meta->entry_addr != 0) {
+    volatile ULONG *saved_main_sp_slot = arm_elf_active_main_sp;
+    arm_elf_active_main_sp = &meta->native_main_sp;
+    result = arm_elf_call_main((arm_elf_main_fn)(uintptr_t)meta->entry_addr,
+                               meta->argc,
+                               (char **)(uintptr_t)meta->argv_addr);
+    arm_elf_active_main_sp = saved_main_sp_slot;
+    return result;
+  }
+
+  /*
+   * Legacy final-link/crt startup semantics:
    *   preinit_array -> init_array -> optional application _init -> main.
    * Pico SDK 2.x runtime initializers and C++ constructors are registered via
    * these arrays.  _init remains a weak/optional user hook, not a substitute
@@ -3359,6 +4596,7 @@ static COUNT exec_run_process(const struct exec_process_start *start)
     int exit_code;
     const native_ez_process_info *saved_ez_process_info =
         arm_ez_active_process_info;
+    arm_app_heap_context *saved_app_heap = arm_app_active_heap;
 
     if (arm_elf_native_stack_acquire(native_stack_size, &stack_bottom,
                                      &previous_stack_cursor) != SUCCESS) {
@@ -3373,8 +4611,13 @@ static COUNT exec_run_process(const struct exec_process_start *start)
       ez_meta->native_stack_addr = (ULONG)stack_bottom;
     stack_top = stack_bottom + native_stack_size;
 
-    if (ez_meta)
+    if (ez_meta) {
       arm_ez_active_process_info = &ez_meta->process_info;
+      arm_app_active_heap = &ez_meta->app_heap;
+    } else if (elf_meta->entry_addr != 0) {
+      arm_ez_active_process_info = &elf_meta->process_info;
+      arm_app_active_heap = &elf_meta->app_heap;
+    }
 
     {
       uintptr_t saved_diag_native_bottom = doom_diag_native_stack_bottom;
@@ -3402,8 +4645,10 @@ static COUNT exec_run_process(const struct exec_process_start *start)
       doom_diag_dos_stack_size = saved_diag_dos_size;
     }
 
-    if (ez_meta)
+    if (ez_meta || (elf_meta && elf_meta->entry_addr != 0)) {
       arm_ez_active_process_info = saved_ez_process_info;
+      arm_app_active_heap = saved_app_heap;
+    }
 
     arm_elf_native_stack_release(stack_bottom, previous_stack_cursor);
     if (elf_meta)

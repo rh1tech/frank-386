@@ -142,15 +142,22 @@ typedef struct native_ez_process_requirements {
 typedef struct native_ez_process_info {
     uint32_t native_stack_size;
     uint32_t dos_stack_size;
-    uint32_t app_psram_begin;
-    uint32_t app_psram_end;
 } native_ez_process_info;
 #pragma pack(pop)
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-extern const native_ez_process_requirements __native_ez_process_requirements;
+#define NATIVE_EZ_PROCESS_REQUIREMENTS_SECTION ".native_process.requirements"
+#define NATIVE_EZ_PROCESS_DEFAULT_SECTION      ".native_process.default"
+
+#ifndef NATIVE_EZ_PROCESS_REQUIREMENTS_ATTR
+#define NATIVE_EZ_PROCESS_REQUIREMENTS_ATTR \
+    __attribute__((section(NATIVE_EZ_PROCESS_REQUIREMENTS_SECTION)))
+#endif
+
+extern const native_ez_process_requirements NATIVE_EZ_PROCESS_REQUIREMENTS_ATTR
+    __native_ez_process_requirements;
 const native_ez_process_info *native_ez_get_process_info(void);
 #ifdef __cplusplus
 }
@@ -320,12 +327,12 @@ struct ez_file {
 #ifdef __cplusplus
 static_assert(sizeof(native_ez_process_requirements) == 8,
               "EZ process requirements size");
-static_assert(sizeof(native_ez_process_info) == 16,
+static_assert(sizeof(native_ez_process_info) == 8,
               "EZ process info size");
 #else
 _Static_assert(sizeof(native_ez_process_requirements) == 12,
                "EZ process requirements size");
-_Static_assert(sizeof(native_ez_process_info) == 16,
+_Static_assert(sizeof(native_ez_process_info) == 8,
                "EZ process info size");
 #endif
 

@@ -427,13 +427,83 @@ bool bios_hdd_get_info(uint8_t bios_index, bios_hdd_info_t *info) {
     return false;
 }
 
+#ifdef FDOS_RAWSD_DIAG
+#include <stdarg.h>
+/* Mirrors the debug-trace pattern in i386.c / ide.c: a static FIL opened
+ * once in append mode. Called only AFTER disk_read() has returned, so the
+ * SD/SPI is idle and this is a plain sequential FatFS write, not nested
+ * inside the driver. Writes to 386/rawsd.log; read it off the card on a PC. */
+static void rawsd_diag_log(const char *fmt, ...)
+{
+    static FIL lf;
+    static int state = 0;              /* 0=unopened 1=open 2=failed */
+    if (state == 2) return;
+    if (state == 0) {
+        if (f_open(&lf, SD_DATA_DIR_SLASH "rawsd.log",
+                   FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK)
+            state = 1;
+        else if (f_open(&lf, "rawsd.log",
+                        FA_WRITE | FA_OPEN_APPEND | FA_OPEN_ALWAYS) == FR_OK)
+            state = 1;                 /* fallback: volume root */
+        else
+            state = 2;
+    }
+    if (state != 1) return;
+    char line[128];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;
+    UINT bw = 0;
+    f_write(&lf, line, (UINT)n, &bw);
+    f_sync(&lf);
+}
+#endif
+
 bool bios_hdd_read(uint8_t bios_index, uint32_t lba, void *buf, uint16_t count) {
     bios_hdd_info_t info;
     if (!count || !bios_hdd_get_info(bios_index, &info)) return false;
-    if (lba >= info.total_sectors || count > info.total_sectors - lba) return false;
+    if (lba >= info.total_sectors || count > info.total_sectors - lba) {
+#ifdef FDOS_RAWSD_DIAG
+        if (info.raw_sd)
+            rawsd_diag_log("RANGE REJECT lba=%lu cnt=%u tot=%lu\r\n",
+                           (unsigned long)lba, (unsigned)count,
+                           (unsigned long)info.total_sectors);
+#endif
+        return false;
+    }
 
-    if (info.raw_sd)
-        return disk_read(0, (BYTE *)buf, (LBA_t)lba, count) == RES_OK;
+    if (info.raw_sd) {
+        DRESULT r = disk_read(0, (BYTE *)buf, (LBA_t)lba, count);
+#ifdef FDOS_RAWSD_DIAG
+        {
+            /* Unconditional trace of the first raw_sd reads, so the log
+               ALWAYS appears once any raw_sd read happens (no failure
+               needed). Shows cluster-1 LBAs, the FAT read (a low lba among
+               high ones), and exactly where z=1 begins. */
+            static unsigned seen = 0;
+            static int hdr = 0;
+            const uint8_t *b = (const uint8_t *)buf;
+            unsigned nbytes = 512u * (unsigned)count, k;
+            int allzero = 1;
+            for (k = 0; k < nbytes; k++) if (b[k]) { allzero = 0; break; }
+            if (!hdr) {
+                hdr = 1;
+                rawsd_diag_log("== rawsd trace tot=%lu ==\r\n",
+                               (unsigned long)info.total_sectors);
+            }
+            if (seen < 48u) {
+                seen++;
+                rawsd_diag_log("%u lba=%lu cnt=%u rc=%d z=%d "
+                               "b=%02x%02x%02x%02x\r\n",
+                               seen, (unsigned long)lba, (unsigned)count,
+                               (int)r, allzero, b[0], b[1], b[2], b[3]);
+            }
+        }
+#endif
+        return r == RES_OK;
+    }
 
     FIL *f = &ata[(uint8_t)info.ata_slot].fil;
     UINT done = 0;

@@ -33,31 +33,6 @@ native_dos_process_requirements *__native_dos_process_requirements(void)
     return 0;
 }
 
-uintptr_t native_dos_app_psram_begin(void)
-{
-    const native_ez_process_info *ez = native_ez_get_process_info();
-    native_dos_process_requirements *r;
-
-    if (ez != 0)
-        return (uintptr_t)ez->app_psram_begin;
-    r = __native_dos_process_requirements();
-    return r != 0 && r->struct_size >= NATIVE_DOS_PROCESS_REQUIREMENTS_V3_SIZE
-        ? (uintptr_t)r->app_psram_begin : 0;
-}
-
-uintptr_t native_dos_app_psram_end(void)
-{
-    const native_ez_process_info *ez = native_ez_get_process_info();
-    native_dos_process_requirements *r;
-
-    if (ez != 0)
-        return (uintptr_t)ez->app_psram_end;
-    r = __native_dos_process_requirements();
-    return r != 0 && r->struct_size >= NATIVE_DOS_PROCESS_REQUIREMENTS_V3_SIZE
-        ? (uintptr_t)r->app_psram_end : 0;
-}
-
-
 /*
  * Cooperative replacement for the old DMX TSM IRQ scheduler.
  *
@@ -639,6 +614,7 @@ static int native_int21_with_es(uint16_t es, union REGS *regs)
     return rc;
 }
 
+#if 0 /* allocator backend moved to the kernel in DOS API v17 */
 static uint32_t native_dos_block_size(uint16_t segment)
 {
     typedef uint32_t (*fn_ptr_t)(uint16_t);
@@ -1114,6 +1090,55 @@ void *realloc(void *ptr, size_t size)
     free(ptr);
     return new_ptr;
 }
+
+#endif
+
+/*
+ * The stdlib ABI remains local to the application, including its selectable
+ * OOM policy.  Allocation itself is kernel-owned now.
+ */
+void *malloc(size_t size)
+{
+    typedef void *(*fn_ptr_t)(size_t);
+    void *ptr = ((fn_ptr_t)_sys_table_ptrs[111])(size);
+
+    return ptr ? ptr : native_dos_malloc_failed(size);
+}
+
+void *calloc(size_t count, size_t size)
+{
+    typedef void *(*fn_ptr_t)(size_t, size_t);
+    void *ptr = ((fn_ptr_t)_sys_table_ptrs[112])(count, size);
+
+    if (ptr)
+        return ptr;
+    if (count != 0 && size > (size_t)-1 / count)
+        return native_dos_malloc_failed((size_t)-1);
+    return native_dos_malloc_failed(count * size);
+}
+
+void *realloc(void *ptr, size_t size)
+{
+    typedef void *(*fn_ptr_t)(void *, size_t);
+    void *result = ((fn_ptr_t)_sys_table_ptrs[113])(ptr, size);
+
+    if (result || size == 0)
+        return result;
+    return native_dos_malloc_failed(size);
+}
+
+void free(void *ptr)
+{
+    typedef void (*fn_ptr_t)(void *);
+    ((fn_ptr_t)_sys_table_ptrs[114])(ptr);
+}
+
+size_t malloc_largest_block(void)
+{
+    typedef size_t (*fn_ptr_t)(void);
+    return ((fn_ptr_t)_sys_table_ptrs[115])();
+}
+
 
 enum
 {
