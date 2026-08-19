@@ -6,8 +6,8 @@
 
 #ifndef DOS_OS_API_SYS_TABLE_BASE
 #define DOS_OS_API_SYS_TABLE_BASE ((void*)(0x10100000ul))
-static const unsigned long* const _sys_table_ptrs = (const unsigned long* const)DOS_OS_API_SYS_TABLE_BASE;
 #endif
+static const unsigned long* const _sys_table_ptrs = (const unsigned long* const)DOS_OS_API_SYS_TABLE_BASE;
 
 #ifdef __cplusplus
 extern "C" {
