@@ -654,7 +654,9 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
     }
 }
 
-// VBE 100h packed 8bpp: HDMI line buffer stores palette indexes directly.
+// VBE 100h packed 8bpp.  HDMI scanline storage has SCREEN_WIDTH (320)
+// palette indexes; each index is expanded to two output pixels.  Sampling
+// every second source pixel avoids overrunning the 320-byte DMA line buffer.
 static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
                                                         uint8_t *output_buffer) {
     if (line >= (uint32_t)gfx_height || gfx_width != 640) {
@@ -662,8 +664,8 @@ static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
         return;
     }
     const uint8_t *src = gfx_buffer + line * 640u;
-    for (int i = 0; i < 640; ++i)
-        output_buffer[i] = src[i];
+    for (int i = 0; i < SCREEN_WIDTH; ++i)
+        ob(src[i << 1]);
 }
 
 void pre_render_line(void);
