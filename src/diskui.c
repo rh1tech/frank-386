@@ -211,7 +211,6 @@ static void usb_device_exit_to_host(void) {
 
     diskui_close();
 
-    *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52;
     watchdog_reboot(0, 0, 0);
     while (true);
     __unreachable();
@@ -571,7 +570,6 @@ static void apply_and_close(void) {
         config_save_disks();
 
     if (reboot_required) {
-        *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52;
         watchdog_reboot(0, 0, 0);
         while (true);
         __unreachable();

@@ -19,6 +19,8 @@
 #include "hardware/gpio.h"
 #include "hardware/flash.h"
 #include "hardware/watchdog.h"
+#include "hardware/regs/powman.h"
+#include "hardware/structs/powman.h"
 
 #include "hardware/structs/qmi.h"
 
@@ -85,6 +87,34 @@
 PC *pc = NULL;
 static PCConfig config;
 volatile bool initialized = false;
+
+/*
+ * True only for a real RP2350 power-on reset.
+ *
+ * POWMAN reset-cause bits can coexist/stay latched across later reset paths,
+ * so HAD_POR alone is not sufficient.  Reject every other explicit reset
+ * cause as well as watchdog resets.  This makes the welcome screen a cold
+ * power-on feature rather than a "not our SRAM cookie" heuristic.
+ */
+static bool is_power_on_boot(void)
+{
+    const uint32_t reset = powman_hw->chip_reset;
+
+    if (watchdog_caused_reboot())
+        return false;
+
+    if (!(reset & POWMAN_CHIP_RESET_HAD_POR_BITS))
+        return false;
+
+    return !(reset & (
+        POWMAN_CHIP_RESET_HAD_RUN_LOW_BITS |
+        POWMAN_CHIP_RESET_HAD_BOR_BITS |
+        POWMAN_CHIP_RESET_HAD_DP_RESET_REQ_BITS |
+        POWMAN_CHIP_RESET_HAD_RESCUE_BITS |
+        POWMAN_CHIP_RESET_HAD_HZD_SYS_RESET_REQ_BITS |
+        POWMAN_CHIP_RESET_HAD_GLITCH_DETECT_BITS |
+        POWMAN_CHIP_RESET_HAD_SWCORE_PD_BITS));
+}
 
 #ifdef I386_MODE
 /*
@@ -440,11 +470,7 @@ enum {
 
 static __attribute__((noreturn)) void hard_reboot(void)
 {
-    /*
-     * Full RP2350 reboot, not a guest CPU/BIOS reset.  Keep the existing
-     * fast-reboot magic used by the other watchdog restart paths.
-     */
-    *(uint32_t *)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52;
+    /* Full RP2350 reboot, not a guest CPU/BIOS reset. */
     watchdog_reboot(0, 0, 0);
 
     while (true)
@@ -725,7 +751,6 @@ static void platform_poll(void *opaque) {
     if (pc && pc->reset_request) {
         pc->reset_request = 0;
 rst:
-        *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
         watchdog_reboot(0, 0, 0);
         while (true);
     }
@@ -1508,9 +1533,9 @@ int main(void) {
         }
     }
 #if WELCOME_SCREEN
-    // Show welcome screen
+    // Show welcome screen only after a real power-on reset.
     DBG_PRINT("\nAbout to show welcome screen...\n");
-    if(*(uint32_t*)(0x20000000 + (512ul << 10) - 32) != 0x1927fa52) // magic to fast reboot
+    if (is_power_on_boot())
         show_welcome_screen();
     DBG_PRINT("Welcome screen done.\n");
 
@@ -1614,8 +1639,7 @@ int main(void) {
         // Check for reset request
         if (pc->reset_request) {
             pc->reset_request = 0;
-            *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
-            watchdog_reboot(0, 0, 0);
+                watchdog_reboot(0, 0, 0);
             while (true);
             __unreachable();
         }
@@ -1628,8 +1652,7 @@ int main(void) {
             i386_profile_dump_sd_and_reset("watchdog_reboot_settings");
 #endif
             // Full hardware reset via watchdog
-            *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
-            watchdog_reboot(0, 0, 0);
+                watchdog_reboot(0, 0, 0);
         }
 
         // Check for shutdown
@@ -1659,7 +1682,6 @@ int main(void) {
 #ifdef I386_PROFILE
     i386_profile_dump_sd_and_reset("watchdog_reboot_shutdown");
 #endif
-    *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
     watchdog_reboot(0, 0, 0);
     while (true);
     __unreachable();
