@@ -1045,15 +1045,14 @@ static bool init_hardware(void) {
     }
     DBG_PRINT("  SD card mounted\n");
 
-    // Check if the SD_DATA_DIR directory exists
-    DIR dir;
-    res = f_opendir(&dir, SD_DATA_DIR);
-    if (res != FR_OK) {
-        show_error_screen(" Missing Directory ", "Directory '" SD_DATA_DIR_SLASH "' not found on SD card.", "Create it and add config.ini, bios.bin");
+    // A fresh card is valid: create the per-CPU data directory on demand.
+    if (!config_ensure_data_dir()) {
+        show_error_screen(" Directory Error ",
+                          "Failed to create directory '" SD_DATA_DIR_SLASH "'.",
+                          "Check SD card write protection/filesystem.");
         // show_error_screen never returns
     }
-    f_closedir(&dir);
-    DBG_PRINT("  " SD_DATA_DIR_SLASH " directory found\n");
+    DBG_PRINT("  " SD_DATA_DIR_SLASH " directory ready\n");
 
     // Load frank-386-specific hardware settings from INI
     // This allows cpu_freq and psram_freq to be configured

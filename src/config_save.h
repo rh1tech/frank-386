@@ -13,6 +13,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Ensure the per-CPU data directory ("/286" or "/386") exists.
+// Safe to call when it already exists.
+bool config_ensure_data_dir(void);
+
 // Save all configuration to INI file
 // Returns true on success
 bool config_save_all(void);

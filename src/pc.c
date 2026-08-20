@@ -794,7 +794,7 @@ void pc_vga_step(void *o)
 
 static uint32_t pc_last_device_service;
 
-static void __not_in_flash_func(pc_service_impl)(PC *pc, bool service_adlib)
+static void __not_in_flash_func(pc_service_impl)(PC *pc)
 {
     /*
      * Native ELF code runs synchronously on core0, so the outer emulation
@@ -802,18 +802,8 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool service_adlib)
      * is the same device tail normally executed after a CPU burst, but it is
      * deliberately separated from cpu_step(): cooperative yield must never
      * execute or advance guest CPU state.
-     *
-     * AdLib is normally fed from the CPU-burst loop.  During native execution
-     * that loop is stopped while core1 continues consuming OPL samples, so a
-     * native yield also gives adlib_core0() one opportunity to refill audio.
      */
     pc_last_device_service = get_uticks();
-
-    if (service_adlib && pc->adlib_enabled) {
-        PROF_T(t_adlib);
-        adlib_core0(pc->adlib);
-        PROF_ADD(t_adlib, adlib);
-    }
 
     {
         /* Завершение отложенного INT 15h/AH=83h (см. bios_15h.c). */
@@ -853,7 +843,7 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc, bool service_adlib)
 
 void __not_in_flash_func(pc_service)(PC *pc)
 {
-    pc_service_impl(pc, true);
+    pc_service_impl(pc);
 }
 
 void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
@@ -888,27 +878,15 @@ void __not_in_flash_func(pc_step)(PC *pc, size_t max_ops)
     bool was_native_done = pc->cpu->native_done;
     if (!pc->paused) {
         if (max_ops > 4096) max_ops = 4096;
-        if (pc->adlib_enabled) {
-            int i = 0;
-            do {
-                PROF_T(t_cpu);
-                cpu_step(pc->cpu, max_ops > 10 ? 10 : max_ops);
-                PROF_ADD(t_cpu, cpu);
-                PROF_T(t_adlib);
-                adlib_core0(pc->adlib);
-                PROF_ADD(t_adlib, adlib);
-            } while (++i < max_ops / 10);
-        } else {
-            PROF_T(t_cpu);
-            cpu_step(pc->cpu, max_ops);
-            PROF_ADD(t_cpu, cpu);
-        }
+        PROF_T(t_cpu);
+        cpu_step(pc->cpu, max_ops);
+        PROF_ADD(t_cpu, cpu);
         if (pc->cpu->native_done && !was_native_done &&
             (uint32_t)(get_uticks() - pc_last_device_service) < 1000u)
             return;
     }
 
-    pc_service_impl(pc, false);
+    pc_service_impl(pc);
 
 #if SUBSYS_PROFILE
     PROF_ADD(t_total, total);

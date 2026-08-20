@@ -52,6 +52,32 @@ extern PC *pc;
 // INI file path
 #define CONFIG_PATH SD_DATA_DIR_SLASH "config.ini"
 
+bool config_ensure_data_dir(void) {
+    FILINFO info;
+    FRESULT res = f_stat(SD_DATA_DIR, &info);
+
+    if (res == FR_OK)
+        return (info.fattrib & AM_DIR) != 0;
+
+    if (res != FR_NO_FILE && res != FR_NO_PATH)
+        return false;
+
+    res = f_mkdir(SD_DATA_DIR);
+    if (res == FR_OK)
+        return true;
+
+    /*
+     * Another path may have created it between f_stat() and f_mkdir().
+     * Accept FR_EXIST only when the existing object really is a directory.
+     */
+    if (res == FR_EXIST) {
+        res = f_stat(SD_DATA_DIR, &info);
+        return res == FR_OK && (info.fattrib & AM_DIR) != 0;
+    }
+
+    return false;
+}
+
 void config_init_from_current(void) {
     // These will be set from PCConfig in main.c
     cfg_changed = false;
@@ -331,6 +357,14 @@ bool config_save_all(void) {
     FIL fp;
     FRESULT res;
     char line[80];
+
+    /*
+     * The directory may legitimately disappear while the raw SD card is
+     * exported over USB MSC, or may not exist yet on a fresh card.
+     * Recreate it before trying to persist the configuration.
+     */
+    if (!config_ensure_data_dir())
+        return false;
 
     res = f_open(&fp, CONFIG_PATH, FA_WRITE | FA_CREATE_ALWAYS);
     if (res != FR_OK) return false;
