@@ -39,6 +39,9 @@
 #define BIOS10_VBE_OEM_OFF             0x9050
 #define BIOS10_VBE_WINFUNC_OFF         0x9060
 #define BIOS10_VBE_MODE_640x400x8      0x0100
+#define BIOS10_VBE_MODE_320x200x15     0x010D
+#define BIOS10_VBE_MODE_320x200x16     0x010E
+#define BIOS10_VBE_MODE_320x200x24     0x010F
 #define BIOS10_VBE_WINDOW_KB           64
 #define BIOS10_VBE_TOTAL_64K_BLOCKS    4
 
@@ -833,10 +836,43 @@ static bool bios_10h_00h(CPU* cpu)
 /* -------------------------------------------------------------------------
  * Minimal VBE 1.2 services.
  *
- * Only mode 100h (640x400x256, packed-pixel, banked A000h window) is exposed.
- * The emulator already has a Bochs-style DISPI backend at ports 1CEh/1CFh;
- * these BIOS calls are the guest-visible VBE facade for that existing path.
+ * Standard banked modes which fit in the 256 KiB VGA aperture and map directly
+ * to the existing Bochs-style DISPI backend are exposed here.
  * ---------------------------------------------------------------------- */
+
+typedef struct {
+    uint16_t mode;
+    uint16_t xres;
+    uint16_t yres;
+    uint16_t bytes_per_scanline;
+    uint8_t bpp;
+    uint8_t banks;
+    uint8_t memory_model;
+    uint8_t red_size, red_pos;
+    uint8_t green_size, green_pos;
+    uint8_t blue_size, blue_pos;
+    uint8_t rsvd_size, rsvd_pos;
+} Bios10VbeMode;
+
+static const Bios10VbeMode bios10_vbe_modes[] = {
+    { BIOS10_VBE_MODE_640x400x8,  640, 400, 640, 8,  4, 4,
+      0, 0, 0, 0, 0, 0, 0, 0 },
+    { BIOS10_VBE_MODE_320x200x15, 320, 200, 640, 15, 2, 6,
+      5, 10, 5, 5, 5, 0, 1, 15 },
+    { BIOS10_VBE_MODE_320x200x16, 320, 200, 640, 16, 2, 6,
+      5, 11, 6, 5, 5, 0, 0, 0 },
+    { BIOS10_VBE_MODE_320x200x24, 320, 200, 960, 24, 3, 6,
+      8, 16, 8, 8, 8, 0, 0, 0 },
+};
+
+static const Bios10VbeMode *bios10_vbe_find_mode(uint16_t mode)
+{
+    for (uint8_t i = 0; i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); i++) {
+        if (bios10_vbe_modes[i].mode == mode)
+            return &bios10_vbe_modes[i];
+    }
+    return NULL;
+}
 static inline void bios10_vbe_reg_write(CPU *cpu, uint16_t index, uint16_t value)
 {
     cpu_portout16(0x1CE, index);
@@ -894,8 +930,9 @@ static bool bios_10h_4F01h(CPU *cpu)
 {
     uint16_t mode = CPU_CX & 0x3FFFu;
     uint32_t dst = ((uint32_t)CPU_ES << 4) + CPU_DI;
+    const Bios10VbeMode *m = bios10_vbe_find_mode(mode);
 
-    if (mode != BIOS10_VBE_MODE_640x400x8) {
+    if (!m) {
         bios10_vbe_fail(cpu);
         return true;
     }
@@ -911,26 +948,35 @@ static bool bios_10h_4F01h(CPU *cpu)
     writew86(dst + 0x06, BIOS10_VBE_WINDOW_KB); /* window size, KiB */
     writew86(dst + 0x08, 0xA000); /* WinA segment */
     writew86(dst + 0x0A, 0x0000); /* WinB segment */
-    /*
-     * Real-mode FAR-call window function. Some VBE 1.x clients call this
-     * pointer directly instead of issuing INT 10h/AX=4F05h.
-     */
     bios10_write_far_ptr(dst + 0x0C,
                          BIOS10_VBE_ROM_SEG, BIOS10_VBE_WINFUNC_OFF);
-    writew86(dst + 0x10, 640);    /* bytes per scan line */
-    writew86(dst + 0x12, 640);    /* X resolution */
-    writew86(dst + 0x14, 400);    /* Y resolution */
+    writew86(dst + 0x10, m->bytes_per_scanline);
+    writew86(dst + 0x12, m->xres);
+    writew86(dst + 0x14, m->yres);
     write86 (dst + 0x16, 8);      /* character cell width */
     write86 (dst + 0x17, 16);     /* character cell height */
     write86 (dst + 0x18, 1);      /* planes */
-    write86 (dst + 0x19, 8);      /* bits per pixel */
-    write86 (dst + 0x1A, 4);      /* four 64 KiB banks */
-    write86 (dst + 0x1B, 4);      /* packed-pixel memory model */
+    write86 (dst + 0x19, m->bpp);
+    write86 (dst + 0x1A, m->banks);
+    write86 (dst + 0x1B, m->memory_model);
     write86 (dst + 0x1C, 64);     /* bank size, KiB */
-    write86 (dst + 0x1D, 0);      /* no extra full image page */
-    write86 (dst + 0x1E, 0);
 
-    /* VBE 2.0+ LFB field deliberately stays zero: mode 100h is banked only. */
+    uint32_t image_bytes = (uint32_t)m->bytes_per_scanline * m->yres;
+    uint8_t pages = (uint8_t)((256u * 1024u) / image_bytes);
+    write86(dst + 0x1D, pages ? (uint8_t)(pages - 1) : 0);
+    write86(dst + 0x1E, 0);
+
+    write86(dst + 0x1F, m->red_size);
+    write86(dst + 0x20, m->red_pos);
+    write86(dst + 0x21, m->green_size);
+    write86(dst + 0x22, m->green_pos);
+    write86(dst + 0x23, m->blue_size);
+    write86(dst + 0x24, m->blue_pos);
+    write86(dst + 0x25, m->rsvd_size);
+    write86(dst + 0x26, m->rsvd_pos);
+    write86(dst + 0x27, 0);
+
+    /* VBE 2.0+ LFB field deliberately stays zero: these modes are banked. */
     writedw86(dst + 0x28, 0x00000000u);
 
     bios10_vbe_ok(cpu);
@@ -942,17 +988,15 @@ static bool bios_10h_4F02h(CPU *cpu)
     uint16_t req = CPU_BX;
     uint16_t mode = req & 0x3FFFu;
     bool no_clear = (req & 0x8000u) != 0;
+    const Bios10VbeMode *m = bios10_vbe_find_mode(mode);
 
-    /* Linear-framebuffer request is not part of this minimal VBE 1.2 mode. */
-    if ((req & 0x4000u) || mode != BIOS10_VBE_MODE_640x400x8) {
+    /* Linear-framebuffer requests are not supported by this VBE 1.2 facade. */
+    if ((req & 0x4000u) || !m) {
         bios10_vbe_fail(cpu);
         return true;
     }
 
-    /*
-     * Establish a known VGA/DAC baseline first. Legacy BDA mode remains 13h;
-     * VBE current-mode queries are answered by 4F03h from DISPI state.
-     */
+    /* Establish a known VGA/DAC baseline before enabling DISPI. */
     {
         uint16_t saved_ax = CPU_AX;
         CPU_AH = 0x00;
@@ -962,9 +1006,9 @@ static bool bios_10h_4F02h(CPU *cpu)
     }
 
     bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
-    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_XRES, 640);
-    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_YRES, 400);
-    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_BPP, 8);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_XRES, m->xres);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_YRES, m->yres);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_BPP, m->bpp);
     bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_BANK, 0);
     bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_ENABLE,
                          VBE_DISPI_ENABLED |
@@ -982,13 +1026,21 @@ static bool bios_10h_4F03h(CPU *cpu)
         uint16_t x = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_XRES);
         uint16_t y = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_YRES);
         uint16_t bpp = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_BPP);
+        const Bios10VbeMode *found = NULL;
 
-        if (x == 640 && y == 400 && bpp == 8)
-            CPU_BX = BIOS10_VBE_MODE_640x400x8;
-        else {
+        for (uint8_t i = 0; i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); i++) {
+            const Bios10VbeMode *m = &bios10_vbe_modes[i];
+            if (m->xres == x && m->yres == y && m->bpp == bpp) {
+                found = m;
+                break;
+            }
+        }
+
+        if (!found) {
             bios10_vbe_fail(cpu);
             return true;
         }
+        CPU_BX = found->mode;
     } else {
         CPU_BX = read86(0x449); /* standard VGA mode */
     }
