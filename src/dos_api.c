@@ -157,6 +157,20 @@ static void __not_in_flash_func(dos_phys_write32)(uint32_t addr, uint32_t val) {
     pstore32(addr, val);
 }
 
+/*
+ * Direct native access to the renderer's VGA backing store.
+ *
+ * This deliberately exposes the raw backing buffer, not the emulated VGA
+ * aperture semantics implemented by vga_mem_write().  It is intended for
+ * native applications which know the active gfx_buffer layout and need the
+ * shortest possible video-memory write path.
+ */
+static uint8_t *__not_in_flash_func(dos_video_get_buffer)(uint32_t *size) {
+    if (size)
+        *size = pc ? (uint32_t)pc->vga_mem_size : 0u;
+    return pc ? pc->vga_mem : NULL;
+}
+
 
 static uint32_t __not_in_flash_func(psram_size)(void) {
     return PSRAM_SIZE_BYTES;
@@ -448,5 +462,6 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)arm_native_app_realloc, /* 113: application realloc */
     (unsigned long)arm_native_app_free, /* 114: application free */
     (unsigned long)arm_native_app_malloc_largest, /* 115: largest application block */
+    (unsigned long)dos_video_get_buffer, /* 116: direct gfx_buffer pointer + size */
     0
 };

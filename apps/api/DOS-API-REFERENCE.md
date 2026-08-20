@@ -220,14 +220,15 @@ Important fixed slots include:
 | 109 | SRAM-resident native-app `memmove` |
 | 110 | largest free DOS block size in bytes |
 | 111..115 | kernel-owned native-app allocator: `malloc/calloc/realloc/free/largest` |
+| 116 | direct native pointer to the VGA renderer backing buffer (`gfx_buffer`) and its size |
 
 Only append new services. A program requiring a newer slot must declare a
 newer `DOS_API_VERSION`; the loader rejects it before execution on an older
 firmware.
 
 Slots 19..100 are defined symbolically in `dos_math_api.h`. Do not duplicate
-their numeric constants elsewhere. The current ABI is `DOS_API_VERSION 18`;
-slots 111..115 were added when native-app allocation moved into the kernel.
+their numeric constants elsewhere. The current ABI is `DOS_API_VERSION 19`;
+slot 116 adds optional direct access to the VGA renderer backing buffer.
 
 ---
 
@@ -279,7 +280,44 @@ dos_phys_write16(0xB8000, cell);   /* text VRAM */
 This is different from `dos_guest_far_ptr()`: a direct native pointer does not
 reproduce VGA plane/write-mode/device semantics.
 
-### 4.3 `conio.h`
+### 4.3 `dos_video.h`: fast direct video-buffer access
+
+For native renderers which need the shortest possible write path, the API also
+exposes the renderer's raw VGA backing store:
+
+```c
+uint32_t size;
+uint8_t *vram = dos_video_get_buffer(&size);
+```
+
+The returned pointer is the native address of the buffer used as `gfx_buffer`
+by the VGA/HDMI renderer; `size` is its size in bytes (currently 256 KiB).
+There is no per-pixel/per-byte system-table call on this path, so ordinary
+native stores, `memcpy()` and `memset()` can be used at full native-memory
+speed.
+
+**This is an expert/fast-path interface, not an alternate emulation of the x86
+VGA aperture.** Direct writes bypass `vga_mem_write()` completely. Therefore
+they do not apply VGA memory-map selection, chain-4/odd-even addressing,
+latches, write modes, set/reset logic, bit masks or sequencer plane-write
+masks. A byte written to `vram[n]` means exactly "write byte `n` of the raw
+backing buffer". It is not generally equivalent to:
+
+```c
+dos_phys_write8(0xA0000u + n, value);
+```
+
+Use `dos_phys_write*()` when software expects normal VGA register/aperture
+semantics. Use `dos_video_get_buffer()` only when the application deliberately
+knows the backing-buffer organization for the active video mode (for example a
+native renderer which produces that representation directly).
+
+The video core may read the same buffer concurrently. The API provides no
+implicit locking, dirty tracking or frame synchronization; an application that
+needs tear-free updates must provide its own update discipline. Never write
+beyond the returned size.
+
+### 4.4 `conio.h`
 
 Native port I/O:
 
@@ -1317,7 +1355,8 @@ define.
 ### Memory
 
 - [ ] distinguish native pointers from guest physical addresses;
-- [ ] use `dos_phys_*` for VGA/device memory;
+- [ ] use `dos_phys_*` when VGA/device register semantics are required;
+- [ ] use `dos_video_get_buffer()` only for code that intentionally knows the raw renderer buffer layout;
 - [ ] use `dos_alloc_low()` for real-mode/DMA-visible conventional memory;
 - [ ] validate ISA DMA 64-KiB boundary rules where applicable;
 - [ ] request sufficient native and DOS stack sizes;
@@ -1586,6 +1625,7 @@ apps/api/dos-api-divmod.S       exact EABI divmod trampolines
 apps/api/dos_math_api.h         math system-table slot map
 
 apps/api/dos_phys.h             guest physical memory
+apps/api/dos_video.h            direct raw VGA backing-buffer access
 apps/api/dos_mem.h              conventional DOS memory
 apps/api/dos_yield.h            cooperative service point
 apps/api/dos_process.h          process exit/termination state

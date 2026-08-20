@@ -479,6 +479,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
     FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
     FRANK_386_VERSION_MINOR=${FRANK_386_VERSION_MINOR}
+    WELCOME_SCREEN=1
 
     # no FreeDOS redundant messages
     QUIET=1
