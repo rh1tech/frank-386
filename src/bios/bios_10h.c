@@ -755,6 +755,10 @@ static bool bios_10h_00h(CPU* cpu)
         return true;
     }
 
+    /* Legacy VGA mode set must leave DISPI/VBE mode first. */
+    cpu_portout16(0x1CE, VBE_DISPI_INDEX_ENABLE);
+    cpu_portout16(0x1CF, VBE_DISPI_DISABLED);
+
     vga_program_regs(cpu, m->regs, m->crtc_base);
 
     write86 (0x449, mode);
