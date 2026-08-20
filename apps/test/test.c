@@ -4,6 +4,7 @@
 #include "dos_mem.h"
 #include "dos_phys.h"
 #include "conio.h"
+#include "dos_yield.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -26,14 +27,59 @@ static int vbe_int10(union REGS *regs, struct SREGS *sregs)
     return regs->w.ax == 0x004f;
 }
 
+static void vbe_wait_key(void)
+{
+    uint32_t quiet_since = dos_yield();
+
+    /* Ignore typematic repeats left by the key used for the previous mode. */
+    for (;;) {
+        if (kbhit()) {
+            (void)getch();
+            quiet_since = dos_yield();
+            continue;
+        }
+        if ((uint32_t)(dos_yield() - quiet_since) >= 250000u)
+            break;
+    }
+
+    (void)getch();
+}
+
+static uint8_t vbe_test_byte(uint16_t bpp, uint16_t width, uint16_t height,
+                             uint16_t pitch, uint32_t linear)
+{
+    uint32_t y = linear / pitch;
+    uint32_t row_off = linear % pitch;
+    uint32_t bytespp = (bpp + 7u) / 8u;
+    uint32_t x = row_off / bytespp;
+    uint32_t byte = row_off % bytespp;
+    uint32_t r = width > 1 ? (x * 255u) / (width - 1u) : 0;
+    uint32_t g = height > 1 ? (y * 255u) / (height - 1u) : 0;
+    uint32_t b = (r + g) >> 1;
+    uint32_t pixel;
+
+    if (bpp == 8)
+        return (uint8_t)(((x >> 3) + (y >> 3) * 40u) & 0xffu);
+
+    if (bpp == 15)
+        pixel = ((r >> 3) << 10) | ((g >> 3) << 5) | (b >> 3);
+    else if (bpp == 16)
+        pixel = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3);
+    else
+        pixel = b | (g << 8) | (r << 16);
+
+    return (uint8_t)(pixel >> (byte * 8u));
+}
+
 static int test_vbe(void)
 {
+    static const uint16_t modes[] = { 0x0100, 0x010d, 0x010e, 0x010f };
     union REGS regs = {0};
     struct SREGS sregs;
     uint8_t *info;
     uint16_t info_seg;
-    uint32_t pos;
     int rc = 0;
+    int graphics_active = 0;
 
     info = (uint8_t *)dos_alloc_low(256);
     if (info == 0) {
@@ -61,70 +107,84 @@ static int test_vbe(void)
     }
     printf("test.exe: VBE %u.%u detected\r\n", info[5], info[4]);
 
-    memset(info, 0, 256);
-    regs.w.ax = 0x4f01;
-    regs.w.cx = 0x0100;
-    regs.w.di = 0;
-    if (!vbe_int10(&regs, &sregs)) {
-        printf("test.exe: VBE 4F01 mode 100h failed, AX=%04x\r\n", regs.w.ax);
-        rc = 4;
-        goto out;
-    }
-    printf("test.exe: mode 100h: %ux%ux%u, pitch=%u, window=%uK\r\n",
-           *(uint16_t *)(info + 0x12), *(uint16_t *)(info + 0x14),
-           info[0x19], *(uint16_t *)(info + 0x10),
-           *(uint16_t *)(info + 0x06));
+    for (unsigned mi = 0; mi < sizeof(modes) / sizeof(modes[0]); ++mi) {
+        uint16_t mode = modes[mi];
+        uint16_t width, height, pitch, bpp;
+        uint32_t total;
+        uint16_t banks;
 
-    regs.w.ax = 0x4f02;
-    regs.w.bx = 0x0100;
-    if (!vbe_int10(&regs, &sregs)) {
-        printf("test.exe: VBE 4F02 mode 100h failed, AX=%04x\r\n", regs.w.ax);
-        rc = 5;
-        goto out;
-    }
-
-    /* Make all 256 DAC entries visible and deterministic. */
-    outp(0x3c8, 0);
-    for (unsigned i = 0; i < 256; ++i) {
-        outp(0x3c9, (uint8_t)((i & 0x07) * 9));
-        outp(0x3c9, (uint8_t)(((i >> 3) & 0x07) * 9));
-        outp(0x3c9, (uint8_t)(((i >> 6) & 0x03) * 21));
-    }
-
-    /* 640*400 = 256000 bytes.  Exercise every 64K VBE bank through the
-       emulated A000h aperture; do not bypass VGA semantics with a raw ptr. */
-    for (uint16_t bank = 0; bank < 4; ++bank) {
-        uint32_t first = (uint32_t)bank << 16;
-        uint32_t count = 65536u;
-
-        if (first + count > 640u * 400u)
-            count = 640u * 400u - first;
-
-        regs.w.ax = 0x4f05;
-        regs.h.bh = 0x00;
-        regs.h.bl = 0x00;
-        regs.w.dx = bank;
+        memset(info, 0, 256);
+        regs.w.ax = 0x4f01;
+        regs.w.cx = mode;
+        regs.w.di = 0;
         if (!vbe_int10(&regs, &sregs)) {
-            rc = 6;
-            break;
+            printf("test.exe: VBE 4F01 mode %03xh failed, AX=%04x\r\n",
+                   mode, regs.w.ax);
+            rc = 4;
+            goto text_mode;
         }
 
-        for (uint32_t off = 0; off < count; ++off) {
-            uint32_t linear = first + off;
-            uint16_t x = (uint16_t)(linear % 640u);
-            uint16_t y = (uint16_t)(linear / 640u);
-            uint8_t color = (uint8_t)(((x >> 4) + (y >> 4) * 40u) & 0xffu);
-            dos_phys_write8(0xA0000u + off, color);
+        pitch = *(uint16_t *)(info + 0x10);
+        width = *(uint16_t *)(info + 0x12);
+        height = *(uint16_t *)(info + 0x14);
+        bpp = info[0x19];
+        total = (uint32_t)pitch * height;
+        banks = (uint16_t)((total + 65535u) >> 16);
+
+        printf("test.exe: mode %03xh: %ux%ux%u, pitch=%u, banks=%u\r\n",
+               mode, width, height, bpp, pitch, banks);
+
+        regs.w.ax = 0x4f02;
+        regs.w.bx = mode;
+        if (!vbe_int10(&regs, &sregs)) {
+            printf("test.exe: VBE 4F02 mode %03xh failed, AX=%04x\r\n",
+                   mode, regs.w.ax);
+            rc = 5;
+            goto text_mode;
         }
+        graphics_active = 1;
+
+        if (bpp == 8) {
+            outp(0x3c8, 0);
+            for (unsigned i = 0; i < 256; ++i) {
+                outp(0x3c9, (uint8_t)((i & 0x07) * 9));
+                outp(0x3c9, (uint8_t)(((i >> 3) & 0x07) * 9));
+                outp(0x3c9, (uint8_t)(((i >> 6) & 0x03) * 21));
+            }
+        }
+
+        for (uint16_t bank = 0; bank < banks; ++bank) {
+            uint32_t first = (uint32_t)bank << 16;
+            uint32_t count = 65536u;
+
+            if (first + count > total)
+                count = total - first;
+
+            regs.w.ax = 0x4f05;
+            regs.h.bh = 0x00;
+            regs.h.bl = 0x00;
+            regs.w.dx = bank;
+            if (!vbe_int10(&regs, &sregs)) {
+                printf("test.exe: VBE 4F05 mode %03xh bank %u failed, AX=%04x\r\n",
+                       mode, bank, regs.w.ax);
+                rc = 6;
+                goto text_mode;
+            }
+
+            for (uint32_t off = 0; off < count; ++off)
+                dos_phys_write8(0xA0000u + off,
+                                 vbe_test_byte(bpp, width, height, pitch,
+                                               first + off));
+        }
+
+        vbe_wait_key();
     }
 
-    if (rc == 0) {
-        printf("test.exe: VBE image drawn; press Enter to return to text mode\r\n");
-        getchar();
+text_mode:
+    if (graphics_active) {
+        regs.w.ax = 0x0003;
+        int386x(0x10, &regs, &regs, &sregs);
     }
-
-    regs.w.ax = 0x0003;
-    int386x(0x10, &regs, &regs, &sregs);
 
     if (rc == 0)
         printf("test.exe: VBE test OK\r\n");

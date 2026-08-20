@@ -201,6 +201,54 @@ void outpw(uint16_t port, uint16_t value)
     cpu->cb.io_write16(cpu->cb.io, port, value);
 }
 
+int kbhit(void)
+{
+    CPU *cpu = get_PC()->cpu;
+    gprx_t saved_gprx[8];
+    x86_flags_t saved_flags = cpu->flags;
+    int ready;
+
+    (void)dos_yield();
+
+    for (int i = 0; i < 8; ++i)
+        saved_gprx[i] = cpu->gprx[i];
+
+    cpu->gprx[regax].r16 = 0x0100;
+    bios_intcall(cpu, 0x16, "native kbhit");
+    ready = cpu->flags.bits.ZF ? 0 : 1;
+
+    for (int i = 0; i < 8; ++i)
+        cpu->gprx[i] = saved_gprx[i];
+    cpu->flags = saved_flags;
+
+    return ready;
+}
+
+int getch(void)
+{
+    static int pending_scan = -1;
+    union REGS regs = {0};
+
+    if (pending_scan >= 0) {
+        int ch = pending_scan;
+        pending_scan = -1;
+        return ch;
+    }
+
+    while (!kbhit())
+        (void)dos_yield();
+
+    regs.h.ah = 0x00;
+    int386(0x16, &regs, &regs);
+
+    if (regs.h.al == 0) {
+        pending_scan = regs.h.ah;
+        return 0;
+    }
+
+    return regs.h.al;
+}
+
 size_t strlen(const char *s)
 {
     const char *p = s;
