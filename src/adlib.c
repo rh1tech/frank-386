@@ -78,8 +78,7 @@ struct AdlibState {
  */
 #define ADLIB_RENDER_TILE 64u
 static int32_t adlib_render_scratch[ADLIB_RENDER_TILE]
-    __attribute__((aligned(4)))
-    __attribute__((section(".core0_stack_ext.adlib_render")));
+    __attribute__((aligned(4)));
 
 void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 {

@@ -203,8 +203,7 @@ static int16_t kl_tablex16[16] = {dB2x16(0.000), dB2x16(9.000), dB2x16(12.000), 
 static uint32_t tll_table[8 * 16][1 << TL_BITS][4];
 #endif
 static int32_t rks_table[2][32][2]
-        __attribute__((aligned(4)))
-        __attribute__((section(".core0_stack_ext.opl_rks")));
+        __attribute__((aligned(4)));
 
 #define min(i, j) (((i) < (j)) ? (i) : (j))
 #define max(i, j) (((i) > (j)) ? (i) : (j))
@@ -1700,14 +1699,12 @@ void OPL_calc_buffer_linear(OPL *opl, int32_t *buffer, uint32_t nsamples) {
      * indexes it as lfo_am_buffer_lsl3[s], so the array must be filled for
      * all nsamples before the slot render loops below. */
     static uint8_t lfo_am_buffer_lsl3[SAMPLE_BUF_SIZE]
-        __attribute__((aligned(4)))
-        __attribute__((section(".core0_stack_ext.opl_lfo")));
+        __attribute__((aligned(4)));
     assert(nsamples <= sizeof(lfo_am_buffer_lsl3));
     opl->lfo_am_buffer_lsl3 = lfo_am_buffer_lsl3;
 #else
     static uint8_t lfo_am_buffer[SAMPLE_BUF_SIZE]
-        __attribute__((aligned(4)))
-        __attribute__((section(".core0_stack_ext.opl_lfo")));
+        __attribute__((aligned(4)));
     assert(nsamples <= sizeof(lfo_am_buffer));
     opl->lfo_am_buffer = lfo_am_buffer;
 #endif
