@@ -4548,8 +4548,24 @@ static void arm_elf_service_guest_irq(void)
  */
 uint32_t arm_elf_yield(void)
 {
+  unsigned int n;
+
   pc_service(pc);
-  arm_elf_service_guest_irq();
+
+  /*
+   * pc_service() can make several guest IRQs pending at once (for example
+   * keyboard make/break bytes plus PIT or mouse).  Service a bounded batch
+   * here so each IRQ still goes through the normal PIC/IVT/EOI path, instead
+   * of trying to drain a device FIFO from inside one native IRQ handler.
+   * The bound prevents a continuously active device from starving the native
+   * application.
+   */
+  for (n = 0; n < 16u && cpu != NULL && cpu->intr; ++n) {
+    arm_elf_service_guest_irq();
+    if (terminate_requested())
+      break;
+  }
+
   return get_uticks();
 }
 
