@@ -654,6 +654,18 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
     }
 }
 
+// VBE 100h packed 8bpp: HDMI line buffer stores palette indexes directly.
+static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
+                                                        uint8_t *output_buffer) {
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+        return;
+    }
+    const uint8_t *src = gfx_buffer + line * 640u;
+    for (int i = 0; i < 640; ++i)
+        output_buffer[i] = src[i];
+}
+
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
     // Before emulator init: output black, avoid calling any flash-resident
@@ -697,6 +709,11 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
         if (submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
+            return;
+        }
+        if (submode == 7) {
+            // VBE 100h: 640x400x256 packed pixels
+            render_gfx_line_vbe8(line, output_buffer);
             return;
         }
         // VGA 256-color (mode 13h) - default

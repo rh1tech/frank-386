@@ -4467,6 +4467,13 @@ static int arm_native_process_is_active(void)
 static bool arm_elf_irq_return(CPU *cpu, bios_callback_params_t *params)
 {
   if (!params->done) {
+    /*
+     * cpu_step()/pc_step() checks a pending IRQ before native_done on the
+     * next interpreter iteration.  Once the guest handler has IRET'ed to this
+     * synthetic return point, prevent another IRQ from being accepted before
+     * arm_elf_service_guest_irq() regains control.
+     */
+    ifl = 0;
     params->done = true;
     cpu->native_done = true;
   }
@@ -4495,6 +4502,7 @@ static void arm_elf_service_guest_irq(void)
   bios_callback_params_t params;
   bool old_native_done;
   bool old_pending_trap;
+  bool old_ifl;
 
   if (pc == NULL || cpu == NULL || !cpu->intr)
     return;
@@ -4502,6 +4510,7 @@ static void arm_elf_service_guest_irq(void)
   save_ctx(cpu, &saved);
   old_native_done = cpu->native_done;
   old_pending_trap = cpu_pending_trap();
+  old_ifl = ifl;
 
   memset(&params, 0, sizeof(params));
   params.callback = arm_elf_irq_return;
@@ -4535,6 +4544,7 @@ static void arm_elf_service_guest_irq(void)
   cpu_pending_trap_set(old_pending_trap);
   restore_ctx(cpu, &saved);
   cpu->native_done = old_native_done;
+  ifl = old_ifl;
 }
 
 /*

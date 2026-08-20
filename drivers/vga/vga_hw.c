@@ -182,7 +182,7 @@ static uint8_t cga_palette[4];
 // Current video mode (0=blank, 1=text, 2=graphics)
 int current_mode = 1;  // Default text mode
 
-// Graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
+// Graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8
 int gfx_submode = 3;
 int gfx_width = 320;
 int gfx_height = 200;
@@ -433,6 +433,38 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
             *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
             *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
         }
+    }
+}
+
+// Render VBE 100h: 640x400x8 packed pixels, one VRAM byte per pixel.
+static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
+                                                        uint32_t *output_buffer) {
+    uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
+
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) |
+                         (TMPL_LINE << 16) | (TMPL_LINE << 24);
+        for (int i = 0; i < 160; ++i)
+            out32[i] = blank;
+        return;
+    }
+
+    const uint8_t *src = gfx_buffer + line * 640u;
+    uint16_t *pal = (line & 1u) ? palette_b : palette_a;
+
+    /*
+     * Two neighbouring source pixels use opposite dither phases. Pack four
+     * physical pixels per uint32 without horizontal doubling.
+     */
+    for (int i = 0; i < 160; ++i) {
+        uint8_t p0 = (uint8_t)(pal[src[i * 4 + 0]] & 0xFFu);
+        uint8_t p1 = (uint8_t)(pal[src[i * 4 + 1]] >> 8);
+        uint8_t p2 = (uint8_t)(pal[src[i * 4 + 2]] & 0xFFu);
+        uint8_t p3 = (uint8_t)(pal[src[i * 4 + 3]] >> 8);
+        out32[i] = (uint32_t)p0 |
+                   ((uint32_t)p1 << 8) |
+                   ((uint32_t)p2 << 16) |
+                   ((uint32_t)p3 << 24);
     }
 }
 
@@ -830,6 +862,9 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         } else if (gfx_submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
+        } else if (gfx_submode == 7) {
+            // VBE 100h: 640x400x256 packed pixels
+            render_gfx_line_vbe8(line, output_buffer);
         } else {
             // VGA 256-color (mode 13h) - default
             render_gfx_line_from_sram(line, output_buffer);
@@ -1387,7 +1422,7 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
     }
 }
 
-// Set graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
+// Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8
 void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
     gfx_submode = submode;
     gfx_width = width;

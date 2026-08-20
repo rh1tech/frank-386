@@ -2482,6 +2482,13 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
         return 0;  // text mode
     }
 
+    // Minimal hardware-renderer fast path for banked VBE packed 8bpp.
+    if (vbe_enabled(s) && s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8) {
+        if (width)  *width  = s->vbe_regs[VBE_DISPI_INDEX_XRES];
+        if (height) *height = s->vbe_regs[VBE_DISPI_INDEX_YRES];
+        return 7;
+    }
+
     // Get shift_control to determine graphics mode type
     int shift_control = (s->gr[0x05] >> 5) & 3;
 

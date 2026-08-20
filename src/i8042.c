@@ -464,6 +464,7 @@ struct  PS2KbdState {
        not the keyboard controller.  */
     int translate;
     bool delay;
+    bool delay_critical;
     uint32_t delay_time;
     int delay_keycode;
 };
@@ -516,6 +517,25 @@ void ps2_queue(void *opaque, int b)
 #endif
 }
 
+
+#define PS2_KBD_BREAK_RESERVE 32
+
+/*
+ * Keep part of the keyboard queue unavailable to ordinary make/typematic
+ * events.  A full queue must never be allowed to drop the later break code,
+ * otherwise the guest can keep a key pressed forever.  Release events (and
+ * both bytes of an extended release) are allowed to consume the reserve.
+ */
+static int ps2_kbd_queue(PS2KbdState *s, int b, int critical)
+{
+    if (!critical &&
+        s->common.queue.count >= PS2_QUEUE_SIZE - PS2_KBD_BREAK_RESERVE)
+        return 0;
+
+    ps2_queue(&s->common, b);
+    return 1;
+}
+
 #define INPUT_MAKE_KEY_MIN 96
 #define INPUT_MAKE_KEY_MAX 127
 
@@ -530,14 +550,18 @@ static const uint8_t linux_input_to_keycode_set1[INPUT_MAKE_KEY_MAX - INPUT_MAKE
    keycode set 1 */
 void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode)
 {
+    int critical = !is_down;
+
     if (s->delay) {
         s->delay = false;
-        ps2_queue(&s->common, s->delay_keycode);
+        ps2_kbd_queue(s, s->delay_keycode, s->delay_critical);
     }
 
     if (keycode >= 0xe000) {
-        ps2_queue(&s->common, keycode >> 8);
+        if (!ps2_kbd_queue(s, keycode >> 8, critical))
+            return;
         s->delay = true;
+        s->delay_critical = critical;
         s->delay_time = get_uticks() + 10000;
         s->delay_keycode = (keycode & 0xff) | ((!is_down) << 7);
     } else if (keycode >= INPUT_MAKE_KEY_MIN) {
@@ -546,17 +570,19 @@ void ps2_put_keycode(PS2KbdState *s, int is_down, int keycode)
         keycode = linux_input_to_keycode_set1[keycode - INPUT_MAKE_KEY_MIN];
         if (keycode == 0)
             return;
-        ps2_queue(&s->common, 0xe0);
+        if (!ps2_kbd_queue(s, 0xe0, critical))
+            return;
         /* XXX: currently the ps2 queue is driven by data reading,
            however the "e0" prefix may be read by some old DOS
            software more than once, The workaround is to send the
            second keycode later, so that the guest software can read
            the same data again. */
         s->delay = true;
+        s->delay_critical = critical;
         s->delay_time = get_uticks() + 1000;
         s->delay_keycode = keycode | ((!is_down) << 7);
     } else {
-        ps2_queue(&s->common, keycode | ((!is_down) << 7));
+        ps2_kbd_queue(s, keycode | ((!is_down) << 7), critical);
     }
 }
 
@@ -567,7 +593,7 @@ void __not_in_flash_func(kbd_step)(void *opaque)
     PS2KbdState *kbd = s->kbd;
     if (kbd->delay && after_eq(get_uticks(), kbd->delay_time)) {
         kbd->delay = false;
-        ps2_queue(&(kbd->common), kbd->delay_keycode);
+        ps2_kbd_queue(kbd, kbd->delay_keycode, kbd->delay_critical);
     }
 #ifndef __wasm__
     if (s->kbd->common.queue.count)

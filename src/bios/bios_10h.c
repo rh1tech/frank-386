@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include "286/cpu.h"
 #include "bios.h"
+#include "vga.h"
 
 #define BIOS_FONT_SEG       0xF000
 #define BIOS_FONT8X16_OFF   0xA000
@@ -12,10 +13,10 @@
  *
  * 08h = VGA with analog color display.
  *
- * The native BIOS exposes a plain VGA-compatible adapter: standard CGA/EGA/VGA
- * register set, no SVGA/VESA extensions.  Therefore the active and alternate
- * display are both reported as the same VGA color display.  This is enough for
- * DOS software that uses AX=1A00h only to detect VGA/EGA capability.
+ * The native BIOS exposes a VGA-compatible adapter plus a deliberately small
+ * VBE 1.2 extension (currently mode 100h, 640x400x8 banked).  The legacy display
+ * combination code still reports a normal VGA color display, which is what DOS
+ * software expects from AX=1A00h.
  */
 #define BIOS10_DCC_VGA_COLOR_ANALOG  0x08
 
@@ -29,6 +30,17 @@
 #define BIOS10_FUNC_STATIC_SEG        BIOS_FONT_SEG
 #define BIOS10_FUNC_STATIC_OFF        0x9000
 #define BIOS10_FUNC_INFO_SIZE         0x40
+
+/*
+ * Minimal VBE 1.2 ROM data. Keep it below the functionality table/font area.
+ */
+#define BIOS10_VBE_ROM_SEG             BIOS_FONT_SEG
+#define BIOS10_VBE_MODELIST_OFF        0x9040
+#define BIOS10_VBE_OEM_OFF             0x9050
+#define BIOS10_VBE_WINFUNC_OFF         0x9060
+#define BIOS10_VBE_MODE_640x400x8      0x0100
+#define BIOS10_VBE_WINDOW_KB           64
+#define BIOS10_VBE_TOTAL_64K_BLOCKS    4
 
 /*
  * Supported video modes bitmap for INT 10h/AX=1B00h static table.
@@ -814,6 +826,221 @@ static bool bios_10h_00h(CPU* cpu)
     return true;
 }
 
+/* -------------------------------------------------------------------------
+ * Minimal VBE 1.2 services.
+ *
+ * Only mode 100h (640x400x256, packed-pixel, banked A000h window) is exposed.
+ * The emulator already has a Bochs-style DISPI backend at ports 1CEh/1CFh;
+ * these BIOS calls are the guest-visible VBE facade for that existing path.
+ * ---------------------------------------------------------------------- */
+static inline void bios10_vbe_reg_write(CPU *cpu, uint16_t index, uint16_t value)
+{
+    cpu_portout16(0x1CE, index);
+    cpu_portout16(0x1CF, value);
+}
+
+static inline uint16_t bios10_vbe_reg_read(CPU *cpu, uint16_t index)
+{
+    cpu_portout16(0x1CE, index);
+    return cpu_portin16(0x1CF);
+}
+
+static inline void bios10_vbe_ok(CPU *cpu)
+{
+    CPU_AX = 0x004F;
+    cf = 0;
+}
+
+static inline void bios10_vbe_fail(CPU *cpu)
+{
+    CPU_AX = 0x014F;
+    cf = 0;
+}
+
+static void bios10_write_far_ptr(uint32_t dst, uint16_t seg, uint16_t off)
+{
+    writew86(dst + 0, off);
+    writew86(dst + 2, seg);
+}
+
+static bool bios_10h_4F00h(CPU *cpu)
+{
+    uint32_t dst = ((uint32_t)CPU_ES << 4) + CPU_DI;
+
+    /* VBE 1.x controller information block is 256 bytes. */
+    for (uint16_t i = 0; i < 256; ++i)
+        write86(dst + i, 0);
+
+    write86(dst + 0, 'V');
+    write86(dst + 1, 'E');
+    write86(dst + 2, 'S');
+    write86(dst + 3, 'A');
+    writew86(dst + 4, 0x0102);  /* VBE 1.2 */
+
+    bios10_write_far_ptr(dst + 6, BIOS10_VBE_ROM_SEG, BIOS10_VBE_OEM_OFF);
+    writedw86(dst + 10, 0x00000000u); /* capabilities */
+    bios10_write_far_ptr(dst + 14, BIOS10_VBE_ROM_SEG, BIOS10_VBE_MODELIST_OFF);
+    writew86(dst + 18, BIOS10_VBE_TOTAL_64K_BLOCKS);
+
+    bios10_vbe_ok(cpu);
+    return true;
+}
+
+static bool bios_10h_4F01h(CPU *cpu)
+{
+    uint16_t mode = CPU_CX & 0x3FFFu;
+    uint32_t dst = ((uint32_t)CPU_ES << 4) + CPU_DI;
+
+    if (mode != BIOS10_VBE_MODE_640x400x8) {
+        bios10_vbe_fail(cpu);
+        return true;
+    }
+
+    for (uint16_t i = 0; i < 256; ++i)
+        write86(dst + i, 0);
+
+    /* VbeModeInfoBlock, VBE 1.2 fields. */
+    writew86(dst + 0x00, 0x0019); /* supported | color | graphics */
+    write86 (dst + 0x02, 0x07);   /* WinA relocatable/readable/writable */
+    write86 (dst + 0x03, 0x00);   /* no WinB */
+    writew86(dst + 0x04, BIOS10_VBE_WINDOW_KB); /* granularity, KiB */
+    writew86(dst + 0x06, BIOS10_VBE_WINDOW_KB); /* window size, KiB */
+    writew86(dst + 0x08, 0xA000); /* WinA segment */
+    writew86(dst + 0x0A, 0x0000); /* WinB segment */
+    /*
+     * Real-mode FAR-call window function. Some VBE 1.x clients call this
+     * pointer directly instead of issuing INT 10h/AX=4F05h.
+     */
+    bios10_write_far_ptr(dst + 0x0C,
+                         BIOS10_VBE_ROM_SEG, BIOS10_VBE_WINFUNC_OFF);
+    writew86(dst + 0x10, 640);    /* bytes per scan line */
+    writew86(dst + 0x12, 640);    /* X resolution */
+    writew86(dst + 0x14, 400);    /* Y resolution */
+    write86 (dst + 0x16, 8);      /* character cell width */
+    write86 (dst + 0x17, 16);     /* character cell height */
+    write86 (dst + 0x18, 1);      /* planes */
+    write86 (dst + 0x19, 8);      /* bits per pixel */
+    write86 (dst + 0x1A, 4);      /* four 64 KiB banks */
+    write86 (dst + 0x1B, 4);      /* packed-pixel memory model */
+    write86 (dst + 0x1C, 64);     /* bank size, KiB */
+    write86 (dst + 0x1D, 0);      /* no extra full image page */
+    write86 (dst + 0x1E, 0);
+
+    /* VBE 2.0+ LFB field deliberately stays zero: mode 100h is banked only. */
+    writedw86(dst + 0x28, 0x00000000u);
+
+    bios10_vbe_ok(cpu);
+    return true;
+}
+
+static bool bios_10h_4F02h(CPU *cpu)
+{
+    uint16_t req = CPU_BX;
+    uint16_t mode = req & 0x3FFFu;
+    bool no_clear = (req & 0x8000u) != 0;
+
+    /* Linear-framebuffer request is not part of this minimal VBE 1.2 mode. */
+    if ((req & 0x4000u) || mode != BIOS10_VBE_MODE_640x400x8) {
+        bios10_vbe_fail(cpu);
+        return true;
+    }
+
+    /*
+     * Establish a known VGA/DAC baseline first. Legacy BDA mode remains 13h;
+     * VBE current-mode queries are answered by 4F03h from DISPI state.
+     */
+    {
+        uint16_t saved_ax = CPU_AX;
+        CPU_AH = 0x00;
+        CPU_AL = 0x13;
+        bios_10h_00h(cpu);
+        CPU_AX = saved_ax;
+    }
+
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_ENABLE, VBE_DISPI_DISABLED);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_XRES, 640);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_YRES, 400);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_BPP, 8);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_BANK, 0);
+    bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_ENABLE,
+                         VBE_DISPI_ENABLED |
+                         (no_clear ? VBE_DISPI_NOCLEARMEM : 0));
+
+    bios10_vbe_ok(cpu);
+    return true;
+}
+
+static bool bios_10h_4F03h(CPU *cpu)
+{
+    uint16_t enable = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_ENABLE);
+
+    if (enable & VBE_DISPI_ENABLED) {
+        uint16_t x = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_XRES);
+        uint16_t y = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_YRES);
+        uint16_t bpp = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_BPP);
+
+        if (x == 640 && y == 400 && bpp == 8)
+            CPU_BX = BIOS10_VBE_MODE_640x400x8;
+        else {
+            bios10_vbe_fail(cpu);
+            return true;
+        }
+    } else {
+        CPU_BX = read86(0x449); /* standard VGA mode */
+    }
+
+    bios10_vbe_ok(cpu);
+    return true;
+}
+
+static bool bios_10h_4F05h(CPU *cpu)
+{
+    if (CPU_BL != 0) { /* only window A exists */
+        bios10_vbe_fail(cpu);
+        return true;
+    }
+
+    if (!(bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_ENABLE) &
+          VBE_DISPI_ENABLED)) {
+        bios10_vbe_fail(cpu);
+        return true;
+    }
+
+    switch (CPU_BH) {
+    case 0x00: /* set window */
+        if (CPU_DX >= BIOS10_VBE_TOTAL_64K_BLOCKS) {
+            bios10_vbe_fail(cpu);
+            return true;
+        }
+        bios10_vbe_reg_write(cpu, VBE_DISPI_INDEX_BANK, CPU_DX);
+        break;
+    case 0x01: /* get window */
+        CPU_DX = bios10_vbe_reg_read(cpu, VBE_DISPI_INDEX_BANK);
+        break;
+    default:
+        bios10_vbe_fail(cpu);
+        return true;
+    }
+
+    bios10_vbe_ok(cpu);
+    return true;
+}
+
+static bool bios_10h_4Fh(CPU *cpu)
+{
+    switch (CPU_AL) {
+    case 0x00: return bios_10h_4F00h(cpu);
+    case 0x01: return bios_10h_4F01h(cpu);
+    case 0x02: return bios_10h_4F02h(cpu);
+    case 0x03: return bios_10h_4F03h(cpu);
+    case 0x05: return bios_10h_4F05h(cpu);
+    default:
+        bios10_vbe_fail(cpu);
+        return true;
+    }
+}
+
+
 /*
 VIDEO - SET TEXT-MODE CURSOR SHAPE
 AH = 01h
@@ -825,6 +1052,7 @@ CL = cursor end scan line (bits 0-4)
 BDA: 0x460 = cursor shape word (CH<<8 | CL), as stored and returned by AH=03h
 CRTC: reg 0Ah = start scan / cursor disable, reg 0Bh = end scan
 */
+
 static bool bios_10h_01h(CPU* cpu)
 {
     /* SeaBIOS stores the caller's unmodified CX in BDA cursor_type. */
@@ -3453,6 +3681,10 @@ bool bios_10h(CPU* cpu) {
             break;
         case 0x1C:
             bios_10h_1Ch(cpu); // SAVE/RESTORE VIDEO STATE
+            break;
+        case 0x4F:
+            if (!bios_10h_4Fh(cpu))
+                goto err;
             break;
         default:
             // unsupported
