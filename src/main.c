@@ -89,6 +89,7 @@ PC *pc = NULL;
 static PCConfig config;
 volatile bool initialized = false;
 static volatile bool audio_timer_ready = false;
+static volatile bool early_psram_missing = false;
 
 volatile uint16_t current_vreg_mv = 1100;
 
@@ -1049,6 +1050,8 @@ static bool init_hardware(void) {
      * can only be shown after the video core has completed initialization.
      * Full/cached capacity handling remains below, after clock configuration. */
     bool psram_missing = psram_detect_size() < (1u << 20);
+    early_psram_missing = psram_missing;
+    __dmb();
     if (psram_missing)
         printf("ERROR: PSRAM not detected or smaller than 1 MiB!\n");
 
@@ -1063,8 +1066,8 @@ static bool init_hardware(void) {
 
     if (psram_missing) {
         show_error_screen(" PSRAM Error ",
-                          "QSPI PSRAM not detected.",
-                          "4 MB or larger PSRAM is required.");
+                          "QSPI PSRAM not detected (>= 4 MB is required).",
+                          "Try *-EGA128.uf2 version (for a case)...");
         __unreachable();
     }
 
@@ -1365,6 +1368,10 @@ static bool init_emulator(void) {
         f_close(&fp);
     }
 
+    // Select cold/warm native POST from the actual RP2350 reset cause.
+    // bios_post() consumes the cold state after the first native POST.
+    pc_set_cold_post_pending(is_power_on_boot());
+
     // Load BIOS and reset CPU
     load_bios_and_reset(pc);
 
@@ -1382,15 +1389,9 @@ static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
 bool repeat_me_often(void);
 static void __not_in_flash_func(core1_entry)(void) {
 
-    DBG_PRINT("[Core 1] Initializing video...\n");
-    DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
-    vga_hw_init();
-    sleep_ms(100);
-    vga_initialized = true;
-
-    // Initialize audio. Boards without an I2S DAC (Olimex PC) define no
-    // I2S pins at all, so the pin report has to follow the audio type
-    // rather than being printed unconditionally.
+    // Audio comes first so fatal PSRAM errors can signal before video starts.
+    // Boards without an I2S DAC (Olimex PC) define no I2S pins at all, so the
+    // pin report has to follow the audio type rather than being unconditional.
 #if FEATURE_AUDIO_I2S
     DBG_PRINT("Initializing I2S Audio...\n");
     DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
@@ -1404,6 +1405,17 @@ static void __not_in_flash_func(core1_entry)(void) {
     audio_set_volume(config_get_volume());
     audio_set_enabled(true);
     config_clear_changes();
+
+    __dmb();
+    if (early_psram_missing)
+        audio_play_tone(300u, 500u);
+
+    DBG_PRINT("[Core 1] Initializing video...\n");
+    DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
+    vga_hw_init();
+    sleep_ms(100);
+    vga_initialized = true;
+
     while(!initialized) {
         sleep_ms(1);
         __dmb();

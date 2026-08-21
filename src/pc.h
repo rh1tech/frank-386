@@ -103,6 +103,10 @@ typedef struct PC {
 	uint8_t lpt_ctrl[2];   /* защёлки control-регистров 0x37A/0x27A  	*/
 } PC;
 
+/* Select the first native BIOS POST path from the platform reset cause.
+ * bios_post() consumes the cold state; later resets in the same run are warm. */
+void pc_set_cold_post_pending(bool cold);
+
 /* Play the native POST result tone once core1 audio service is running. */
 void pc_play_pending_post_beep(PC *pc);
 

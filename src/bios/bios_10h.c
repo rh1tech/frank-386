@@ -21,6 +21,7 @@
  * software expects from AX=1A00h.
  */
 #define BIOS10_DCC_VGA_COLOR_ANALOG  0x08
+#define BIOS10_DCC_EGA_COLOR          0x04
 
 /*
  * INT 10h/AX=1B00h GET FUNCTIONALITY/STATE INFORMATION.
@@ -53,7 +54,11 @@
  * Bits set here match vga_modes[]:
  *   00h..07h, 0Dh..13h
  */
+#ifdef EGA128
+#define BIOS10_FUNC_MODES_BITMAP      0x0001E0FFu
+#else
 #define BIOS10_FUNC_MODES_BITMAP      0x000FE0FFu
+#endif
 
 /*
  * INT 10h/AH=12h/BL=10h GET EGA/VGA INFORMATION constants.
@@ -71,6 +76,7 @@
  *
  * Plain VGA has 256 KiB addressable video RAM.
  */
+#define BIOS10_EGA_INFO_MEM_128K      0x01
 #define BIOS10_EGA_INFO_MEM_256K      0x03
 
 /*
@@ -544,9 +550,11 @@ static const VgaMode vga_modes[] = {
     {0x0E,0,80,24,8, 0x4000,0x3D4,0xA0000,0x20000,&vga_640x200x16},
     {0x0F,0,80,24,14,0x8000,0x3B4,0xA0000,0x20000,&vga_640x350x16},
     {0x10,0,80,24,14,0x8000,0x3D4,0xA0000,0x20000,&vga_640x350x16},
+#ifndef EGA128
     {0x11,0,80,29,16,0x0000,0x3D4,0xA0000,0x10000,&vga_640x480x16},
     {0x12,0,80,29,16,0x0000,0x3D4,0xA0000,0x20000,&vga_640x480x16},
     {0x13,0,40,24,8, 0x1000,0x3D4,0xA0000,0x10000,&vga_320x200x256},
+#endif
 };
 
 static const VgaMode *vga_find_mode(uint8_t mode)
@@ -760,9 +768,11 @@ static bool bios_10h_00h(CPU* cpu)
         return true;
     }
 
+#ifndef EGA128
     /* Legacy VGA mode set must leave DISPI/VBE mode first. */
     cpu_portout16(0x1CE, VBE_DISPI_INDEX_ENABLE);
     cpu_portout16(0x1CF, VBE_DISPI_DISABLED);
+#endif
 
     vga_program_regs(cpu, m->regs, m->crtc_base);
 
@@ -786,7 +796,11 @@ static bool bios_10h_00h(CPU* cpu)
        video_ctl - это BDA 0x487 (vgabios.c:303: 0x60 = 256K, адаптер
        активен; бит 7 = no_clear). Пишем канонические IBM-значения
        3x8 по номеру режима. */
+#ifdef EGA128
+    write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xA0 : 0x20);
+#else
     write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xE0 : 0x60);
+#endif
     {
         static const uint8_t crt_msr[8] =
             { 0x2C, 0x28, 0x2D, 0x29, 0x2A, 0x2E, 0x1E, 0x29 };
@@ -2716,7 +2730,11 @@ static bool bios_10h_1210h(CPU* cpu)
         BIOS10_EGA_INFO_MONO_IO :
         BIOS10_EGA_INFO_COLOR_IO;
 
+#ifdef EGA128
+    CPU_BL = BIOS10_EGA_INFO_MEM_128K;
+#else
     CPU_BL = BIOS10_EGA_INFO_MEM_256K;
+#endif
     CPU_CH = switches >> 4;
     CPU_CL = switches;
 
@@ -3642,6 +3660,7 @@ bool bios_10h(CPU* cpu) {
                 break;
             case 9: bios_10h_1009h(cpu); // READ ALL PALETTE REGISTERS
                 break;
+#ifndef EGA128
             case 0x10: bios_10h_1010h(cpu); // SET INDIVIDUAL DAC REGISTER
                 break;
             case 0x12: bios_10h_1012h(cpu); // SET BLOCK OF DAC REGISTERS
@@ -3660,6 +3679,7 @@ bool bios_10h(CPU* cpu) {
                 break;
             case 0x1B: bios_10h_101Bh(cpu); // PERFORM GRAY-SCALE SUMMING
                 break;
+#endif
             default:
                 goto err;
             }
@@ -3704,6 +3724,7 @@ bool bios_10h(CPU* cpu) {
                 break;
             case 0x20: bios_10h_1220h(cpu); // ALTERNATE PRINT SCREEN
                 break;
+#ifndef EGA128
             case 0x30: bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
                 break;
             case 0x31: bios_10h_1231h(cpu); // DEFAULT PALETTE LOADING
@@ -3718,6 +3739,7 @@ bool bios_10h(CPU* cpu) {
                 break;
             case 0x36: bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
                 break;
+#endif
             default:
                 goto err;
             }
@@ -3725,6 +3747,7 @@ bool bios_10h(CPU* cpu) {
         case 0x13:
             bios_10h_13h(cpu); // WRITE STRING
             break;
+#ifndef EGA128
         case 0x1A:
             if (CPU_AL == 0x00)
                 bios_10h_1A00h(cpu); // GET DISPLAY COMBINATION CODE
@@ -3740,10 +3763,13 @@ bool bios_10h(CPU* cpu) {
         case 0x1C:
             bios_10h_1Ch(cpu); // SAVE/RESTORE VIDEO STATE
             break;
+#endif
+#ifndef EGA128
         case 0x4F:
             if (!bios_10h_4Fh(cpu))
                 goto err;
             break;
+#endif
         default:
             // unsupported
             goto err;
@@ -3776,7 +3802,11 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
        базовые опции 0x51, dcc_index - VGA color 0x08. Читаются
        библиотеками определения адаптера напрямую из BDA. */
     write86(BIOS10_BDA_MODESET_CTL, 0x51);
-    write86(0x48A, 0x08);
+#ifdef EGA128
+    write86(0x48A, BIOS10_DCC_EGA_COLOR);
+#else
+    write86(0x48A, BIOS10_DCC_VGA_COLOR_ANALOG);
+#endif
 
     /*
      * INT 10h/AX=1130h must return a guest-visible ES:BP pointer.

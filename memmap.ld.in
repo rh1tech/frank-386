@@ -319,8 +319,8 @@ SECTIONS
 
     ASSERT(SIZEOF(.stack_dummy) <= LENGTH(CORE0_STACK), "core0 stack exceeds CORE0_STACK")
     ASSERT(SIZEOF(.stack1_dummy) <= LENGTH(SCRATCH_X), "core1 stack exceeds SCRATCH_X")
-    ASSERT(SIZEOF(.gfx_buffer) == LENGTH(GFX_BUFFER),
-           "gfx_buffer must occupy the complete 256 KiB GFX_BUFFER region")
+    ASSERT(SIZEOF(.gfx_buffer) == @GFX_BUFFER_EXPECTED_SIZE@,
+           "gfx_buffer has unexpected size")
 
     /* picolibc and LLVM */
     PROVIDE (__heap_start = __end__);

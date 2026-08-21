@@ -2482,12 +2482,14 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
         return 0;  // text mode
     }
 
+#ifndef EGA128
     // Minimal hardware-renderer fast path for banked VBE packed 8bpp.
     if (vbe_enabled(s) && s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8) {
         if (width)  *width  = s->vbe_regs[VBE_DISPI_INDEX_XRES];
         if (height) *height = s->vbe_regs[VBE_DISPI_INDEX_YRES];
         return 7;
     }
+#endif
 
     // Get shift_control to determine graphics mode type
     int shift_control = (s->gr[0x05] >> 5) & 3;
@@ -2525,12 +2527,15 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     //   VL_DePlaneVGA: SR[4] = (old & ~8) | 4  →  chain4=0 (bit3), seq=1 (bit2)
     // -----------------------------------------------------------------------
     int rv;
+#ifndef EGA128
     if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&   /* chain4 OFF */
          (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_SEQ_MODE) &&  /* sequential ON */
          (s->ar[0x10] & 0x40) &&                               /* 8-bit DAC color */
          w == 320) {
         rv = 5;  // Mode X
-    } else if (shift_control == 0) {
+    } else
+#endif
+    if (shift_control == 0) {
         if ((s->gr[0x06] & 0x0C) == 0x0C && w >= 640)
             rv = 4;  // CGA 2-color
         else if (!(s->cr[0x17] & 0x01) && w >= 640)

@@ -1235,12 +1235,17 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	pc->boot_start_time = 0;
 
+#ifdef EGA128
+	/* Standard 128 KiB EGA configuration. */
+	pc->vga_mem_size = 128u << 10;
+#else
 	/* gfx_buffer is always 256 KB — always use exactly that, ignoring
 	 * whatever vga_mem the config says.  This ensures Wolf3D's three video
 	 * pages (dword offsets 0 / 16640 / 33280, up to byte 133120) are never
 	 * dropped.  Old SD-card configs with vga_mem=128K would otherwise leave
 	 * the third page zeroed (black) due to the size check in vga_mem_write. */
 	pc->vga_mem_size = 256u << 10;   /* fixed: gfx_buffer is always 256 KB */
+#endif
 	pc->vga_mem = gfx_buffer;
 	memset(pc->vga_mem, 0, pc->vga_mem_size);
 	pc->vga = vga_init(pc->vga_mem, pc->vga_mem_size,
@@ -1426,6 +1431,12 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
 }
 
 static int bios_post_beep_pending;
+static bool bios_cold_post_pending = true;
+
+void pc_set_cold_post_pending(bool cold)
+{
+    bios_cold_post_pending = cold;
+}
 
 static void bios_post_table_rule(PC *pc, uint8_t left, uint8_t middle, uint8_t right)
 {
@@ -1513,8 +1524,13 @@ static void bios_post_components(PC *pc, size_t psram_size)
     bios_post_table_rule(pc, 0xDA, 0xC2, 0xBF);
     bios_post_table_row(pc, left, right);
 
+#ifdef EGA128
+    snprintf(left, sizeof(left), "Video    : %s EGA 128 KB",
+             SELECT_VGA ? "VGA" : "HDMI");
+#else
     snprintf(left, sizeof(left), "Video    : %s VBE 1.2 256 KB",
              SELECT_VGA ? "VGA" : "HDMI");
+#endif
     snprintf(right, sizeof(right), "PSRAM    : Up to 16 MB");
     bios_post_table_row(pc, left, right);
 
@@ -1629,6 +1645,8 @@ void bios_post(PC *pc) {
 // POST
     const uint16_t ebda_seg = 0x9FC0;                 /* 1 KiB EBDA at 9FC00 */
     const uint32_t ebda_phys = (uint32_t)ebda_seg << 4;
+    const bool cold_post = bios_cold_post_pending;
+    bios_cold_post_pending = false;
     reset_umb();
 
     /* Match the controller-visible keyboard state left by SeaBIOS POST. */
@@ -1654,6 +1672,10 @@ void bios_post(PC *pc) {
 // init BDA
 	for (uint32_t a = 0x400; a < 0x500; ++a)
 		pstore8(a, 0);
+	/* 40:72 is a BIOS compatibility result, not the input used to choose
+	 * the POST path. Cold POST leaves it clear; every later soft/warm POST
+	 * publishes the standard IBM warm-boot signature. */
+	pstore16(0x472, cold_post ? 0x0000 : 0x1234);
 // init EDBA
 	for (uint32_t a = ebda_phys; a < ebda_phys + 1024; ++a)
         pstore8(a, 0);
@@ -1776,7 +1798,11 @@ void bios_post(PC *pc) {
 	pstore16(0x482, 0x003E);                             /* keyboard buffer end */
 	pstore8 (0x484, 24);                                 /* rows minus one */
 	pstore16(0x485, 16);                                 /* char height */
-	pstore8 (0x487, 0x60);                               /* video_ctl: 256K, cursor emulation on */
+#ifdef EGA128
+	pstore8 (0x487, 0x20);                               /* video_ctl: 128K */
+#else
+	pstore8 (0x487, 0x60);                               /* video_ctl: 256K */
+#endif
 	pstore8 (0x488, 0xF9);                               /* video_switches */
 	pstore8 (0x489, 0x51);                               /* modeset_ctl (SeaBIOS vgainit.c:144) */
 	/* 40:8E = disk_interrupt_flag, 40:8F = floppy_harddisk_info.
@@ -1908,13 +1934,19 @@ void bios_post(PC *pc) {
 // like VGA BIOS banner:
 	vga_bios_baner(pc->cpu);
 
-    /* BDA/IVT/ROM data already live in PSRAM, so the visible POST memory
-     * test must restore every word that it probes. */
     {
         size_t psram_size = psram_detected_size();
+
+        /* Hardware table is shown on every POST, cold or warm. */
         bios_post_components(pc, psram_size);
-        bool memory_ok = bios_post_psram_test(pc, psram_size);
-        bios_post_beep_pending = memory_ok ? 1 : -1;
+
+        /* Memory test and its result tone are cold-POST features only. */
+        if (cold_post) {
+            bool memory_ok = bios_post_psram_test(pc, psram_size);
+            bios_post_beep_pending = memory_ok ? 1 : -1;
+        } else {
+            bios_post_beep_pending = 0;
+        }
     }
 // STEP/BREAKPOINT/TRACE etc (no DOS/BIOS support)
 	point2iret(0x01);

@@ -159,7 +159,11 @@ static uint vga_sm = 0;
 uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__((section(".text_buffer")));
 static volatile int update_requested = 0;  // Set by update call
 
+#ifdef EGA128
+#define GFX_BUFFER_SIZE (128 * 1024)
+#else
 #define GFX_BUFFER_SIZE (256 * 1024)
+#endif
 uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((section(".bss.gfx_buffer"), aligned(4)));
 
 // Fast text palette for 2-bit pixel pairs
@@ -334,6 +338,7 @@ static void init_palettes(void) {
 // DMA Interrupt Handler - Renders each scanline
 // ============================================================================
 
+#ifndef EGA128
 // Render VGA 256-color planar (Mode X: 320x200x256, unchained)
 // VRAM layout in our emulator: packed planes in dwords.
 // Each dword holds 4 bytes: plane0..plane3, and those bytes are pixels x%4.
@@ -379,6 +384,8 @@ static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, u
         *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
     }
 }
+
+#endif /* !EGA128 */
 
 // Render graphics line directly from SRAM framebuffer (for IRQ use)
 // Uses dithered 16-bit palette for ~2197 perceived colors
@@ -436,6 +443,7 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
     }
 }
 
+#ifndef EGA128
 // Render VBE 100h: 640x400x8 packed pixels, one VRAM byte per pixel.
 static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
                                                         uint32_t *output_buffer) {
@@ -467,6 +475,8 @@ static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
                    ((uint32_t)p3 << 24);
     }
 }
+
+#endif /* !EGA128 */
 
 // Render CGA 4-color graphics line (320x200, 2 bits per pixel, interleaved)
 // VGA stores CGA data in odd/even mode with interleaved planes
@@ -859,6 +869,7 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         } else if (gfx_submode == 4) {
             // CGA 2-color (640x200 monochrome)
             render_gfx_line_cga2(line, output_buffer);
+#ifndef EGA128
         } else if (gfx_submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
@@ -868,6 +879,11 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         } else {
             // VGA 256-color (mode 13h) - default
             render_gfx_line_from_sram(line, output_buffer);
+#else
+        } else {
+            // EGA128 has no 256-color/Mode X/VBE renderer.
+            render_gfx_line_ega(line, output_buffer);
+#endif
         }
         return;
     }

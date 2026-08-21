@@ -227,6 +227,60 @@ void audio_init(void) {
 #endif
 }
 
+void audio_play_tone(unsigned hz, unsigned ms) {
+    if (!hz || !ms)
+        return;
+
+#if FEATURE_AUDIO_I2S
+    const uint32_t sample_rate = SOUND_FREQUENCY;
+    const uint32_t frames = (sample_rate * ms) / 1000u;
+    uint32_t phase = 0;
+    int32_t amp = 32767 >> volume;
+    if (amp < 1)
+        amp = 1;
+
+    for (uint32_t i = 0; i < frames; ++i) {
+        int16_t s = phase < (sample_rate / 2u) ? (int16_t)amp : (int16_t)-amp;
+        uint32_t frame = ((uint32_t)(uint16_t)s << 16) | (uint16_t)s;
+        pio_sm_put_blocking(i2s_config.pio, i2s_config.sm, frame);
+        phase += hz;
+        if (phase >= sample_rate)
+            phase -= sample_rate;
+    }
+#elif FEATURE_AUDIO_PWM
+    const uint32_t half_period_us = 500000u / hz;
+    const uint32_t half_cycles = (hz * ms * 2u) / 1000u;
+#ifdef BEEPER_PIN
+    const uint16_t high = (uint16_t)(4095u >> volume);
+    for (uint32_t i = 0; i < half_cycles; ++i) {
+        pwm_set_gpio_level(BEEPER_PIN, (i & 1u) ? 0u : high);
+        sleep_us(half_period_us);
+    }
+    pwm_set_gpio_level(BEEPER_PIN, 0);
+#else
+    uint16_t amp = (uint16_t)(2047u >> volume);
+    if (!amp) amp = 1;
+    for (uint32_t i = 0; i < half_cycles; ++i) {
+        uint16_t level = (i & 1u) ? (uint16_t)(2048u - amp)
+                                   : (uint16_t)(2048u + amp);
+        pwm_set_gpio_level(PWM_LEFT_PIN, level);
+        pwm_set_gpio_level(PWM_RIGHT_PIN, level);
+        sleep_us(half_period_us);
+    }
+    pwm_set_gpio_level(PWM_LEFT_PIN, 2048);
+    pwm_set_gpio_level(PWM_RIGHT_PIN, 2048);
+#endif
+#elif FEATURE_AUDIO_HW
+    const uint32_t half_period_us = 500000u / hz;
+    const uint32_t half_cycles = (hz * ms * 2u) / 1000u;
+    for (uint32_t i = 0; i < half_cycles; ++i) {
+        pwm_set_gpio_level(PCM_PIN, (i & 1u) ? 1024u : 3072u);
+        sleep_us(half_period_us);
+    }
+    pwm_set_gpio_level(PCM_PIN, 2048);
+#endif
+}
+
 static int16_t samples[2] = { 0 };
 
 //=============================================================================

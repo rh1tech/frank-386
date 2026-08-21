@@ -58,6 +58,7 @@ void audio_set_enabled(bool);
 void audio_set_volume(uint8_t);
 uint8_t audio_get_volume(void);
 void audio_init(void);
+void audio_play_tone(unsigned hz, unsigned ms);
 
 #ifdef __cplusplus
 }

@@ -84,6 +84,12 @@ set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
 
+# Build with a standard 128 KiB EGA-compatible video adapter.
+option(EGA128 "Build with 128 KiB EGA video memory/capabilities" ON)
+if(EGA128)
+    add_compile_definitions(EGA128=1)
+endif()
+
 # USB role is selected at runtime (HOST by default, DEVICE via config.ini).
 # Both TinyUSB roles are compiled into every firmware image.
 
@@ -291,6 +297,9 @@ if(EMM)
 else ()
     SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
 endif()
+if(EGA128)
+    SET(BUILD_NAME "${BUILD_NAME}-EGA128")
+endif()
 
 #=============================================================================
 # Core 386 Emulator Sources
@@ -417,6 +426,11 @@ add_executable(${BUILD_NAME}
     ${EMU_CORE_SOURCES}
 )
 
+if(EGA128)
+    set(GFX_BUFFER_EXPECTED_SIZE 131072)
+else()
+    set(GFX_BUFFER_EXPECTED_SIZE 262144)
+endif()
 configure_file(memmap.ld.in memmap.ld @ONLY)
 pico_set_linker_script(${BUILD_NAME} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
 
@@ -739,6 +753,7 @@ message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
 message(STATUS "  Audio Type:     ${AUDIO_TYPE}")
 message(STATUS "  USB:            runtime HOST/DEVICE")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
+message(STATUS "  EGA 128 KiB:    ${EGA128}")
 message(STATUS "  Build Name:     ${BUILD_NAME}")
 message(STATUS "")
 
