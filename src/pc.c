@@ -29,6 +29,11 @@ uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
 void netredirect_init(CPU *cpu, int enable);
 
 unsigned long phys_mem_size = 8l << 20;
+uint8_t *guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
+#ifdef EGA128
+uint8_t ram_pages[RAM_PAGES_SIZE]
+    __attribute__((section(".bss.gfx_buffer.ram_pages"), aligned(4)));
+#endif
 void* g_pc;
 
 #define cpu_raise_irq cpu_raise_irq
@@ -1033,6 +1038,18 @@ bool __not_in_flash_func(iomem_write_string_ptr)(void *iomem, uint32_t addr, con
 // Старая версия теперь через новую
 bool __not_in_flash_func(iomem_write_string)(void *iomem, uint32_t addr, uint32_t buf, int len)
 {
+#ifdef EGA128
+    if (unlikely(ega128_paging_active())) {
+        while (len > 0) {
+            uint32_t span;
+            const uint8_t *p = ega128_page_ptr(buf, &span, false);
+            int n = len < (int)span ? len : (int)span;
+            if (!iomem_write_string_ptr(iomem, addr, p, n)) return false;
+            addr += n; buf += n; len -= n;
+        }
+        return true;
+    }
+#endif
     return iomem_write_string_ptr(iomem, addr, PC_RAM + buf, len);
 }
 
@@ -1109,6 +1126,9 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	PC *pc = malloc(sizeof(PC));
 	g_pc = pc;
 	CPU_CB *cb = NULL;
+#ifdef EGA128
+	if (!ega128_paging_active())
+#endif
 	for(int i = 0; i < (conf->mem_size >> 2); ++i)
 	 PC_RAM32[i] = 0;
 #ifdef BUILD_ESP32
@@ -1525,13 +1545,17 @@ static void bios_post_components(PC *pc, size_t psram_size)
     bios_post_table_row(pc, left, right);
 
 #ifdef EGA128
-    snprintf(left, sizeof(left), "Video    : %s EGA 128 KB",
+    snprintf(left, sizeof(left), "Video    : EGA 128 KB [%s]",
              SELECT_VGA ? "VGA" : "HDMI");
+    if (ega128_paging_active())
+        snprintf(right, sizeof(right), "%s", ega128_paging_post_label());
+    else
+        snprintf(right, sizeof(right), "QSPI PSRAM Up to 16 MB");
 #else
     snprintf(left, sizeof(left), "Video    : %s VBE 1.2 256 KB",
              SELECT_VGA ? "VGA" : "HDMI");
+    snprintf(right, sizeof(right), "QSPI PSRAM Up to 16 MB");
 #endif
-    snprintf(right, sizeof(right), "PSRAM    : Up to 16 MB");
     bios_post_table_row(pc, left, right);
 
     snprintf(left, sizeof(left), "PC RAM   : %lu KB",
@@ -1601,6 +1625,47 @@ void pc_play_pending_post_beep(PC *pc)
     pcspk_ioport_write(pc->pcspk, old61);
 }
 
+#ifdef EGA128
+static bool bios_post_paged_memory_test(PC *pc)
+{
+    const uint32_t total = EGA128_VIRTUAL_RAM_SIZE;
+    const uint32_t progress_step = 256u << 10;
+
+    bios_printf(pc->cpu, "RAM memory test: 00000000  %5lu / %5lu KB",
+                0ul, (unsigned long)(total >> 10));
+
+    for (uint32_t addr = 0; addr < total; addr += 4) {
+        /* A0000h..BFFFFh is the VGA aperture.  C0000h..FFFFFh is backed
+         * by pageable guest memory too (UMB plus native/external ROM data),
+         * so it must be verified through the same pload/pstore path. */
+        if (addr == 0x000A0000u)
+            addr = 0x000C0000u;
+
+        uint32_t old = pload32(addr);
+        uint32_t pattern = addr ^ 0xA55AA55Au;
+
+        pstore32(addr, pattern);
+        if (pload32(addr) != pattern) {
+            pstore32(addr, old);
+            bios_printf(pc->cpu, "\rRAM memory test: FAILED at %08lX (%5lu KB)\n",
+                        (unsigned long)addr, (unsigned long)(addr >> 10));
+            return false;
+        }
+        pstore32(addr, old);
+
+        uint32_t done = addr + 4;
+        if ((done % progress_step) == 0 || done == total) {
+            bios_printf(pc->cpu, "\rRAM memory test: %08lX  %5lu / %5lu KB",
+                        (unsigned long)done, (unsigned long)(done >> 10),
+                        (unsigned long)(total >> 10));
+        }
+    }
+
+    bios_printf(pc->cpu, "  OK\n");
+    return true;
+}
+#endif
+
 static bool bios_post_psram_test(PC *pc, size_t psram_size)
 {
     const size_t step = 256u << 10;
@@ -1627,7 +1692,7 @@ static bool bios_post_psram_test(PC *pc, size_t psram_size)
                         (unsigned long)off, (unsigned long)(off >> 10));
             break;
         }
-        bios_printf(pc->cpu, "\rPSRAM memory test: %08lX  %5lu / %5lu KiB",
+        bios_printf(pc->cpu, "\rPSRAM memory test: %08lX  %5lu / %5lu KB",
                     (unsigned long)(off + len),
                     (unsigned long)((off + len) >> 10),
                     (unsigned long)(psram_size >> 10));
@@ -1942,7 +2007,13 @@ void bios_post(PC *pc) {
 
         /* Memory test and its result tone are cold-POST features only. */
         if (cold_post) {
+#ifdef EGA128
+            bool memory_ok = ega128_paging_active()
+                       ? bios_post_paged_memory_test(pc)
+                       : bios_post_psram_test(pc, psram_size);
+#else
             bool memory_ok = bios_post_psram_test(pc, psram_size);
+#endif
             bios_post_beep_pending = memory_ok ? 1 : -1;
         } else {
             bios_post_beep_pending = 0;
@@ -2108,6 +2179,14 @@ void load_bios_and_reset(PC *pc)
 		umb_select_map(1, 0x100000u, 0);
 		bios_post(pc);
 	}
+#ifdef EGA128
+	/* Fake/native BIOS (F9000-FFFFF) and external ROM images share the
+	 * pageable physical backing with UMB RAM.  There is deliberately no
+	 * ROM overlay over F0000-F8FFF: that range is native-BIOS UMB. */
+	extern bool ega128_paging_flush(void);
+	if (ega128_paging_active() && !ega128_paging_flush())
+		printf("ERROR: EGA128 paging flush failed before reset\n");
+#endif
 	sn76489_reset();
 	cpu_reset(pc->cpu);
 }

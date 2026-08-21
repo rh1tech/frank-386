@@ -51,6 +51,26 @@ static inline uint8_t *xms_ptr(uint32_t offset) {
     return X86_RAM_BASE + XMS_EMB_BASE_PHYS + offset;
 }
 
+static inline uint8_t xms_load8(uint32_t offset)
+{
+#ifdef EGA128
+    if (ega128_paging_active())
+        return read86(XMS_EMB_BASE_PHYS + offset);
+#endif
+    return *xms_ptr(offset);
+}
+
+static inline void xms_store8(uint32_t offset, uint8_t value)
+{
+#ifdef EGA128
+    if (ega128_paging_active()) {
+        write86(XMS_EMB_BASE_PHYS + offset, value);
+        return;
+    }
+#endif
+    *xms_ptr(offset) = value;
+}
+
 typedef struct {
     uint32_t base;   /* byte offset inside the EMB pool */
     uint32_t size;   /* bytes */
@@ -353,17 +373,15 @@ ret:
 
 static inline void xms_move_to(uint32_t destination, uint32_t source, uint32_t length) {
     dpb_watch_check_chain("xms_move_to 1");
-    uint8_t *dst = xms_ptr(destination);
     while (length--)
-        *dst++ = read86(source++);
+        xms_store8(destination++, read86(source++));
     dpb_watch_check_chain("xms_move_to 2");
 }
  
 static inline void xms_move_from(uint32_t source, uint32_t destination, uint32_t length) {
     dpb_watch_check_chain("xms_move_from 1");
-    const uint8_t *src = xms_ptr(source);
     while (length--)
-        write86(destination++, *src++);
+        write86(destination++, xms_load8(source++));
     dpb_watch_check_chain("xms_move_from 2");
 }
 
@@ -393,7 +411,22 @@ static inline void xms_move_mem_to_mem(uint32_t destination, uint32_t source, ui
 
 static inline void xms_move_xms_to_xms(uint32_t destination, uint32_t source, uint32_t length) {
     dpb_watch_check_chain("xms_move_xms_to_xms 1");
-    memmove(xms_ptr(destination), xms_ptr(source), length);
+#ifdef EGA128
+    if (ega128_paging_active()) {
+        if (destination > source && destination - source < length) {
+            source += length;
+            destination += length;
+            while (length--)
+                xms_store8(--destination, xms_load8(--source));
+        } else {
+            while (length--)
+                xms_store8(destination++, xms_load8(source++));
+        }
+    } else
+#endif
+    {
+        memmove(xms_ptr(destination), xms_ptr(source), length);
+    }
     dpb_watch_check_chain("xms_move_xms_to_xms 2");
 }
 
@@ -575,12 +608,23 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
         case MOVE_EMB: {
             // Move Extended Memory Block (Function 0Bh)
             move_data_t move_data;
-            uint32_t struct_offset = ((uint32_t) CPU_DS << 4) + CPU_SI;
-            uint16_t *move_data_ptr = (uint16_t *) &move_data;
-            for (int i = sizeof(move_data_t) / 2; i--;) {
-                *move_data_ptr++ = readw86(struct_offset++);
-                struct_offset++;
-            }
+            const uint32_t struct_offset = ((uint32_t) CPU_DS << 4) + CPU_SI;
+
+            /* Load the packed XMS move descriptor field-by-field.  Apart from
+             * avoiding type-punning through uint16_t *, this keeps every guest
+             * access on readw86() -> pload16(), which is required when EGA128
+             * paging is active. */
+            move_data.length =
+                (uint32_t)readw86(struct_offset + 0) |
+                ((uint32_t)readw86(struct_offset + 2) << 16);
+            move_data.source_handle = readw86(struct_offset + 4);
+            move_data.source_offset =
+                (uint32_t)readw86(struct_offset + 6) |
+                ((uint32_t)readw86(struct_offset + 8) << 16);
+            move_data.destination_handle = readw86(struct_offset + 10);
+            move_data.destination_offset =
+                (uint32_t)readw86(struct_offset + 12) |
+                ((uint32_t)readw86(struct_offset + 14) << 16);
             
             /* Validate handles / offsets and rebase EMB offsets onto the
              * per-handle base inside the pool. Real-mode (handle==0) sides
@@ -658,7 +702,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
 #if XMS_DEBUG
                 uint32_t first_bad = len;
                 for (uint32_t i = 0; i < len; ++i) {
-                    uint8_t expected = *xms_ptr(src + i);
+                    uint8_t expected = xms_load8(src + i);
                     uint8_t actual = read86(dst + i);
                     if (expected != actual) {
                         first_bad = i;
@@ -834,7 +878,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 break;
             }
             if (base != old_base && old_size)
-                memmove(xms_ptr(base), xms_ptr(old_base), old_size);
+                xms_move_xms_to_xms(base, old_base, old_size);
             h->base = base;
             h->size = new_size;
             CPU_AX = 1;

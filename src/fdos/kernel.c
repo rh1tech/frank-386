@@ -1885,7 +1885,7 @@ dos_far_ptr linear_to_far(const void *p)
     printf("PANIC: linear_to_far out of x86 guest RAM range %p\n", (const void *)p);
     for (;;) ;
   }
-  uint32_t lin = (uint32_t)(p - (intptr_t)X86_RAM_BASE);
+  uint32_t lin = fdos_arm_linear(p);
   /* is_guest_ptr() above has already established lin <= X86_MAX_LINEAR
      (0x10FFEF), so the HMA branch's offset (lin - 0xFFFF0) is <= 0xFFFF
      and the cast below cannot truncate. See is_guest_ptr() in portab.h

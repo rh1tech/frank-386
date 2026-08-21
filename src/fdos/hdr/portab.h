@@ -188,7 +188,13 @@ extern char DosDataSeg[];
 #ifndef PSRAM_BASE_ADDR
 #define PSRAM_BASE_ADDR   0x11000000
 #endif
-#define X86_RAM_BASE ((uint8_t*)PSRAM_BASE_ADDR)
+#ifdef EGA128
+extern uint8_t *guest_ram_base;
+#define X86_RAM_BASE (guest_ram_base)
+#include "ega128_paging.h"
+#else
+#define X86_RAM_BASE ((uint8_t *)PSRAM_BASE_ADDR)
+#endif
 
 /* Highest linear address any real-mode seg:off pair can name: FFFF:FFFF
    -> (0xFFFF << 4) + 0xFFFF == 0x10FFEF. Everything from 0x100000 up to
@@ -207,9 +213,28 @@ extern char DosDataSeg[];
    inverses over the whole range, instead of almost-inverses with a
    16-byte hole that fails silently. */
 static inline bool is_guest_ptr(const void *p) {
+#ifdef EGA128
+    if (ega128_paging_active()) {
+        uint32_t linear;
+        return ega128_cache_ptr_to_linear(p, &linear) &&
+               linear <= X86_MAX_LINEAR;
+    }
+#endif
     uintptr_t a = (uintptr_t)p;
     return a >= (uintptr_t)X86_RAM_BASE &&
            a <= (uintptr_t)X86_RAM_BASE + X86_MAX_LINEAR;
+}
+
+static inline uint32_t fdos_arm_linear(const void *p)
+{
+#ifdef EGA128
+    if (ega128_paging_active()) {
+        uint32_t linear;
+        if (ega128_cache_ptr_to_linear(p, &linear))
+            return linear;
+    }
+#endif
+    return (uint32_t)((uintptr_t)p - (uintptr_t)X86_RAM_BASE);
 }
 
 /*
@@ -320,10 +345,30 @@ static inline dos_far_ptr add_far_x86(dos_far_ptr p, uint32_t n) {
 }
 ///#define DHDR_END ((void*)(uintptr_t)-1)
 #define EFFECTIVE(a) (((uint32_t)(a).segment << 4) + (a).offset)
+#ifdef EGA128
+/*
+ * In the pageable build a DOS far pointer still denotes a GUEST address, not
+ * a host pointer.  Resolve it only when C code actually asks for direct
+ * access.  The returned pointer addresses the currently mapped 2-KiB chunk;
+ * resident FDOS low memory is pinned 1:1 by ega128_paging.c, while transient
+ * objects are fetched on demand.  Mark the page dirty because legacy ARM_PTR
+ * sites are intentionally read/write and C gives us no way to infer access
+ * direction from a later -> or * operator.
+ */
+static inline uint8_t *fdos_guest_arm_ptr(dos_far_ptr p_x86)
+{
+    uint32_t linear = EFFECTIVE(p_x86);
+    if (__builtin_expect(guest_ram_base != ram_pages, 1))
+        return (uint8_t *)PSRAM_BASE_ADDR + linear;
+    return ega128_guest_ptr(linear, true);
+}
+#define ARM_PTR(p_x86) fdos_guest_arm_ptr((p_x86))
+#else
 #define ARM_PTR(p_x86) ( X86_RAM_BASE + EFFECTIVE(p_x86) )
+#endif
 // N.B. use it only for addresses are stored in x86 RAM (PSRAM), M33 SRAM/FLASH is not mapped there
 #define x86_FAR_PTR(s, arm_addr) \
-    MK_FP((s), (uint16_t)(((uintptr_t)(arm_addr) - (uintptr_t)X86_RAM_BASE) - ((uint32_t)(s) << 4)))
+    MK_FP((s), (uint16_t)(fdos_arm_linear((arm_addr)) - ((uint32_t)(s) << 4)))
 
 /*
     Two documentary aliases of dos_far_ptr. They do NOT change layout or add

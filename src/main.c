@@ -30,6 +30,9 @@
 
 #include "board_config.h"
 #include "psram_init.h"
+#ifdef EGA128
+#include "ega128_paging.h"
+#endif
 #include "ems.h"
 #include "vga_hw.h"
 #include "vga.h"
@@ -49,6 +52,11 @@
 #include "audio.h"
 
 #include "pc.h"
+#include "mem.h"
+#include "bulk_bounce.h"
+#ifdef EGA128
+bool ega128_paging_flush(void);
+#endif
 #include "i8259.h"
 #include "ini.h"
 #include "debug.h"
@@ -427,23 +435,60 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
                file, (unsigned long)size, (unsigned long)addr, dest);
     }
 
-    res = f_read(&fp, dest, size, &bytes_read);
-    if (res != FR_OK || bytes_read != size) {
-        f_close(&fp);
-        printf("ERROR: Failed to read ROM: %s (error %d, read %u of %lu)\n",
-               file, res, bytes_read, (unsigned long)size);
-        return -1;
+#ifdef EGA128
+    if (ega128_paging_active()) {
+        uint32_t guest_addr = backward ? (uint32_t)(addr - size) : (uint32_t)addr;
+        FSIZE_t left = size;
+        while (left) {
+            UINT chunk = left > GUEST_BULK_BUF_SIZE ? GUEST_BULK_BUF_SIZE : (UINT)left;
+            bytes_read = 0;
+            res = f_read(&fp, guest_bulk_buf, chunk, &bytes_read);
+            if (res != FR_OK || bytes_read != chunk) {
+                f_close(&fp);
+                printf("ERROR: Failed to read ROM: %s (error %d, read %u of %u)\n",
+                       file, res, bytes_read, chunk);
+                return -1;
+            }
+            for (UINT i = 0; i < chunk; ++i)
+                pstore8(guest_addr + i, guest_bulk_buf[i]);
+            guest_addr += chunk;
+            left -= chunk;
+        }
+    } else
+#endif
+    {
+        res = f_read(&fp, dest, size, &bytes_read);
+        if (res != FR_OK || bytes_read != size) {
+            f_close(&fp);
+            printf("ERROR: Failed to read ROM: %s (error %d, read %u of %lu)\n",
+                   file, res, bytes_read, (unsigned long)size);
+            return -1;
+        }
     }
 
     f_close(&fp);
 
     // Debug: verify data was written to memory
-    DBG_PRINT("  First bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-           dest[0], dest[1], dest[2], dest[3],
-           dest[4], dest[5], dest[6], dest[7]);
-    DBG_PRINT("  Last bytes:  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-           dest[size-8], dest[size-7], dest[size-6], dest[size-5],
-           dest[size-4], dest[size-3], dest[size-2], dest[size-1]);
+#ifdef EGA128
+    if (ega128_paging_active()) {
+        uint32_t first = backward ? (uint32_t)(addr - size) : (uint32_t)addr;
+        uint32_t last = first + (uint32_t)size - 8u;
+        DBG_PRINT("  First bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                  pload8(first + 0), pload8(first + 1), pload8(first + 2), pload8(first + 3),
+                  pload8(first + 4), pload8(first + 5), pload8(first + 6), pload8(first + 7));
+        DBG_PRINT("  Last bytes:  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                  pload8(last + 0), pload8(last + 1), pload8(last + 2), pload8(last + 3),
+                  pload8(last + 4), pload8(last + 5), pload8(last + 6), pload8(last + 7));
+    } else
+#endif
+    {
+        DBG_PRINT("  First bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+               dest[0], dest[1], dest[2], dest[3],
+               dest[4], dest[5], dest[6], dest[7]);
+        DBG_PRINT("  Last bytes:  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+               dest[size-8], dest[size-7], dest[size-6], dest[size-5],
+               dest[size-4], dest[size-3], dest[size-2], dest[size-1]);
+    }
 
     return (int)size;  // Return size on success
 }
@@ -789,10 +834,14 @@ static void load_default_config(void) {
     // Guest RAM follows the physically detected PSRAM.  The optional
     // Lo-tech EMS board reserves its fixed 2 MiB backing store at the top.
     size_t detected_psram = psram_detected_size();
+#ifdef EGA128
+    if (guest_ram_base == ram_pages)
+        detected_psram = ega128_paging_active() ? EGA128_VIRTUAL_RAM_SIZE : RAM_PAGES_SIZE;
+#endif
 #if EMULATE_LTEMS
     if (detected_psram >= (4u << 20)) {
         config.mem_size = detected_psram - (2u << 20);
-        ems_base_ptr = (uint8_t *)PSRAM_BASE_ADDR + config.mem_size;
+        ems_base_ptr = guest_ram_base + config.mem_size;
     } else {
         config.mem_size = detected_psram;
         ems_base_ptr = NULL;
@@ -1052,9 +1101,18 @@ static bool init_hardware(void) {
     bool psram_missing = psram_detect_size() < (1u << 20);
     early_psram_missing = psram_missing;
     __dmb();
+#ifdef EGA128
+    if (psram_missing) {
+        guest_ram_base = ram_pages;
+        printf("PSRAM not detected; using 128 KiB SRAM guest-RAM fallback\n");
+    } else {
+        guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
+        ega128_select_direct_backend();
+    }
+#else
     if (psram_missing)
         printf("ERROR: PSRAM not detected or smaller than 1 MiB!\n");
-
+#endif
     // Initialize VGA early so we can show errors on screen
     multicore_launch_core1(core1_entry);
 
@@ -1064,12 +1122,14 @@ static bool init_hardware(void) {
     }
     __dmb();
 
+#ifndef EGA128
     if (psram_missing) {
         show_error_screen(" PSRAM Error ",
                           "QSPI PSRAM not detected (>= 4 MB is required).",
                           "Try *-EGA128.uf2 version (for a case)...");
         __unreachable();
     }
+#endif
 
     // Initialize SD card
     DBG_PRINT("Initializing SD card...\n");
@@ -1170,7 +1230,8 @@ static bool init_hardware(void) {
         int test_freq = config_get_psram_test_freq();
         size_t detected_psram;
 
-        if ((cached_mb == 1 || cached_mb == 2 || cached_mb == 4 ||
+        if (!psram_missing &&
+            (cached_mb == 1 || cached_mb == 2 || cached_mb == 4 ||
              cached_mb == 8 || cached_mb == 16) &&
             test_freq == cfg_psram) {
             detected_psram = (size_t)cached_mb << 20;
@@ -1178,10 +1239,19 @@ static bool init_hardware(void) {
             DBG_PRINT("  PSRAM cached: %d MiB (tested at %d MHz)\n",
                       cached_mb, test_freq);
         } else {
-            detected_psram = psram_detect_size();
+            detected_psram = psram_missing ? 0 : psram_detect_size();
             if (detected_psram < (1u << 20)) {
+#ifdef EGA128
+                if (!ega128_paging_init()) {
+                    printf("ERROR: EGA128 paging backing store initialization failed!\n");
+                    return false;
+                }
+                guest_ram_base = ram_pages;
+                detected_psram = 0;
+#else
                 printf("ERROR: PSRAM not detected or smaller than 1 MiB!\n");
                 return false;
+#endif
             }
             DBG_PRINT("  PSRAM detected: %lu MiB\n",
                       (unsigned long)(detected_psram >> 20));
@@ -1407,9 +1477,10 @@ static void __not_in_flash_func(core1_entry)(void) {
     config_clear_changes();
 
     __dmb();
+#ifndef EGA128
     if (early_psram_missing)
         audio_play_tone(300u, 500u);
-
+#endif
     DBG_PRINT("[Core 1] Initializing video...\n");
     DBG_PRINT("  Base pin: GPIO%d\n", VGA_BASE_PIN);
     vga_hw_init();

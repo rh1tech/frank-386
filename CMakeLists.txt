@@ -427,10 +427,13 @@ add_executable(${BUILD_NAME}
 )
 
 if(EGA128)
-    set(GFX_BUFFER_EXPECTED_SIZE 131072)
-else()
-    set(GFX_BUFFER_EXPECTED_SIZE 262144)
+    target_sources(${BUILD_NAME} PRIVATE src/ega128_paging.c)
+    if(BOARD STREQUAL "M1")
+        target_sources(${BUILD_NAME} PRIVATE drivers/psram_spi/psram_spi.c)
+    endif()
 endif()
+
+set(GFX_BUFFER_EXPECTED_SIZE 262144)
 configure_file(memmap.ld.in memmap.ld @ONLY)
 pico_set_linker_script(${BUILD_NAME} ${CMAKE_CURRENT_BINARY_DIR}/memmap.ld)
 
@@ -449,6 +452,13 @@ target_include_directories(${BUILD_NAME} PRIVATE
 )
 if(BOARD STREQUAL "C2")
     pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/link/link_bus.pio)
+endif()
+if(EGA128 AND BOARD STREQUAL "M1")
+    target_include_directories(${BUILD_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/drivers/psram_spi)
+    pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/drivers/psram_spi/psram_spi.pio)
+    target_compile_definitions(${BUILD_NAME} PRIVATE
+        PSRAM_PIN_CS=18 PSRAM_PIN_SCK=19 PSRAM_PIN_MOSI=20 PSRAM_PIN_MISO=21
+    )
 endif()
 target_include_directories(${BUILD_NAME} PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/drivers/usbhid
