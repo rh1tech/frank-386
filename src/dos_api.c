@@ -4,6 +4,7 @@
 #include <bios/bios.h>
 #include "mem.h"
 #include "board_config.h"
+#include "psram_init.h"
 #include <math.h>
 
 #define __in_systable(group) __attribute__((section(".dos_api" group)))
@@ -173,7 +174,7 @@ static uint8_t *__not_in_flash_func(dos_video_get_buffer)(uint32_t *size) {
 
 
 static uint32_t __not_in_flash_func(psram_size)(void) {
-    return PSRAM_SIZE_BYTES;
+    return (uint32_t)psram_usable_size();
 }
 
 /*

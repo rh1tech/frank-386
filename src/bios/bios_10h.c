@@ -2,6 +2,8 @@
 #include "286/cpu.h"
 #include "bios.h"
 #include "vga.h"
+#include "board_config.h"
+#include "hardware/clocks.h"
 
 #define BIOS_FONT_SEG       0xF000
 #define BIOS_FONT8X16_OFF   0xA000
@@ -3805,16 +3807,27 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
 
 void vga_bios_baner(CPU* cpu)
 {
+    char banner[80];
+    unsigned mhz = (unsigned)(clock_get_hz(clk_sys) / 1000000u);
+    unsigned mv = current_vreg_mv;
 #if I386_MODE
-    const char *banner = "RP2350 PC em386 BIOS";
+    const char *core = "PC em386 BIOS";
 #else
-    const char *banner = "RP2350 PC em286 BIOS";
+    const char *core = "PC em286 BIOS";
 #endif
+    if (mv)
+        snprintf(banner, sizeof(banner), "RP2350%c %u MHz %u.%02uV %s",
+                 get_rp2350_package_letter(), mhz, mv / 1000u, (mv % 1000u) / 10u, core);
+    else
+        snprintf(banner, sizeof(banner), "RP2350%c %u MHz %s",
+                 get_rp2350_package_letter(), mhz, core);
+
     const uint8_t attr = 0x61; // bg=yellow(6), fg=blue(1)
     const uint8_t row  = 0;
     const uint8_t cols = 80;
-    const uint8_t len  = 17;
-    const uint8_t col  = (cols - len) / 2; // 31
+    uint8_t len = (uint8_t)strlen(banner);
+    if (len > cols) len = cols;
+    uint8_t col = (uint8_t)((cols - len) / 2);
 
     // Set 80x25 color text mode
     CPU_AH = 0x00; CPU_AL = 0x03;

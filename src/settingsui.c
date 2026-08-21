@@ -29,7 +29,6 @@ typedef enum {
 // Setting items
 typedef enum {
     SETTING_VOL= 0,
-    SETTING_MEM,
     SETTING_CPU,
     SETTING_FPU,
     SETTING_REDIRECTOR,
@@ -55,13 +54,6 @@ typedef enum {
 // Option values
 static const int vol_options[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
 static const int vol_option_count = 17;
-
-#if EMULATE_LTEMS
-static const int mem_options[] = { 1, 2, 4, 6 };
-#else
-static const int mem_options[] = { 1, 2, 4, 8 };
-#endif
-static const int mem_option_count = 4;
 
 #ifndef I386_MODE
 static const int cpu_options[] = { 0, 1, 2 };
@@ -102,7 +94,7 @@ static bool restart_requested = false;
 static int plasma_frame = 0;  // Animation frame counter
 
 // Original values (to detect changes)
-static int orig_mem, orig_cpu, orig_fpu, orig_redirector;
+static int orig_cpu, orig_fpu, orig_redirector;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
 static int orig_cpu_freq, orig_psram_freq, orig_flash_freq, orig_volume, orig_voltage, orig_mouse_invert_y;
 
@@ -129,7 +121,6 @@ void settingsui_open(void) {
     if (settings_state != SETTINGS_CLOSED) return;
 
     // Store original values
-    orig_mem = config_get_mem_size_mb();
     orig_cpu = config_get_cpu_gen();
     orig_fpu = config_get_fpu();
     orig_redirector = config_get_redirector();
@@ -161,7 +152,6 @@ void settingsui_open(void) {
 void settingsui_close(void) {
     // Restore original values if not confirmed
     if (settings_state == SETTINGS_MAIN && config_has_changes()) {
-        config_set_mem_size_mb(orig_mem);
         config_set_cpu_gen(orig_cpu);
         config_set_fpu(orig_fpu);
         config_set_redirector(orig_redirector);
@@ -208,14 +198,6 @@ static void cycle_option(int direction) {
             idx = (idx + direction + count) % count;
             audio_set_volume(options[idx]);
             config_set_volume(options[idx]);
-            break;
-
-        case SETTING_MEM:
-            options = mem_options;
-            count = mem_option_count;
-            idx = find_option_index(options, count, config_get_mem_size_mb());
-            idx = (idx + direction + count) % count;
-            config_set_mem_size_mb(options[idx]);
             break;
 
         case SETTING_CPU:
@@ -340,7 +322,6 @@ static void draw_settings_menu(void) {
     // Settings items
     const char *labels[] = {
         "Volume:",
-        "RAM Size:",
         "CPU Type:",
         "FPU (387):",
         "SD cart as H drive:",
@@ -377,9 +358,6 @@ static void draw_settings_menu(void) {
         switch (setting_idx) {
             case SETTING_VOL:
                 snprintf(value, sizeof(value), "< %d >", audio_get_volume());
-                break;
-            case SETTING_MEM:
-                snprintf(value, sizeof(value), "< %d MB >", config_get_mem_size_mb());
                 break;
             case SETTING_CPU:
                 if (!config_get_cpu_gen()) {

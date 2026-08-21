@@ -16,6 +16,10 @@
 #include <hardware/watchdog.h>
 #include "bios/bios.h"
 #include "bulk_bounce.h"
+#include "psram_init.h"
+#include "config_save.h"
+
+extern bool SELECT_VGA;
 
 /* Общий bounce-буфер нативных bulk-обменов FatFs <-> гость.
    Условия, при которых его допустимо разделять, - в bulk_bounce.h. */
@@ -476,6 +480,7 @@ static int pc_io_read_string(void *o, int addr, uint32_t buf, int size, int coun
 
 #if EMULATE_LTEMS
 uint8_t ems_pages[4] = {0};
+uint8_t *ems_base_ptr = NULL;
 
 inline static void out_ems(const uint16_t port, const uint8_t data) {
     ems_pages[port & 3] = data;
@@ -1420,6 +1425,206 @@ static void install_hdd_dpt(PC *pc, int idx, uint32_t addr)
     pstore16(vec + 2, 0xF000);                     /* segment */	
 }
 
+static int bios_post_beep_pending;
+
+static void bios_post_table_rule(PC *pc, uint8_t left, uint8_t middle, uint8_t right)
+{
+    static char line[81];
+
+    line[0] = (char)left;
+    memset(line + 1, 0xC4, 38);
+    line[39] = (char)middle;
+    memset(line + 40, 0xC4, 39);
+    line[79] = (char)right;
+    line[80] = 0;
+    bios_puts(pc->cpu, line);
+}
+
+static void bios_post_table_row(PC *pc, const char *left, const char *right)
+{
+    static char line[81];
+    size_t n;
+
+    memset(line, ' ', 80);
+    line[0] = (char)0xB3;
+    line[39] = (char)0xB3;
+    line[79] = (char)0xB3;
+
+    n = strlen(left);
+    if (n > 36) n = 36;
+    memcpy(line + 2, left, n);
+
+    n = strlen(right);
+    if (n > 37) n = 37;
+    memcpy(line + 41, right, n);
+
+    line[80] = 0;
+    bios_puts(pc->cpu, line);
+}
+
+static const char *bios_post_fdd_type(uint8_t drive)
+{
+    switch ((fdds_types() >> (drive ? 4 : 0)) & 0x0F) {
+    case 1: return "360 KB 5.25";
+    case 2: return "1.2 MB 5.25";
+    case 3: return "720 KB 3.5";
+    case 4: return "1.44 MB 3.5";
+    case 5: return "2.88 MB 3.5";
+    default: return "none";
+    }
+}
+
+static void bios_post_hdd_text(char *dst, size_t dst_size, uint8_t bios_index)
+{
+    bios_hdd_info_t info;
+
+    if (!bios_hdd_get_info(bios_index, &info)) {
+        dst[0] = 0;
+        return;
+    }
+
+    unsigned long mib = (unsigned long)(info.total_sectors >> 11);
+    if (info.raw_sd) {
+        snprintf(dst, dst_size, "HDD %02Xh  : RAW-SD %lu MB",
+                 0x80u + bios_index, mib);
+    } else {
+        unsigned controller = (unsigned)info.ata_slot >> 1;
+        unsigned device = (unsigned)info.ata_slot & 1u;
+        snprintf(dst, dst_size, "HDD %02Xh  : ATA%u-%u %lu MB",
+                 0x80u + bios_index, controller, device, mib);
+    }
+}
+
+static void bios_post_components(PC *pc, size_t psram_size)
+{
+    (void)psram_size;
+    char left[40], right[40];
+    char serial[40], parallel[40];
+    char hdd[6][40];
+
+#if I386_MODE
+    snprintf(left, sizeof(left), "CPU      : 80386");
+#else
+    snprintf(left, sizeof(left), "CPU      : 80286");
+#endif
+    snprintf(right, sizeof(right), "FPU      : %s",
+             pc->fpu_enabled ? "80387" : "not installed");
+
+    bios_post_table_rule(pc, 0xDA, 0xC2, 0xBF);
+    bios_post_table_row(pc, left, right);
+
+    snprintf(left, sizeof(left), "Video    : %s VBE 1.2 256 KB",
+             SELECT_VGA ? "VGA" : "HDMI");
+    snprintf(right, sizeof(right), "PSRAM    : Up to 16 MB");
+    bios_post_table_row(pc, left, right);
+
+    snprintf(left, sizeof(left), "PC RAM   : %lu KB",
+             (unsigned long)(phys_mem_size >> 10));
+    snprintf(right, sizeof(right), "Mouse    : %s",
+             pc->mouse_enabled ? "PS/2" : "not installed");
+    bios_post_table_row(pc, left, right);
+
+    bios_post_table_rule(pc, 0xC3, 0xC5, 0xB4);
+
+    snprintf(serial, sizeof(serial), "Serial   : %s",
+             pc->enable_serial ? "03F8h" : "none");
+    if (pc->dss_enabled && pc->covox_enabled)
+        snprintf(parallel, sizeof(parallel), "Parallel : 0378h 0278h");
+    else if (pc->dss_enabled)
+        snprintf(parallel, sizeof(parallel), "Parallel : 0378h");
+    else if (pc->covox_enabled)
+        snprintf(parallel, sizeof(parallel), "Parallel : 0278h");
+    else
+        snprintf(parallel, sizeof(parallel), "Parallel : none");
+
+    snprintf(left, sizeof(left), "FDD A    : %s", bios_post_fdd_type(0));
+    bios_post_table_row(pc, left, serial);
+    snprintf(left, sizeof(left), "FDD B    : %s", bios_post_fdd_type(1));
+    bios_post_table_row(pc, left, parallel);
+
+    for (uint8_t i = 0; i < 6; ++i)
+        bios_post_hdd_text(hdd[i], sizeof(hdd[i]), i);
+
+    if (!hdd[0][0]) {
+        strcpy(left, "HDD      : none");
+        bios_post_table_row(pc, left, right);
+    } else {
+        for (uint8_t i = 0; i < 6; i += 2) {
+            if (!hdd[i][0] && !hdd[i + 1][0])
+                break;
+            bios_post_table_row(pc, hdd[i], hdd[i + 1]);
+        }
+    }
+
+    bios_post_table_rule(pc, 0xC0, 0xC1, 0xD9);
+}
+
+void pc_play_pending_post_beep(PC *pc)
+{
+    int result = bios_post_beep_pending;
+    if (!result || !pc || !pc->pcspk || !pc->pcspk_enabled)
+        return;
+
+    bios_post_beep_pending = 0;
+
+    unsigned hz = result > 0 ? 1000u : 300u;
+    unsigned ms = result > 0 ? 100u : 500u;
+    uint16_t divisor = (uint16_t)(PIT_FREQ / hz);
+    if (divisor == 0)
+        divisor = 1;
+
+    uint8_t old61 = (uint8_t)pcspk_ioport_read(pc->pcspk);
+    i8254_ioport_write(pc->pit, 0x43, 0xB6); /* ch2, lo/hi, mode 3 */
+    i8254_ioport_write(pc->pit, 0x42, divisor & 0xFF);
+    i8254_ioport_write(pc->pit, 0x42, divisor >> 8);
+    pcspk_ioport_write(pc->pcspk, old61 | 0x03);
+
+    /* Audio is now serviced by core1's 44.1-kHz repeating timer, so core0 may
+     * sleep while PIT2 remains connected to the speaker. */
+    usleep(ms * 1000u);
+    pcspk_ioport_write(pc->pcspk, old61);
+}
+
+static bool bios_post_psram_test(PC *pc, size_t psram_size)
+{
+    const size_t step = 256u << 10;
+    bool ok = true;
+    int size_mb = (int)(psram_size >> 20);
+    int psram_freq = config_get_psram_freq();
+
+    if (config_get_psram_size_mb() == size_mb &&
+        config_get_psram_test_freq() == psram_freq)
+        return true;
+
+    psram_prepare_nondestructive_test();
+
+    bios_printf(pc->cpu, "PSRAM memory test: 00000000  %5lu / %5lu KB",
+                0ul, (unsigned long)(psram_size >> 10));
+
+    for (size_t off = 0; off < psram_size; off += step) {
+        size_t len = psram_size - off;
+        if (len > step)
+            len = step;
+        if (!psram_test_nondestructive(off, len)) {
+            ok = false;
+            bios_printf(pc->cpu, "\rPSRAM memory test: FAILED at %08lX (%5lu KB)\n",
+                        (unsigned long)off, (unsigned long)(off >> 10));
+            break;
+        }
+        bios_printf(pc->cpu, "\rPSRAM memory test: %08lX  %5lu / %5lu KiB",
+                    (unsigned long)(off + len),
+                    (unsigned long)((off + len) >> 10),
+                    (unsigned long)(psram_size >> 10));
+    }
+
+    if (ok) {
+        bios_printf(pc->cpu, "  OK\n");
+        config_set_psram_test_cache(size_mb, psram_freq);
+        (void)config_save_all();
+    }
+    return ok;
+}
+
 void bios_post(PC *pc) {
 // POST
     const uint16_t ebda_seg = 0x9FC0;                 /* 1 KiB EBDA at 9FC00 */
@@ -1702,6 +1907,15 @@ void bios_post(PC *pc) {
 
 // like VGA BIOS banner:
 	vga_bios_baner(pc->cpu);
+
+    /* BDA/IVT/ROM data already live in PSRAM, so the visible POST memory
+     * test must restore every word that it probes. */
+    {
+        size_t psram_size = psram_detected_size();
+        bios_post_components(pc, psram_size);
+        bool memory_ok = bios_post_psram_test(pc, psram_size);
+        bios_post_beep_pending = memory_ok ? 1 : -1;
+    }
 // STEP/BREAKPOINT/TRACE etc (no DOS/BIOS support)
 	point2iret(0x01);
 	point2iret(0x03);
@@ -1866,20 +2080,6 @@ void load_bios_and_reset(PC *pc)
 	cpu_reset(pc->cpu);
 }
 
-static long parse_mem_size(const char *value)
-{
-	int len = strlen(value);
-	long a = atol(value);
-	if (len) {
-		switch (value[len - 1]) {
-		case 'G': a *= 1024 * 1024 * 1024; break;
-		case 'M': a *= 1024 * 1024; break;
-		case 'K': a *= 1024; break;
-		}
-	}
-	return a;
-}
-
 int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value)
 {
@@ -1899,7 +2099,7 @@ int parse_conf_ini(void* user, const char* section,
 		} else if (NAME("vga_bios")) {
 			conf->vga_bios = strdup(value);
 		} else if (NAME("mem_size") || NAME("mem")) {
-			conf->mem_size = parse_mem_size(value);
+			/* Obsolete: physical PSRAM size is detected at boot. */
 		} else if (NAME("cpu")) {
 			conf->cpu_gen = atoi(value);
 		} else if (NAME("raw_sd_hdd")) {

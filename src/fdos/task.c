@@ -54,6 +54,7 @@ extern struct PC *pc;
 void pc_step(struct PC *pc, int stepcount);
 void pc_service(struct PC *pc);
 uint32_t get_uticks(void);
+size_t psram_usable_size(void);
 
 /* Native-yield IRQ trampoline uses the same callback trap mechanism as
    bios_intcall(), but deliberately does not execute the suspended parent
@@ -2595,7 +2596,7 @@ void doom_stack_guard_check(unsigned stage)
 
 static uintptr_t arm_elf_native_stack_arena_end(void)
 {
-  return (uintptr_t)PSRAM_BASE_ADDR + (uintptr_t)PSRAM_SIZE_BYTES;
+  return (uintptr_t)PSRAM_BASE_ADDR + (uintptr_t)psram_usable_size();
 }
 
 static uintptr_t arm_elf_native_stack_arena_begin(void)

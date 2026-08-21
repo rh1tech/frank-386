@@ -30,6 +30,7 @@
 
 #include "board_config.h"
 #include "psram_init.h"
+#include "ems.h"
 #include "vga_hw.h"
 #include "vga.h"
 #include "ps2.h"
@@ -87,6 +88,21 @@
 PC *pc = NULL;
 static PCConfig config;
 volatile bool initialized = false;
+static volatile bool audio_timer_ready = false;
+
+volatile uint16_t current_vreg_mv = 1100;
+
+static uint16_t vreg_to_mv(enum vreg_voltage v) {
+    switch ((int)v) {
+    case 15: return 1300;
+    case 16: return 1350;
+    case 17: return 1400;
+    case 18: return 1500;
+    case 19: return 1600;
+    case 20: return 1650;
+    default: return 1100;
+    }
+}
 
 /*
  * True only for a real RP2350 power-on reset.
@@ -769,11 +785,19 @@ rst:
 static void load_default_config(void) {
     memset(&config, 0, sizeof(config));
 
-    // Default memory configuration
+    // Guest RAM follows the physically detected PSRAM.  The optional
+    // Lo-tech EMS board reserves its fixed 2 MiB backing store at the top.
+    size_t detected_psram = psram_detected_size();
 #if EMULATE_LTEMS
-    config.mem_size = (EMU_MEM_SIZE_MB - 2) * 1024 * 1024;
+    if (detected_psram >= (4u << 20)) {
+        config.mem_size = detected_psram - (2u << 20);
+        ems_base_ptr = (uint8_t *)PSRAM_BASE_ADDR + config.mem_size;
+    } else {
+        config.mem_size = detected_psram;
+        ems_base_ptr = NULL;
+    }
 #else
-    config.mem_size = EMU_MEM_SIZE_MB * 1024 * 1024;
+    config.mem_size = detected_psram;
 #endif
     config.vga_mem_size = EMU_VGA_MEM_SIZE_KB * 1024;
 
@@ -933,6 +957,7 @@ static void configure_clocks(void) {
 
     vreg_disable_voltage_limit();
     vreg_set_voltage(CPU_VOLTAGE);
+    current_vreg_mv = vreg_to_mv(CPU_VOLTAGE);
     sleep_ms(100);  // Stabilization delay
 
     // Configure flash timing BEFORE changing clock
@@ -980,10 +1005,12 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
             set_sys_clock_khz(cpu_mhz * 1000, false);
             sleep_ms(10);
             vreg_set_voltage(new_voltage);
+            current_vreg_mv = vreg_to_mv(new_voltage);
         } else {
             // RAISING: voltage first, then clock (safe order)
             vreg_disable_voltage_limit();
             vreg_set_voltage(new_voltage);
+            current_vreg_mv = vreg_to_mv(new_voltage);
             sleep_ms(50);  // Stabilization delay
             set_flash_timings(cpu_mhz, cfg_flash);
             set_sys_clock_khz(cpu_mhz * 1000, false);
@@ -1017,13 +1044,6 @@ static bool init_hardware(void) {
     uint psram_pin = get_psram_pin();
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
-
-    if (!psram_test()) {
-        printf("ERROR: PSRAM test failed!\n");
-        // Can't show visual error - VGA not ready yet
-        return false;
-    }
-    DBG_PRINT("  PSRAM test passed (8MB)\n");
 
     // Initialize VGA early so we can show errors on screen
     multicore_launch_core1(core1_entry);
@@ -1104,6 +1124,39 @@ static bool init_hardware(void) {
 #endif
     }
 
+    /* A real power-on follows the same reset-cause test as the welcome screen:
+     * always redetect and fully POST-test PSRAM.  Warm/watchdog reboots may
+     * reuse the previously tested capacity. */
+    if (is_power_on_boot())
+        config_invalidate_psram_test_cache_runtime();
+
+    /* PSRAM capacity is stable hardware configuration.  Reuse the capacity
+     * saved after a successful full POST test when it was tested at the
+     * current PSRAM clock; otherwise detect it through the uncached XIP alias. */
+    {
+        int cached_mb = config_get_psram_size_mb();
+        int cfg_psram = config_get_psram_freq();
+        int test_freq = config_get_psram_test_freq();
+        size_t detected_psram;
+
+        if ((cached_mb == 1 || cached_mb == 2 || cached_mb == 4 ||
+             cached_mb == 8 || cached_mb == 16) &&
+            test_freq == cfg_psram) {
+            detected_psram = (size_t)cached_mb << 20;
+            psram_set_detected_size(detected_psram);
+            DBG_PRINT("  PSRAM cached: %d MiB (tested at %d MHz)\n",
+                      cached_mb, test_freq);
+        } else {
+            detected_psram = psram_detect_size();
+            if (detected_psram < (1u << 20)) {
+                printf("ERROR: PSRAM not detected or smaller than 1 MiB!\n");
+                return false;
+            }
+            DBG_PRINT("  PSRAM detected: %lu MiB\n",
+                      (unsigned long)(detected_psram >> 20));
+        }
+    }
+
 #ifdef BOARD_HAS_PS2
     // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
@@ -1159,6 +1212,14 @@ static bool init_emulator(void) {
         DBG_PRINT("Using default configuration\n");
     }
 
+    /* init_hardware() already invalidates the PSRAM test cache on a real
+     * power-on, but load_config_from_sd() above parses [frank-386] again and
+     * restores psram_size/psram_test_freq from disk.  Drop only the runtime
+     * copy again so the upcoming BIOS POST performs the full memory test.
+     * Warm/watchdog reboots keep the saved cache and skip the test. */
+    if (is_power_on_boot())
+        config_invalidate_psram_test_cache_runtime();
+
     DBG_PRINT("\nEmulator configuration:\n");
     DBG_PRINT("  Memory: %ld MB\n", config.mem_size / (1024 * 1024));
     DBG_PRINT("  VGA Memory: %ld KB\n", config.vga_mem_size / 1024);
@@ -1168,17 +1229,10 @@ static bool init_emulator(void) {
     DBG_PRINT("  Floppy A: %s\n", config.fdd[0] ? config.fdd[0] : "(none)");
     DBG_PRINT("  Floppy B: %s\n", config.fdd[1] ? config.fdd[1] : "(none)");
 
-    // Calculate total PSRAM needed
-    size_t total_psram = config.mem_size;
-    DBG_PRINT("  PSRAM needed: %lu KB (available: %lu KB)\n",
-           (unsigned long)(total_psram / 1024),
-           (unsigned long)(PSRAM_SIZE_BYTES / 1024));
-
-           if (total_psram > PSRAM_SIZE_BYTES) {
-        printf("WARNING: Reducing memory to fit in PSRAM\n");
-        config.mem_size = PSRAM_SIZE_BYTES;
-        DBG_PRINT("  Adjusted memory: %ld MB\n", config.mem_size / (1024 * 1024));
-    }
+    size_t detected_psram = psram_detected_size();
+    DBG_PRINT("  PSRAM detected: %lu KB; guest RAM: %lu KB\n",
+              (unsigned long)(detected_psram / 1024),
+              (unsigned long)(config.mem_size / 1024));
 
 #if REMOTE_MEM
     /* Claim a window of the slave's SRAM immediately above local RAM.
@@ -1244,7 +1298,6 @@ static bool init_emulator(void) {
 
     // Initialize config save module with current values from PCConfig
     // (these override INI values if not present in [frank-386] section)
-    config_set_mem_size_mb(config.mem_size / (1024 * 1024));
     config_set_cpu_gen(config.cpu_gen);
     config_set_fpu(config.fpu);
     config_set_redirector(config.redirector);
@@ -1330,6 +1383,8 @@ static void __not_in_flash_func(core1_entry)(void) {
     static repeating_timer_t m_timer = { 0 };
     int hz = 44100;
 	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
+    __dmb();
+    audio_timer_ready = true;
     while(1) {
         repeat_me_often();
 #ifdef DIAG_ENABLED
@@ -1519,6 +1574,12 @@ int main(void) {
 #endif
 
     initialized = true;
+
+    /* Native POST ran before core1 could start its audio timer.  Wait until
+     * the mixer is actually servicing samples, then emit the queued POST tone. */
+    while (!audio_timer_ready)
+        tight_loop_contents();
+    pc_play_pending_post_beep(pc);
 
     // HDMI DMA starts at normal priority to avoid starving SD/PSRAM during
     // BIOS loading.  Now that all ROMs are in PSRAM, raise DMA priority for

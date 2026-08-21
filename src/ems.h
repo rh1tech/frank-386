@@ -16,9 +16,11 @@
 
 #if EMULATE_LTEMS
 
-/* Physical base of EMS storage in PSRAM — must match ems.c.inl */
-#define EMS_PSRAM_OFFSET ((EMU_MEM_SIZE_MB * 1024 - 2048ul) << 10)
-#define EMS_BASE_PTR     ((uint8_t *)0x11000000 + EMS_PSRAM_OFFSET)
+/* Physical base of the fixed 2 MiB EMS backing store.  Its location is
+ * chosen at runtime immediately above local guest RAM, because PSRAM size is
+ * auto-detected (1/2/4/8/16 MiB). */
+extern uint8_t *ems_base_ptr;
+#define EMS_BASE_PTR ems_base_ptr
 
 /* Page-selector array — defined once in pc.c */
 extern uint8_t ems_pages[4];

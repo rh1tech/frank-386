@@ -15,8 +15,8 @@ static bios_callback_params_t params = {
 };
 
 bool bios_18h(CPU* cpu) {
-    print_line("No Basic ROM                           ", 1);
-    print_line("System halted                          ", 2);
+    print_line("No Basic ROM                           ", 13);
+    print_line("System halted                          ", 14);
     SET_CS ( 0xFFF0 ); // -> FFF74: INT FFh
     SET_IP ( 0x0074 );
     set_bios_callback(cpu, &params, false);

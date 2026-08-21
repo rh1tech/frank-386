@@ -122,6 +122,14 @@ static inline uint get_psram_pin(void) {
     }
 }
 
+/* Current core voltage, in millivolts, as last programmed by main.c. */
+extern volatile uint16_t current_vreg_mv;
+
+static inline char get_rp2350_package_letter(void) {
+    uint32_t package_sel = *((io_ro_32*)(SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET));
+    return (package_sel & 1) ? 'A' : 'B';
+}
+
 //=============================================================================
 // M1 Layout Configuration
 //=============================================================================
@@ -486,11 +494,6 @@ static inline uint get_psram_pin(void) {
 //=============================================================================
 // Emulator Memory Configuration
 //=============================================================================
-
-// Main memory size (configurable, limited by 8MB PSRAM minus VGA memory)
-#ifndef EMU_MEM_SIZE_MB
-#define EMU_MEM_SIZE_MB 4
-#endif
 
 // VGA memory size (up to 2MB)
 #ifndef EMU_VGA_MEM_SIZE_KB

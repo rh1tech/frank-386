@@ -18,7 +18,6 @@
 #include "pc.h"
 
 // Current configuration values (minimal storage)
-static int cfg_mem_mb = 8;
 static int cfg_cpu_gen = 4;
 static int cfg_fpu = 0;
 static int cfg_redirector = 1;
@@ -41,6 +40,8 @@ static int cfg_nes_joystick = 0;
 static int cfg_usb_joystick = 0;
 static int cfg_cpu_freq = CPU_CLOCK_MHZ;
 static int cfg_psram_freq = PSRAM_MAX_FREQ_MHZ;
+static int cfg_psram_size_mb = 0;
+static int cfg_psram_test_freq = 0;
 static int cfg_flash_freq = FLASH_MAX_FREQ_MHZ;
 static int cfg_volume = 15;
 static int cfg_voltage = -1;  /* -1 = auto (by cpu_freq) */
@@ -81,14 +82,6 @@ bool config_ensure_data_dir(void) {
 void config_init_from_current(void) {
     // These will be set from PCConfig in main.c
     cfg_changed = false;
-}
-
-int config_get_mem_size_mb(void) { return cfg_mem_mb; }
-void config_set_mem_size_mb(int mb) {
-    if (cfg_mem_mb != mb) {
-        cfg_mem_mb = mb;
-        cfg_changed = true;
-    }
 }
 
 int config_get_cpu_gen(void) { return cfg_cpu_gen; }
@@ -271,6 +264,20 @@ void config_set_cpu_freq(int mhz) {
 }
 
 int config_get_psram_freq(void) { return cfg_psram_freq; }
+int config_get_psram_size_mb(void) { return cfg_psram_size_mb; }
+int config_get_psram_test_freq(void) { return cfg_psram_test_freq; }
+void config_set_psram_test_cache(int size_mb, int test_freq_mhz) {
+    if (size_mb != 1 && size_mb != 2 && size_mb != 4 &&
+        size_mb != 8 && size_mb != 16)
+        return;
+    cfg_psram_size_mb = size_mb;
+    cfg_psram_test_freq = test_freq_mhz;
+    cfg_changed = true;
+}
+void config_invalidate_psram_test_cache_runtime(void) {
+    cfg_psram_size_mb = 0;
+    cfg_psram_test_freq = 0;
+}
 void config_set_psram_freq(int mhz) {
     if (cfg_psram_freq != mhz) {
         cfg_psram_freq = mhz;
@@ -372,10 +379,6 @@ bool config_save_all(void) {
     // Write [pc] section
     write_line(&fp, "[pc]\n");
 
-    // Memory
-    snprintf(line, sizeof(line), "mem=%dM\n", cfg_mem_mb);
-    write_line(&fp, line);
-
 //    snprintf(line, sizeof(line), "vga_mem=%dK\n", cfg_vga_kb);
 //    write_line(&fp, line);
 
@@ -457,6 +460,12 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "psram_freq=%d\n", cfg_psram_freq);
     write_line(&fp, line);
+    if (cfg_psram_size_mb) {
+        snprintf(line, sizeof(line), "psram_size=%d\n", cfg_psram_size_mb);
+        write_line(&fp, line);
+        snprintf(line, sizeof(line), "psram_test_freq=%d\n", cfg_psram_test_freq);
+        write_line(&fp, line);
+    }
     snprintf(line, sizeof(line), "flash_freq=%d\n", cfg_flash_freq);
     write_line(&fp, line);
     snprintf(line, sizeof(line), "volume=%d\n", cfg_volume);
@@ -514,6 +523,12 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_cpu_freq = atoi(value);
     } else if (strcmp(name, "psram_freq") == 0) {
         cfg_psram_freq = atoi(value);
+    } else if (strcmp(name, "psram_size") == 0) {
+        int mb = atoi(value);
+        if (mb == 1 || mb == 2 || mb == 4 || mb == 8 || mb == 16)
+            cfg_psram_size_mb = mb;
+    } else if (strcmp(name, "psram_test_freq") == 0) {
+        cfg_psram_test_freq = atoi(value);
     } else if (strcmp(name, "flash_freq") == 0) {
         cfg_flash_freq = atoi(value);
     } else if (strcmp(name, "volume") == 0) {

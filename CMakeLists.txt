@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -73,7 +73,7 @@ endif()
 
 # CPU overclock configuration (252, 378, 504 MHz)
 # 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
-set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
+set(CPU_SPEED "378" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
 set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
@@ -243,7 +243,7 @@ target_compile_definitions(psram PRIVATE
     BOARD_${BOARD}
     PSRAM_MAX_FREQ_MHZ=${PSRAM_SPEED}
 )
-target_link_libraries(psram pico_stdlib hardware_clocks)
+target_link_libraries(psram pico_stdlib hardware_clocks hardware_xip_cache)
 
 #=============================================================================
 # VGA Video Driver
@@ -479,7 +479,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     # Version information
     FRANK_386_VERSION_MAJOR=${FRANK_386_VERSION_MAJOR}
     FRANK_386_VERSION_MINOR=${FRANK_386_VERSION_MINOR}
-    WELCOME_SCREEN=1
+    #WELCOME_SCREEN=1
 
     # no FreeDOS redundant messages
     QUIET=1
@@ -507,7 +507,6 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     RP2350_BUILD=1
 
     # Emulator configuration (8MB PSRAM)
-    EMU_MEM_SIZE_MB=8
     EMU_VGA_MEM_SIZE_KB=256
     EMU_CPU_GEN=4
 

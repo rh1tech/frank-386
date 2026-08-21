@@ -103,6 +103,9 @@ typedef struct PC {
 	uint8_t lpt_ctrl[2];   /* защёлки control-регистров 0x37A/0x27A  	*/
 } PC;
 
+/* Play the native POST result tone once core1 audio service is running. */
+void pc_play_pending_post_beep(PC *pc);
+
 /* ARM32 ABI guards for the public PC layout. */
 #if UINTPTR_MAX == 0xffffffffu
 _Static_assert(offsetof(PC, boot_start_time) == 32, "PC.boot_start_time ABI offset");

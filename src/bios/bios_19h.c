@@ -175,12 +175,7 @@ static bool bios_19h_waiter(CPU* cpu, bios_callback_params_t* params) {
         goto ex;
     }
     params->data = (void*)ticks;
-    if (ticks < 18) {
-        print_line("1", 2);
-    } else if (ticks < 36) {
-        print_line("2", 2);
-    } else {
-        print_line("3", 2);
+    if (ticks >= 36) {
         params->done = true;
     }
 ex:
@@ -200,18 +195,14 @@ extern struct PC* pc;
 void pc_step(struct PC* pc, size_t max_ops);
 
 bool bios_19h(CPU* cpu) {
-    print_line("Press Win+F12 to enter Setup ", 1);
     SET_CS ( 0xFFEF ); // -> FFEFF
     SET_IP ( 0x000F );
     set_bios_callback(cpu, &params, false);
     while(!params.done) {
         pc_step(pc, 4096);
     }
-    print_line("                             ", 1);
-    print_line(" ", 2);
     drop_bios_callback(cpu, &params);
     params.done = false;
-    print_line(" ", 2);
     /* Classic boot order used here: floppy A:, then first fixed disk C:.
     * No POST is done here; INT 19h is only bootstrap. */
     if (fdd_is_inserted(0) && read_boot_sector(fdd_get_file(0))) {

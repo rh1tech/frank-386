@@ -25,9 +25,6 @@ bool config_save_all(void);
 bool config_save_disks(void);
 
 // Get/set configuration values (stored in memory until saved)
-int config_get_mem_size_mb(void);
-void config_set_mem_size_mb(int mb);
-
 int config_get_cpu_gen(void);
 void config_set_cpu_gen(int gen);
 
@@ -88,6 +85,10 @@ void config_set_cpu_freq(int mhz);
 
 int config_get_psram_freq(void);
 void config_set_psram_freq(int mhz);
+int config_get_psram_size_mb(void);
+int config_get_psram_test_freq(void);
+void config_set_psram_test_cache(int size_mb, int test_freq_mhz);
+void config_invalidate_psram_test_cache_runtime(void);
 int config_get_flash_freq(void);
 void config_set_flash_freq(int mhz);
 int config_get_volume(void);
