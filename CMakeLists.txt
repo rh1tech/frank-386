@@ -73,7 +73,7 @@ endif()
 
 # CPU overclock configuration (252, 378, 504 MHz)
 # 252 - very basic overclock, 378 = stable overclock, 504 = high overclock
-set(CPU_SPEED "378" CACHE STRING "CPU clock in MHz: 378, 504")
+set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
 set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")

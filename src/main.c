@@ -1045,6 +1045,13 @@ static bool init_hardware(void) {
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
 
+    /* Probe PSRAM before video as before, but do not stop here: the error OSD
+     * can only be shown after the video core has completed initialization.
+     * Full/cached capacity handling remains below, after clock configuration. */
+    bool psram_missing = psram_detect_size() < (1u << 20);
+    if (psram_missing)
+        printf("ERROR: PSRAM not detected or smaller than 1 MiB!\n");
+
     // Initialize VGA early so we can show errors on screen
     multicore_launch_core1(core1_entry);
 
@@ -1053,6 +1060,13 @@ static bool init_hardware(void) {
         __dmb();
     }
     __dmb();
+
+    if (psram_missing) {
+        show_error_screen(" PSRAM Error ",
+                          "QSPI PSRAM not detected.",
+                          "4 MB or larger PSRAM is required.");
+        __unreachable();
+    }
 
     // Initialize SD card
     DBG_PRINT("Initializing SD card...\n");
@@ -1064,16 +1078,18 @@ static bool init_hardware(void) {
             show_error_screen(" SD Card Error ",
                               "SD card not found or not ready.",
                               "Insert a card and restart.");
+            __unreachable();
         }
         if (res == FR_NO_FILESYSTEM) {
             show_error_screen(" SD Card Error ",
                               "SD card has no supported filesystem.",
                               "Format it as FAT and restart.");
+            __unreachable();
         }
 
         snprintf(detail, sizeof(detail), "FatFS error code: %d", res);
         show_error_screen(" SD Card Error ", "Failed to mount SD card.", detail);
-        // show_error_screen never returns
+        __unreachable();
     }
     DBG_PRINT("  SD card mounted\n");
 
@@ -1082,7 +1098,7 @@ static bool init_hardware(void) {
         show_error_screen(" Directory Error ",
                           "Failed to create directory '" SD_DATA_DIR_SLASH "'.",
                           "Check SD card write protection/filesystem.");
-        // show_error_screen never returns
+        __unreachable();
     }
     DBG_PRINT("  " SD_DATA_DIR_SLASH " directory ready\n");
 
@@ -1344,7 +1360,7 @@ static bool init_emulator(void) {
             char detail[64];
             snprintf(detail, sizeof(detail), "File: %s", bios_path);
             show_error_screen(" Missing BIOS ", "BIOS file not found.", detail);
-            // show_error_screen never returns
+            __unreachable();
         }
         f_close(&fp);
     }
