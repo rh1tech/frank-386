@@ -1148,7 +1148,10 @@ double FpuPop() {
 void OpFpu(CPU* cpu, uint8_t opcode) {
     unsigned op = opcode & 7;
     if (!cpu->fpu) {
-        // TODO" 
+        /* Consume ModR/M and displacement even when no 287/387 is present.
+         * The CPU still decodes the complete ESC instruction; the absent
+         * coprocessor performs no operation or memory transfer. */
+        modregrm(cpu);
         return;
     }
     u64 rde = 0;
