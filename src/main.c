@@ -1059,6 +1059,18 @@ static bool init_hardware(void) {
     FRESULT res = f_mount(&fatfs, "", 1);
     if (res != FR_OK) {
         char detail[32];
+
+        if (res == FR_NOT_READY) {
+            show_error_screen(" SD Card Error ",
+                              "SD card not found or not ready.",
+                              "Insert a card and restart.");
+        }
+        if (res == FR_NO_FILESYSTEM) {
+            show_error_screen(" SD Card Error ",
+                              "SD card has no supported filesystem.",
+                              "Format it as FAT and restart.");
+        }
+
         snprintf(detail, sizeof(detail), "FatFS error code: %d", res);
         show_error_screen(" SD Card Error ", "Failed to mount SD card.", detail);
         // show_error_screen never returns

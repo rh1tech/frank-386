@@ -670,6 +670,12 @@ static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
 
 void pre_render_line(void);
 static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buffer) {
+    /* Early hardware errors are shown before pc_new()/vga_init(), while
+     * vga_state is still NULL.  OSD rendering itself does not need it. */
+    if (osd_is_visible()) {
+        return osd_render_line_hdmi(line, output_buffer);
+    }
+
     // Before emulator init: output black, avoid calling any flash-resident
     // functions that could cause XIP contention with Core 0's BIOS loading.
     if (!vga_state) {
@@ -677,9 +683,6 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
         return;
     }
     pre_render_line();
-    if (osd_is_visible()) {
-        return osd_render_line_hdmi(line, output_buffer);
-    }
     int mode = current_mode;
     if (mode == 1) {
         // Text mode now rendered from linear framebuffer
