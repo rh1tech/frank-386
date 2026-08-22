@@ -922,6 +922,20 @@ static void bios10_write_far_ptr(uint32_t dst, uint16_t seg, uint16_t off)
 static bool bios_10h_4F00h(CPU *cpu)
 {
     uint32_t dst = ((uint32_t)CPU_ES << 4) + CPU_DI;
+    uint32_t modelist = ((uint32_t)BIOS10_VBE_ROM_SEG << 4) +
+                         BIOS10_VBE_MODELIST_OFF;
+
+    /*
+     * Publish exactly the modes handled by 4F01h/4F02h.  VideoModePtr is a
+     * persistent far pointer, so the list itself lives in the guest-visible
+     * BIOS area rather than in the caller's temporary controller-info block.
+     */
+    for (uint8_t i = 0;
+         i < sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0]); ++i)
+        writew86(modelist + (uint32_t)i * 2u, bios10_vbe_modes[i].mode);
+    writew86(modelist +
+             (uint32_t)(sizeof(bios10_vbe_modes) / sizeof(bios10_vbe_modes[0])) * 2u,
+             0xFFFFu);
 
     /* VBE 1.x controller information block is 256 bytes. */
     for (uint16_t i = 0; i < 256; ++i)

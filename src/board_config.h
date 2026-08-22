@@ -151,6 +151,18 @@ static inline char get_rp2350_package_letter(void) {
 
 #define HDMI_BASE_PIN HDMI_PIN_CLKN
 
+// SPI PSRAM support (old M1 style)
+#define PSRAM
+//#define PSRAM_MUTEX 1
+#define PSRAM_SPINLOCK 1
+#define PSRAM_ASYNC 1
+
+#define PSRAM_PIN_CS 18
+#define PSRAM_PIN_SCK 19
+#define PSRAM_PIN_MOSI 20
+#define PSRAM_PIN_MISO 21
+
+
 // SD Card Pins (directly define for both naming conventions)
 #define SDCARD_PIN_CLK    2
 #define SDCARD_PIN_CMD    3
