@@ -41,6 +41,15 @@
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
+extern const dos_far_ptr x86_blk_dev;
+
+static inline UBYTE blk_dev_units(void)
+{
+  const uint32_t base = ((uint32_t)FP_SEG(x86_blk_dev) << 4) +
+                        FP_OFF(x86_blk_dev);
+  return pload8(base + offsetof(struct dhdr, dh_name));
+}
+
 
 #define NENTRY          26      /* total size of dispatch table */
 
@@ -191,7 +200,7 @@ STATIC WORD play_dj(CPU *cpu, ddt *pddt)
     int i;
     ddt *pddt2 = NULL;
 
-    for (i = 0; i < blk_dev->dh_name[0]; i++)
+    for (i = 0; i < blk_dev_units(); i++)
     {
       pddt2 = getddt(i);
       if (pddt->ddt_driveno == pddt2->ddt_driveno &&
@@ -200,7 +209,7 @@ STATIC WORD play_dj(CPU *cpu, ddt *pddt)
         break;
     }
 
-    if (i == blk_dev->dh_name[0])
+    if (i == blk_dev_units())
     {
       put_string("Error in the DJ mechanism!\n");   /* should not happen! */
     }
@@ -890,7 +899,7 @@ STATIC WORD Getlogdev(CPU* cpu, request FAR *rq, ddt *pddt)
     return S_DONE;
   }
 
-  for (i = 0; i < blk_dev->dh_name[0]; i++)
+  for (i = 0; i < blk_dev_units(); i++)
   {
     pddt2 = getddt(i);
     if (pddt->ddt_driveno == pddt2->ddt_driveno &&
@@ -1404,7 +1413,7 @@ STATIC blk_proc * const dispatch[NENTRY] =
 */
 void blk_driver(CPU* cpu, request FAR *rq)
 {
-  if (rq->r_unit >= blk_dev->dh_name[0] && rq->r_command != C_INIT)
+  if (rq->r_unit >= blk_dev_units() && rq->r_command != C_INIT)
   {
     rq->r_status = failure(E_UNIT);
     return;
