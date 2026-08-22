@@ -199,6 +199,80 @@ static int int21_failed(CPU *cpu)
   return (cpu_getflags(cpu) & 1u) != 0;
 }
 
+static inline uint32_t fcom_gaddr(UWORD command_psp, size_t off)
+{
+  return fcom_guest_linear(command_psp,
+      (UWORD)(FCOM_WORK_OFFSET + (UWORD)off));
+}
+
+static inline UBYTE fcom_gread8(UWORD command_psp, size_t off)
+{
+  return fcom_guest_read8(fcom_gaddr(command_psp, off));
+}
+
+static inline void fcom_gwrite8(UWORD command_psp, size_t off, UBYTE value)
+{
+  pstore8(fcom_gaddr(command_psp, off), value);
+}
+
+static uint32_t fcom_gskip_space(uint32_t p)
+{
+  UBYTE c;
+  while ((c = fcom_guest_read8(p)) == ' ' || c == '\t')
+    ++p;
+  return p;
+}
+
+static size_t fcom_gstr_copy_from_host(UWORD command_psp, size_t off,
+                                      size_t cap, const char *src)
+{
+  size_t n = strlen(src);
+  uint32_t dst = fcom_gaddr(command_psp, off);
+
+  if (n >= cap)
+    n = cap - 1u;
+  if (n)
+    fcom_guest_write(dst, src, n);
+  pstore8(dst + (uint32_t)n, 0);
+  return n;
+}
+
+static int fcom_gstr_eq_label(UWORD command_psp, size_t line_off,
+                              size_t want_off)
+{
+  uint32_t p = fcom_gaddr(command_psp, line_off);
+  uint32_t want = fcom_gaddr(command_psp, want_off);
+  uint32_t end;
+  size_t len;
+  size_t want_len;
+
+  while (fcom_guest_read8(p) == ' ' || fcom_guest_read8(p) == '\t')
+    ++p;
+  if (fcom_guest_read8(p) != ':')
+    return 0;
+  ++p;
+  while (fcom_guest_read8(p) == ' ' || fcom_guest_read8(p) == '\t')
+    ++p;
+
+  end = p;
+  while (fcom_guest_read8(end) != 0 &&
+         fcom_guest_read8(end) != ' ' &&
+         fcom_guest_read8(end) != '\t')
+    ++end;
+
+  len = (size_t)(end - p);
+  want_len = fcom_guest_strnlen(want, 128u);
+  if (len != want_len)
+    return 0;
+
+  while (len--) {
+    if (toupper((unsigned char)fcom_guest_read8(p++)) !=
+        toupper((unsigned char)fcom_guest_read8(want++)))
+      return 0;
+  }
+  return 1;
+}
+
 
 static char *fcom_dir_stack_storage(UWORD command_psp)
 {
@@ -224,15 +298,6 @@ static UWORD *fcom_loadfix_storage(UWORD command_psp)
 }
 
 
-static struct fcom_batch_context *fcom_batch_context_storage(
-    UWORD command_psp)
-{
-  return (struct fcom_batch_context *)ARM_PTR(
-      MK_FP(command_psp, FCOM_BATCH_CONTEXT_OFFSET));
-}
-
-/* cb_catch.asm CBreakCounter - lives in guest memory because the INT 23h
-   stub increments it with a real CS-relative INC (see fcom_create_process) */
 static UWORD *fcom_cbreak_counter(UWORD command_psp)
 {
   return (UWORD *)ARM_PTR(MK_FP(command_psp, FCOM_CBREAK_COUNT_OFFSET));
@@ -1246,7 +1311,7 @@ static void guest_free(CPU *cpu, UWORD command_psp, UWORD segment)
 static int environment_layout(UWORD command_psp,
                               size_t *variables_bytes,
                               size_t *trailer_bytes,
-                              char *program_name, size_t program_name_size)
+                              uint32_t program_dst, size_t program_name_size)
 {
   uint32_t start = environment_start_linear(command_psp);
   uint32_t p = start;
@@ -1257,8 +1322,8 @@ static int environment_layout(UWORD command_psp,
 
   *variables_bytes = 0;
   *trailer_bytes = 0;
-  if (program_name_size)
-    program_name[0] = '\0';
+  if (program_name_size && program_dst != FCOM_GUEST_NULL)
+    pstore8(program_dst, 0);
 
   if (start == FCOM_GUEST_NULL)
     return 0;
@@ -1295,10 +1360,10 @@ static int environment_layout(UWORD command_psp,
 
     if (n == left)
       return -1;
-    if (i == 0 && program_name_size) {
+    if (i == 0 && program_name_size && program_dst != FCOM_GUEST_NULL) {
       size_t copy = n < program_name_size - 1u ? n : program_name_size - 1u;
-      fcom_guest_read(p, program_name, copy);
-      program_name[copy] = '\0';
+      fcom_guest_copy(program_dst, p, copy);
+      pstore8(program_dst + (uint32_t)copy, 0);
     }
     trailer += n + 1u;
     p += (uint32_t)n + 1u;
@@ -1355,7 +1420,7 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
     return -1;
 
   if (environment_layout(command_psp, &variables_bytes,
-                         &trailer_bytes, NULL, 0) < 0)
+                         &trailer_bytes, FCOM_GUEST_NULL, 0) < 0)
     return -1;
 
   src = environment_start_linear(command_psp);
@@ -1458,6 +1523,158 @@ static int replace_environment_variable(CPU *cpu, UWORD command_psp,
   return 0;
 }
 
+
+static int fcom_guest_assignment_name_matches(uint32_t env_entry,
+                                               size_t env_len,
+                                               uint32_t assignment,
+                                               size_t name_len)
+{
+  size_t i;
+
+  if (env_len <= name_len ||
+      fcom_guest_read8(env_entry + (uint32_t)name_len) != '=')
+    return 0;
+
+  for (i = 0; i < name_len; ++i) {
+    UBYTE a = fcom_guest_read8(env_entry + (uint32_t)i);
+    UBYTE b = fcom_guest_read8(assignment + (uint32_t)i);
+    if (toupper((unsigned char)a) != toupper((unsigned char)b))
+      return 0;
+  }
+  return 1;
+}
+
+static int replace_environment_variable_guest(CPU *cpu, UWORD command_psp,
+                                               uint32_t assignment,
+                                               size_t assignment_max)
+{
+  uint32_t src;
+  uint32_t equal;
+  size_t assignment_len;
+  size_t name_len;
+  size_t value_len;
+  size_t variables_bytes;
+  size_t trailer_bytes;
+  size_t copied_bytes = 0;
+  size_t entry_count = 0;
+  size_t required;
+  unsigned left;
+  UWORD paras;
+  int allocated;
+  UWORD new_seg;
+  uint32_t dst;
+  size_t pos = 0;
+  uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
+  UWORD old_owned_env = fcom_guest_read16(
+      gbase + (uint32_t)offsetof(struct fcom_guest, owned_env_seg));
+
+  assignment_len = fcom_guest_strnlen(assignment, assignment_max);
+  if (assignment_len == assignment_max)
+    return -8;
+
+  equal = assignment;
+  while (equal < assignment + assignment_len &&
+         fcom_guest_read8(equal) != '=')
+    ++equal;
+  if (equal == assignment || equal >= assignment + assignment_len)
+    return -1;
+
+  name_len = (size_t)(equal - assignment);
+  value_len = assignment_len - name_len - 1u;
+
+  {
+    size_t i;
+    for (i = 0; i < name_len; ++i) {
+      UBYTE c = fcom_guest_read8(assignment + (uint32_t)i);
+      if (c == ' ' || c == '\t')
+        return -1;
+    }
+  }
+
+  if (environment_layout(command_psp, &variables_bytes,
+                         &trailer_bytes, FCOM_GUEST_NULL, 0) < 0)
+    return -1;
+
+  src = environment_start_linear(command_psp);
+  left = (unsigned)variables_bytes;
+  while (src != FCOM_GUEST_NULL && left > 1u && fcom_guest_read8(src)) {
+    size_t n = fcom_guest_strnlen(src, left);
+    if (n == left)
+      return -1;
+
+    if (!fcom_guest_assignment_name_matches(src, n, assignment, name_len)) {
+      copied_bytes += n + 1u;
+      ++entry_count;
+    }
+    src += (uint32_t)n + 1u;
+    left -= (unsigned)n + 1u;
+  }
+
+  if (value_len != 0) {
+    copied_bytes += name_len + 1u + value_len + 1u;
+    ++entry_count;
+  }
+
+  required = copied_bytes + (entry_count ? 1u : 2u) + trailer_bytes;
+  if (required > 0xfff0u)
+    return -8;
+
+  paras = (UWORD)((required + 15u) >> 4);
+  allocated = guest_alloc(cpu, command_psp, paras);
+  if (allocated < 0)
+    return allocated;
+
+  new_seg = (UWORD)allocated;
+  dst = fcom_guest_linear(new_seg, 0);
+
+  src = environment_start_linear(command_psp);
+  left = (unsigned)variables_bytes;
+  while (src != FCOM_GUEST_NULL && left > 1u && fcom_guest_read8(src)) {
+    size_t n = fcom_guest_strnlen(src, left);
+    if (n == left) {
+      guest_free(cpu, command_psp, new_seg);
+      return -1;
+    }
+
+    if (!fcom_guest_assignment_name_matches(src, n, assignment, name_len)) {
+      fcom_guest_copy(dst + (uint32_t)pos, src, n + 1u);
+      pos += n + 1u;
+    }
+    src += (uint32_t)n + 1u;
+    left -= (unsigned)n + 1u;
+  }
+
+  if (value_len != 0) {
+    fcom_guest_copy(dst + (uint32_t)pos, assignment, assignment_len);
+    pos += assignment_len;
+    pstore8(dst + (uint32_t)pos++, 0);
+  }
+
+  if (pos == 0)
+    pstore8(dst + (uint32_t)pos++, 0);
+  pstore8(dst + (uint32_t)pos++, 0);
+
+  src = environment_start_linear(command_psp);
+  if (src != FCOM_GUEST_NULL) {
+    fcom_guest_copy(dst + (uint32_t)pos,
+                    src + (uint32_t)variables_bytes, trailer_bytes);
+  } else {
+    pstore8(dst + (uint32_t)pos++, 0);
+    pstore8(dst + (uint32_t)pos++, 0);
+  }
+
+  fcom_guest_psp_set_environment(command_psp, new_seg);
+
+  if (old_owned_env != 0)
+    guest_free(cpu, command_psp, old_owned_env);
+
+  fcom_guest_write16(gbase + (uint32_t)offsetof(struct fcom_guest, owned_env_seg),
+                     new_seg);
+  fcom_guest_write16(gbase + (uint32_t)offsetof(struct fcom_guest, owned_env_bytes),
+                     (UWORD)(paras << 4));
+  return 0;
+}
+
 /* Определены ниже, у прочих int21-хелперов редиректа. */
 static int dos_open_mode(CPU *cpu, UWORD command_psp,
                          struct fcom_guest *g,
@@ -1466,59 +1683,55 @@ static int dos_open_mode(CPU *cpu, UWORD command_psp,
 static int fcom_initialize_environment(CPU *cpu, UWORD command_psp)
 {
   const uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
+  const uint32_t program =
+      gbase + (uint32_t)offsetof(struct fcom_guest, program);
+  const uint32_t assignment =
+      gbase + (uint32_t)offsetof(struct fcom_guest, text);
+  const uint32_t path =
+      gbase + (uint32_t)offsetof(struct fcom_guest, path);
+  const uint32_t path2 =
+      gbase + (uint32_t)offsetof(struct fcom_guest, path2);
+  const uint32_t comspec =
+      gbase + (uint32_t)offsetof(struct fcom_guest, comspec_arg);
   UWORD env_seg = fcom_guest_psp_environment(command_psp);
-  char program_name[128];
-  char assignment[160];
-  char comspec_arg[128];
-  char path2[128];
   size_t variables_bytes;
   size_t trailer_bytes;
+  size_t n;
 
-  if (env_seg != 0 && fcom_guest_mcb_owner((UWORD)(env_seg - 1u)) == command_psp) {
+  if (env_seg != 0 &&
+      fcom_guest_mcb_owner((UWORD)(env_seg - 1u)) == command_psp) {
     fcom_guest_write16(gbase + (uint32_t)offsetof(struct fcom_guest, owned_env_seg),
                        env_seg);
     fcom_guest_write16(gbase + (uint32_t)offsetof(struct fcom_guest, owned_env_bytes),
                        (UWORD)(fcom_guest_mcb_size((UWORD)(env_seg - 1u)) << 4));
   }
 
-  if (environment_layout(command_psp, &variables_bytes,
-                         &trailer_bytes, program_name, sizeof(program_name)) < 0)
-    program_name[0] = '\0';
+  if (environment_layout(command_psp, &variables_bytes, &trailer_bytes,
+                         program, sizeof(((struct fcom_guest *)0)->program)) < 0)
+    pstore8(program, 0);
 
-  if (program_name[0] == '\0')
-    strcpy(program_name, "COMMAND.COM");
+  if (fcom_guest_read8(program) == 0)
+    fcom_guest_write(program, "COMMAND.COM", sizeof("COMMAND.COM"));
 
-  /*
-   * Never retain a host pointer to struct fcom_guest across INT 21h.
-   * SHELL= path buffers are addressed by guest offset; host temporaries are
-   * used only for parsing/printing between calls.
-   */
-  fcom_guest_read(gbase + (uint32_t)offsetof(struct fcom_guest, comspec_arg),
-                  comspec_arg, sizeof(comspec_arg));
-  comspec_arg[sizeof(comspec_arg) - 1u] = '\0';
+  n = fcom_guest_strnlen(comspec,
+                         sizeof(((struct fcom_guest *)0)->comspec_arg));
+  if (n != 0 && n < sizeof(((struct fcom_guest *)0)->path2)) {
+    fcom_guest_copy(path, comspec, n + 1u);
 
-  if (comspec_arg[0] != '\0') {
-    size_t n = strlen(comspec_arg);
+    SET_DS(command_psp);
+    CPU_SI = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
+    SET_ES(command_psp);
+    CPU_DI = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path2);
+    CPU_AH = 0x60;
+    fcom_intcall(cpu, command_psp, 0x21, "FCOM comspec truename");
 
-    if (n < sizeof(path2)) {
-      fcom_guest_write(gbase + (uint32_t)offsetof(struct fcom_guest, path),
-                       comspec_arg, n + 1u);
-      SET_DS(command_psp);
-      CPU_SI = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
-      SET_ES(command_psp);
-      CPU_DI = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path2);
-      CPU_AH = 0x60;
-      fcom_intcall(cpu, command_psp, 0x21, "FCOM comspec truename");
+    if (!int21_failed(cpu)) {
+      int is_dir = 0;
+      size_t path2_len =
+          fcom_guest_strnlen(path2, sizeof(((struct fcom_guest *)0)->path2));
 
-      if (!int21_failed(cpu)) {
-        int is_dir = 0;
-
-        fcom_guest_read(gbase + (uint32_t)offsetof(struct fcom_guest, path2),
-                        path2, sizeof(path2));
-        path2[sizeof(path2) - 1u] = '\0';
-
-        fcom_guest_write(gbase + (uint32_t)offsetof(struct fcom_guest, path),
-                         path2, strlen(path2) + 1u);
+      if (path2_len < sizeof(((struct fcom_guest *)0)->path2)) {
+        fcom_guest_copy(path, path2, path2_len + 1u);
         SET_DS(command_psp);
         CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
         CPU_AX = 0x4300;
@@ -1527,15 +1740,21 @@ static int fcom_initialize_environment(CPU *cpu, UWORD command_psp)
           is_dir = 1;
 
         if (is_dir) {
-          size_t len = strlen(path2);
-          while (len > 0 && path2[len - 1] == '\\')
-            path2[--len] = '\0';
-          if (len + sizeof("\\COMMAND.COM") <= sizeof(path2))
-            memcpy(path2 + len, "\\COMMAND.COM", sizeof("\\COMMAND.COM"));
+          while (path2_len > 0 &&
+                 fcom_guest_read8(path2 + (uint32_t)path2_len - 1u) == '\\') {
+            --path2_len;
+            pstore8(path2 + (uint32_t)path2_len, 0);
+          }
+
+          if (path2_len + sizeof("\\COMMAND.COM") <=
+              sizeof(((struct fcom_guest *)0)->path2)) {
+            fcom_guest_write(path2 + (uint32_t)path2_len,
+                             "\\COMMAND.COM", sizeof("\\COMMAND.COM"));
+            path2_len += sizeof("\\COMMAND.COM") - 1u;
+          }
         }
 
-        fcom_guest_write(gbase + (uint32_t)offsetof(struct fcom_guest, path),
-                         path2, strlen(path2) + 1u);
+        fcom_guest_copy(path, path2, path2_len + 1u);
         SET_DS(command_psp);
         CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, path);
         CPU_AX = 0x3d00u;
@@ -1546,22 +1765,26 @@ static int fcom_initialize_environment(CPU *cpu, UWORD command_psp)
           CPU_BX = fd;
           CPU_AH = 0x3e;
           fcom_intcall(cpu, command_psp, 0x21, "FCOM comspec close");
-          strncpy(program_name, path2, sizeof(program_name) - 1u);
-          program_name[sizeof(program_name) - 1u] = '\0';
+          fcom_guest_copy(program, path2, path2_len + 1u);
         } else {
-          dos_printf("FCOM: cannot open \"%s\"\n", path2);
+          dos_printf("FCOM: cannot open COMSPEC\n");
         }
-      } else {
-        dos_printf("FCOM: bad COMSPEC path \"%s\"\n", comspec_arg);
       }
+    } else {
+      dos_printf("FCOM: bad COMSPEC path\n");
     }
   }
 
-  if (snprintf(assignment, sizeof(assignment), "COMSPEC=%s", program_name) < 0 ||
-      strlen(assignment) >= sizeof(assignment))
+  fcom_guest_write(assignment, "COMSPEC=", sizeof("COMSPEC=") - 1u);
+  n = fcom_guest_strnlen(program, sizeof(((struct fcom_guest *)0)->program));
+  if (n >= sizeof(((struct fcom_guest *)0)->text) - sizeof("COMSPEC="))
     return -1;
 
-  return replace_environment_variable(cpu, command_psp, assignment);
+  fcom_guest_copy(assignment + sizeof("COMSPEC=") - 1u, program, n);
+  pstore8(assignment + sizeof("COMSPEC=") - 1u + (uint32_t)n, 0);
+
+  return replace_environment_variable_guest(
+      cpu, command_psp, assignment, sizeof(((struct fcom_guest *)0)->text));
 }
 
 static int fcom_set_bool_option(const char *arg,
@@ -7555,6 +7778,7 @@ static int find_batch_file(CPU *cpu, UWORD command_psp,
 static int read_batch_byte(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, UWORD handle)
 {
+  (void)g;
   SET_DS(command_psp);
   CPU_DX = FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io);
   CPU_BX = handle;
@@ -7566,7 +7790,8 @@ static int read_batch_byte(CPU *cpu, UWORD command_psp,
     return -(int)CPU_AX;
   if (CPU_AX == 0)
     return -1;
-  return g->io[0];
+  return fcom_guest_read8(
+      fcom_gaddr(command_psp, offsetof(struct fcom_guest, io)));
 }
 
 
@@ -7581,81 +7806,69 @@ static int seek_batch_start(CPU *cpu, UWORD command_psp, UWORD handle)
   return int21_failed(cpu) ? -(int)CPU_AX : 0;
 }
 
-static int batch_label_matches(const char *line, const char *wanted)
+static uint32_t batch_argument_at_guest(UWORD command_psp,
+                                       unsigned index)
 {
-  const char *p = line;
-  const char *end;
-  size_t len;
+  const uint32_t args =
+      fcom_gaddr(command_psp, offsetof(struct fcom_guest, batch_args));
+  const uint32_t out =
+      fcom_gaddr(command_psp, offsetof(struct fcom_guest, batch_arg));
+  uint32_t p = args;
+  unsigned logical = index +
+      fcom_gread8(command_psp, offsetof(struct fcom_guest, batch_shiftlevel));
 
-  while (*p == ' ' || *p == '\t')
-    ++p;
-  if (*p != ':')
-    return 0;
+  while (fcom_guest_read8(p) != 0) {
+    uint32_t begin;
 
-  ++p;
-  while (*p == ' ' || *p == '\t')
-    ++p;
-
-  end = p;
-  while (*end != '\0' && *end != ' ' && *end != '\t')
-    ++end;
-
-  len = (size_t)(end - p);
-  return len == strlen(wanted) &&
-         strncasecmp(p, wanted, len) == 0;
-}
-
-static const char *batch_argument_at(struct fcom_guest *g,
-                                     unsigned index)
-{
-  const char *p = g->batch_args;
-  unsigned logical = index + g->batch_shiftlevel;
-
-  while (*p != '\0') {
-    const char *start;
-
-    p = skip_space((char *)p);
-    if (*p == '\0')
+    p = fcom_gskip_space(p);
+    if (fcom_guest_read8(p) == 0)
       break;
 
-    if (*p == '"') {
-      start = ++p;
-      while (*p != '\0' && *p != '"')
+    if (fcom_guest_read8(p) == '"') {
+      begin = ++p;
+      while (fcom_guest_read8(p) != 0 && fcom_guest_read8(p) != '"')
         ++p;
     } else {
-      start = p;
-      while (*p != '\0' && *p != ' ' && *p != '\t')
+      begin = p;
+      while (fcom_guest_read8(p) != 0 &&
+             fcom_guest_read8(p) != ' ' &&
+             fcom_guest_read8(p) != '\t')
         ++p;
     }
 
     if (logical == 0) {
-      size_t n = (size_t)(p - start);
-
-      if (n >= sizeof(g->batch_arg))
-        n = sizeof(g->batch_arg) - 1;
-      memcpy(g->batch_arg, start, n);
-      g->batch_arg[n] = '\0';
-      return g->batch_arg;
+      size_t n = (size_t)(p - begin);
+      if (n >= sizeof(((struct fcom_guest *)0)->batch_arg))
+        n = sizeof(((struct fcom_guest *)0)->batch_arg) - 1u;
+      fcom_guest_copy(out, begin, n);
+      pstore8(out + (uint32_t)n, 0);
+      return out;
     }
 
-    if (*p == '"')
+    if (fcom_guest_read8(p) == '"')
       ++p;
     --logical;
   }
 
-  return "";
+  pstore8(out, 0);
+  return out;
 }
 
-static void batch_shift_args(struct fcom_guest *g, const char *args)
+static void batch_shift_args_guest(UWORD command_psp, const char *args)
 {
-  char *p = skip_space((char *)args);
+  const char *p = skip_space((char *)args);
+  UBYTE level =
+      fcom_gread8(command_psp, offsetof(struct fcom_guest, batch_shiftlevel));
 
   if (strcasecmp(p, "DOWN") == 0) {
-    if (g->batch_shiftlevel != 0)
-      --g->batch_shiftlevel;
+    if (level != 0)
+      --level;
   } else {
-    ++g->batch_shiftlevel;
+    ++level;
   }
+
+  fcom_gwrite8(command_psp,
+               offsetof(struct fcom_guest, batch_shiftlevel), level);
 }
 
 static void split_call_target(char *args, char **target, char **tail)
@@ -7684,62 +7897,94 @@ static void split_call_target(char *args, char **target, char **tail)
   *tail = skip_space(p);
 }
 
-static int expand_batch_parameters(struct fcom_guest *g, char *line)
+static int expand_batch_parameters_guest(UWORD command_psp)
 {
-  const char *srcp = line;
-  char *dst = g->for_command;
-  char *end = g->for_command + FCOM_LINE_MAX;
+  const uint32_t line =
+      fcom_gaddr(command_psp, offsetof(struct fcom_guest, batch_line));
+  const uint32_t name =
+      fcom_gaddr(command_psp, offsetof(struct fcom_guest, batch_name));
+  const uint32_t args =
+      fcom_gaddr(command_psp, offsetof(struct fcom_guest, batch_args));
+  const uint32_t out =
+      fcom_gaddr(command_psp, offsetof(struct fcom_guest, for_command));
+  uint32_t src = line;
+  uint32_t dst = out;
+  const uint32_t end = out + FCOM_LINE_MAX;
 
-  while (*srcp != '\0' && dst < end) {
-    if (*srcp == '%' && srcp[1] != '\0') {
-      const char *value = NULL;
-      char code = srcp[1];
+  while (fcom_guest_read8(src) != 0 && dst < end) {
+    UBYTE c = fcom_guest_read8(src);
+
+    if (c == '%' && fcom_guest_read8(src + 1u) != 0) {
+      uint32_t value = FCOM_GUEST_NULL;
+      UBYTE code = fcom_guest_read8(src + 1u);
 
       if (code == '0') {
-        value = g->batch_name;
+        value = name;
       } else if (code >= '1' && code <= '9') {
-        value = batch_argument_at(g, (unsigned)(code - '1'));
+        value = batch_argument_at_guest(command_psp,
+                                        (unsigned)(code - '1'));
       } else if (code == '*') {
-        const char *p = g->batch_args;
-        unsigned skip = g->batch_shiftlevel;
+        uint32_t p = args;
+        unsigned skip =
+            fcom_gread8(command_psp,
+                        offsetof(struct fcom_guest, batch_shiftlevel));
 
-        while (skip-- != 0 && *p != '\0') {
-          p = skip_space((char *)p);
-          if (*p == '"') {
+        while (skip-- != 0 && fcom_guest_read8(p) != 0) {
+          p = fcom_gskip_space(p);
+          if (fcom_guest_read8(p) == '"') {
             ++p;
-            while (*p != '\0' && *p != '"')
+            while (fcom_guest_read8(p) != 0 &&
+                   fcom_guest_read8(p) != '"')
               ++p;
-            if (*p == '"')
+            if (fcom_guest_read8(p) == '"')
               ++p;
           } else {
-            while (*p != '\0' && *p != ' ' && *p != '\t')
+            while (fcom_guest_read8(p) != 0 &&
+                   fcom_guest_read8(p) != ' ' &&
+                   fcom_guest_read8(p) != '\t')
               ++p;
           }
         }
-        value = skip_space((char *)p);
+        value = fcom_gskip_space(p);
       } else if (code == '%') {
-        *dst++ = '%';
-        srcp += 2;
+        pstore8(dst++, '%');
+        src += 2u;
         continue;
       }
 
-      if (value != NULL) {
-        while (*value != '\0' && dst < end)
-          *dst++ = *value++;
-        srcp += 2;
+      if (value != FCOM_GUEST_NULL) {
+        while (fcom_guest_read8(value) != 0 && dst < end)
+          pstore8(dst++, fcom_guest_read8(value++));
+        src += 2u;
         continue;
       }
     }
 
-    *dst++ = *srcp++;
+    pstore8(dst++, c);
+    ++src;
   }
 
-  if (*srcp != '\0')
+  if (fcom_guest_read8(src) != 0)
     return 0;
 
-  *dst = '\0';
-  strcpy(line, g->for_command);
+  pstore8(dst, 0);
+  fcom_guest_copy(line, out, (size_t)(dst - out) + 1u);
   return 1;
+}
+
+/*
+ * One explicit remaining legacy boundary. Batch storage and parameter
+ * expansion are guest-offset based before this point.
+ */
+static int execute_batch_command_legacy(CPU *cpu, UWORD command_psp)
+{
+  struct fcom_guest *fresh =
+      (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+  char *line = (char *)ARM_PTR(MK_FP(
+      command_psp,
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, batch_line)));
+
+  return execute_command_line(cpu, command_psp, fresh, line);
 }
 
 /*
@@ -7760,28 +8005,47 @@ static int fcom_chk_cbreak(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, int mode)
 {
   UWORD *counter = fcom_cbreak_counter(command_psp);
+  const size_t leave_off = offsetof(struct fcom_guest, cbreak_leave_all);
+  const size_t active_off = offsetof(struct fcom_guest, batch_active);
+
+  (void)g;
 
   switch (mode)
   {
     case BREAK_ENDOFBATCHFILES:
-      g->cbreak_leave_all = 0;
+      fcom_gwrite8(command_psp, leave_off, 0);
       return 0;
 
     case 0:
-      if (!g->batch_active)
+      if (!fcom_gread8(command_psp, active_off))
         goto justCheck;
       /* fall through */
 
     case BREAK_BATCHFILE:
-      if (g->cbreak_leave_all)
+      if (fcom_gread8(command_psp, leave_off))
         return 1;
       if (*counter == 0)
         return 0;
 
-      dos_puts(cpu, command_psp, g, "Terminate batch file '");
-      dos_puts(cpu, command_psp, g,
-               g->batch_name[0] != '\0' ? g->batch_name : "<<unknown>>");
-      dos_puts(cpu, command_psp, g, "' (Yes/No/All) ? ");
+      {
+        struct fcom_guest *fresh =
+            (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+        dos_puts(cpu, command_psp, fresh, "Terminate batch file '");
+        {
+          size_t batch_len = fcom_guest_strnlen(
+              fcom_gaddr(command_psp, offsetof(struct fcom_guest, batch_name)),
+              sizeof(((struct fcom_guest *)0)->batch_name));
+          if (batch_len != 0)
+            (void)fcom_write(cpu, command_psp,
+                FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, batch_name),
+                (UWORD)batch_len);
+          else
+            dos_puts(cpu, command_psp, fresh, "<<unknown>>");
+        }
+        fresh = (struct fcom_guest *)ARM_PTR(
+            MK_FP(command_psp, FCOM_WORK_OFFSET));
+        dos_puts(cpu, command_psp, fresh, "' (Yes/No/All) ? ");
+      }
 
       for (;;) {
         int ch;
@@ -7791,23 +8055,26 @@ static int fcom_chk_cbreak(CPU *cpu, UWORD command_psp,
         ch = toupper((unsigned char)CPU_AL);
 
         if (ch == 'Y' || ch == 'N' || ch == 'A') {
-          dos_puts(cpu, command_psp, g, "\r\n");
+          struct fcom_guest *fresh =
+              (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+          dos_puts(cpu, command_psp, fresh, "\r\n");
           if (ch == 'N')
-            return (int)(*counter = 0);   /* ignore */
+            return (int)(*counter = 0);
           if (ch == 'A')
-            g->cbreak_leave_all = 1;
-          break;                          /* Yes: fall through */
+            fcom_gwrite8(command_psp, leave_off, 1);
+          break;
         }
 
-        g->io[0] = '\a';                  /* beep() */
+        pstore8(fcom_gaddr(command_psp, offsetof(struct fcom_guest, io)),
+                '\a');
         (void)fcom_write(cpu, command_psp,
             FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, io), 1);
       }
       break;
 
     justCheck:
-    case BREAK_FORCMD:         /* FOR commands are part of batch processing */
-      if (g->cbreak_leave_all)
+    case BREAK_FORCMD:
+      if (fcom_gread8(command_psp, leave_off))
         return 1;
       /* fall through */
 
@@ -7817,13 +8084,15 @@ static int fcom_chk_cbreak(CPU *cpu, UWORD command_psp,
       break;
   }
 
-  *counter = 0;                /* state processed */
+  *counter = 0;
   return 1;
 }
 
 static int execute_batch_handle(CPU *cpu, UWORD command_psp,
                                 struct fcom_guest *g, UWORD handle)
 {
+  const size_t line_off = offsetof(struct fcom_guest, batch_line);
+  const size_t goto_off = offsetof(struct fcom_guest, batch_goto);
   size_t used = 0;
   int skip_lf = 0;
   int searching = 0;
@@ -7833,31 +8102,39 @@ static int execute_batch_handle(CPU *cpu, UWORD command_psp,
 
     if (ch < 0) {
       if (used != 0) {
-        g->batch_line[used] = '\0';
+        pstore8(fcom_gaddr(command_psp, line_off) + (uint32_t)used, 0);
 
         if (searching) {
-          if (batch_label_matches(g->batch_line, g->batch_goto)) {
-            g->batch_goto[0] = '\0';
+          if (fcom_gstr_eq_label(command_psp, line_off, goto_off)) {
+            pstore8(fcom_gaddr(command_psp, goto_off), 0);
             return 0;
           }
         } else {
-          /* batch.c:533 chkCBreak(BREAK_BATCHFILE): user break exits
-             this batch file (exit_batch(); leaveAll cascades outward) */
-          if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_BATCHFILE))
+          struct fcom_guest *fresh =
+              (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+
+          if (fcom_chk_cbreak(cpu, command_psp, fresh, BREAK_BATCHFILE))
             return 0;
-          if (!expand_batch_parameters(g, g->batch_line)) {
-            dos_puts(cpu, command_psp, g, "Line too long.\r\n");
+
+          if (!expand_batch_parameters_guest(command_psp)) {
+            fresh = (struct fcom_guest *)ARM_PTR(
+                MK_FP(command_psp, FCOM_WORK_OFFSET));
+            dos_puts(cpu, command_psp, fresh, "Line too long.\r\n");
             return 1;
           }
-          if (execute_command_line(cpu, command_psp, g,
-                                   g->batch_line) < 0)
+
+          if (execute_batch_command_legacy(cpu, command_psp) < 0)
             return -1;
         }
       }
 
       if (searching) {
-        g->batch_goto[0] = '\0';
-        dos_puts(cpu, command_psp, g, "Label not found\r\n");
+        pstore8(fcom_gaddr(command_psp, goto_off), 0);
+        {
+          struct fcom_guest *fresh =
+              (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+          dos_puts(cpu, command_psp, fresh, "Label not found\r\n");
+        }
         return 0;
       }
       return ch == -1 ? 0 : ch;
@@ -7870,37 +8147,43 @@ static int execute_batch_handle(CPU *cpu, UWORD command_psp,
     }
 
     if (ch == '\r' || ch == '\n') {
-      g->batch_line[used] = '\0';
+      pstore8(fcom_gaddr(command_psp, line_off) + (uint32_t)used, 0);
       if (ch == '\r')
         skip_lf = 1;
 
       if (searching) {
-        if (batch_label_matches(g->batch_line, g->batch_goto)) {
+        if (fcom_gstr_eq_label(command_psp, line_off, goto_off)) {
           searching = 0;
-          g->batch_goto[0] = '\0';
+          pstore8(fcom_gaddr(command_psp, goto_off), 0);
         }
       } else {
-        char *line = skip_space(g->batch_line);
+        uint32_t line = fcom_gaddr(command_psp, line_off);
 
-        /* Labels are declarations, not executable command lines. */
-        if (*line != ':') {
-          /* batch.c:533 chkCBreak(BREAK_BATCHFILE) - see above */
-          if (fcom_chk_cbreak(cpu, command_psp, g, BREAK_BATCHFILE))
+        while (fcom_guest_read8(line) == ' ' || fcom_guest_read8(line) == '\t')
+          ++line;
+
+        if (fcom_guest_read8(line) != ':') {
+          struct fcom_guest *fresh =
+              (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+
+          if (fcom_chk_cbreak(cpu, command_psp, fresh, BREAK_BATCHFILE))
             return 0;
-          if (!expand_batch_parameters(g, g->batch_line)) {
-            dos_puts(cpu, command_psp, g, "Line too long.\r\n");
+
+          if (!expand_batch_parameters_guest(command_psp)) {
+            fresh = (struct fcom_guest *)ARM_PTR(
+                MK_FP(command_psp, FCOM_WORK_OFFSET));
+            dos_puts(cpu, command_psp, fresh, "Line too long.\r\n");
             return 1;
           }
-          if (execute_command_line(cpu, command_psp, g,
-                                   g->batch_line) < 0)
+
+          if (execute_batch_command_legacy(cpu, command_psp) < 0)
             return -1;
         }
 
-        if (g->batch_goto[0] != '\0') {
+        if (fcom_guest_read8(fcom_gaddr(command_psp, goto_off)) != 0) {
           int rc = seek_batch_start(cpu, command_psp, handle);
-
           if (rc < 0) {
-            g->batch_goto[0] = '\0';
+            pstore8(fcom_gaddr(command_psp, goto_off), 0);
             return rc;
           }
           searching = 1;
@@ -7913,88 +8196,209 @@ static int execute_batch_handle(CPU *cpu, UWORD command_psp,
     }
 
     if (used < FCOM_LINE_MAX)
-      g->batch_line[used++] = (char)ch;
+      pstore8(fcom_gaddr(command_psp, line_off) + (uint32_t)used++,
+              (UBYTE)ch);
   }
+}
+
+static int fcom_batch_push(UWORD command_psp, const char *host_name,
+                           uint32_t guest_name, const char *args,
+                           UBYTE *depth_out, uint32_t *saved_addr_out)
+{
+  const uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
+  const size_t name_off = offsetof(struct fcom_guest, batch_name);
+  const size_t args_off = offsetof(struct fcom_guest, batch_args);
+  const size_t goto_off = offsetof(struct fcom_guest, batch_goto);
+  UBYTE depth = fcom_guest_read8(
+      gbase + (uint32_t)offsetof(struct fcom_guest, batch_depth));
+  uint32_t saved_addr;
+
+  if (depth >= FCOM_BATCH_CONTEXTS)
+    return -8;
+
+  saved_addr = fcom_guest_linear(
+      command_psp,
+      (UWORD)(FCOM_BATCH_CONTEXT_OFFSET +
+              (UWORD)(depth * sizeof(struct fcom_batch_context))));
+
+  fcom_guest_copy(saved_addr + offsetof(struct fcom_batch_context, name),
+                  fcom_gaddr(command_psp, name_off),
+                  sizeof(((struct fcom_batch_context *)0)->name));
+  fcom_guest_copy(saved_addr + offsetof(struct fcom_batch_context, args),
+                  fcom_gaddr(command_psp, args_off),
+                  sizeof(((struct fcom_batch_context *)0)->args));
+  fcom_guest_copy(saved_addr + offsetof(struct fcom_batch_context, goto_label),
+                  fcom_gaddr(command_psp, goto_off),
+                  sizeof(((struct fcom_batch_context *)0)->goto_label));
+  pstore8(saved_addr + offsetof(struct fcom_batch_context, active),
+          fcom_guest_read8(gbase +
+              (uint32_t)offsetof(struct fcom_guest, batch_active)));
+  pstore8(saved_addr + offsetof(struct fcom_batch_context, exit_batch_only),
+          fcom_guest_read8(gbase +
+              (uint32_t)offsetof(struct fcom_guest, exit_batch_only)));
+  pstore8(saved_addr + offsetof(struct fcom_batch_context, shiftlevel),
+          fcom_guest_read8(gbase +
+              (uint32_t)offsetof(struct fcom_guest, batch_shiftlevel)));
+
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, batch_depth),
+          (UBYTE)(depth + 1u));
+
+  if (guest_name != FCOM_GUEST_NULL) {
+    size_t n = fcom_guest_strnlen(
+        guest_name, sizeof(((struct fcom_guest *)0)->batch_name) - 1u);
+    fcom_guest_copy(fcom_gaddr(command_psp, name_off), guest_name, n);
+    pstore8(fcom_gaddr(command_psp, name_off) + (uint32_t)n, 0);
+  } else {
+    fcom_gstr_copy_from_host(command_psp, name_off,
+                             sizeof(((struct fcom_guest *)0)->batch_name),
+                             host_name ? host_name : "");
+  }
+
+  fcom_gstr_copy_from_host(command_psp, args_off,
+                           sizeof(((struct fcom_guest *)0)->batch_args),
+                           args ? args : "");
+  pstore8(fcom_gaddr(command_psp, goto_off), 0);
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, batch_active), 1);
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, exit_batch_only), 0);
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, batch_shiftlevel), 0);
+
+  *depth_out = depth;
+  *saved_addr_out = saved_addr;
+  return 0;
+}
+
+static void fcom_batch_pop(UWORD command_psp, UBYTE depth,
+                           uint32_t saved_addr)
+{
+  const uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
+
+  fcom_guest_copy(fcom_gaddr(command_psp,
+                             offsetof(struct fcom_guest, batch_name)),
+                  saved_addr + offsetof(struct fcom_batch_context, name),
+                  sizeof(((struct fcom_batch_context *)0)->name));
+  fcom_guest_copy(fcom_gaddr(command_psp,
+                             offsetof(struct fcom_guest, batch_args)),
+                  saved_addr + offsetof(struct fcom_batch_context, args),
+                  sizeof(((struct fcom_batch_context *)0)->args));
+  fcom_guest_copy(fcom_gaddr(command_psp,
+                             offsetof(struct fcom_guest, batch_goto)),
+                  saved_addr + offsetof(struct fcom_batch_context, goto_label),
+                  sizeof(((struct fcom_batch_context *)0)->goto_label));
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, batch_active),
+          fcom_guest_read8(saved_addr +
+              offsetof(struct fcom_batch_context, active)));
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, exit_batch_only),
+          fcom_guest_read8(saved_addr +
+              offsetof(struct fcom_batch_context, exit_batch_only)));
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, batch_shiftlevel),
+          fcom_guest_read8(saved_addr +
+              offsetof(struct fcom_batch_context, shiftlevel)));
+  fcom_guest_fill(saved_addr, 0, sizeof(struct fcom_batch_context));
+  pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, batch_depth), depth);
+}
+
+static int fcom_open_guest_path(CPU *cpu, UWORD command_psp, UWORD path_off)
+{
+  SET_DS(command_psp);
+  CPU_DX = path_off;
+  CPU_AX = 0x3d00u;
+  fcom_intcall(cpu, command_psp, 0x21, "FCOM BAT open guest path");
+  return int21_failed(cpu) ? -(int)CPU_AX : (int)CPU_AX;
+}
+
+static int execute_batch_opened(CPU *cpu, UWORD command_psp, int handle,
+                                const char *host_name, uint32_t guest_name,
+                                const char *args)
+{
+  const uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
+  UBYTE depth;
+  uint32_t saved_addr;
+  int rc;
+
+  rc = fcom_batch_push(command_psp, host_name, guest_name, args,
+                       &depth, &saved_addr);
+  if (rc < 0) {
+    fcom_close(cpu, command_psp, (UWORD)handle);
+    {
+      struct fcom_guest *fresh =
+          (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+      dos_puts(cpu, command_psp, fresh, "Out of memory.\r\n");
+    }
+    return rc;
+  }
+
+  rc = execute_batch_handle(cpu, command_psp, NULL, (UWORD)handle);
+  fcom_close(cpu, command_psp, (UWORD)handle);
+
+  if (fcom_guest_read8(
+          gbase + (uint32_t)offsetof(struct fcom_guest, exit_batch_only)))
+    rc = 0;
+
+  fcom_batch_pop(command_psp, depth, saved_addr);
+
+  if (!fcom_guest_read8(
+          gbase + (uint32_t)offsetof(struct fcom_guest, batch_active))) {
+    struct fcom_guest *fresh =
+        (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+    (void)fcom_chk_cbreak(cpu, command_psp, fresh, BREAK_ENDOFBATCHFILES);
+  }
+
+  return rc;
 }
 
 static int execute_batch_file(CPU *cpu, UWORD command_psp,
                               struct fcom_guest *g, const char *name,
                               const char *args)
 {
-  struct fcom_batch_context *contexts =
-      fcom_batch_context_storage(command_psp);
-  struct fcom_batch_context *saved;
   int handle;
-  int rc;
 
-  if (g->batch_depth >= FCOM_BATCH_CONTEXTS) {
-    dos_puts(cpu, command_psp, g, "Out of memory.\r\n");
-    return -8;
+  {
+    struct fcom_guest *fresh =
+        (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+    handle = find_batch_file(cpu, command_psp, fresh, name);
   }
-
-  handle = find_batch_file(cpu, command_psp, g, name);
   if (handle < 0)
     return handle;
 
-  saved = &contexts[g->batch_depth++];
-  memcpy(saved->name, g->batch_name, sizeof(saved->name));
-  memcpy(saved->args, g->batch_args, sizeof(saved->args));
-  memcpy(saved->goto_label, g->batch_goto, sizeof(saved->goto_label));
-  saved->active = g->batch_active;
-  saved->exit_batch_only = g->exit_batch_only;
-  saved->shiftlevel = g->batch_shiftlevel;
+  (void)g;
+  return execute_batch_opened(cpu, command_psp, handle,
+                              name, FCOM_GUEST_NULL, args);
+}
 
-  strncpy(g->batch_name, name, sizeof(g->batch_name) - 1);
-  g->batch_name[sizeof(g->batch_name) - 1] = '\0';
-  strncpy(g->batch_args, args ? args : "", sizeof(g->batch_args) - 1);
-  g->batch_args[sizeof(g->batch_args) - 1] = '\0';
-  g->batch_goto[0] = '\0';
-  g->batch_active = 1;
-  g->exit_batch_only = 0;
-  g->batch_shiftlevel = 0;
+static int execute_batch_guest_path(CPU *cpu, UWORD command_psp,
+                                    UWORD path_off)
+{
+  uint32_t path = fcom_guest_linear(command_psp, path_off);
+  int handle = fcom_open_guest_path(cpu, command_psp, path_off);
 
-  rc = execute_batch_handle(cpu, command_psp, g, (UWORD)handle);
-  fcom_close(cpu, command_psp, (UWORD)handle);
+  if (handle < 0)
+    return handle;
 
-  if (g->exit_batch_only)
-    rc = 0;
-
-  memcpy(g->batch_name, saved->name, sizeof(g->batch_name));
-  memcpy(g->batch_args, saved->args, sizeof(g->batch_args));
-  memcpy(g->batch_goto, saved->goto_label, sizeof(g->batch_goto));
-  g->batch_active = saved->active;
-  g->exit_batch_only = saved->exit_batch_only;
-  g->batch_shiftlevel = saved->shiftlevel;
-  memset(saved, 0, sizeof(*saved));
-  --g->batch_depth;
-
-  /* batch.c:223: leaving the LAST batch context resets 'leaveAll'
-     (chkCBreak(BREAK_ENDOFBATCHFILES)) */
-  if (!g->batch_active)
-    (void)fcom_chk_cbreak(cpu, command_psp, g, BREAK_ENDOFBATCHFILES);
-
-  return rc;
+  return execute_batch_opened(cpu, command_psp, handle,
+                              NULL, path, "");
 }
 
 static int execute_default_autoexec(CPU *cpu, UWORD command_psp,
                                     struct fcom_guest *g)
 {
+  const UWORD path_off =
+      FCOM_WORK_OFFSET + (UWORD)offsetof(struct fcom_guest, autoexec_path);
+  uint32_t path = fcom_guest_linear(command_psp, path_off);
   unsigned drive = dos_get_drive(cpu, command_psp);
   int rc;
 
-  g->autoexec_path[0] = (char)('A' + drive);
-  g->autoexec_path[1] = ':';
-  g->autoexec_path[2] = '\\';
+  (void)g;
+  pstore8(path + 0u, (UBYTE)('A' + drive));
+  pstore8(path + 1u, ':');
+  pstore8(path + 2u, '\\');
+  fcom_guest_write(path + 3u, "FDAUTO.BAT", 11u);
 
-  memcpy(g->autoexec_path + 3, "FDAUTO.BAT", 11);
-  rc = execute_batch_file(cpu, command_psp, g,
-                          g->autoexec_path, "");
+  rc = execute_batch_guest_path(cpu, command_psp, path_off);
   if (rc != -2 && rc != -3)
     return rc;
 
-  memcpy(g->autoexec_path + 3, "AUTOEXEC.BAT", 13);
-  return execute_batch_file(cpu, command_psp, g,
-                            g->autoexec_path, "");
+  fcom_guest_write(path + 3u, "AUTOEXEC.BAT", 13u);
+  return execute_batch_guest_path(cpu, command_psp, path_off);
 }
 
 
@@ -8765,7 +9169,7 @@ int execute_command_core(CPU *cpu, UWORD command_psp,
     if (!g->batch_active)
       return 1;
 
-    batch_shift_args(g, args);
+    batch_shift_args_guest(command_psp, args);
     return 0;
   }
 
@@ -9181,131 +9585,127 @@ static int execute_command_line_body(CPU *cpu, UWORD command_psp,
 }
 
 
-static char *skip_option_argument(char *p)
+static uint32_t fcom_guest_skip_space(uint32_t p)
 {
-  if (*p == ':' || *p == '=')
-    ++p;
-  while (*p != '\0' && *p != ' ' && *p != '\t')
+  UBYTE c;
+  while ((c = fcom_guest_read8(p)) == ' ' || c == '\t')
     ++p;
   return p;
 }
 
-static enum fcom_start_action parse_init_tail(struct fcom_guest *g,
-                                               char **command)
+static uint32_t fcom_guest_skip_option_argument(uint32_t p)
 {
-  char *p = skip_space(g->init_tail);
+  UBYTE c = fcom_guest_read8(p);
+
+  if (c == ':' || c == '=')
+    ++p;
+  while ((c = fcom_guest_read8(p)) != 0 && c != ' ' && c != '\t')
+    ++p;
+  return p;
+}
+
+static enum fcom_start_action parse_init_tail_guest(
+    UWORD command_psp, UWORD *command_offset)
+{
+  const uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
+  const uint32_t init_base =
+      gbase + (uint32_t)offsetof(struct fcom_guest, init_tail);
+  const uint32_t comspec_base =
+      gbase + (uint32_t)offsetof(struct fcom_guest, comspec_arg);
+  const uint32_t autoexec_base =
+      gbase + (uint32_t)offsetof(struct fcom_guest, autoexec_path);
+  uint32_t p = fcom_guest_skip_space(init_base);
   enum fcom_start_action action = FCOM_START_NONE;
 
-  *command = NULL;
+  *command_offset = 0xffffu;
 
-  while (*p != '\0') {
-    char option;
+  while (fcom_guest_read8(p) != 0) {
+    UBYTE c = fcom_guest_read8(p);
+    UBYTE option;
 
-    if (*p != '/' && *p != '-') {
-      /*
-       * Не-опционное слово - путь COMSPEC, как в FreeCom: shell/init.c
-       * отдаёт первое такое слово в grabComFilename() (абсолютизация,
-       * каталог дополняется \COMMAND.COM, файл валидируется открытием) и
-       * публикует результат в COMSPEC; сканирование ПРОДОЛЖАЕТСЯ - только
-       * /C и /K завершают разбор. Стандартная форма CONFIG.SYS:
-       *     SHELL=...\command.com \freedos\bin /E:2048 /P=\FDAUTO.BAT
-       * Здесь слово лишь запоминается (первое - победитель, как гейт
-       * !comPath оригинала); применяет его fcom_initialize_environment().
-       * Второе и далее у оригинала уходит в CTTY либо "too many
-       * parameters" - CTTY в порту нет, лишние слова игнорируются.
-       */
-      {
-        char *w = p;
-        size_t n;
-        while (*p != '\0' && *p != ' ' && *p != '\t')
-          ++p;
-        n = (size_t)(p - w);
-        if (g->comspec_arg[0] == '\0' && n > 0) {
-          if (n >= sizeof(g->comspec_arg))
-            n = sizeof(g->comspec_arg) - 1;
-          memcpy(g->comspec_arg, w, n);
-          g->comspec_arg[n] = '\0';
-        }
+    if (c != '/' && c != '-') {
+      uint32_t w = p;
+      size_t n;
+
+      while ((c = fcom_guest_read8(p)) != 0 && c != ' ' && c != '\t')
+        ++p;
+      n = (size_t)(p - w);
+
+      if (fcom_guest_read8(comspec_base) == 0 && n != 0) {
+        if (n >= sizeof(((struct fcom_guest *)0)->comspec_arg))
+          n = sizeof(((struct fcom_guest *)0)->comspec_arg) - 1u;
+        fcom_guest_copy(comspec_base, w, n);
+        pstore8(comspec_base + (uint32_t)n, 0);
       }
-      p = skip_space(p);
+
+      p = fcom_guest_skip_space(p);
       continue;
     }
 
     ++p;
-    option = (char)toupper((unsigned char)*p);
-    if (*p != '\0')
+    option = (UBYTE)toupper((unsigned char)fcom_guest_read8(p));
+    if (fcom_guest_read8(p) != 0)
       ++p;
 
     switch (option) {
     case 'P':
-      g->persistent = 1;
-      if (*p == ':' || *p == '=') {
-        char *start;
+      pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, persistent), 1);
+      c = fcom_guest_read8(p);
+      if (c == ':' || c == '=') {
+        uint32_t word;
         size_t n;
 
         ++p;
-        start = p;
-        while (*p != '\0' && *p != ' ' && *p != '\t')
+        word = p;
+        while ((c = fcom_guest_read8(p)) != 0 && c != ' ' && c != '\t')
           ++p;
-        n = (size_t)(p - start);
-        if (n >= sizeof(g->autoexec_path))
-          n = sizeof(g->autoexec_path) - 1;
-        memcpy(g->autoexec_path, start, n);
-        g->autoexec_path[n] = '\0';
+        n = (size_t)(p - word);
+        if (n >= sizeof(((struct fcom_guest *)0)->autoexec_path))
+          n = sizeof(((struct fcom_guest *)0)->autoexec_path) - 1u;
+        fcom_guest_copy(autoexec_base, word, n);
+        pstore8(autoexec_base + (uint32_t)n, 0);
       } else {
-        p = skip_option_argument(p);
+        p = fcom_guest_skip_option_argument(p);
       }
       break;
 
     case 'D':
-      g->skip_autoexec = 1;
-      p = skip_option_argument(p);
+      pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, skip_autoexec), 1);
+      p = fcom_guest_skip_option_argument(p);
       break;
 
     case 'C':
     case 'K':
       action = option == 'C' ? FCOM_START_EXIT : FCOM_START_KEEP;
-      if (*p == '=' || *p == ':')
+      c = fcom_guest_read8(p);
+      if (c == '=' || c == ':')
         ++p;
-      p = skip_space(p);
-      *command = p;
+      p = fcom_guest_skip_space(p);
+      *command_offset = (UWORD)(FCOM_WORK_OFFSET +
+          offsetof(struct fcom_guest, init_tail) + (p - init_base));
       return action;
 
-    /*
-     * These switches are recognized by FreeCOM but their storage-related
-     * effects are unnecessary for the native shell. Consume their value
-     * so they cannot be mistaken for a command.
-     */
     case 'E':
     case 'L':
     case 'U':
-      p = skip_option_argument(p);
-      break;
-
-    /*
-     * /Y, /F and /! are boolean FreeCOM startup switches.  Their effects
-     * are not implemented yet, but the switch itself is consumed.
-     */
     case 'Y':
     case 'F':
     case '!':
-      p = skip_option_argument(p);
-      break;
-
     default:
-      p = skip_option_argument(p);
+      p = fcom_guest_skip_option_argument(p);
       break;
     }
 
-    p = skip_space(p);
+    p = fcom_guest_skip_space(p);
   }
 
   return action;
 }
 
-
-UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
-                          UWORD parent_psp, UWORD environment_seg)
+static UWORD fcom_create_process_common(const char *init_tail,
+                          dos_far_ptr guest_tail, UBYTE guest_tail_valid,
+                          UBYTE start_mode, UWORD parent_psp,
+                          UWORD environment_seg)
 {
   seg mcb_seg;
   UWORD largest = 0;
@@ -9322,10 +9722,21 @@ UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
    * autoexec path became "\FDAUTO.BAT\r\n" and the open silently failed -
    * /P armed the permanent shell but FDAUTO.BAT never ran.
    */
-  if (init_tail)
+  if (guest_tail_valid &&
+      !far_is_null(guest_tail) && !far_is_end(guest_tail))
+  {
+    uint32_t tail_base = fcom_guest_linear(FP_SEG(guest_tail),
+                                           FP_OFF(guest_tail));
+    n = fcom_guest_read8(tail_base + offsetof(CommandTail, ctCount));
+    if (n > sizeof(((CommandTail *)0)->ctBuffer))
+      n = sizeof(((CommandTail *)0)->ctBuffer);
+  }
+  else if (init_tail)
+  {
     for (; init_tail[n] != '\0'; n++)
       if (init_tail[n] == '\r')
         break;
+  }
 
   {
     UBYTE old_umb_link = fcom_guest_lol_uppermem_link();
@@ -9382,8 +9793,28 @@ UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
     fcom_guest_write(pspbase + (uint32_t)offsetof(psp, ps_cmd.ctCount),
                      &count, sizeof(count));
     if (n)
-      fcom_guest_write(pspbase + (uint32_t)offsetof(psp, ps_cmd.ctBuffer),
-                       init_tail, n);
+    {
+      if (guest_tail_valid &&
+          !far_is_null(guest_tail) && !far_is_end(guest_tail))
+      {
+        uint32_t src =
+            fcom_guest_linear(FP_SEG(guest_tail), FP_OFF(guest_tail)) +
+            (uint32_t)offsetof(CommandTail, ctBuffer);
+        size_t i;
+        for (i = 0; i < n; ++i) {
+          uint8_t c = fcom_guest_read8(src + (uint32_t)i);
+          fcom_guest_write(pspbase +
+                               (uint32_t)offsetof(psp, ps_cmd.ctBuffer) +
+                               (uint32_t)i,
+                           &c, 1u);
+        }
+      }
+      else
+      {
+        fcom_guest_write(pspbase + (uint32_t)offsetof(psp, ps_cmd.ctBuffer),
+                         init_tail, n);
+      }
+    }
     {
       const char cr = '\r';
       fcom_guest_write(pspbase + (uint32_t)offsetof(psp, ps_cmd.ctBuffer) +
@@ -9434,6 +9865,21 @@ UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
   return command_psp;
 }
 
+UWORD fcom_create_process(const char *init_tail, UBYTE start_mode,
+                          UWORD parent_psp, UWORD environment_seg)
+{
+  return fcom_create_process_common(init_tail, MK_FP(0, 0), 0,
+                                    start_mode, parent_psp, environment_seg);
+}
+
+UWORD fcom_create_process_guest_tail(dos_far_ptr command_tail,
+                          UBYTE start_mode, UWORD parent_psp,
+                          UWORD environment_seg)
+{
+  return fcom_create_process_common(NULL, command_tail, 1,
+                                    start_mode, parent_psp, environment_seg);
+}
+
 UWORD fcom_process_stack_top(void)
 {
   return FCOM_STACK_TOP;
@@ -9452,62 +9898,108 @@ UWORD fcom_process_entry_offset(void)
  */
 static __attribute__((noinline))
 UBYTE fcom_process_session(CPU *cpu, UWORD command_psp,
-                           struct fcom_guest *g)
+                           enum fcom_start_action start_action,
+                           UWORD start_command_offset)
 {
-  psp *process = (psp *)ARM_PTR(MK_FP(command_psp, 0));
-  enum fcom_start_action start_action;
-  char *start_command = NULL;
+  const uint32_t pspbase = fcom_guest_linear(command_psp, 0);
+  const uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
 
-  start_action = parse_init_tail(g, &start_command);
-
-  if (g->persistent && !g->skip_autoexec &&
+  if (fcom_guest_read8(gbase +
+          (uint32_t)offsetof(struct fcom_guest, persistent)) &&
+      !fcom_guest_read8(gbase +
+          (uint32_t)offsetof(struct fcom_guest, skip_autoexec)) &&
       start_action == FCOM_START_NONE) {
-    if (g->autoexec_path[0] != '\0')
-      (void)execute_batch_file(cpu, command_psp, g,
-                               g->autoexec_path, "");
+    const UWORD autoexec_off =
+        FCOM_WORK_OFFSET +
+        (UWORD)offsetof(struct fcom_guest, autoexec_path);
+    uint32_t autoexec = fcom_guest_linear(command_psp, autoexec_off);
+
+    if (fcom_guest_read8(autoexec) != 0)
+      (void)execute_batch_guest_path(cpu, command_psp, autoexec_off);
     else
-      (void)execute_default_autoexec(cpu, command_psp, g);
+      (void)execute_default_autoexec(cpu, command_psp, NULL);
   }
 
-  if (start_command && *start_command) {
+  if (start_command_offset != 0xffffu &&
+      fcom_guest_read8(fcom_guest_linear(command_psp,
+                                         start_command_offset)) != 0) {
+    struct fcom_guest *g = (struct fcom_guest *)ARM_PTR(
+        MK_FP(command_psp, FCOM_WORK_OFFSET));
+    char *start_command = (char *)ARM_PTR(
+        MK_FP(command_psp, start_command_offset));
     int rc = execute_command_line(cpu, command_psp, g, start_command);
 
-    if (rc < 0 && !g->persistent)
+    if (rc < 0 &&
+        !fcom_guest_read8(gbase +
+            (uint32_t)offsetof(struct fcom_guest, persistent)))
       goto done;
 
-    if (start_action == FCOM_START_EXIT && !g->persistent)
+    if (start_action == FCOM_START_EXIT &&
+        !fcom_guest_read8(gbase +
+            (uint32_t)offsetof(struct fcom_guest, persistent)))
       goto done;
   }
 
   for (;;) {
     int rc;
+    struct fcom_guest *g;
 
+    g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
     ensure_prompt_column_zero(cpu, command_psp, g);
+
+    g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
     show_prompt(cpu, command_psp, g);
+
+    g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
     if (fcom_readline(cpu, command_psp, g) == 0)
       continue;
 
+    g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
     fcom_history_add(command_psp, g, g->input.kb_buf);
+
+    g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
     rc = execute_command_line(cpu, command_psp, g, g->input.kb_buf);
     if (rc < 0)
       break;
   }
 
 done:
-  fcom_fddebug_close(cpu, command_psp, g);
-  process->ps_parent = g->saved_parent_psp;
-  process->ps_isv22 = g->saved_terminate_addr;
-  return (UBYTE)(g->exit_requested ? g->exit_code : g->errorlevel);
-}
+  {
+    struct fcom_guest *g =
+        (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
+    fcom_fddebug_close(cpu, command_psp, g);
+  }
 
+  {
+    UWORD parent = fcom_guest_read16(
+        gbase + (uint32_t)offsetof(struct fcom_guest, saved_parent_psp));
+    intvec terminate_addr;
+
+    fcom_guest_read(
+        gbase + (uint32_t)offsetof(struct fcom_guest, saved_terminate_addr),
+        &terminate_addr, sizeof(terminate_addr));
+    fcom_guest_write(pspbase + (uint32_t)offsetof(psp, ps_parent),
+                     &parent, sizeof(parent));
+    fcom_guest_write(pspbase + (uint32_t)offsetof(psp, ps_isv22),
+                     &terminate_addr, sizeof(terminate_addr));
+  }
+
+  return (UBYTE)(fcom_guest_read8(
+      gbase + (uint32_t)offsetof(struct fcom_guest, exit_requested))
+      ? fcom_guest_read16(
+          gbase + (uint32_t)offsetof(struct fcom_guest, exit_code))
+      : fcom_guest_read8(
+          gbase + (uint32_t)offsetof(struct fcom_guest, errorlevel)));
+}
 
 UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
 {
   const uint32_t pspbase = fcom_guest_linear(command_psp, 0);
   const uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
-  struct fcom_guest *g;
   UWORD saved_parent_psp;
   intvec saved_terminate_addr;
+  enum fcom_start_action start_action;
+  UWORD start_command_offset;
   UWORD word;
   UBYTE byte;
 
@@ -9564,20 +10056,37 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
    */
   setvec(0x23, MK_FP(command_psp, FCOM_CBREAK_STUB_OFFSET));
 
+  /*
+   * PSP:80h is the canonical source.  Parse it before COMSPEC
+   * initialization: a non-option word in SHELL= is the COMSPEC source.
+   */
+  {
+    UBYTE count;
+
+    fcom_guest_read(pspbase + (uint32_t)offsetof(psp, ps_cmd.ctCount),
+                    &count, sizeof(count));
+    if (count >= sizeof(((struct fcom_guest *)0)->init_tail))
+      count = sizeof(((struct fcom_guest *)0)->init_tail) - 1u;
+    if (count != 0)
+      fcom_guest_copy(gbase + (uint32_t)offsetof(struct fcom_guest, init_tail),
+                      pspbase + (uint32_t)offsetof(psp, ps_cmd.ctBuffer),
+                      count);
+    pstore8(gbase + (uint32_t)offsetof(struct fcom_guest, init_tail) +
+                (uint32_t)count, 0);
+  }
+
+  start_action = parse_init_tail_guest(command_psp, &start_command_offset);
+
   /* FreeCOM initialize(): publish COMSPEC before any startup command runs. */
   if (fcom_initialize_environment(cpu, command_psp) < 0)
     dos_printf("FCOM: cannot set COMSPEC in environment\n");
-
-  /* Environment allocation may evict the pages that held these legacy host
-     pointers.  Phase C removes them entirely; until then never carry the old
-     values across the INT 21h allocation path above. */
-  g = (struct fcom_guest *)ARM_PTR(MK_FP(command_psp, FCOM_WORK_OFFSET));
 
 #if FCOM_DEBUG
   dos_printf("FCOM: PSP=%04x parent=%04x block=%u paras (%u bytes) "
              "data=%04x..%04x stack=%04x..%04x (%u bytes) %s\n",
              command_psp,
-             g->saved_parent_psp,
+             fcom_guest_read16(gbase +
+                 (uint32_t)offsetof(struct fcom_guest, saved_parent_psp)),
              (unsigned)FCOM_PROCESS_PARAS,
              (unsigned)FCOM_PROCESS_BYTES,
              FCOM_WORK_OFFSET,
@@ -9590,46 +10099,23 @@ UBYTE fcom_process_main(CPU *cpu, UWORD command_psp)
   /* Баннер печатает только процесс #0 (родитель - PSP ядра):
      COMSPEC-дети (COMMAND /C для внешних команд) стартуют молча,
      как транзиентные экземпляры COMMAND.COM в MS-DOS. */
-  if (g->saved_parent_psp == DOS_PSP)
+  if (fcom_guest_read16(gbase +
+          (uint32_t)offsetof(struct fcom_guest, saved_parent_psp)) == DOS_PSP)
     dos_printf("FreeCom v.0.86 (for RP2350) @ %04Xh [%s]\n",
       command_psp, command_psp >= 0xa000u ? "UMB" : "LOW");
 #endif
-  /* The process command line has one canonical home: PSP:80h. */
-  {
-    uint32_t pspbase = fcom_guest_linear(command_psp, 0);
-    uint32_t gbase = fcom_guest_linear(command_psp, FCOM_WORK_OFFSET);
-    UBYTE count;
-
-    fcom_guest_read(pspbase + (uint32_t)offsetof(psp, ps_cmd.ctCount),
-                    &count, sizeof(count));
-    if (count >= sizeof(g->init_tail))
-      count = sizeof(g->init_tail) - 1u;
-    if (count != 0) {
-      uint8_t tail[sizeof(g->init_tail)];
-      fcom_guest_read(pspbase + (uint32_t)offsetof(psp, ps_cmd.ctBuffer),
-                      tail, count);
-      fcom_guest_write(gbase + (uint32_t)offsetof(struct fcom_guest, init_tail),
-                       tail, count);
-    }
-    {
-      const char zero = '\0';
-      fcom_guest_write(gbase + (uint32_t)offsetof(struct fcom_guest, init_tail) +
-                           (uint32_t)count,
-                       &zero, 1u);
-    }
-  }
-
   /*
    * Direct return is intentional: bootstrap locals and saved PSP values are
    * no longer live while commands and their synchronous children execute.
    */
-  return fcom_process_session(cpu, command_psp, g);
+  return fcom_process_session(cpu, command_psp,
+                              start_action, start_command_offset);
 }
 
 void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode,
               UWORD environment_seg, UBYTE own_environment)
 {
-  UWORD parent_psp = internal_data->cu_psp;
+  UWORD parent_psp = fcom_guest_current_psp();
   UWORD command_psp =
       fcom_create_process(init_tail, start_mode, parent_psp, environment_seg);
 

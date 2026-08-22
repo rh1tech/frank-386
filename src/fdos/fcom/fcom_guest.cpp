@@ -27,6 +27,7 @@ extern "C" {
 #include "fdos/fcom/fcom_guest.h"
 
 using fdos_guest::mcb_ref;
+using fdos_guest::dos_data_ref;
 using fdos_guest::lol_ref;
 
 extern "C" {
@@ -146,6 +147,13 @@ uint16_t fcom_guest_mcb_owner(uint16_t mcb_seg)
 uint16_t fcom_guest_mcb_size(uint16_t mcb_seg)
 {
     return mcb_ref(static_cast<seg>(mcb_seg)).size();
+}
+
+uint16_t fcom_guest_current_psp(void)
+{
+    constexpr uint32_t idata_linear =
+        (static_cast<uint32_t>(DOS_PSP) << 4) + X86_INTERNAL_DATA_OFF;
+    return static_cast<uint16_t>(dos_data_ref(idata_linear).cu_psp());
 }
 
 uint8_t fcom_guest_lol_uppermem_link(void)

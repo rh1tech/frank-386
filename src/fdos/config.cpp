@@ -18,6 +18,7 @@ extern "C" char *strchr(const char *, int);
 
 using fdos_guest::lol_ref;
 using fdos_guest::dos_data_ref;
+extern "C" COUNT DosExecGuest(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp);
 static constexpr uint32_t config_fixed_data_linear = ((uint32_t)DOS_PSP << 4) + 0x08F0u;
 static constexpr uint32_t config_internal_data_linear = ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
 static const lol_ref config_lol(config_fixed_data_linear);
@@ -59,6 +60,36 @@ static inline void cfg_guest_write_far(uint32_t addr, dos_far_ptr v)
   cfg_guest_write(addr, &v, sizeof(v));
 }
 
+static inline size_t cfg_guest_strnlen(uint32_t addr, size_t maxlen)
+{
+  size_t n = 0;
+  while (n < maxlen && pload8(addr + (uint32_t)n) != 0)
+    ++n;
+  return n;
+}
+
+static inline void cfg_guest_move(uint32_t dst, uint32_t src, size_t len)
+{
+  if (dst == src || len == 0)
+    return;
+  if (dst < src || dst >= src + len) {
+    while (len--)
+      pstore8(dst++, pload8(src++));
+  } else {
+    dst += (uint32_t)len;
+    src += (uint32_t)len;
+    while (len--)
+      pstore8(--dst, pload8(--src));
+  }
+}
+
+static BYTE szBuf[256];
+
+static inline void cfg_stage_szbuf(void)
+{
+  cfg_guest_write(cfg_guest_linear(x86_SZ_BUF), szBuf, strlen((char *)szBuf) + 1u);
+}
+
 
 #define HMA_NONE 0              /* do nothing */
 #define HMA_REQ 1               /* DOS = HIGH detected */
@@ -67,7 +98,6 @@ static inline void cfg_guest_write_far(uint32_t addr, dos_far_ptr v)
 
 #define EOF 0x1a
 
-#define szBuf ((BYTE *)ARM_PTR(x86_SZ_BUF))
 STATIC unsigned nCfgLine BSS_INIT(0);
 static UBYTE ErrorAlreadyPrinted[128] BSS_INIT({0});
 BYTE *pLineStart BSS_INIT(0);
@@ -1181,8 +1211,6 @@ STATIC VOID DosData(BYTE * pLine)
 STATIC VOID CfgKeyBuf(BYTE * pLine)
 {
   /*  Format:     KEYBUF = startoffset [,endoffset]    */
-  UWORD FAR *keyfill = (UWORD FAR *)ARM_PTR( MK_FP(0x40, 0x1a) );
-  UWORD FAR *keyrange = (UWORD FAR *)ARM_PTR( MK_FP(0x40, 0x80) );
   COUNT startbuf, endbuf;
 
   if ((pLine = GetNumArg(pLine, &startbuf)) == 0)
@@ -1204,10 +1232,10 @@ STATIC VOID CfgKeyBuf(BYTE * pLine)
     printf("Must start at 0xac..0x1de, not 0x100..0x104\n");
     return;
   }
-  keyfill[0] = startbuf;
-  keyfill[1] = startbuf;
-  keyrange[0] = startbuf;
-  keyrange[1] = endbuf;
+  pstore16(0x041a, (UWORD)startbuf);
+  pstore16(0x041c, (UWORD)startbuf);
+  pstore16(0x0480, (UWORD)startbuf);
+  pstore16(0x0482, (UWORD)endbuf);
   keycheck();
 }
 
@@ -1269,7 +1297,8 @@ STATIC VOID sysVersion(BYTE * pLine)
 
   config_lol.os_setver_major() = major; /* not the internal os_major */
   config_lol.os_setver_minor() = minor; /* not the internal os_minor */
-  ((psp far *) ARM_PTR(x86_PSP))->ps_retdosver = (minor << 8) + major;
+  pstore16(cfg_guest_linear(x86_PSP) + offsetof(psp, ps_retdosver),
+           (UWORD)((minor << 8) + major));
 }
 
 /*
@@ -1295,79 +1324,80 @@ STATIC VOID SetIdleHalt(BYTE * pLine)
     HaltCpuWhileIdle = haltlevel; /* 0 for no HLT, 1..n more, -1 max */
 }
 
-STATIC BYTE far * searchvar(const BYTE * name, int length)
+STATIC int searchvar(const BYTE *name, int length)
 {
-  BYTE* pp = ((BYTE*)ARM_PTR(x86_master_env));
-  do {
-    if (!fmemcmp(name, pp, length + 1)) {
-      return pp;
-    }
-    pp += strlen(pp) + 1;
-  } while (*pp);
-  return NULL;
+  const uint32_t base = cfg_guest_linear(x86_master_env);
+  unsigned off = 0;
+
+  while (off < 128u && pload8(base + off) != 0) {
+    size_t n = cfg_guest_strnlen(base + off, 128u - off);
+    int match = 1;
+    int i;
+    if (n >= 128u - off)
+      break;
+    if (n <= (size_t)length || pload8(base + off + (uint32_t)length) != '=')
+      match = 0;
+    for (i = 0; match && i < length; ++i)
+      if (pload8(base + off + (uint32_t)i) != name[i])
+        match = 0;
+    if (match)
+      return (int)off;
+    off += (unsigned)n + 1u;
+  }
+  return -1;
 }
 
-static char* envp = 0;
-STATIC void deletevar(BYTE far * pp) {
-  if (!envp) {
-    envp = ((char*)ARM_PTR(x86_master_env));
-  }
-  int variablelength;
-  if (NULL == pp)
+static unsigned env_used = 0;
+
+STATIC void deletevar(int off)
+{
+  const uint32_t base = cfg_guest_linear(x86_master_env);
+  size_t variablelength, move_len;
+  if (off < 0)
     return;
-  variablelength = fstrlen(pp) + 1;
-  memcpy(pp, pp + variablelength, (unsigned)(envp + 3 - (pp + variablelength)));
-  /* our fmemcpy always copies forwards */
-  envp -= variablelength;
-  return;
+  variablelength = cfg_guest_strnlen(base + (uint32_t)off, 128u - (unsigned)off) + 1u;
+  move_len = env_used + 3u - ((unsigned)off + variablelength);
+  cfg_guest_move(base + (uint32_t)off,
+                 base + (uint32_t)off + (uint32_t)variablelength,
+                 move_len);
+  env_used -= (unsigned)variablelength;
 }
 
 STATIC VOID CmdSet(BYTE *pLine)
 {
-  if (!envp) {
-    envp = ((char*)ARM_PTR(x86_master_env));
-  }
+  const uint32_t base = cfg_guest_linear(x86_master_env);
   pLine = GetStringArg(pLine, szBuf);
-  pLine = skipwh(pLine);  /* scan() stops at the equal sign or space */
-  if (*pLine == '=')      /* equal sign is required */
-  {
-    int size, oldsize, namesize;
-    BYTE far * pp;
-    strupr(szBuf);        /* all environment variables must be uppercase */
-    namesize = strlen(szBuf);
-    strcat(szBuf, "=");
-    pp = searchvar(szBuf, namesize);
+  pLine = skipwh(pLine);
+  if (*pLine == '=') {
+    int size, oldsize, namesize, off;
+    strupr(szBuf);
+    namesize = strlen((char *)szBuf);
+    strcat((char *)szBuf, "=");
+    off = searchvar(szBuf, namesize);
     pLine = skipwh(++pLine);
-    strcat(szBuf, pLine); /* append the variable value (may include spaces) */
-    size = strlen(szBuf);
+    strcat((char *)szBuf, (char *)pLine);
+    size = strlen((char *)szBuf);
     if (size == namesize + 1) {
-      /* empty variable ?  then just delete. (cannot fail) */
-      deletevar(pp);
+      deletevar(off);
       return;
     }
-    if (pp) {
-      oldsize = fstrlen(pp) + 1;
-    } else {
-      oldsize = 0;
-    }
-    BYTE* master_env = ((BYTE*)ARM_PTR(x86_master_env));
+    oldsize = off >= 0
+        ? (int)cfg_guest_strnlen(base + (uint32_t)off, 128u - (unsigned)off) + 1
+        : 0;
     dpb_watch_check_chain("prep_shell-after-env");
-    if (size < master_env + 128 - (envp - oldsize) - 1 - 2)
-    {                     /* must end with two consequtive zeros */
-      deletevar(pp);      /* now that there's enough space, actually delete */
-      fstrcpy(envp, szBuf);
-      envp += size + 1;   /* add next variables starting at the second zero */
-      *envp = 0;
-      envp[1] = 0;
-      envp[2] = 0;
-      /* The word marker after last variable should not equal 1,
-          to indicate that there is no executable pathname following.  */
-    }
-    else
+    if (size < (int)(128u - (env_used - (unsigned)oldsize) - 3u)) {
+      deletevar(off);
+      cfg_guest_write(base + env_used, szBuf, (size_t)size + 1u);
+      env_used += (unsigned)size + 1u;
+      pstore8(base + env_used + 0u, 0);
+      pstore8(base + env_used + 1u, 0);
+      pstore8(base + env_used + 2u, 0);
+    } else {
       printf("Master environment is full - can't add \"%s\"\n", szBuf);
-  }
-  else
+    }
+  } else {
     printf("Invalid SET command: \"%s\"\n", szBuf);
+  }
 }
 
 STATIC VOID CmdChain(BYTE * pLine)
@@ -1382,6 +1412,7 @@ STATIC VOID CmdChain(BYTE * pLine)
   }
   /* upstream: open(pLine) из собственного буфера, не из SDA */
   strcpy((char *)szBuf, (const char *)pLine);
+  cfg_stage_szbuf();
   if ((fd = open(x86_SZ_BUF, 0)) < 0) {
     CfgFailure(pLine);
     return;
@@ -1498,12 +1529,13 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
   int fd, i, subf_tbl_ndx;
   const char* filename = filenam == NULL ? "\\COUNTRY.SYS" : filenam;
   BOOL rc = FALSE;
-  BYTE FAR *ptable;
+  uint32_t ptable;
   dos_far_ptr CharMapFn;
 
   /* upstream: open(filename) из собственного буфера, не из SDA */
   if (szBuf != filename) // for case "\\COUNTRY.SYS", in other case, filename == filenam == szBuf
     strcpy((char *)szBuf, filename);
+  cfg_stage_szbuf();
   if ((fd = open(x86_SZ_BUF, 0)) < 0)
   {
     if (filenam == NULL)
@@ -1520,23 +1552,26 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
     ULONG offset;       /* offset of first entry in file */
   };
   dos_far_ptr x86_header = guest_stack_alloc(cpu, sizeof(struct header));
-  struct header* header = (struct header*)ARM_PTR(x86_header);
+  struct header header;
   if (read(fd, x86_header, sizeof(struct header)) != sizeof(struct header))
   {
     printf("Error reading %s\n", filename);
     goto ret;
   }
+  cfg_guest_read(cfg_guest_linear(x86_header), &header, sizeof(header));
 
-  if (memcmp(header->name, "\377COUNTRY", sizeof(header->name)))
+  if (memcmp(header.name, "\377COUNTRY", sizeof(header.name)))
   {
 err:printf("%s has invalid format\n", filename);
     goto ret;
   }
 
   dos_far_ptr x86_entries = x86_nlsEntries;
-  UWORD* p_entries = (UWORD*)ARM_PTR(x86_entries);
-  if (lseek(fd, header->offset) == 0xffffffffL || read(fd, x86_entries, sizeof(UWORD)) != sizeof(*p_entries))
+  UWORD entries_count;
+  if (lseek(fd, header.offset) == 0xffffffffL ||
+      read(fd, x86_entries, sizeof(UWORD)) != sizeof(UWORD))
     goto err;
+  entries_count = pload16(cfg_guest_linear(x86_entries));
 
   struct entry {      /* entry */
     UWORD length;       /* length of entry, not counting this word, = 12 */
@@ -1546,33 +1581,43 @@ err:printf("%s has invalid format\n", filename);
     ULONG offset;       /* offset of country-subfunction-header in file */
   };
   dos_far_ptr x86_entry = guest_stack_alloc(cpu, sizeof(struct entry));
-  struct entry* entry = (struct entry*)ARM_PTR(x86_entry);
+  struct entry entry;
 
   dos_far_ptr x86_count = x86_nlsCount;
-  UWORD* p_count = (UWORD*)ARM_PTR(x86_count);
+  UWORD subf_count;
 
   dos_far_ptr x86_hdr = x86_subf_hdr;
-  struct subf_hdr* hdr = (struct subf_hdr*)ARM_PTR(x86_hdr);
+  struct subf_hdr hdr[9];
 
   dos_far_ptr x86_subf_data_ = x86_subf_data;
-  struct subf_data* subf_data = (struct subf_data*)ARM_PTR(x86_subf_data_);
+  struct subf_data subf_data;
 
-  struct nlsPackage* nlsPackageHardcoded = (struct nlsPackage*)ARM_PTR(_nlsPackageHardcoded);
+  struct nlsPackage nlsPackageHardcoded;
+  cfg_guest_read(cfg_guest_linear(_nlsPackageHardcoded),
+                 &nlsPackageHardcoded, sizeof(nlsPackageHardcoded));
 
-  for (i = 0; i < *p_entries; i++)
+  for (i = 0; i < entries_count; i++)
   {
-    if (read(fd, x86_entry, sizeof(struct entry)) != sizeof(struct entry) || entry->length != 12)
+    if (read(fd, x86_entry, sizeof(struct entry)) != sizeof(struct entry))
       goto err;
-    if (entry->country != ctryCode || (entry->codepage != codePage && codePage))
+    cfg_guest_read(cfg_guest_linear(x86_entry), &entry, sizeof(entry));
+    if (entry.length != 12)
+      goto err;
+    if (entry.country != ctryCode || (entry.codepage != codePage && codePage))
       continue;
-    if (lseek(fd, entry->offset) == 0xffffffffL
-      || read(fd, x86_count, sizeof(UWORD)) != sizeof(UWORD)
-      || *p_count > 9
-      || read(fd, x86_hdr, sizeof(struct subf_hdr) * *p_count) != sizeof(struct subf_hdr) * *p_count)
+    if (lseek(fd, entry.offset) == 0xffffffffL ||
+        read(fd, x86_count, sizeof(UWORD)) != sizeof(UWORD))
       goto err;
+    subf_count = pload16(cfg_guest_linear(x86_count));
+    if (subf_count > 9 ||
+        read(fd, x86_hdr, sizeof(struct subf_hdr) * subf_count) !=
+            sizeof(struct subf_hdr) * subf_count)
+      goto err;
+    cfg_guest_read(cfg_guest_linear(x86_hdr), hdr,
+                   sizeof(struct subf_hdr) * subf_count);
 
     /* Note: we reuse i here as we only process 1 entry, goto after inner for ends outer for */
-    for (i = 0; i < *p_count; i++)
+    for (i = 0; i < subf_count; i++)
     {
       if (hdr[i].length != 6)
         goto err;
@@ -1581,63 +1626,78 @@ err:printf("%s has invalid format\n", filename);
         continue;
       if (subf_tbl_ndx == 35)
         subf_tbl_ndx = 8;  /* 0 through 7 match, but subfunction 35 is 9th entry in table[] */
-      if (lseek(fd, hdr[i].offset) == 0xffffffffL
-       || read(fd, x86_subf_data_, 10) != 10
-       || (memcmp(subf_data->signature, table[subf_tbl_ndx].sig, 8) && (hdr[i].id !=4
-       || memcmp(subf_data->signature, table[2].sig, 8)))  /* UCASE for FUCASE ^*/
-       || subf_data->length > sizeof(subf_data->buffer)
-       || subf_data->length > table[subf_tbl_ndx].max
-       || read(fd, x86_subf_data_buffer, subf_data->length) != subf_data->length)
+      if (lseek(fd, hdr[i].offset) == 0xffffffffL ||
+          read(fd, x86_subf_data_, 10) != 10)
         goto err;
+      cfg_guest_read(cfg_guest_linear(x86_subf_data_), &subf_data, 10);
+      if ((memcmp(subf_data.signature, table[subf_tbl_ndx].sig, 8) &&
+           (hdr[i].id != 4 || memcmp(subf_data.signature, table[2].sig, 8))) ||
+          subf_data.length > sizeof(subf_data.buffer) ||
+          subf_data.length > table[subf_tbl_ndx].max ||
+          read(fd, x86_subf_data_buffer, subf_data.length) != subf_data.length)
+        goto err;
+      cfg_guest_read(cfg_guest_linear(x86_subf_data_), &subf_data,
+                     offsetof(struct subf_data, buffer) + subf_data.length);
       if (hdr[i].id == 1)
       {
-        if (((struct CountrySpecificInfo *)subf_data->buffer)->CountryID != entry->country
-         || (((struct CountrySpecificInfo *)subf_data->buffer)->CodePage != entry->codepage && codePage)
+        if (((struct CountrySpecificInfo *)subf_data.buffer)->CountryID != entry.country
+         || (((struct CountrySpecificInfo *)subf_data.buffer)->CodePage != entry.codepage && codePage)
         ) {
           continue;
         }
-        nlsPackageHardcoded->cntry = entry->country;
-        nlsPackageHardcoded->cp = entry->codepage;
-        subf_data->length =      /* MS-DOS "CTYINFO" is up to 38 bytes */
-                min(subf_data->length, sizeof(struct CountrySpecificInfo));
+        nlsPackageHardcoded.cntry = entry.country;
+        nlsPackageHardcoded.cp = entry.codepage;
+        pstore16(cfg_guest_linear(_nlsPackageHardcoded) +
+                     offsetof(struct nlsPackage, cntry), entry.country);
+        pstore16(cfg_guest_linear(_nlsPackageHardcoded) +
+                     offsetof(struct nlsPackage, cp), entry.codepage);
+        subf_data.length =      /* MS-DOS "CTYINFO" is up to 38 bytes */
+                min(subf_data.length, sizeof(struct CountrySpecificInfo));
         CharMapFn = nlsCountryInfoHardcoded.C.CharMapFn;
       }
       if (hdr[i].id == 35)
       {
-        if (subf_data->length < 4)
+        if (subf_data.length < 4)
           goto err;
-        memcpy(&nlsPackageHardcoded->yeschar, subf_data->buffer, 2);
-        memcpy(&nlsPackageHardcoded->nochar, subf_data->buffer + 2, 2);
+        cfg_guest_write(cfg_guest_linear(_nlsPackageHardcoded) +
+                            offsetof(struct nlsPackage, yeschar),
+                        subf_data.buffer, 2);
+        cfg_guest_write(cfg_guest_linear(_nlsPackageHardcoded) +
+                            offsetof(struct nlsPackage, nochar),
+                        subf_data.buffer + 2, 2);
         continue;
       }
       if (hdr[i].id == 1)
-        ptable = (BYTE FAR *)&nlsPackageHardcoded->nlsExt.size;
+        ptable = cfg_guest_linear(_nlsPackageHardcoded) +
+                 offsetof(struct nlsPackage, nlsExt.size);
       else
-        ptable = (BYTE FAR *)ARM_PTR(nlsPackageHardcoded->nlsPointers[table[subf_tbl_ndx].idx].pointer);
+        ptable = cfg_guest_linear(
+            nlsPackageHardcoded.nlsPointers[table[subf_tbl_ndx].idx].pointer);
       if (hdr[i].id == 7)
       {
-        if (subf_data->length == 0)
+        if (subf_data.length == 0)
         {
           /* if DBCS table (in country.sys) is empty, clear internal table */
-          *(DWORD *)(subf_data->buffer) = 0L;
-          memcpy(ptable, subf_data->buffer, 4);
+          *(DWORD *)(subf_data.buffer) = 0L;
+          cfg_guest_write(ptable, subf_data.buffer, 4);
         }
         else
         {
-          memcpy(ptable + 2, subf_data->buffer, subf_data->length);
+          cfg_guest_write(ptable + 2u, subf_data.buffer, subf_data.length);
           /* write length */
-          *(UWORD *)(subf_data->buffer) = subf_data->length;
-          memcpy(ptable, subf_data->buffer, 2);
+          *(UWORD *)(subf_data.buffer) = subf_data.length;
+          cfg_guest_write(ptable, subf_data.buffer, 2);
         }
         continue;
       }
 
       /* for 0-7 we store COUNTRY.SYS data directly in the NLS table. */
-      memcpy(ptable + 2, subf_data->buffer,
-              /* skip length ^*/  subf_data->length);
+      cfg_guest_write(ptable + 2u, subf_data.buffer,
+                      /* skip length ^*/ subf_data.length);
       if (hdr[i].id == 1) {
           /* fixup user callable address in case we overwrote it */
-          ((struct CountrySpecificInfo *)ptable)->CharMapFn = CharMapFn;
+          cfg_guest_write(ptable + offsetof(struct CountrySpecificInfo, CharMapFn),
+                          &CharMapFn, sizeof(CharMapFn));
        }
     }
     rc = TRUE;
@@ -1708,19 +1768,18 @@ STATIC BOOL InstallFakeMemMgr(const char devname[8], const char mcbname[8], COUN
   const size_t bytes = sizeof(struct fake_memmgr_driver);
   const size_t paras = (bytes + 15) / 16;
   dos_far_ptr x86_dhp = KernelAllocPara(paras, 'D', (char *)mcbname, mode);
-  struct fake_memmgr_driver *drv =
-      (struct fake_memmgr_driver *)ARM_PTR(x86_dhp);
+  struct fake_memmgr_driver drv;
   UWORD req_off = (UWORD)offsetof(struct fake_memmgr_driver, request_off);
   UWORD req_seg = (UWORD)offsetof(struct fake_memmgr_driver, request_seg);
 
-  memset(drv, 0, paras * 16);
-  drv->hdr.dh_next = config_lol.nul_dev_next();
-  drv->hdr.dh_attr = ATTR_CHAR;
-  drv->hdr.x86.dh_strategy =
+  memset(&drv, 0, sizeof(drv));
+  drv.hdr.dh_next = config_lol.nul_dev_next();
+  drv.hdr.dh_attr = ATTR_CHAR;
+  drv.hdr.x86.dh_strategy =
       (UWORD)offsetof(struct fake_memmgr_driver, strategy);
-  drv->hdr.x86.dh_interrupt =
+  drv.hdr.x86.dh_interrupt =
       (UWORD)offsetof(struct fake_memmgr_driver, interrupt);
-  memcpy(drv->hdr.dh_name, devname, sizeof(drv->hdr.dh_name));
+  memcpy(drv.hdr.dh_name, devname, sizeof(drv.hdr.dh_name));
 
   /* strategy: save ES:BX request-header pointer in resident storage; RETF */
   {
@@ -1729,7 +1788,7 @@ STATIC BOOL InstallFakeMemMgr(const char devname[8], const char mcbname[8], COUN
       0x2e, 0x8c, 0x06, (UBYTE)req_seg, (UBYTE)(req_seg >> 8),
       0xcb
     };
-    memcpy(drv->strategy, code, sizeof(code));
+    memcpy(drv.strategy, code, sizeof(code));
   }
 
   /* interrupt: request->r_status = S_DONE; RETF */
@@ -1748,9 +1807,11 @@ STATIC BOOL InstallFakeMemMgr(const char devname[8], const char mcbname[8], COUN
       0x58,                         /* pop ax */
       0xcb                          /* retf */
     };
-    memcpy(drv->interrupt, code, sizeof(code));
+    memcpy(drv.interrupt, code, sizeof(code));
   }
 
+  cfg_guest_fill(cfg_guest_linear(x86_dhp), 0, paras * 16u);
+  cfg_guest_write(cfg_guest_linear(x86_dhp), &drv, sizeof(drv));
   config_lol.nul_dev_next(x86_dhp);
   CfgDbgPrintf(("Installed fake memory-manager device %.8s at %04x:0000 (%u paragraphs)\n",
                 devname, FP_SEG(x86_dhp), (unsigned)paras));
@@ -1828,7 +1889,8 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
      UMB+конфиг 11ca8c0 -> bef7e2f). DosExec()'s "lp" - нативный
      указатель в гостевую память (linear_to_far в task.c), сегмент
      значения не имеет. */
-  if ((result = DosExec(EXEC_OVERLAY, &eb, (BYTE FAR *) szBuf)) != SUCCESS)
+  cfg_stage_szbuf();
+  if ((result = DosExecGuest(EXEC_OVERLAY, &eb, x86_SZ_BUF)) != SUCCESS)
   {
     dpb_watch_check_chain("LoadDevice err");
     CfgFailure(pLine);
@@ -1865,39 +1927,41 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
   dos_far_ptr next_dhp = MK_FP(0, 0);
   while (FP_OFF(next_dhp) != 0xffff)
   {
-    struct dhdr *p = (struct dhdr *) ARM_PTR(dhp);
-
-#ifdef DEBUGCFG
-    UBYTE *img = (UBYTE *)ARM_PTR(dhp);
-#endif
+    struct dhdr p;
+    uint32_t dh_linear = cfg_guest_linear(dhp);
+    cfg_guest_read(dh_linear, &p, sizeof(p));
 
     /* One-shot check of the loaded x86 device header before init_device()
        and before x86_execrh() can execute dh_strategy.  Keep it to one
        line: header signature, header fields, and first bytes at strategy. */
     CfgDbgPrintf(("DEVHDR %04x:%04x sig=%02x%02x%02x%02x attr=%04x strat=%04x intr=%04x op=%02x%02x%02x%02x%02x\n",
                   FP_SEG(dhp), FP_OFF(dhp),
-                  img[0], img[1], img[2], img[3],
-                  p->dh_attr, p->x86.dh_strategy, p->x86.dh_interrupt,
-                  img[p->x86.dh_strategy + 0], img[p->x86.dh_strategy + 1],
-                  img[p->x86.dh_strategy + 2], img[p->x86.dh_strategy + 3],
-                  img[p->x86.dh_strategy + 4]));    
+                  pload8(dh_linear + 0), pload8(dh_linear + 1),
+                  pload8(dh_linear + 2), pload8(dh_linear + 3),
+                  p.dh_attr, p.x86.dh_strategy, p.x86.dh_interrupt,
+                  pload8(dh_linear + p.x86.dh_strategy + 0), pload8(dh_linear + p.x86.dh_strategy + 1),
+                  pload8(dh_linear + p.x86.dh_strategy + 2), pload8(dh_linear + p.x86.dh_strategy + 3),
+                  pload8(dh_linear + p.x86.dh_strategy + 4)));    
     /* /// TODO:
      native external drivers need a separate load path, e.g. DEVICENATIVE.
      ATTR_NATIVE cannot be trusted in disk-loaded DOS driver headers. */
-    p->dh_attr &= ~ATTR_NATIVE;
+    p.dh_attr &= ~ATTR_NATIVE;
+    pstore16(dh_linear + offsetof(struct dhdr, dh_attr), p.dh_attr);
     if ((result = init_device(dhp, szBuf, mode, &top)) != SUCCESS) {
       break;
     }
+    cfg_guest_read(dh_linear, &p, sizeof(p));
 
     /* dh_next chains multiple device headers within the *same*
        loaded driver segment: only its offset is meaningful, the
        segment is always this driver's own load segment (see
        DosExec()'s relocation pass, which treats every loaded driver
        image as living entirely in one segment). */
-    next_dhp = MK_FP(FP_SEG(dhp), FP_OFF(p->dh_next));
+    next_dhp = MK_FP(FP_SEG(dhp), FP_OFF(p.dh_next));
 
     /* Link in device driver and save LoL->nul_dev pointer to next */
-    p->dh_next = config_lol.nul_dev_next();
+    p.dh_next = config_lol.nul_dev_next();
+    cfg_guest_write_far(dh_linear + offsetof(struct dhdr, dh_next), p.dh_next);
     config_lol.nul_dev_next(dhp);
 
     dhp = next_dhp;
@@ -2163,6 +2227,7 @@ VOID DoConfig(int nPass)
 
     for (ii = 0; configcommands[ii] != NULL; ++ii) {
       strcpy((char *)szBuf, configcommands[ii]);
+      cfg_stage_szbuf();
       if ((nFileDesc = open(x86_SZ_BUF, 0)) >= 0) {
         CfgDbgPrintf(("Reading \"%s\"...\n", configcommands[ii]));
         break;
@@ -2644,7 +2709,6 @@ STATIC VOID InstallExec(struct instCmds *icmd)
   BYTE *s;
   UWORD namelen, taillen;
   dos_far_ptr x86_filename, x86_tail;
-  BYTE *filename, *tail;
   exec_blk exb;
 
   cmd = skipwh(cmd);
@@ -2673,16 +2737,12 @@ STATIC VOID InstallExec(struct instCmds *icmd)
   x86_filename = guest_stack_alloc(cpu, (uint16_t)((namelen + 1) + (taillen + 3)));
   x86_tail = MK_FP(FP_SEG(x86_filename),
                    (uint16_t)(FP_OFF(x86_filename) + namelen + 1));
-  filename = (BYTE *) ARM_PTR(x86_filename);
-  tail = (BYTE *) ARM_PTR(x86_tail);
-
-  memcpy(filename, cmd, namelen);
-  filename[namelen] = 0;
-
-  tail[0] = (BYTE) taillen;
-  memcpy(tail + 1, s, taillen);
-  tail[taillen + 1] = '\r';
-  tail[taillen + 2] = 0;
+  cfg_guest_write(cfg_guest_linear(x86_filename), cmd, namelen);
+  pstore8(cfg_guest_linear(x86_filename) + namelen, 0);
+  pstore8(cfg_guest_linear(x86_tail), (BYTE)taillen);
+  cfg_guest_write(cfg_guest_linear(x86_tail) + 1u, s, taillen);
+  pstore8(cfg_guest_linear(x86_tail) + 1u + taillen, '\r');
+  pstore8(cfg_guest_linear(x86_tail) + 2u + taillen, 0);
 
   exb.exec.env_seg = 0;
   exb.exec.cmd_line = x86_tail;
@@ -2694,8 +2754,8 @@ STATIC VOID InstallExec(struct instCmds *icmd)
                                                                 in
                                                                 task.c */
 
-  InstallPrintf(("INSTALL exec file='%s' tail_len=%u tail='%s'\n",
-                 filename, tail[0], tail + 1));
+  InstallPrintf(("INSTALL exec file='%.*s' tail_len=%u tail='%s'\n",
+                 (int)namelen, cmd, (unsigned)taillen, s));
 
   {
     /* icmd->mode is an allocation-strategy value (FIRST_FIT or
@@ -2707,7 +2767,7 @@ STATIC VOID InstallExec(struct instCmds *icmd)
     UBYTE saved_mem_access_mode = config_idata.mem_access_mode();
 
     config_idata.mem_access_mode() = icmd->mode;
-    if (DosExec(EXEC_LOADNGO, &exb, filename) != SUCCESS)
+    if (DosExecGuest(EXEC_LOADNGO, &exb, x86_filename) != SUCCESS)
       CfgFailure(cmd);
     config_idata.mem_access_mode() = saved_mem_access_mode;
   }

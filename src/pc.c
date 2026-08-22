@@ -1552,7 +1552,7 @@ static void bios_post_components(PC *pc, size_t psram_size)
     else
         snprintf(right, sizeof(right), "QSPI PSRAM Up to 16 MB");
 #else
-    snprintf(left, sizeof(left), "Video    : %s VBE 1.2 256 KB",
+    snprintf(left, sizeof(left), "Video    : VGA VBE 1.2 256 KB [%s]",
              SELECT_VGA ? "VGA" : "HDMI");
     snprintf(right, sizeof(right), "QSPI PSRAM Up to 16 MB");
 #endif

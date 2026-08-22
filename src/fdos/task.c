@@ -24,6 +24,7 @@
 #include "fcom/fcom.h"
 #include "../diag.h"
 #include "../../apps/api/ez.h"
+#include "../mem.h"
 
 #if DIAG
 extern volatile uint32_t dos_diag_kernel_code;
@@ -89,6 +90,174 @@ _Static_assert(sizeof(((struct dos_data *) 0)->PriPathBuffer) + 3 == ENV_KEEPFRE
                "ENV_KEEPFREE must track sizeof(PriPathBuffer)+3, see ChildEnv()");
 
 #define LOAD_HIGH 0x80          /* mode bit: try UMB first (see DosUmbLink()) */
+
+static inline uint32_t task_guest_linear(dos_far_ptr p)
+{
+  return ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p);
+}
+
+static inline uint32_t task_guest_seg_linear(UWORD seg)
+{
+  return (uint32_t)seg << 4;
+}
+
+static inline void task_guest_read(uint32_t addr, void *dst, size_t len)
+{
+  UBYTE *d = (UBYTE *)dst;
+  while (len--)
+    *d++ = pload8(addr++);
+}
+
+static inline void task_guest_write(uint32_t addr, const void *src, size_t len)
+{
+  const UBYTE *s = (const UBYTE *)src;
+  while (len--)
+    pstore8(addr++, *s++);
+}
+
+static inline dos_far_ptr task_guest_read_far(uint32_t addr)
+{
+  dos_far_ptr v;
+  task_guest_read(addr, &v, sizeof(v));
+  return v;
+}
+
+static inline void task_guest_write_far(uint32_t addr, dos_far_ptr v)
+{
+  task_guest_write(addr, &v, sizeof(v));
+}
+
+static const uint32_t task_idata_linear =
+    ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
+static const uint32_t task_lol_linear =
+    ((uint32_t)DOS_PSP << 4) + 0x08f0u;
+
+static inline UBYTE task_idata_read8(size_t off)
+{
+  return pload8(task_idata_linear + (uint32_t)off);
+}
+
+static inline void task_idata_write8(size_t off, UBYTE v)
+{
+  pstore8(task_idata_linear + (uint32_t)off, v);
+}
+
+static inline UWORD task_idata_read16(size_t off)
+{
+  return pload16(task_idata_linear + (uint32_t)off);
+}
+
+static inline void task_idata_write16(size_t off, UWORD v)
+{
+  pstore16(task_idata_linear + (uint32_t)off, v);
+}
+
+static inline dos_far_ptr task_idata_read_far(size_t off)
+{
+  return task_guest_read_far(task_idata_linear + (uint32_t)off);
+}
+
+static inline void task_idata_write_far(size_t off, dos_far_ptr v)
+{
+  task_guest_write_far(task_idata_linear + (uint32_t)off, v);
+}
+
+static inline UBYTE task_far_peek8(dos_far_ptr p, UWORD add)
+{
+  UWORD off = (UWORD)(FP_OFF(p) + add);
+  return pload8(((uint32_t)FP_SEG(p) << 4) + off);
+}
+
+static int task_guest_is_command_com(dos_far_ptr name)
+{
+  UWORD pos = 0, base = 0;
+  static const char command[] = "COMMAND.COM";
+  unsigned i;
+
+  for (;;) {
+    UBYTE c = task_far_peek8(name, pos);
+    if (c == 0)
+      break;
+    if (c == ':' || c == '/' || c == '\\')
+      base = (UWORD)(pos + 1u);
+    ++pos;
+  }
+
+  if ((UWORD)(pos - base) != (UWORD)(sizeof(command) - 1u))
+    return 0;
+
+  for (i = 0; i < sizeof(command) - 1u; ++i) {
+    UBYTE c = task_far_peek8(name, (UWORD)(base + i));
+    if (c >= 'a' && c <= 'z')
+      c = (UBYTE)(c - ('a' - 'A'));
+    if (c != (UBYTE)command[i])
+      return 0;
+  }
+  return 1;
+}
+
+static dos_far_ptr task_guest_is_device(dos_far_ptr name)
+{
+  UWORD pos = 0, root = 0;
+  dos_far_ptr dh;
+
+  for (;;) {
+    UBYTE c = task_far_peek8(name, pos);
+    if (c == 0)
+      break;
+    if (c == ':' || c == '/' || c == '\\')
+      root = (UWORD)(pos + 1u);
+    ++pos;
+  }
+
+  {
+    UBYTE c0 = task_far_peek8(name, root);
+    if (c0 == 0)
+      return MK_FP(0, 0);
+    if (c0 == '.') {
+      UBYTE c1 = task_far_peek8(name, (UWORD)(root + 1u));
+      UBYTE c2 = task_far_peek8(name, (UWORD)(root + 2u));
+      if (c1 == 0 || (c1 == '.' && c2 == 0))
+        return MK_FP(0, 0);
+    }
+  }
+
+  dh = MK_FP(DOS_PSP,
+             (UWORD)(0x08f0u + offsetof(struct lol, nul_dev)));
+
+  while (!far_is_end(dh))
+  {
+    struct dhdr h;
+    int i;
+    task_guest_read(task_guest_linear(dh), &h, sizeof(h));
+
+    if (h.dh_attr & ATTR_CHAR)
+    {
+      for (i = 0; i < FNAME_SIZE; ++i)
+      {
+        UBYTE c1 = task_far_peek8(name, (UWORD)(root + i));
+        if (c1 == '.' || c1 == 0)
+        {
+          for (; i < FNAME_SIZE; ++i)
+          {
+            UBYTE c2 = h.dh_name[i];
+            if (c2 != ' ' && c2 != 0)
+              break;
+          }
+          break;
+        }
+        if (DosUpFChar(c1) != DosUpFChar(h.dh_name[i]))
+          break;
+      }
+      if (i == FNAME_SIZE)
+        return dh;
+    }
+
+    dh = h.dh_next;
+  }
+
+  return MK_FP(0, 0);
+}
 
 
 /* Minimal ARM ELF32 loader support.  ET_REL sections are loaded on demand,
@@ -2460,8 +2629,8 @@ static int arm_elf_load_root(COUNT fd, UWORD base_seg,
 STATIC int ExecMemLargest(UWORD *asize, UWORD threshold);
 STATIC int ExecMemAlloc(UWORD size, seg * para, UWORD * asize);
 ULONG SftGetFsize(int sft_idx);
-STATIC COUNT ChildEnv(exec_blk *exp, UWORD *pChildEnvSeg, char *pathname);
-STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk *exb, BYTE *fnam);
+STATIC COUNT ChildEnvGuest(exec_blk *exp, UWORD *pChildEnvSeg, dos_far_ptr pathname);
+STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg, exec_blk *exb, dos_far_ptr fnam);
 static dos_far_ptr exec_caller_return_addr(void);
 static COUNT exec_run_arm_elf(UWORD child_psp_seg,
                               arm_elf_load_meta *meta);
@@ -3289,7 +3458,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
    * whenever it fits.  PSRAM is a fallback, never the preferred placement.
    */
   fail_stage = "environment allocation";
-  rc = ChildEnv(exp, &env_mcb, (char *)namep);
+  rc = ChildEnvGuest(exp, &env_mcb, linear_to_far((const BYTE *)namep));
   if (rc == SUCCESS) {
     int low_rc;
     fail_stage = "guest largest-block query";
@@ -3458,7 +3627,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   DosCloseSft(fd, FALSE);
   setvec(0x22, exec_caller_return_addr());
   child_psp(load_seg, internal_data->cu_psp, load_seg + final_paras);
-  fcbcode = patchPSP(alloc_mcb, env_mcb, exp, namep);
+  fcbcode = patchPSPGuest(alloc_mcb, env_mcb, exp, linear_to_far(namep));
   (void)fcbcode;
 
   arm_native_assign_dos_stack_owner(meta->dos_stack_mcb, load_seg);
@@ -3566,7 +3735,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     internal_data->mem_access_mode |= 0x80;
   }
 
-  rc = ChildEnv(exp, &env_mcb, (char *)namep);
+  rc = ChildEnvGuest(exp, &env_mcb, linear_to_far((const BYTE *)namep));
   if (rc == SUCCESS) {
     /*
      * Reserve the largest available DOS block while loading.  ET_REL discovery
@@ -3790,7 +3959,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
      after it in the same MCB and are therefore released by FreeProcessMem(). */
   setvec(0x22, exec_caller_return_addr());
   child_psp(load_seg, internal_data->cu_psp, load_seg + final_paras);
-  fcbcode = patchPSP(alloc_mcb, env_mcb, exp, namep);
+  fcbcode = patchPSPGuest(alloc_mcb, env_mcb, exp, linear_to_far(namep));
   (void)fcbcode;
 
   if (meta->dos_stack_mcb != 0) {
@@ -3910,78 +4079,84 @@ STATIC UWORD SetverGetVersion(dos_far_ptr table_ptr, const BYTE *name)
    child environment. Returns the segment of the env's *MCB* (not the
    env block itself) in *pChildEnvSeg.
 */
-STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
+STATIC COUNT ChildEnvGuest(exec_blk *exp, UWORD *pChildEnvSeg,
+                           dos_far_ptr pathname)
 {
-  BYTE *pSrc;
-  BYTE *pDest;
+  uint32_t src_linear = 0;
+  uint32_t dst_linear;
   UWORD nEnvSize;
-  COUNT RetCode;
-  psp *ppsp = (psp *) ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  COUNT ret;
+  UWORD parent_psp;
+  UWORD parent_env = 0;
 
-  *pChildEnvSeg = 0;             /* prevent freeing a random address on
-                                     errors by callers of ChildEnv() */
+  *pChildEnvSeg = 0;
 
-  /* copy parent's environment if exec.env_seg == 0 */
-  pSrc = exp->exec.env_seg ?
-    (BYTE *) ARM_PTR(MK_FP(exp->exec.env_seg, 0)) :
-    (ppsp->ps_environ ? (BYTE *) ARM_PTR(MK_FP(ppsp->ps_environ, 0)) : NULL);
-  
-  ///printf("ChildEnv\n");
+  parent_psp = task_idata_read16(offsetof(struct dos_data, cu_psp));
+  if (parent_psp != 0)
+    parent_env = pload16(task_guest_seg_linear(parent_psp) +
+                         offsetof(psp, ps_environ));
+
+  if (exp->exec.env_seg)
+    src_linear = task_guest_seg_linear(exp->exec.env_seg);
+  else if (parent_env)
+    src_linear = task_guest_seg_linear(parent_env);
+
   nEnvSize = 1;
-  if (pSrc)
-  {                              /* if no environment is available, one
-                                     byte is required */
-    for (nEnvSize = 0;; nEnvSize++)
+  if (src_linear != 0)
+  {
+    for (nEnvSize = 0;; ++nEnvSize)
     {
       if (nEnvSize >= MAXENV - ENV_KEEPFREE)
         return DE_INVLDENV;
-
-      /* loop until first double terminator '\0\0' found */
-      if (*(UWORD *) (pSrc + nEnvSize) == 0)
+      if (pload16(src_linear + nEnvSize) == 0)
         break;
     }
-    nEnvSize += 2;                /* account for trailing \0\0 */
+    nEnvSize += 2;
   }
 
-  /* allocate enough space for env + path (rounding up to nearest
-     paragraph); at least 1 paragraph for an empty environment, plus
-     ENV_KEEPFREE for argv[0] (the fully-qualified program name) */
-  if ((RetCode = DosMemAlloc((nEnvSize + ENV_KEEPFREE + 15) / 16,
-                             internal_data->mem_access_mode,
-                             pChildEnvSeg, NULL)) < SUCCESS)
-    return RetCode;
+  if ((ret = DosMemAlloc((nEnvSize + ENV_KEEPFREE + 15) / 16,
+                         task_idata_read8(offsetof(struct dos_data,
+                                                   mem_access_mode)),
+                         pChildEnvSeg, NULL)) < SUCCESS)
+    return ret;
 
-  pDest = (BYTE *) ARM_PTR(MK_FP(*pChildEnvSeg + 1, 0));      /* skip past MCB */
+  dst_linear = task_guest_seg_linear((UWORD)(*pChildEnvSeg + 1u));
 
-  if (pSrc)
+  if (src_linear != 0)
   {
-    memcpy(pDest, pSrc, nEnvSize);
-    pDest += nEnvSize;
+    UWORD i;
+    for (i = 0; i < nEnvSize; ++i)
+      pstore8(dst_linear + i, pload8(src_linear + i));
+    dst_linear += nEnvSize;
   }
   else
-    *pDest++ = '\0';             /* empty environment */
-
-  /* "extra strings" count (DOS 3.0+: argv[0] follows the env block) */
-  *((UWORD *) pDest) = 1;
-  pDest += sizeof(UWORD);
-
-  /* copy the fully-qualified program name */
-  /* pathname is DosExec()'s "lp": a NATIVE pointer that INT 21h/AH=4Bh built
-     as ARM_PTR(guest DS:DX). That guest pointer belongs to the CALLER's
-     segment (e.g. FreeCOM's PSP), NOT DOS_PSP - so it must be turned back
-     into a far pointer by its true linear address, not re-anchored on
-     DOS_PSP. Using x86_FAR_PTR(DOS_PSP, ...) here computes a wrong offset,
-     truename() then fails to find the file, and every external command dies
-     with "Bad command or filename". This is the one native->far conversion in
-     the EXEC path that genuinely needs linear_to_far() until DosExec()/
-     ChildEnv() are changed to carry a dos_far_ptr end to end. */
-  if ((RetCode = truename(linear_to_far((const BYTE *) pathname),
-                          PriPathName, CDS_MODE_SKIP_PHYSICAL)) < SUCCESS) {
-    dpb_watch_check_chain("ChildEnv 1");
-    return RetCode;
+  {
+    pstore8(dst_linear++, 0);
   }
+
+  pstore16(dst_linear, 1);
+  dst_linear += sizeof(UWORD);
+
+  if ((ret = truename(pathname, PriPathName,
+                      CDS_MODE_SKIP_PHYSICAL)) < SUCCESS)
+  {
+    dpb_watch_check_chain("ChildEnv 1");
+    return ret;
+  }
+
   dpb_watch_check_chain("ChildEnv 2");
-  strcpy(pDest, PriPathName);
+  {
+    uint32_t pri =
+        task_idata_linear + offsetof(struct dos_data, PriPathBuffer);
+    size_t i;
+    for (i = 0; i < sizeof(((struct dos_data *)0)->PriPathBuffer); ++i)
+    {
+      UBYTE c = pload8(pri + (uint32_t)i);
+      pstore8(dst_linear + (uint32_t)i, c);
+      if (c == 0)
+        break;
+    }
+  }
   dpb_watch_check_chain("ChildEnv 3");
 
   return SUCCESS;
@@ -3997,75 +4172,56 @@ STATIC COUNT ChildEnv(exec_blk * exp, UWORD * pChildEnvSeg, char *pathname)
  */
 void new_psp(seg para, seg cur_psp)   /* exported: INT 21h AH=26h */
 {
-  psp *p = (psp *) ARM_PTR(MK_FP(para, 0));
-
-  memcpy(p, ARM_PTR(MK_FP(cur_psp, 0)), sizeof(psp));
-
-  p->ps_isv22 = getvec(0x22);
-  p->ps_isv23 = getvec(0x23);
-  p->ps_isv24 = getvec(0x24);
-  p->ps_retdosver =
-      ((UWORD)LoL->os_setver_minor << 8) | LoL->os_setver_major;
+  psp p;
+  task_guest_read(task_guest_seg_linear(cur_psp), &p, sizeof(p));
+  p.ps_isv22 = getvec(0x22);
+  p.ps_isv23 = getvec(0x23);
+  p.ps_isv24 = getvec(0x24);
+  p.ps_retdosver =
+      ((UWORD)pload8(task_lol_linear + offsetof(struct lol, os_setver_minor)) << 8) |
+      pload8(task_lol_linear + offsetof(struct lol, os_setver_major));
+  task_guest_write(task_guest_seg_linear(para), &p, sizeof(p));
 }
 
 void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h */
 {
-  psp *p = (psp *) ARM_PTR(MK_FP(para, 0));
-  psp *q = (psp *) ARM_PTR(MK_FP(cur_psp, 0));
-  /* Parent's JFT. NULL if the parent corrupted its own ps_filetab: the
-     child then simply inherits no handles (its own table is already
-     filled with 0xff below) instead of us reading 20 bytes out of the
-     guest IVT and treating them as SFT indices. */
-  UBYTE *q_filetab = jft_of(q);
+  psp p, q;
   int i;
-
   new_psp(para, cur_psp);
-
-  p->ps_parent = cur_psp;
-  p->ps_prevpsp = MK_FP(cur_psp, 0);
-
-  p->ps_size = psize;
-
-  p->ps_maxfiles = 20;
-  memset(p->ps_files, 0xff, 20);
-  /* Canonical far pair <psp_seg>:0018h. NOT linear_to_far(p->ps_files):
-     that normalises to (lin>>4):(lin&0xF), i.e. (psp_seg+1):0008h - the same
-     LINEAR address, but a different seg:off pair. Programs and TSRs test the
-     pair itself to decide whether the JFT is still the default one inside the
-     PSP (that is what SetJFTSize() moves), so the normalised form reads to
-     them as "JFT already relocated". Build it from the segment we know. */
-  p->ps_filetab = MK_FP(para, offsetof(psp, ps_files));
-
-  /*
-   * Inherit the parent's first 20 handles, matching upstream
-   * CloneHandle(): handles whose SFT has O_NOINHERIT are deliberately
-   * omitted from the child JFT and their SFT reference count is not
-   * incremented.
-   */
-  for (i = 0; q_filetab != NULL && i < 20; i++)
-  {
-    if (q_filetab[i] != 0xff)
-    {
-      dos_far_ptr sft_ptr = idx_to_sft(q_filetab[i]);
-      if (!far_is_end(sft_ptr))
-      {
-        sft *entry = (sft *)ARM_PTR(sft_ptr);
-        if (!(entry->sft_mode & O_NOINHERIT))
-        {
-          p->ps_files[i] = q_filetab[i];
-          entry->sft_count++;
+  task_guest_read(task_guest_seg_linear(para), &p, sizeof(p));
+  task_guest_read(task_guest_seg_linear(cur_psp), &q, sizeof(q));
+  p.ps_parent = cur_psp;
+  p.ps_prevpsp = MK_FP(cur_psp, 0);
+  p.ps_size = psize;
+  p.ps_maxfiles = 20;
+  memset(p.ps_files, 0xff, 20);
+  p.ps_filetab = MK_FP(para, offsetof(psp, ps_files));
+  if (!far_is_null(q.ps_filetab) && !far_is_end(q.ps_filetab)) {
+    uint32_t q_jft = task_guest_linear(q.ps_filetab);
+    for (i = 0; i < 20; i++) {
+      UBYTE h = pload8(q_jft + (uint32_t)i);
+      if (h != 0xff) {
+        dos_far_ptr sft_ptr = idx_to_sft(h);
+        if (!far_is_end(sft_ptr)) {
+          sft entry;
+          uint32_t sft_linear = task_guest_linear(sft_ptr);
+          task_guest_read(sft_linear, &entry, sizeof(entry));
+          if (!(entry.sft_mode & O_NOINHERIT)) {
+            p.ps_files[i] = h;
+            entry.sft_count++;
+            task_guest_write(sft_linear, &entry, sizeof(entry));
+          }
         }
       }
     }
   }
-
-  p->ps_fcb1.fcb_drive = 0;
-  memset(p->ps_fcb1.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
-  p->ps_fcb2.fcb_drive = 0;
-  memset(p->ps_fcb2.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
-
-  p->ps_cmd.ctCount = 0;
-  p->ps_cmd.ctBuffer[0] = 0xd;
+  p.ps_fcb1.fcb_drive = 0;
+  memset(p.ps_fcb1.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
+  p.ps_fcb2.fcb_drive = 0;
+  memset(p.ps_fcb2.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
+  p.ps_cmd.ctCount = 0;
+  p.ps_cmd.ctBuffer[0] = 0xd;
+  task_guest_write(task_guest_seg_linear(para), &p, sizeof(p));
 }
 
 /*
@@ -4087,44 +4243,39 @@ void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h *
 */
 static dos_far_ptr /* -> caller's return address */ exec_caller_return_addr(void)
 {
-  dos_far_ptr /* -> struct int21_guest_iregs */ fr = internal_data->user_r;
+  dos_far_ptr fr =
+      task_idata_read_far(offsetof(struct dos_data, user_r));
 
   if (!far_is_null(fr) && !far_is_end(fr))
   {
-    const struct int21_guest_iregs *r =
-        (const struct int21_guest_iregs *)ARM_PTR(fr);
-    return MK_FP(r->cs, r->ip);
+    uint32_t linear = task_guest_linear(fr);
+    UWORD ip = pload16(linear + offsetof(struct int21_guest_iregs, ip));
+    UWORD cs = pload16(linear + offsetof(struct int21_guest_iregs, cs));
+    return MK_FP(cs, ip);
   }
   return MK_FP(CPU_CS, CPU_IP);
 }
 
-STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
+STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg,
+                           exec_blk *exb, dos_far_ptr fnam)
 {
-  psp *p;
+  psp p;
   mcb pspmcb;
   UWORD psp_mcb_seg;
+  UWORD pos = 0, base = 0;
   int i;
-  BYTE *np;
+  BYTE shortname[13];
 
   psp_mcb_seg = pspseg;
   mcb_guest_load(psp_mcb_seg, &pspmcb);
   ++pspseg;
-  p = (psp *) ARM_PTR(MK_FP(pspseg, 0));
+  task_guest_read(task_guest_seg_linear(pspseg), &p, sizeof(p));
 
-  /* cmd_line/fcb_1/fcb_2 are guest far pointers out of the exec block, so a
-     128-byte command tail placed near a segment end must wrap rather than
-     read on past it. */
-  guest_read(&p->ps_cmd, exb->exec.cmd_line, sizeof(CommandTail));
-  /* "No FCBs" is signalled by an OFFSET of FFFFh - the segment is not part
-     of the sentinel. Upstream tests exactly that (task.c: "if
-     (FP_OFF(exb->exec.fcb_1) != 0xffff)"), and a guest is entitled to pass
-     e.g. DS:FFFF. Testing the full FFFF:FFFF pair instead (far_is_end())
-     would miss those and memcpy() 32 bytes of whatever ARM_PTR(DS:FFFF)
-     lands on straight into the child's PSP FCBs. */
+  guest_read(&p.ps_cmd, exb->exec.cmd_line, sizeof(CommandTail));
   if (FP_OFF(exb->exec.fcb_1) != 0xFFFF)
   {
-    guest_read(&p->ps_fcb1, exb->exec.fcb_1, 16);
-    guest_read(&p->ps_fcb2, exb->exec.fcb_2, 16);
+    guest_read(&p.ps_fcb1, exb->exec.fcb_1, 16);
+    guest_read(&p.ps_fcb2, exb->exec.fcb_2, 16);
   }
 
   pspmcb.m_psp = pspseg;
@@ -4137,49 +4288,45 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
     mcb_guest_store(envseg, &envmcb);
     envseg++;
   }
-  p->ps_environ = envseg;
+  p.ps_environ = envseg;
 
-  /* use the file name less extension, path, and drive */
-  np = fnam;
   for (;;)
   {
-    switch (*fnam++)
-    {
-      case '\0':
-        goto set_name;
-      case ':':
-      case '/':
-      case '\\':
-        np = fnam;
-    }
+    UBYTE c = task_far_peek8(fnam, pos);
+    if (c == 0)
+      break;
+    if (c == ':' || c == '/' || c == '\\')
+      base = (UWORD)(pos + 1u);
+    ++pos;
   }
-set_name:
-  for (i = 0; i < 8 && np[i] != '.' && np[i] != '\0'; i++)
-    pspmcb.m_name[i] = toupper((unsigned char) np[i]);
+
+  memset(shortname, 0, sizeof(shortname));
+  for (i = 0; i < 12; ++i)
+  {
+    UBYTE c = task_far_peek8(fnam, (UWORD)(base + i));
+    if (c == 0)
+      break;
+    shortname[i] = c;
+  }
+
+  for (i = 0; i < 8 && shortname[i] != '.' && shortname[i] != '\0'; ++i)
+    pspmcb.m_name[i] = toupper((unsigned char)shortname[i]);
   if (i < 8)
     pspmcb.m_name[i] = '\0';
   mcb_guest_store(psp_mcb_seg, &pspmcb);
 
-  /* Per-program DOS version faking (SETVER). Upstream does this here and
-     new_psp()/DosExec() both already claim we do too - but the block was
-     dropped in the port, leaving SetverGetVersion() with no caller at all
-     (-Wunused-function flags it). Restore it.
-
-     LoL->setverPtr is still 0000:0000 until something publishes a SETVER
-     table, and SetverGetVersion() returns 0 for a null table, so this is a
-     no-op today - but the code path is live again and the comments are no
-     longer lying. */
   {
-    UWORD fakever = SetverGetVersion(LoL->setverPtr, np);
+    dos_far_ptr setver_ptr =
+        task_guest_read_far(task_lol_linear + offsetof(struct lol, setverPtr));
+    UWORD fakever = SetverGetVersion(setver_ptr, shortname);
     if (fakever != 0)
-      p->ps_retdosver = fakever;
+      p.ps_retdosver = fakever;
   }
 
-  /* AX value to be passed to the child, based on FCB drive validity -
-     matches upstream's INT21/4B return convention (some old programs
-     check this instead of parsing their own command line). */
-  return (get_cds1(p->ps_fcb1.fcb_drive) ? 0 : 0xff) |
-    (get_cds1(p->ps_fcb2.fcb_drive) ? 0 : 0xff00);
+  task_guest_write(task_guest_seg_linear(pspseg), &p, sizeof(p));
+
+  return (get_cds1(p.ps_fcb1.fcb_drive) ? 0 : 0xff) |
+         (get_cds1(p.ps_fcb2.fcb_drive) ? 0 : 0xff00);
 }
 
 /*
@@ -4307,112 +4454,119 @@ struct exec_child_context
   bool native_done;
 };
 
-static void exec_enter_child(struct exec_child_context *saved,
+static void exec_enter_child(uint32_t saved_linear,
                              UWORD child_psp_seg, dos_far_ptr stack,
                              UWORD dses)
 {
-  save_ctx(cpu,&saved->cpu);
-  saved->cu_psp=internal_data->cu_psp; saved->dta=internal_data->dta;
-  saved->indos=internal_data->InDOS;
-  saved->error_mode=internal_data->ErrorMode;
-  saved->terminate=terminate_flag;
-  /* native_done is a shared signalling channel between three users:
-     request_terminate(), bios_intcall()'s waiter and cpu_far_call()'s
-     waiter. When this EXEC is entered from inside an OUTER pc_step()
-     loop (a guest parent - e.g. a file manager - spawning a native
-     COMMAND), the outer level may have its own pending state; it must
-     be part of this stack frame, not destroyed by the blanket clears
-     that used to live on both the enter and leave paths. */
-  saved->native_done=cpu->native_done;
+  struct saved_cpu_ctx saved_cpu;
+  dos_far_ptr dta;
+  UWORD cu_psp;
+  UBYTE byte;
 
-  internal_data->cu_psp=child_psp_seg;
-  internal_data->dta=MK_FP(child_psp_seg,offsetof(psp,ps_cmd));
+  save_ctx(cpu, &saved_cpu);
+  task_guest_write(saved_linear + offsetof(struct exec_child_context, cpu),
+                   &saved_cpu, sizeof(saved_cpu));
+
+  cu_psp = task_idata_read16(offsetof(struct dos_data, cu_psp));
+  pstore16(saved_linear + offsetof(struct exec_child_context, cu_psp), cu_psp);
+
+  dta = task_idata_read_far(offsetof(struct dos_data, dta));
+  task_guest_write_far(saved_linear + offsetof(struct exec_child_context, dta),
+                       dta);
+
+  byte = task_idata_read8(offsetof(struct dos_data, InDOS));
+  pstore8(saved_linear + offsetof(struct exec_child_context, indos), byte);
+  byte = task_idata_read8(offsetof(struct dos_data, ErrorMode));
+  pstore8(saved_linear + offsetof(struct exec_child_context, error_mode), byte);
+  pstore8(saved_linear + offsetof(struct exec_child_context, terminate),
+          terminate_flag ? 1u : 0u);
+  pstore8(saved_linear + offsetof(struct exec_child_context, native_done),
+          cpu->native_done ? 1u : 0u);
+
+  task_idata_write16(offsetof(struct dos_data, cu_psp), child_psp_seg);
+  task_idata_write_far(offsetof(struct dos_data, dta),
+                       MK_FP(child_psp_seg,offsetof(psp,ps_cmd)));
   SET_SS(FP_SEG(stack)); CPU_SP=FP_OFF(stack);
   SET_DS(dses); SET_ES(dses);
   terminate_flag=false;
-  /* term_exit_code/term_exit_type are intentionally NOT cleared and NOT
-     part of this per-level context: upstream FreeDOS keeps the AH=4Dh
-     return status in a single kernel global (the SDA), so starting a
-     new child must not erase the status a previous sibling left for our
-     caller, and the status the child leaves at its termination must
-     survive exec_leave_child() for the parent to read via AH=4Dh. */
   cpu->native_done=false;
-  if (internal_data->InDOS != 0) --internal_data->InDOS;
+  {
+    UBYTE indos = task_idata_read8(offsetof(struct dos_data, InDOS));
+    if (indos != 0)
+      task_idata_write8(offsetof(struct dos_data, InDOS), (UBYTE)(indos - 1));
+  }
 }
 
 static void exec_release_child(UWORD child_psp_seg)
 {
-  psp *p=(psp *)ARM_PTR(MK_FP(child_psp_seg,0));
-  setvec(0x22,p->ps_isv22); setvec(0x23,p->ps_isv23); setvec(0x24,p->ps_isv24);
+  psp p;
+  task_guest_read(task_guest_seg_linear(child_psp_seg), &p, sizeof(p));
+  setvec(0x22,p.ps_isv22);
+  setvec(0x23,p.ps_isv23);
+  setvec(0x24,p.ps_isv24);
   if (term_exit_type != 3) {
-    int i; for(i=0;i<p->ps_maxfiles;i++) DosClose(i);
-    FcbCloseAll(); FreeProcessMem(child_psp_seg);
+    int i;
+    for(i=0;i<p.ps_maxfiles;i++) DosClose(i);
+    FcbCloseAll();
+    FreeProcessMem(child_psp_seg);
   }
 }
 
-static void exec_leave_child(struct exec_child_context *saved,
+static void exec_leave_child(uint32_t saved_linear,
                              UWORD child_psp_seg)
 {
-  bool outer_terminate = saved->terminate;
-  bool outer_native_done = saved->native_done;
+  struct saved_cpu_ctx saved_cpu;
+  bool outer_terminate;
+  bool outer_native_done;
+  UWORD saved_cu_psp;
+  dos_far_ptr saved_dta;
+  UBYTE saved_indos;
+  UBYTE saved_error_mode;
   UWORD cleanup_sp = SDA_CHAR_TOS_OFF;
   UWORD parent_frame_sp;
 
   /*
-   * The child is dead from this point on.  Two independent guards keep
-   * cleanup from ever running on that dead execution context:
-   *
-   *   1. native_done remains set, so an accidental pc_step() cannot execute
-   *      even one instruction at the dead child's CS:IP;
-   *   2. SS:SP is detached from the child's MCB-backed DOS stack before any
-   *      handle/FCB/memory teardown and moved to the resident SDA char stack.
-   *
-   * cpu_far_call() and bios_intcall() already stack native_done and clear it
-   * only for their own synchronous guest burst, so sanctioned device/BIOS
-   * calls still run and restore the dead-context guard on return.
-   *
-   * Usually the full SDA char stack (0600h..0780h) is available.  If the
-   * suspended parent itself lives on that stack, however, its long-lived
-   * exec_child_context is immediately below the parent's original SP.
-   * Continue below that frame instead of resetting SP to 0780h; this keeps
-   * nested EXEC from a cleanup-time driver call from overwriting the frame
-   * that restore_ctx() still has to consume.
+   * The long-lived frame remains in guest RAM. Only this short-lived CPU
+   * snapshot is materialised on the native stack while leaving the child,
+   * so nested EXEC levels do not accumulate native-stack usage.
    */
+  task_guest_read(saved_linear + offsetof(struct exec_child_context, cpu),
+                  &saved_cpu, sizeof(saved_cpu));
+  saved_cu_psp =
+      pload16(saved_linear + offsetof(struct exec_child_context, cu_psp));
+  saved_dta =
+      task_guest_read_far(saved_linear + offsetof(struct exec_child_context, dta));
+  saved_indos =
+      pload8(saved_linear + offsetof(struct exec_child_context, indos));
+  saved_error_mode =
+      pload8(saved_linear + offsetof(struct exec_child_context, error_mode));
+  outer_terminate =
+      pload8(saved_linear + offsetof(struct exec_child_context, terminate)) != 0;
+  outer_native_done =
+      pload8(saved_linear + offsetof(struct exec_child_context, native_done)) != 0;
+
   parent_frame_sp =
-      (UWORD)((saved->cpu.sp - sizeof(*saved)) & (UWORD)~1u);
-  if (saved->cpu.ss == DOS_PSP &&
+      (UWORD)((saved_cpu.sp - sizeof(struct exec_child_context)) &
+              (UWORD)~1u);
+  if (saved_cpu.ss == DOS_PSP &&
       parent_frame_sp >= SDA_DISK_TOS_OFF &&
       parent_frame_sp <= SDA_CHAR_TOS_OFF)
     cleanup_sp = parent_frame_sp;
 
-  /* Keep the OUTER level's terminate state invisible during cleanup: nested
-     driver calls must not inherit a signal belonging to a different EXEC
-     level.  The outer values are re-armed LAST, after the parent CPU context
-     has been restored.
-
-     term_exit_code/term_exit_type stay untouched throughout: they are the
-     single DOS-global AH=4Dh status the child just left for the parent, and
-     exec_release_child() reads term_exit_type for the keep-resident (TSR)
-     decision. cu_psp is still the child's until exec_release_child()
-     finishes - DosClose() locates the handle table through it. */
   cpu->native_done = true;
   terminate_flag = false;
   SET_SS(DOS_PSP);
   CPU_SP = cleanup_sp;
-  internal_data->InDOS = saved->indos;
-  /* Match return_user(): suppress recursive critical-error aborts
-     while vectors, handles, FCBs and process memory are released. */
-  internal_data->abort_progress = (UBYTE)-1;
+  task_idata_write8(offsetof(struct dos_data, InDOS), saved_indos);
+  task_idata_write8(offsetof(struct dos_data, abort_progress), (UBYTE)-1);
   exec_release_child(child_psp_seg);
 
-  internal_data->cu_psp = saved->cu_psp;
-  internal_data->dta = saved->dta;
-  internal_data->abort_progress = 0;
-  internal_data->ErrorMode = saved->error_mode;
-  restore_ctx(cpu, &saved->cpu);
-  /* restore_ctx() reinstates the parent's original SP and thereby
-     releases the guest-resident exec_child_context.  Do not dereference
-     saved beyond this point; the two outer signals were copied above. */
+  task_idata_write16(offsetof(struct dos_data, cu_psp), saved_cu_psp);
+  task_idata_write_far(offsetof(struct dos_data, dta), saved_dta);
+  task_idata_write8(offsetof(struct dos_data, abort_progress), 0);
+  task_idata_write8(offsetof(struct dos_data, ErrorMode), saved_error_mode);
+  restore_ctx(cpu, &saved_cpu);
+
   terminate_flag = outer_terminate;
   cpu->native_done = outer_native_done;
 }
@@ -4822,7 +4976,7 @@ static COUNT exec_run_process(const struct exec_process_start *start)
 {
   UWORD parent_sp = CPU_SP;
   UWORD frame_sp;
-  struct exec_child_context *saved;
+  uint32_t saved_linear;
 
   /*
    * Keep the long-lived suspended-parent context in guest RAM, exactly
@@ -4836,15 +4990,21 @@ static COUNT exec_run_process(const struct exec_process_start *start)
    * consume their respective parent stacks rather than any shared
    * arena.
    */
-  frame_sp = (UWORD)((parent_sp - sizeof(*saved)) & (UWORD)~1u);
+  frame_sp =
+      (UWORD)((parent_sp - sizeof(struct exec_child_context)) & (UWORD)~1u);
   CPU_SP = frame_sp;
-  saved = (struct exec_child_context *)ARM_PTR(MK_FP(CPU_SS, frame_sp));
+  saved_linear = ((uint32_t)CPU_SS << 4) + frame_sp;
 
-  exec_enter_child(saved, start->child_psp,
+  exec_enter_child(saved_linear, start->child_psp,
                    start->stack, start->dses);
-  /* save_ctx() saw the reserved frame at SS:frame_sp.  The process state
-     to restore is the pre-reservation stack pointer. */
-  saved->cpu.sp = parent_sp;
+  /*
+   * save_ctx() saw the reserved frame at SS:frame_sp. Preserve the original
+   * parent SP in the guest-resident context.
+   */
+  pstore16(saved_linear +
+               offsetof(struct exec_child_context, cpu) +
+               offsetof(struct saved_cpu_ctx, sp),
+           parent_sp);
   if (start->kind != EXEC_PROCESS_ARM_ELF &&
       start->kind != EXEC_PROCESS_ARM_EZ)
     exec_set_initial_registers(start);
@@ -4874,7 +5034,7 @@ static COUNT exec_run_process(const struct exec_process_start *start)
                                      &previous_stack_cursor) != SUCCESS) {
       dos_printf("ARM native: PSRAM stack arena exhausted (%lu bytes)\r\n",
                  native_stack_size);
-      exec_leave_child(saved, start->child_psp);
+      exec_leave_child(saved_linear, start->child_psp);
       return DE_NOMEM;
     }
     if (elf_meta)
@@ -4980,7 +5140,7 @@ static COUNT exec_run_process(const struct exec_process_start *start)
       pc_step(pc, 4096);
   }
 
-  exec_leave_child(saved, start->child_psp);
+  exec_leave_child(saved_linear, start->child_psp);
   return SUCCESS;
 }
 
@@ -5124,7 +5284,7 @@ STATIC int ExecMemAlloc(UWORD size, seg * para, UWORD * asize)
   return rc;
 }
 
-COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
+COUNT DosComLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
 {
   UWORD mem;
   UWORD env = 0, asize = 0;
@@ -5139,16 +5299,18 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
     if ((mode & 0x7f) != EXEC_OVERLAY)
     {
       COUNT rc;
-      UBYTE UMBstate = LoL->uppermem_link;
-      UBYTE orig_mem_access = internal_data->mem_access_mode;
+      UBYTE UMBstate = pload8(task_lol_linear + offsetof(struct lol, uppermem_link));
+      UBYTE orig_mem_access =
+          task_idata_read8(offsetof(struct dos_data, mem_access_mode));
 
       if (mode & LOAD_HIGH)
       {
-        internal_data->mem_access_mode |= 0x80;
+        task_idata_write8(offsetof(struct dos_data, mem_access_mode),
+                         (UBYTE)(orig_mem_access | 0x80));
         DosUmbLink(1);
       }
 
-      rc = ChildEnv(exp, &env, namep);
+      rc = ChildEnvGuest(exp, &env, namep);
 
       /* COM files always load into the largest available block */
       if (rc == SUCCESS)
@@ -5161,7 +5323,8 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
       if (mode & LOAD_HIGH)
       {
         DosUmbLink(UMBstate);
-        internal_data->mem_access_mode = orig_mem_access;
+        task_idata_write8(offsetof(struct dos_data, mem_access_mode),
+                         orig_mem_access);
         mode &= 0x7f;
       }
 
@@ -5193,11 +5356,12 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
 
   {
     UWORD fcbcode;
-    psp *p;
     // termination vector (not used by the kernel, but may be used by gues process)
     setvec(0x22, exec_caller_return_addr());
-    child_psp(mem, internal_data->cu_psp, mem + asize);
-    fcbcode = patchPSP(mem - 1, env, exp, namep);
+    child_psp(mem,
+              task_idata_read16(offsetof(struct dos_data, cu_psp)),
+              mem + asize);
+    fcbcode = patchPSPGuest(mem - 1, env, exp, namep);
 
     if (asize > 0x1000)
       asize = 0x1000;
@@ -5207,19 +5371,21 @@ COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
 
     /* CP/M compatibility: far-call-to-0:00C0h stub encoding the
        segment size, at PSP+5 */
-    p = (psp *) ARM_PTR(MK_FP(mem, 0));
-    p->ps_reentry = MK_FP(0xc - asize, asize << 4);
+    task_guest_write_far(task_guest_seg_linear(mem) +
+                             offsetof(psp, ps_reentry),
+                         MK_FP((UWORD)(0xc - asize),
+                               (UWORD)(asize << 4)));
     asize <<= 4;
     asize += 0x10e;
     exp->exec.stack = MK_FP(mem, asize);
     exp->exec.start_addr = MK_FP(mem, 0x100);
-    *((UWORD *) ARM_PTR(MK_FP(mem, asize))) = 0;
+    pstore16(task_guest_seg_linear(mem) + asize, 0);
     load_transfer(mem, exp, fcbcode, mode);
   }
   return SUCCESS;
 }
 
-COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
+COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
 {
   UWORD mem, env = 0, start_seg, asize = 0;
   UWORD exe_size;
@@ -5229,8 +5395,9 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
 
   if ((mode & 0x7f) != EXEC_OVERLAY)
   {
-    UBYTE UMBstate = LoL->uppermem_link;
-    UBYTE orig_mem_access = internal_data->mem_access_mode;
+    UBYTE UMBstate = pload8(task_lol_linear + offsetof(struct lol, uppermem_link));
+    UBYTE orig_mem_access =
+        task_idata_read8(offsetof(struct dos_data, mem_access_mode));
     COUNT rc;
 
     image_size += sizeof(psp) / 16;
@@ -5242,10 +5409,11 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
     if (mode & LOAD_HIGH)
     {
       DosUmbLink(1);
-      internal_data->mem_access_mode |= 0x80;
+      task_idata_write8(offsetof(struct dos_data, mem_access_mode),
+                       (UBYTE)(orig_mem_access | 0x80));
     }
 
-    rc = ChildEnv(exp, &env, namep);
+    rc = ChildEnvGuest(exp, &env, namep);
 
     if (rc == SUCCESS)
       rc = ExecMemLargest(&asize, exe_size);
@@ -5266,7 +5434,8 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
 
     if (mode & LOAD_HIGH)
     {
-      internal_data->mem_access_mode = orig_mem_access;
+      task_idata_write8(offsetof(struct dos_data, mem_access_mode),
+                       orig_mem_access);
       DosUmbLink(UMBstate);
     }
     if (rc != SUCCESS)
@@ -5328,7 +5497,7 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
     SftSeek(fd, (LONG) ExeHeader.exRelocTable, SEEK_SET);
     for (i = 0; i < ExeHeader.exRelocItems; i++)
     {
-      UWORD *spot;
+      uint32_t spot;
 
       if (DosRWSft(fd, sizeof(UWORD) * 2, x86_FAR_PTR(DOS_PSP, reloc) /* -> UWORD[] */,
                    XFR_READ) != sizeof(UWORD) * 2)
@@ -5342,13 +5511,15 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
       }
       if (mode == EXEC_OVERLAY)
       {
-        spot = (UWORD *) ARM_PTR(MK_FP(reloc[1] + mem, reloc[0]));
-        *spot += exp->load.reloc;
+        spot = task_guest_linear(
+            MK_FP((UWORD)(reloc[1] + mem), reloc[0]));
+        pstore16(spot, (UWORD)(pload16(spot) + exp->load.reloc));
       }
       else
       {
-        spot = (UWORD *) ARM_PTR(MK_FP(reloc[1] + start_seg, reloc[0]));
-        *spot += start_seg;
+        spot = task_guest_linear(
+            MK_FP((UWORD)(reloc[1] + start_seg), reloc[0]));
+        pstore16(spot, (UWORD)(pload16(spot) + start_seg));
       }
     }
   }
@@ -5363,32 +5534,15 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
 
     setvec(0x22, exec_caller_return_addr());
     // termination vector (not used by the kernel, but may be used by gues process)
-    child_psp(mem, internal_data->cu_psp, mem + asize);
-    fcbcode = patchPSP(mem - 1, env, exp, namep);
+    child_psp(mem,
+              task_idata_read16(offsetof(struct dos_data, cu_psp)),
+              mem + asize);
+    fcbcode = patchPSPGuest(mem - 1, env, exp, namep);
     exp->exec.stack = MK_FP(ExeHeader.exInitSS + start_seg, ExeHeader.exInitSP);
     exp->exec.start_addr = MK_FP(ExeHeader.exInitCS + start_seg, ExeHeader.exInitIP);
     load_transfer(mem, exp, fcbcode, mode);
   }
   return SUCCESS;
-}
-
-static void fcom_copy_exec_tail(char *dst, size_t dst_size, const CommandTail *tail)
-{
-  size_t count;
-
-  if (dst_size == 0)
-    return;
-
-  dst[0] = '\0';
-  if (tail == NULL)
-    return;
-
-  count = tail->ctCount;
-  if (count >= dst_size)
-    count = dst_size - 1;
-
-  memcpy(dst, tail->ctBuffer, count);
-  dst[count] = '\0';
 }
 
 /*
@@ -5430,12 +5584,11 @@ static uint32_t native_stack_free(void)
 }
 #endif
 
-COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
+static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
 {
   COUNT rc;
   COUNT fd;
   long openresult;
-  dos_far_ptr x86_lp;
 #if CONTROL_STACK
   {
     uint32_t free_bytes = native_stack_free();
@@ -5451,7 +5604,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
   }
 #endif
   if ((mode & 0x7f) == EXEC_LOADNGO &&
-      fcom_is_command_com((const char *)lp))
+      task_guest_is_command_com(x86_lp))
   {
     /*
      * Хвост командной строки ребёнка собирается в фиксированном слоте
@@ -5462,36 +5615,26 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
      * one-shot: к моменту запуска ребёнка (и любых вложенных EXEC)
      * содержимое уже скопировано. Стек вызывающего не трогается.
      */
-    _Static_assert(sizeof(((CommandTail *)0)->ctBuffer) + 1 <=
-                   SDA_EXEC_TAIL_LEN, "EXEC tail slot too small");
-    char *tail = (char *)ARM_PTR(MK_FP(DOS_PSP, SDA_EXEC_TAIL_OFF));
-    const CommandTail *command_tail = NULL;
     UWORD child_env_mcb = 0;
     COUNT env_rc;
-
-    if (!far_is_null(ep->exec.cmd_line) &&
-        !far_is_end(ep->exec.cmd_line))
-      command_tail =
-          (const CommandTail *)ARM_PTR(ep->exec.cmd_line);
 
     /*
      * Match ordinary EXEC semantics: ChildEnv() copies either the explicit
      * EPB environment or, for env_seg == 0, the current process environment,
      * and appends argv[0].  FCOM owns that copy for its whole lifetime.
      */
-    env_rc = ChildEnv(ep, &child_env_mcb, (char *)lp);
+    env_rc = ChildEnvGuest(ep, &child_env_mcb, x86_lp);
     if (env_rc < SUCCESS)
       return env_rc;
 
     {
       UWORD command_psp;
-      fcom_copy_exec_tail(tail,
-                          sizeof(((CommandTail *)0)->ctBuffer) + 1,
-                          command_tail);
       UWORD fcbcode;
 
-      command_psp=fcom_create_process(tail,mode & LOAD_HIGH,
-                                      internal_data->cu_psp,
+      command_psp=fcom_create_process_guest_tail(ep->exec.cmd_line,
+                                      mode & LOAD_HIGH,
+                                      task_idata_read16(offsetof(struct dos_data,
+                                                                 cu_psp)),
                                       child_env_mcb + 1);
       if (command_psp == 0) {
         DosMemFree(child_env_mcb);
@@ -5505,7 +5648,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
        * process name.  The first process-model pass skipped this entire
        * loader stage.
        */
-      fcbcode=patchPSP(command_psp - 1,child_env_mcb,ep,lp);
+      fcbcode=patchPSPGuest(command_psp - 1,child_env_mcb,ep,x86_lp);
 
       /* tail уже скопирован в PSP:80h ребёнка; patchPSP() отдельно
          установил caller-supplied FCB1/FCB2 из EXEC parameter block.
@@ -5520,12 +5663,7 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 
   memcpy(&TempExeBlock, ep, sizeof(exec_blk));
 
-  /* Same as ChildEnv()/truename() above: "lp" is ARM_PTR(guest DS:DX) from
-     INT 21h/AH=4Bh, so it lives in the CALLER's segment (FreeCOM's PSP for an
-     external command), not DOS_PSP. Re-anchoring it on DOS_PSP produces a
-     bogus offset and DosOpenSft() below then fails to open the executable. */
-  x86_lp = linear_to_far((const BYTE *) lp);
-  dos_far_ptr x86_dhp = IsDevice(lp);
+  dos_far_ptr x86_dhp = task_guest_is_device(x86_lp);
   if (EFFECTIVE(x86_dhp) ||           /* don't try to "execute" e.g. C:\NUL */
       (openresult = DosOpenSft(x86_lp, O_LEGACY | O_OPEN | O_RDONLY, 0)) < SUCCESS) {
     dpb_watch_check_chain("DosExec err");
@@ -5540,19 +5678,21 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 
   if (rc == sizeof(exe_header) &&
       (ExeHeader.exSignature == MAGIC || ExeHeader.exSignature == OLD_MAGIC))
-    rc = DosExeLoader(lp, &TempExeBlock, mode, fd);
+    rc = DosExeLoader(x86_lp, &TempExeBlock, mode, fd);
   else if (rc >= 2 &&
            ((const UBYTE *)&ExeHeader)[0] == 'E' &&
            ((const UBYTE *)&ExeHeader)[1] == 'Z')
-    rc = DosArmEzLoader(&TempExeBlock, mode, fd, lp);
+    rc = DosArmEzLoader(&TempExeBlock, mode, fd,
+                        (BYTE *)ARM_PTR(x86_lp));
   else if (rc >= 4 &&
            ((const UBYTE *)&ExeHeader)[0] == 0x7f &&
            ((const UBYTE *)&ExeHeader)[1] == 'E' &&
            ((const UBYTE *)&ExeHeader)[2] == 'L' &&
            ((const UBYTE *)&ExeHeader)[3] == 'F')
-    rc = DosArmElfLoader(&TempExeBlock, mode, fd, lp);
+    rc = DosArmElfLoader(&TempExeBlock, mode, fd,
+                         (BYTE *)ARM_PTR(x86_lp));
   else if (rc != 0)
-    rc = DosComLoader(lp, &TempExeBlock, mode, fd);
+    rc = DosComLoader(x86_lp, &TempExeBlock, mode, fd);
   else
   {
     DosCloseSft(fd, FALSE);
@@ -5564,6 +5704,18 @@ COUNT DosExec(COUNT mode, exec_blk * ep, BYTE * lp)
 
   return rc;
 }
+
+
+COUNT DosExec(COUNT mode, exec_blk *ep, BYTE *lp)
+{
+  return DosExecFar(mode, ep, linear_to_far((const BYTE *)lp));
+}
+
+COUNT DosExecGuest(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
+{
+  return DosExecFar(mode, ep, x86_lp);
+}
+
 
 /* res_DosExec() - what a running process calls to EXEC a child
    (P_0() below, for the shell). Upstream's version is a tiny asm

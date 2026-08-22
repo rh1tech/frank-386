@@ -384,8 +384,8 @@ UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth);
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
 void new_psp(seg para, seg cur_psp);        /* INT 21h AH=26h */
 void child_psp(seg para, seg cur_psp, int psize); /* INT 21h AH=55h */
-COUNT DosComLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
-COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd);
+COUNT DosComLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd);
+COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd);
 ULONG SftGetFsize(int sft_idx);
 void request_terminate(UBYTE exit_code, UBYTE exit_type);
 bool terminate_requested(void);

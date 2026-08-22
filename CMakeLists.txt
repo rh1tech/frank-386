@@ -22,7 +22,7 @@ if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
 endif()
 
 # Build with a standard 128 KiB EGA-compatible video adapter.
-option(EGA128 "Build with 128 KiB EGA video memory/capabilities" ON)
+option(EGA128 "Build with 128 KiB EGA video memory/capabilities" OFF)
 if(EGA128)
     add_compile_definitions(EGA128=1)
 endif()
