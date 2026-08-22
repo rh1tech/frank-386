@@ -574,16 +574,16 @@ static UWORD arm_app_dos_segment(const void *ptr)
 
 static ULONG arm_app_dos_block_size(UWORD segment)
 {
-  mcb *p;
+  mcb p;
 
   if (segment == 0)
     return 0;
-  p = para2far((seg)(segment - 1));
-  if ((p->m_type != MCB_NORMAL &&
-       p->m_type != MCB_LAST) ||
-      p->m_psp != internal_data->cu_psp)
+  mcb_guest_load((seg)(segment - 1), &p);
+  if ((p.m_type != MCB_NORMAL &&
+       p.m_type != MCB_LAST) ||
+      p.m_psp != internal_data->cu_psp)
     return 0;
-  return (ULONG)p->m_size << 4;
+  return (ULONG)p.m_size << 4;
 }
 
 static void *arm_app_dos_malloc(size_t size)
@@ -1084,7 +1084,7 @@ static void arm_elf_pool_free_stats(UBYTE use_umb,
 {
   UBYTE umb_state = LoL->uppermem_link;
   seg pseg;
-  mcb *p;
+  mcb p;
   ULONG total = 0;
   ULONG largest = 0;
   ULONG guard = 0;
@@ -1103,12 +1103,12 @@ static void arm_elf_pool_free_stats(UBYTE use_umb,
   }
 
   for (;;) {
-    p = para2far(pseg);
-    if (p->m_size == 0xffffu ||
-        (p->m_type != MCB_NORMAL && p->m_type != MCB_LAST))
+    mcb_guest_load(pseg, &p);
+    if (p.m_size == 0xffffu ||
+        (p.m_type != MCB_NORMAL && p.m_type != MCB_LAST))
       break;
-    if (p->m_psp == FREE_PSP) {
-      ULONG bytes = (ULONG)p->m_size << 4;
+    if (p.m_psp == FREE_PSP) {
+      ULONG bytes = (ULONG)p.m_size << 4;
       if (bytes > largest)
         largest = bytes;
       if (total <= 0xfffffffful - bytes)
@@ -1116,9 +1116,9 @@ static void arm_elf_pool_free_stats(UBYTE use_umb,
       else
         total = 0xfffffffful;
     }
-    if (p->m_type == MCB_LAST)
+    if (p.m_type == MCB_LAST)
       break;
-    pseg = (seg)(pseg + p->m_size + 1u);
+    pseg = (seg)(pseg + p.m_size + 1u);
     if (++guard > 0xfffful)
       break;
   }
@@ -2184,7 +2184,12 @@ retry_pool:
     /* DosMemChange() assigns the caller as owner.  These blocks belong to the
        child PSP, exactly like its separate DOS-stack MCB, so normal process
        teardown/TSR ownership sees them as part of the child. */
-    para2far(mcb_seg)->m_psp = base_seg;
+    {
+      mcb block;
+      mcb_guest_load(mcb_seg, &block);
+      block.m_psp = base_seg;
+      mcb_guest_store(mcb_seg, &block);
+    }
 
     chunk = (arm_elf_sec_chunk *)ARM_PTR(MK_FP(data_seg, 0));
     chunk->next_addr = 0;
@@ -2687,9 +2692,11 @@ static int arm_native_reserve_dos_stack_low(ULONG stack_size,
            DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   {
-    mcb *block = (mcb *)ARM_PTR(MK_FP(mcb_seg, 0));
-    block->m_psp = internal_data->cu_psp;
-    memcpy(block->m_name, "ARMSTK  ", sizeof(block->m_name));
+    mcb block;
+    mcb_guest_load(mcb_seg, &block);
+    block.m_psp = internal_data->cu_psp;
+    memcpy(block.m_name, "ARMSTK  ", sizeof(block.m_name));
+    mcb_guest_store(mcb_seg, &block);
   }
 
   return SUCCESS;
@@ -2733,10 +2740,12 @@ static int arm_native_reserve_dos_stack(ULONG stack_size,
            DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   {
-    mcb *block = (mcb *)ARM_PTR(MK_FP(mcb_seg, 0));
+    mcb block;
+    mcb_guest_load(mcb_seg, &block);
     /* Temporary owner until the child PSP exists. */
-    block->m_psp = internal_data->cu_psp;
-    memcpy(block->m_name, "ARMSTK  ", sizeof(block->m_name));
+    block.m_psp = internal_data->cu_psp;
+    memcpy(block.m_name, "ARMSTK  ", sizeof(block.m_name));
+    mcb_guest_store(mcb_seg, &block);
   }
 
   return SUCCESS;
@@ -2744,8 +2753,10 @@ static int arm_native_reserve_dos_stack(ULONG stack_size,
 
 static void arm_native_assign_dos_stack_owner(UWORD stack_mcb, UWORD child_psp)
 {
-  mcb *block = (mcb *)ARM_PTR(MK_FP(stack_mcb, 0));
-  block->m_psp = child_psp;
+  mcb block;
+  mcb_guest_load(stack_mcb, &block);
+  block.m_psp = child_psp;
+  mcb_guest_store(stack_mcb, &block);
 }
 
 static int arm_native_alloc_dos_stack(ULONG stack_size, UWORD child_psp,
@@ -4090,11 +4101,13 @@ static dos_far_ptr /* -> caller's return address */ exec_caller_return_addr(void
 STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
 {
   psp *p;
-  mcb *pspmcb;
+  mcb pspmcb;
+  UWORD psp_mcb_seg;
   int i;
   BYTE *np;
 
-  pspmcb = (mcb *) ARM_PTR(MK_FP(pspseg, 0));
+  psp_mcb_seg = pspseg;
+  mcb_guest_load(psp_mcb_seg, &pspmcb);
   ++pspseg;
   p = (psp *) ARM_PTR(MK_FP(pspseg, 0));
 
@@ -4114,10 +4127,14 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
     guest_read(&p->ps_fcb2, exb->exec.fcb_2, 16);
   }
 
-  pspmcb->m_psp = pspseg;
+  pspmcb.m_psp = pspseg;
+  mcb_guest_store(psp_mcb_seg, &pspmcb);
   if (envseg)
   {
-    ((mcb *) ARM_PTR(MK_FP(envseg, 0)))->m_psp = pspseg;
+    mcb envmcb;
+    mcb_guest_load(envseg, &envmcb);
+    envmcb.m_psp = pspseg;
+    mcb_guest_store(envseg, &envmcb);
     envseg++;
   }
   p->ps_environ = envseg;
@@ -4138,9 +4155,10 @@ STATIC UWORD patchPSP(UWORD pspseg, UWORD envseg, exec_blk * exb, BYTE * fnam)
   }
 set_name:
   for (i = 0; i < 8 && np[i] != '.' && np[i] != '\0'; i++)
-    pspmcb->m_name[i] = toupper((unsigned char) np[i]);
+    pspmcb.m_name[i] = toupper((unsigned char) np[i]);
   if (i < 8)
-    pspmcb->m_name[i] = '\0';
+    pspmcb.m_name[i] = '\0';
+  mcb_guest_store(psp_mcb_seg, &pspmcb);
 
   /* Per-program DOS version faking (SETVER). Upstream does this here and
      new_psp()/DosExec() both already claim we do too - but the block was
@@ -5278,8 +5296,9 @@ COUNT DosExeLoader(BYTE * namep, exec_blk * exp, COUNT mode, COUNT fd)
     start_seg += sizeof(psp) / 16;
     if (exe_size > 0 && (ExeHeader.exMinAlloc | ExeHeader.exMaxAlloc) == 0)
     {
-      mcb *mp = (mcb *) ARM_PTR(MK_FP(mem - 1, 0));
-      start_seg += mp->m_size - image_size;
+      mcb mp;
+      mcb_guest_load((seg)(mem - 1), &mp);
+      start_seg += mp.m_size - image_size;
     }
   }
 

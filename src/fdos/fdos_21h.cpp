@@ -1,8 +1,23 @@
+/* FreeDOS headers describe the legacy C ABI.  Keep their declarations with
+ * C linkage now that this translation unit is compiled as C++. */
+#define new fdos_new
+extern "C" {
 #include "hdrs.h"
 #include "bios/bios.h"
 #include "fdos.h"
+}
+#undef new
+#ifdef load
+#undef load
+#endif
+#include <cstring>
+#include "guest_ref.hpp"
 
-int snprintf(char *s, size_t n, const char *fmt, ...);
+using fdos_guest::cpu_regs_ref;
+using fdos_guest::dos_data_ref;
+using fdos_guest::psp_ref;
+
+extern "C" int snprintf(char *s, size_t n, const char *fmt, ...);
 static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
 {
     static char tags[16][40];
@@ -21,24 +36,22 @@ static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
  * interrupt frame IP, CS, FLAGS.
  */
 static void int21_store_guest_frame(dos_far_ptr frame,
-                                    const CPU_regs *regs,
+                                    const cpu_regs_ref &regs,
                                     UWORD ip, UWORD cs, UWORD flags)
 {
-  struct int21_guest_iregs *r =
-      (struct int21_guest_iregs *)ARM_PTR(frame);
-
-  r->ax = regs->gprx[regax].r16;
-  r->bx = regs->gprx[regbx].r16;
-  r->cx = regs->gprx[regcx].r16;
-  r->dx = regs->gprx[regdx].r16;
-  r->si = regs->gprx[regsi].r16;
-  r->di = regs->gprx[regdi].r16;
-  r->bp = regs->gprx[regbp].r16;
-  r->ds = regs->ds;
-  r->es = regs->es;
-  r->ip = ip;
-  r->cs = cs;
-  r->flags = flags;
+  const uint32_t base = ((uint32_t)FP_SEG(frame) << 4) + FP_OFF(frame);
+  pstore16(base + offsetof(struct int21_guest_iregs, ax), regs.r16(regax));
+  pstore16(base + offsetof(struct int21_guest_iregs, bx), regs.r16(regbx));
+  pstore16(base + offsetof(struct int21_guest_iregs, cx), regs.r16(regcx));
+  pstore16(base + offsetof(struct int21_guest_iregs, dx), regs.r16(regdx));
+  pstore16(base + offsetof(struct int21_guest_iregs, si), regs.r16(regsi));
+  pstore16(base + offsetof(struct int21_guest_iregs, di), regs.r16(regdi));
+  pstore16(base + offsetof(struct int21_guest_iregs, bp), regs.r16(regbp));
+  pstore16(base + offsetof(struct int21_guest_iregs, ds), regs.ds());
+  pstore16(base + offsetof(struct int21_guest_iregs, es), regs.es());
+  pstore16(base + offsetof(struct int21_guest_iregs, ip), ip);
+  pstore16(base + offsetof(struct int21_guest_iregs, cs), cs);
+  pstore16(base + offsetof(struct int21_guest_iregs, flags), flags);
 }
 
 #ifdef NO_HANDLER_DETECTOR
@@ -70,7 +83,7 @@ struct critical_error_workspace
   struct int21_guest_iregs saved_frame;
 };
 
-_Static_assert(sizeof(struct critical_error_workspace) <=
+static_assert(sizeof(struct critical_error_workspace) <=
                offsetof(struct dos_data, disk_stack) -
                offsetof(struct dos_data, error_stack),
                "critical-error workspace must fit the resident DOS error stack");
@@ -583,33 +596,33 @@ static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp, dos_far_p
 /* INT 21h is dispatched against a local register frame, as in upstream
  * FreeDOS int21_service().  Guest BIOS/device calls may use the live CPU as
  * scratch state, but cannot leak register changes into this frame. */
-#define R_AX    regs->gprx[regax].r16
-#define R_BX    regs->gprx[regbx].r16
-#define R_CX    regs->gprx[regcx].r16
-#define R_DX    regs->gprx[regdx].r16
-#define R_SI    regs->gprx[regsi].r16
-#define R_DI    regs->gprx[regdi].r16
-#define R_BP    regs->gprx[regbp].r16
-#define R_AL    regs->gprx[regax].r8[0]
-#define R_AH    regs->gprx[regax].r8[1]
-#define R_BL    regs->gprx[regbx].r8[0]
-#define R_BH    regs->gprx[regbx].r8[1]
-#define R_CL    regs->gprx[regcx].r8[0]
-#define R_CH    regs->gprx[regcx].r8[1]
-#define R_DL    regs->gprx[regdx].r8[0]
-#define R_DH    regs->gprx[regdx].r8[1]
-#define R_DS    regs->ds
-#define R_ES    regs->es
-#define R_FS    regs->fs
-#define R_GS    regs->gs
-#define R_CF    regs->flags.bits.CF
-#define R_ZF    regs->flags.bits.ZF
+#define R_AX    regs_ref.r16(regax)
+#define R_BX    regs_ref.r16(regbx)
+#define R_CX    regs_ref.r16(regcx)
+#define R_DX    regs_ref.r16(regdx)
+#define R_SI    regs_ref.r16(regsi)
+#define R_DI    regs_ref.r16(regdi)
+#define R_BP    regs_ref.r16(regbp)
+#define R_AL    regs_ref.r8l(regax)
+#define R_AH    regs_ref.r8h(regax)
+#define R_BL    regs_ref.r8l(regbx)
+#define R_BH    regs_ref.r8h(regbx)
+#define R_CL    regs_ref.r8l(regcx)
+#define R_CH    regs_ref.r8h(regcx)
+#define R_DL    regs_ref.r8l(regdx)
+#define R_DH    regs_ref.r8h(regdx)
+#define R_DS    regs_ref.ds()
+#define R_ES    regs_ref.es()
+#define R_FS    regs_ref.fs()
+#define R_GS    regs_ref.gs()
+#define R_CF    regs_ref.carry()
+#define R_ZF    regs_ref.zero()
 #define R_FP_DS_DX MK_FP(R_DS, R_DX)
 #define R_FP_DS_SI MK_FP(R_DS, R_SI)
 #define R_FP_ES_DI MK_FP(R_ES, R_DI)
 
 #ifdef WITHFAT32
-static COUNT int21_fat32_regs(CPU_regs *regs)
+static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
 {
   COUNT rc;
 
@@ -729,7 +742,7 @@ rebuild_dpb:
           if (!ISFAT32(dpb))
             return DE_INVLDPARM;
 
-          value = xdffp->xdff_f.setget.new;
+          value = xdffp->xdff_f.setget.fdos_new;
           if ((UWORD)xdffp->xdff_function == 0x03)
           {
             if (value != 0xFFFFFFFFUL && (value & ~(0xf | 0x80)))
@@ -830,7 +843,6 @@ DOS 1+ - main DOS handler
 */
 bool fdos_21h(CPU* _cpu) {
     COUNT rc;
-    CPU_regs *regs;
     UWORD entry_ss, entry_sp;
     UWORD entry_ip, entry_cs;
     UWORD frame_sp;
@@ -839,7 +851,6 @@ bool fdos_21h(CPU* _cpu) {
     dos_far_ptr old_ps_stack;
     dos_far_ptr old_user_r;
     dos_far_ptr old_prev_user_r;
-    psp *current_psp;
 
     cpu = _cpu;
     entry_ss = CPU_SS;
@@ -884,28 +895,32 @@ bool fdos_21h(CPU* _cpu) {
      * canary. A hit means somebody wrote into the active INT21 frame area,
      * even if the 4-KB DOS stack itself never approached its lower boundary.
      */
-    regs_sp = (UWORD)((frame_sp - sizeof(*regs)) & (UWORD)~3u);
+    regs_sp = (UWORD)((frame_sp - sizeof(CPU_regs)) & (UWORD)~3u);
     guard_sp = (UWORD)(regs_sp);
 
     CPU_SP = guard_sp;
-    regs = (CPU_regs *)ARM_PTR(MK_FP(entry_ss, regs_sp));
+    cpu_regs_ref regs_ref(((uint32_t)entry_ss << 4) + regs_sp);
+    dos_data_ref idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
+    CPU_regs saved_regs;
+    cpu_save_regs(_cpu, &saved_regs);
+    regs_ref.write_from(saved_regs);
+    regs_ref.flags() = (uint32_t(regs_ref.flags()) & ~0x0041u) | (flags_on_stack & 0x0041u);
 
-    cpu_save_regs(_cpu, regs);
-    regs->flags.value = (regs->flags.value & ~0x0041u) | (flags_on_stack & 0x0041u);
-    current_psp = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-    old_ps_stack = current_psp->ps_stack;
-    old_user_r = internal_data->user_r;
-    old_prev_user_r = internal_data->prev_user_r;
+    psp_ref current_psp((seg)(UWORD)idata.cu_psp());
+    old_ps_stack = current_psp.stack();
+    old_user_r = idata.user_r();
+    old_prev_user_r = idata.prev_user_r();
 
-    current_psp->ps_stack = MK_FP(entry_ss, frame_sp);
-    internal_data->prev_user_r = old_user_r;
-    internal_data->user_r = current_psp->ps_stack;
+    const dos_far_ptr active_ps_stack = MK_FP(entry_ss, frame_sp);
+    current_psp.stack(active_ps_stack);
+    idata.prev_user_r(old_user_r);
+    idata.user_r(active_ps_stack);
 
-    int21_store_guest_frame(current_psp->ps_stack, regs,
+    int21_store_guest_frame(active_ps_stack, regs_ref,
                             entry_ip, entry_cs, flags_on_stack);
 
-    internal_data->Int21AX = R_AX;
-    ++internal_data->InDOS;
+    idata.int21ax() = (UWORD)R_AX;
+    ++idata.indos();
 
     /*
      * A user INT 24h handler is allowed to abandon the DOS critical-error
@@ -918,7 +933,7 @@ bool fdos_21h(CPU* _cpu) {
      * functions 00h..0Ch are excluded by the original condition as well.
      */
     if (R_AH > 0x0c && R_AH != 0x30 && R_AH != 0x59)
-      internal_data->ErrorMode = 0;
+      idata.error_mode() = 0;
 
     dpb_watch_int21_checkpoint(cpu, "entry");
     /* STI: real DOS re-enables interrupts first thing in its INT 21h
@@ -953,7 +968,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
     {
       R_CF = 0;
       if (R_AH != 0x59)
-        internal_data->CritErrCode = SUCCESS;
+        idata.crit_err_code() = SUCCESS;
     }
 
     switch (R_AH) {
@@ -966,7 +981,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
       case 0x02:
         write_char_stdout(R_AL);
-        R_AL = (R_DL == HT) ? ' ' : R_DL;
+        R_AL = (R_DL == HT) ? (UBYTE)' ' : (UBYTE)R_DL;
         break;
 
       /* Auxiliary Input                                              */
@@ -1076,7 +1091,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
 
       case 0x29: /* DOS 1+ - PARSE FILENAME INTO FCB */
-        R_AL = DosParseFilenameIntoFcbRegs(R_AL, MK_FP(R_DS, R_SI), MK_FP(R_ES, R_DI), &R_SI);
+        {
+          UWORD next_si;
+          R_AL = DosParseFilenameIntoFcbRegs((UBYTE)R_AL, MK_FP(R_DS, R_SI),
+                                             MK_FP(R_ES, R_DI), &next_si);
+          R_SI = next_si;
+        }
         break;
 
         /* Set Interrupt Vector                                         */
@@ -1091,7 +1111,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         /* Get Date                                                     */
       case 0x2a:
-        R_AL = DosGetDateRegs(&R_CX, &R_DH, &R_DL);
+        {
+          UWORD year;
+          UBYTE month, day;
+          R_AL = DosGetDateRegs(&year, &month, &day);
+          R_CX = year;
+          R_DH = month;
+          R_DL = day;
+        }
         break;
 
         /* Set Date                                                     */
@@ -1101,7 +1128,14 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         /* Get Time                                                     */
       case 0x2c:
-        DosGetTimeRegs(&R_CH, &R_CL, &R_DH, &R_DL);
+        {
+          UBYTE hour, minute, second, hundredth;
+          DosGetTimeRegs(&hour, &minute, &second, &hundredth);
+          R_CH = hour;
+          R_CL = minute;
+          R_DH = second;
+          R_DL = hundredth;
+        }
         break;
 
         /* Set Time                                                     */
@@ -1403,9 +1437,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          * reads and writes live CPU_* registers.  Isolate that API here;
          * the rest of INT 21h uses the local frame. */
         cpu_save_regs(_cpu, &live_saved);
-        cpu_restore_regs(_cpu, regs);
+        regs_ref.read_into(saved_regs);
+        cpu_restore_regs(_cpu, &saved_regs);
         rc = DosDevIOctl();      /* can set critical error code! */
-        cpu_save_regs(_cpu, regs);
+        cpu_save_regs(_cpu, &saved_regs);
+        regs_ref.write_from(saved_regs);
         cpu_restore_regs(_cpu, &live_saved);
 
         if (rc < SUCCESS)
@@ -1674,7 +1710,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           seg para;
           UWORD asize = 0;
 
-          rc = DosMemAlloc(R_BX, internal_data->mem_access_mode, &para, &asize);
+          rc = DosMemAlloc((UWORD)R_BX, (UBYTE)idata.mem_access_mode(), &para, &asize);
 #ifdef INT21_DIAG
           printf("MEM 48 by %04x:%04x bx=%04x -> rc=%d seg=%04x max=%04x\n",
                  readw86(stk_lin(CPU_SS, CPU_SP, 2)),
@@ -1759,7 +1795,12 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         switch (R_AL)
         {
           case 0x00:
-            rc = DosGetFtime((COUNT)R_BX, (ddate*)&R_DX, (dtime*)&R_CX);
+            {
+              UWORD date_word, time_word;
+              rc = DosGetFtime((COUNT)R_BX, (ddate *)&date_word, (dtime *)&time_word);
+              R_DX = date_word;
+              R_CX = time_word;
+            }
             break;
 
           case 0x01:
@@ -1936,7 +1977,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x73:
         R_CF = 0;
         internal_data->CritErrCode = SUCCESS;
-        rc = int21_fat32_regs(regs);
+        rc = int21_fat32_regs(regs_ref);
         goto short_check;
 #endif
 
@@ -2067,7 +2108,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            return_code = AL | 0x300). Errors from DosMemChange() are
            deliberately ignored, exactly like the original. */
         DosMemChange(internal_data->cu_psp,
-                     R_DX < 6 ? 6 : R_DX, NULL);
+                     (UWORD)R_DX < 6u ? (UWORD)6u : (UWORD)R_DX, NULL);
         request_terminate(R_AL, 3);
         R_CF = 0;
         break;
@@ -2598,8 +2639,8 @@ error_invalid:
 
 error_exit:
     R_AX = (UWORD)(-rc);
-    if (internal_data->CritErrCode == SUCCESS)
-        internal_data->CritErrCode = R_AX;      /* Maybe set */
+    if ((UWORD)idata.crit_err_code() == SUCCESS)
+        idata.crit_err_code() = (UWORD)R_AX;      /* Maybe set */
     R_CF = 1;
     goto exit_dispatch;
 
@@ -2608,26 +2649,27 @@ error_carry:
 
 exit_dispatch:
     flags_on_stack = (flags_on_stack & ~0x0041u)
-                   | (regs->flags.value & 0x0041u);
+                   | (uint32_t(regs_ref.flags()) & 0x0041u);
     /*
      * Keep the published frame coherent through the end of dispatch.
      * Critical-error handling and DOS extenders may inspect PSP:2Eh
      * while this invocation is active.
      */
-    int21_store_guest_frame(current_psp->ps_stack, regs,
+    int21_store_guest_frame(current_psp.stack(), regs_ref,
                             entry_ip, entry_cs, flags_on_stack);
 
     /* Upstream copies its local lregs frame back only after dispatch.
      * Do the same here, then patch CF/ZF in the caller's IRET frame. */
-    cpu_restore_regs(_cpu, regs);
+    regs_ref.read_into(saved_regs);
+    cpu_restore_regs(_cpu, &saved_regs);
     dpb_watch_int21_checkpoint(cpu, "exit");
     writew86(stk_lin(entry_ss, entry_sp, 4), flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");
-    current_psp->ps_stack = old_ps_stack;
-    internal_data->user_r = old_user_r;
-    internal_data->prev_user_r = old_prev_user_r;
+    current_psp.stack(old_ps_stack);
+    idata.user_r(old_user_r);
+    idata.prev_user_r(old_prev_user_r);
     CPU_SP = entry_sp;
-    --internal_data->InDOS;
+    --idata.indos();
     return true;
 }
 

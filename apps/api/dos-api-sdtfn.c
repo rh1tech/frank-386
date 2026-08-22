@@ -1623,9 +1623,10 @@ struct native_dos_FILE
     int handle;
     int eof;
     int is_static;
+    int text_mode;
 };
 
-static struct native_dos_FILE native_stdout_file = {1, 0, 1};
+static struct native_dos_FILE native_stdout_file = {1, 0, 1, 1};
 FILE *stdout = &native_stdout_file;
 
 /*
@@ -1675,6 +1676,49 @@ static int native_console_write(int handle, const char *data, size_t length)
     return total;
 }
 
+/* DOS text streams translate LF to CRLF; low-level write() stays binary. */
+static int native_stream_write(FILE *stream, const char *data, size_t length)
+{
+    size_t start = 0;
+    size_t i;
+
+    if (!stream || (!data && length != 0))
+        return -1;
+
+    if (!stream->text_mode)
+        return write(stream->handle, data, (unsigned int)length) == (int)length
+            ? (int)length : -1;
+
+    /* Preserve the existing console policy; regular DOS text files use the
+       CRT rule that every LF written to a text stream becomes CRLF. */
+    if (stream->handle == 1 || stream->handle == 2)
+        return native_console_write(stream->handle, data, length) < 0
+            ? -1 : (int)length;
+
+    for (i = 0; i < length; ++i)
+    {
+        if (data[i] != '\n')
+            continue;
+
+        if (i > start &&
+            write(stream->handle, data + start, (unsigned int)(i - start)) !=
+                (int)(i - start))
+            return -1;
+
+        if (write(stream->handle, "\r\n", 2) != 2)
+            return -1;
+
+        start = i + 1;
+    }
+
+    if (start < length &&
+        write(stream->handle, data + start, (unsigned int)(length - start)) !=
+            (int)(length - start))
+        return -1;
+
+    return (int)length;
+}
+
 int fputc(int c, FILE *stream)
 {
     unsigned char ch = (unsigned char)c;
@@ -1683,10 +1727,7 @@ int fputc(int c, FILE *stream)
     if (!stream)
         return -1;
 
-    if ((stream->handle == 1 || stream->handle == 2) && ch == '\n')
-        rc = native_console_write(stream->handle, (const char *)&ch, 1);
-    else
-        rc = write(stream->handle, &ch, 1);
+    rc = native_stream_write(stream, (const char *)&ch, 1);
 
     return rc < 0 ? -1 : ch;
 }
@@ -1702,11 +1743,7 @@ int fputs(const char *str, FILE *stream)
     if (len == 0)
         return 0;
 
-    if (stream->handle == 1 || stream->handle == 2)
-        return native_console_write(stream->handle, str, len) >= 0 ? 0 : -1;
-
-    return write(stream->handle, str, (unsigned int)len) == (int)len
-        ? 0 : -1;
+    return native_stream_write(stream, str, len) >= 0 ? 0 : -1;
 }
 
 int putchar(int c)
@@ -1730,7 +1767,7 @@ int vsnprintf(char *buffer, size_t size,
     return ((fn_ptr_t)_sys_table_ptrs[10])(buffer, size, format, args);
 }
 
-static int native_vfprintf_handle(int handle, const char *format, va_list args)
+static int native_vfprintf_stream(FILE *stream, const char *format, va_list args)
 {
     char stackbuf[512];
     va_list copy;
@@ -1744,10 +1781,8 @@ static int native_vfprintf_handle(int handle, const char *format, va_list args)
 
     if ((size_t)length < sizeof(stackbuf))
     {
-        int written = (handle == 1 || handle == 2)
-            ? native_console_write(handle, stackbuf, (size_t)length)
-            : write(handle, stackbuf, (unsigned int)length);
-        return written < 0 ? -1 : length;
+        return native_stream_write(stream, stackbuf, (size_t)length) < 0
+            ? -1 : length;
     }
 
     char *buffer = (char *)malloc((size_t)length + 1);
@@ -1758,9 +1793,7 @@ static int native_vfprintf_handle(int handle, const char *format, va_list args)
     vsnprintf(buffer, (size_t)length + 1, format, copy);
     va_end(copy);
 
-    int written = (handle == 1 || handle == 2)
-        ? native_console_write(handle, buffer, (size_t)length)
-        : write(handle, buffer, (unsigned int)length);
+    int written = native_stream_write(stream, buffer, (size_t)length);
     free(buffer);
     return written < 0 ? -1 : length;
 }
@@ -1813,6 +1846,7 @@ FILE *fopen(const char *filename, const char *mode)
     stream->handle = handle;
     stream->eof = 0;
     stream->is_static = 0;
+    stream->text_mode = strchr(mode, 'b') == NULL;
     return stream;
 }
 
@@ -1869,11 +1903,11 @@ size_t fwrite(const void *buffer, size_t size, size_t count, FILE *stream)
         return 0;
 
     total = size * count;
-    written = write(stream->handle, buffer, (unsigned int)total);
-    if (written <= 0)
+    written = native_stream_write(stream, (const char *)buffer, total);
+    if (written < 0)
         return 0;
 
-    return (size_t)written / size;
+    return count;
 }
 
 int fseek(FILE *stream, long offset, int origin)
@@ -1925,7 +1959,7 @@ int getchar(void)
 
 int vprintf(const char *format, va_list args)
 {
-    return native_vfprintf_handle(1, format, args);
+    return native_vfprintf_stream(stdout, format, args);
 }
 
 int printf(const char *format, ...)
@@ -1934,7 +1968,7 @@ int printf(const char *format, ...)
     int rc;
 
     va_start(args, format);
-    rc = native_vfprintf_handle(1, format, args);
+    rc = native_vfprintf_stream(stdout, format, args);
     va_end(args);
     return rc;
 }
@@ -1948,7 +1982,7 @@ int fprintf(FILE *stream, const char *format, ...)
         return -1;
 
     va_start(args, format);
-    rc = native_vfprintf_handle(stream->handle, format, args);
+    rc = native_vfprintf_stream(stream, format, args);
     va_end(args);
     return rc;
 }

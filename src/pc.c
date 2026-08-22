@@ -29,8 +29,8 @@ uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
 void netredirect_init(CPU *cpu, int enable);
 
 unsigned long phys_mem_size = 8l << 20;
-uint8_t *guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
 #ifdef EGA128
+uint8_t* __scratch_y("guest_ram_base") guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
 uint8_t ram_pages[RAM_PAGES_SIZE]
     __attribute__((section(".bss.gfx_buffer.ram_pages"), aligned(4)));
 #endif

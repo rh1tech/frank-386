@@ -12,6 +12,7 @@ int strncmp(const char *a, const char *b, size_t n);
 char *strncpy(char *dst, const char *src, size_t n);
 char *strcpy(char *dst, const char *src);
 char *strcat(char *dst, const char *src);
+char *strchr(const char *s, int c);
 int strcmp(const char *a, const char *b);
 int strcmpi(const char *a, const char *b);
 void strupr(char *s);

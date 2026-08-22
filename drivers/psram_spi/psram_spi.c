@@ -1,4 +1,6 @@
 #pragma GCC optimize("Ofast")
+#include <pico.h>
+#include "board_config.h"
 #include "psram_spi.h"
 #include <stdio.h>
 psram_spi_inst_t psram_spi;

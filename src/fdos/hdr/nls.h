@@ -641,7 +641,7 @@ struct subf_hdr { /* subfunction header */
 };
 
 struct subf_tbl {
-  char sig[8];    /* signature for each subfunction data */
+  char sig[9];    /* 8-byte signature + C++ initializer NUL */
   int idx;        /* index of pointer in nls_hc.asm to be copied to */
   UWORD max;      /* max payload accepted from COUNTRY.SYS, in bytes;
                      0 == subfunction not supported */

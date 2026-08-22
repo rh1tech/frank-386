@@ -1092,8 +1092,10 @@ static bool init_hardware(void) {
     // Initialize PSRAM first
     DBG_PRINT("Initializing PSRAM...\n");
     uint psram_pin = get_psram_pin();
+#ifndef EGA128  // TODO: remove it for test EGA128+QSPI
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
+#endif
 
     /* Probe PSRAM before video as before, but do not stop here: the error OSD
      * can only be shown after the video core has completed initialization.

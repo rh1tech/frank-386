@@ -110,6 +110,74 @@ struct dhdr* clk_dev;
 struct dhdr* blk_dev;
 struct lol* LoL;// = (struct lol*)ARM_PTR(x86_FIXED_DATA);
 struct dos_data* internal_data;// (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
+
+
+static inline uint32_t kernel_guest_linear(dos_far_ptr p)
+{
+  return ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p);
+}
+
+static void kernel_guest_write(uint32_t addr, const void *src, size_t len)
+{
+  const UBYTE *s = (const UBYTE *)src;
+  while (len--)
+    pstore8(addr++, *s++);
+}
+
+static void kernel_guest_read(uint32_t addr, void *dst, size_t len)
+{
+  UBYTE *d = (UBYTE *)dst;
+  while (len--)
+    *d++ = pload8(addr++);
+}
+
+static void kernel_guest_fill(uint32_t addr, UBYTE value, size_t len)
+{
+  while (len--)
+    pstore8(addr++, value);
+}
+
+#define KERNEL_LOL_LINEAR \
+  (((uint32_t)DOS_PSP << 4) + 0x08F0u)
+#define KERNEL_IDATA_LINEAR \
+  (((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF)
+static dos_far_ptr kernel_guest_read_far(uint32_t addr)
+{
+  dos_far_ptr p;
+  kernel_guest_read(addr, &p, sizeof(p));
+  return p;
+}
+
+static void kernel_guest_write_far(uint32_t addr, dos_far_ptr p)
+{
+  kernel_guest_write(addr, &p, sizeof(p));
+}
+
+static UBYTE kernel_lol_read8(size_t off)
+{
+  return pload8(KERNEL_LOL_LINEAR + (uint32_t)off);
+}
+
+static UWORD kernel_lol_read16(size_t off)
+{
+  return pload16(KERNEL_LOL_LINEAR + (uint32_t)off);
+}
+
+static dos_far_ptr kernel_lol_read_far(size_t off)
+{
+  return kernel_guest_read_far(KERNEL_LOL_LINEAR + (uint32_t)off);
+}
+
+static void kernel_lol_write8(size_t off, UBYTE v)
+{
+  pstore8(KERNEL_LOL_LINEAR + (uint32_t)off, v);
+}
+
+static void kernel_lol_write_far(size_t off, dos_far_ptr p)
+{
+  kernel_guest_write_far(KERNEL_LOL_LINEAR + (uint32_t)off, p);
+}
+
 /* break_ena: the original kernel's C global break_ena IS the SDA byte
    at internal_data+17h (an asm label alias). The port briefly had two
    diverging copies; the SDA field internal_data->break_ena is now the
@@ -197,66 +265,77 @@ static dos_far_ptr nls_hc_ptr(UWORD off)
 
 static void init_nls_hardcoded(void)
 {
-    struct nlsPackage *pkg = (struct nlsPackage *)ARM_PTR(x86_nlsPackageHardcoded);
-    struct nlsInfoBlock *info = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
+    struct nlsPackage pkg;
+    struct nlsInfoBlock info;
     UWORD off_table2 = sizeof(struct nlsPackage);
     UWORD off_table4 = off_table2 + sizeof(nls_upcase_hardcoded_init);
     UWORD off_table5 = off_table4 + sizeof(nls_fupcase_hardcoded_init);
     UWORD off_table6 = off_table5 + sizeof(nls_fname_term_hardcoded_init);
     UWORD off_table7 = off_table6 + sizeof(nls_coll_hardcoded_init);
 
-    memset(pkg, 0, sizeof(*pkg));
+    memset(&pkg, 0, sizeof(pkg));
+    pkg.nxt = MK_FP(0, 0);
+    pkg.cntry = 1;
+    pkg.cp = 437;
+    pkg.flags = NLS_FLAG_HARDCODED;
+    pkg.yeschar = 'Y';
+    pkg.nochar = 'N';
+    pkg.numSubfct = 6;
 
-    pkg->nxt = MK_FP(0, 0);
-    pkg->cntry = 1;
-    pkg->cp = 437;
-    pkg->flags = NLS_FLAG_HARDCODED;
-    pkg->yeschar = 'Y';
-    pkg->nochar = 'N';
-    pkg->numSubfct = 6;
+    pkg.nlsPointers[0].subfct = 2;
+    pkg.nlsPointers[0].pointer = nls_hc_ptr(off_table2);
+    pkg.nlsPointers[1].subfct = 4;
+    pkg.nlsPointers[1].pointer = nls_hc_ptr(off_table4);
+    pkg.nlsPointers[2].subfct = 5;
+    pkg.nlsPointers[2].pointer = nls_hc_ptr(off_table5);
+    pkg.nlsPointers[3].subfct = 6;
+    pkg.nlsPointers[3].pointer = nls_hc_ptr(off_table6);
+    pkg.nlsPointers[4].subfct = 7;
+    pkg.nlsPointers[4].pointer = nls_hc_ptr(off_table7);
+    pkg.nlsPointers[5].subfct = 1;
+    pkg.nlsPointers[5].pointer = nls_hc_ptr(offsetof(struct nlsPackage, nlsExt));
 
-    struct nlsPointer *ptrs = pkg->nlsPointers;
-    ptrs[0].subfct = 2;
-    ptrs[0].pointer = nls_hc_ptr(off_table2);
-    ptrs[1].subfct = 4;
-    ptrs[1].pointer = nls_hc_ptr(off_table4);
-    ptrs[2].subfct = 5;
-    ptrs[2].pointer = nls_hc_ptr(off_table5);
-    ptrs[3].subfct = 6;
-    ptrs[3].pointer = nls_hc_ptr(off_table6);
-    ptrs[4].subfct = 7;
-    ptrs[4].pointer = nls_hc_ptr(off_table7);
-    ptrs[5].subfct = 1;
-    ptrs[5].pointer = nls_hc_ptr(offsetof(struct nlsPackage, nlsExt));
+    pkg.nlsExt.subfct = 1;
+    pkg.nlsExt.size = 0x001c;
+    pkg.nlsExt.countryCode = 1;
+    pkg.nlsExt.codePage = 437;
+    pkg.nlsExt.dateFmt = 0;
+    memcpy(pkg.nlsExt.curr, "$", 2);
+    memcpy(pkg.nlsExt.thSep, ",", 2);
+    memcpy(pkg.nlsExt.point, ".", 2);
+    memcpy(pkg.nlsExt.dateSep, "-", 2);
+    memcpy(pkg.nlsExt.timeSep, ":", 2);
+    pkg.nlsExt.currFmt = 0;
+    pkg.nlsExt.prescision = 2;
+    pkg.nlsExt.timeFmt = 0;
+    pkg.nlsExt.upCaseFct = CharMapSrvc;
+    memcpy(pkg.nlsExt.dataSep, ",", 2);
 
-    pkg->nlsExt.subfct = 1;
-    pkg->nlsExt.size = 0x001c;
-    pkg->nlsExt.countryCode = 1;
-    pkg->nlsExt.codePage = 437;
-    pkg->nlsExt.dateFmt = 0;
-    memcpy(pkg->nlsExt.curr, "$", 2);
-    memcpy(pkg->nlsExt.thSep, ",", 2);
-    memcpy(pkg->nlsExt.point, ".", 2);
-    memcpy(pkg->nlsExt.dateSep, "-", 2);
-    memcpy(pkg->nlsExt.timeSep, ":", 2);
-    pkg->nlsExt.currFmt = 0;
-    pkg->nlsExt.prescision = 2;
-    pkg->nlsExt.timeFmt = 0;
-    pkg->nlsExt.upCaseFct = CharMapSrvc;
-    memcpy(pkg->nlsExt.dataSep, ",", 2);
+    kernel_guest_write(kernel_guest_linear(x86_nlsPackageHardcoded),
+                       &pkg, sizeof(pkg));
+    kernel_guest_write(kernel_guest_linear(nls_hc_ptr(off_table2)),
+                       nls_upcase_hardcoded_init,
+                       sizeof(nls_upcase_hardcoded_init));
+    kernel_guest_write(kernel_guest_linear(nls_hc_ptr(off_table4)),
+                       nls_fupcase_hardcoded_init,
+                       sizeof(nls_fupcase_hardcoded_init));
+    kernel_guest_write(kernel_guest_linear(nls_hc_ptr(off_table5)),
+                       nls_fname_term_hardcoded_init,
+                       sizeof(nls_fname_term_hardcoded_init));
+    kernel_guest_write(kernel_guest_linear(nls_hc_ptr(off_table6)),
+                       nls_coll_hardcoded_init,
+                       sizeof(nls_coll_hardcoded_init));
+    kernel_guest_write(kernel_guest_linear(nls_hc_ptr(off_table7)),
+                       nls_dbcs_hardcoded_init,
+                       sizeof(nls_dbcs_hardcoded_init));
 
-    memcpy(ARM_PTR(nls_hc_ptr(off_table2)), nls_upcase_hardcoded_init, sizeof(nls_upcase_hardcoded_init));
-    memcpy(ARM_PTR(nls_hc_ptr(off_table4)), nls_fupcase_hardcoded_init, sizeof(nls_fupcase_hardcoded_init));
-    memcpy(ARM_PTR(nls_hc_ptr(off_table5)), nls_fname_term_hardcoded_init, sizeof(nls_fname_term_hardcoded_init));
-    memcpy(ARM_PTR(nls_hc_ptr(off_table6)), nls_coll_hardcoded_init, sizeof(nls_coll_hardcoded_init));
-    memcpy(ARM_PTR(nls_hc_ptr(off_table7)), nls_dbcs_hardcoded_init, sizeof(nls_dbcs_hardcoded_init));
-
-    memset(info, 0, sizeof(*info));
-    info->fname = MK_FP(0, 0);
-    info->sysCodePage = 437;
-    info->flags = NLS_CODE_REORDER_POINTERS;
-    info->actPkg = x86_nlsPackageHardcoded;
-    info->chain = x86_nlsPackageHardcoded;
+    memset(&info, 0, sizeof(info));
+    info.fname = MK_FP(0, 0);
+    info.sysCodePage = 437;
+    info.flags = NLS_CODE_REORDER_POINTERS;
+    info.actPkg = x86_nlsPackageHardcoded;
+    info.chain = x86_nlsPackageHardcoded;
+    kernel_guest_write(kernel_guest_linear(x86_nlsInfo), &info, sizeof(info));
 }
 
 KernelConfig InitKernelConfig = {
@@ -1309,136 +1388,112 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
 }
 
 WORD execrh(/*request*/ dos_far_ptr _rq, /*struct dhdr*/ dos_far_ptr _dhp) {
-  struct dhdr* dhp = (struct dhdr*)ARM_PTR(_dhp);
-  request* rq = (request*)ARM_PTR(_rq);
-  if (dhp->dh_attr & ATTR_NATIVE) {
-    dhp->arm.dh_interrupt(rq);
-  } else {
-    x86_execrh(_rq, dhp, _dhp);
+  struct dhdr dh;
+  request rq;
+
+  kernel_guest_read(kernel_guest_linear(_dhp), &dh, sizeof(dh));
+
+  if (dh.dh_attr & ATTR_NATIVE) {
+    kernel_guest_read(kernel_guest_linear(_rq), &rq, sizeof(rq));
+    dh.arm.dh_interrupt(&rq);
+    kernel_guest_write(kernel_guest_linear(_rq), &rq, sizeof(rq));
+    return rq.r_status;
   }
-  return rq->r_status;
+
+  x86_execrh(_rq, &dh, _dhp);
+  return pload16(kernel_guest_linear(_rq) + offsetof(request, r_status));
 }
 
 /* check for a block device and update  device control block    */
 STATIC VOID update_dcb(/*struct dhdr*/ dos_far_ptr x86_dhp)
 {
-  /*
-  printf("before update_dcb: first_mcb=%04X nblkdev=%u DPBp=%04X:%04X\n",
-       LoL->first_mcb, LoL->nblkdev,
-       FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));  
-  */
-  struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
+  struct dhdr dh;
   REG COUNT Index;
-  COUNT nunits = dhp->dh_name[0];
-   // Drive Parameter Block: описание одного DOS-диска/логического drive unit.
-   // Через DPB DOS связывает букву диска с конкретным block-device driver и его subunit.
+  COUNT nunits;
   dos_far_ptr x86_dpb;
+  UBYTE nblkdev;
 
-  /* printf("nblkdev = %i\n", LoL->nblkdev); */
-  
-  /* if no units, nothing to do, ensure at least 1 unit for rest of logic */
-  if (nunits == 0) return;
+  kernel_guest_read(kernel_guest_linear(x86_dhp), &dh, sizeof(dh));
+  nunits = (UBYTE)dh.dh_name[0];
+  if (nunits == 0)
+    return;
 
-  /* allocate memory for new device control blocks, insert into chain [at end], and update our pointer to new end */
-  if ( LoL->first_mcb ) { // MCB exist, use KernelAlloc
+  if (kernel_lol_read16(offsetof(struct lol, first_mcb)) != 0) {
     x86_dpb = KernelAlloc(nunits * sizeof(struct dpb), 'E', Config.cfgDosDataUmb);
+  } else {
+    x86_dpb = DynAlloc("DPBp", (UBYTE)dh.dh_name[0], sizeof(struct dpb));
   }
-  else { // no MCB, use temporaty flow (TODO: ensure)
-    x86_dpb = DynAlloc("DPBp", blk_dev->dh_name[0], sizeof(struct dpb));
-  }
-  struct dpb FAR *dpb = (struct dpb*)ARM_PTR(x86_dpb);
-///printf("DBG update_dcb alloc nunits=%u x86_dpb=%04X:%04X native=%p\n", nunits, FP_SEG(x86_dpb), FP_OFF(x86_dpb), ARM_PTR(x86_dpb));
 
-  /* find end of dpb chain or initialize root if needed */
-  if (LoL->nblkdev == 0)
-  {
-    /* update root pointer to new end (our just allocated block) */
-    LoL->DPBp = x86_dpb;
-  }  
-  else
-  {
-    struct dpb FAR *tmp_dpb;
-    /* find current end of dpb chain by following next pointers to end */
-    for (
-        tmp_dpb = (struct dpb*)ARM_PTR(LoL->DPBp);
-        !far_is_end(tmp_dpb->dpb_next);
-        tmp_dpb = (struct dpb*)ARM_PTR(tmp_dpb->dpb_next)
-    )
-      ;
-    /* insert into chain [at end] */
-    tmp_dpb->dpb_next = x86_dpb;
+  nblkdev = kernel_lol_read8(offsetof(struct lol, nblkdev));
+  if (nblkdev == 0) {
+    kernel_lol_write_far(offsetof(struct lol, DPBp), x86_dpb);
+  } else {
+    dos_far_ptr cur = kernel_lol_read_far(offsetof(struct lol, DPBp));
+    struct dpb d;
+
+    for (;;) {
+      kernel_guest_read(kernel_guest_linear(cur), &d, sizeof(d));
+      if (far_is_end(d.dpb_next))
+        break;
+      cur = d.dpb_next;
+    }
+    d.dpb_next = x86_dpb;
+    kernel_guest_write(kernel_guest_linear(cur), &d, sizeof(d));
   }
-  /* dpb points to last block, one just allocated */
 
   for (Index = 0; Index < nunits; Index++)
-  {		
-    /* printf("processing unit %i of %i nunits\n", Index, nunits); */
-    /* memory allocated as array, so next is just next element */
-    dpb->dpb_next = (Index + 1 < nunits)
-                  ? ADD_OFF(x86_dpb, (Index + 1) * sizeof(struct dpb))
-                  : MK_FP(-1, -1);
-    dpb->dpb_unit = LoL->nblkdev;
-    dpb->dpb_subunit = Index;
-    dpb->dpb_device = x86_dhp;
-    dpb->dpb_flags = M_CHANGED;
-    // LoL->CDSp: Current Directory Structure
-    /* Upstream tests the whole far pointer ("LoL->CDSp != 0"); testing only
-       FP_SEG() would wrongly discard a CDS array that happens to live at
-       offset 0 of segment 0. far_is_null() is the port's spelling of that
-       same 32-bit test. */
-    if (!far_is_null(LoL->CDSp) && (LoL->nblkdev < LoL->lastdrive))
-    {
-      struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp);
-      CDSp[LoL->nblkdev].cdsDpb = ADD_OFF(x86_dpb, Index * sizeof(struct dpb));
-      CDSp[LoL->nblkdev].cdsFlags = CDSPHYSDRV;
-    }
-    /*
-	  printf("DBG update_dcb unit=%u dpb=%04X:%04X native=%p next=%04X:%04X dev=%04X:%04X flags=%04X\n",
-       LoL->nblkdev,
-       FP_SEG(ADD_OFF(x86_dpb, Index * sizeof(struct dpb))),
-       FP_OFF(ADD_OFF(x86_dpb, Index * sizeof(struct dpb))),
-       dpb,
-       FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next),
-       FP_SEG(dpb->dpb_device), FP_OFF(dpb->dpb_device),
-       dpb->dpb_flags);
-    */
-    ++dpb;  /* dbp = dbp->dpb_next; */
-    ++LoL->nblkdev;
-  }
+  {
+    dos_far_ptr this_dpb = ADD_OFF(x86_dpb, Index * sizeof(struct dpb));
+    struct dpb d;
 
-  /* printf("processed %i nunits\n", nunits); */
+    kernel_guest_read(kernel_guest_linear(this_dpb), &d, sizeof(d));
+    d.dpb_next = (Index + 1 < nunits)
+               ? ADD_OFF(x86_dpb, (Index + 1) * sizeof(struct dpb))
+               : MK_FP((UWORD)-1, (UWORD)-1);
+    d.dpb_unit = nblkdev;
+    d.dpb_subunit = Index;
+    d.dpb_device = x86_dhp;
+    d.dpb_flags = M_CHANGED;
+    kernel_guest_write(kernel_guest_linear(this_dpb), &d, sizeof(d));
+
+    {
+      dos_far_ptr cds_base = kernel_lol_read_far(offsetof(struct lol, CDSp));
+      UBYTE lastdrive = kernel_lol_read8(offsetof(struct lol, lastdrive));
+      if (!far_is_null(cds_base) && nblkdev < lastdrive) {
+        uint32_t cds_lin = kernel_guest_linear(cds_base) +
+                           (uint32_t)nblkdev * sizeof(struct cds);
+        struct cds c;
+        kernel_guest_read(cds_lin, &c, sizeof(c));
+        c.cdsDpb = this_dpb;
+        c.cdsFlags = CDSPHYSDRV;
+        kernel_guest_write(cds_lin, &c, sizeof(c));
+      }
+    }
+
+    ++nblkdev;
+    kernel_lol_write8(offsetof(struct lol, nblkdev), nblkdev);
+  }
 }
 
 /* If cmdLine is NULL, this is an internal driver */
 
 BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode, dos_far_ptr* r_top)
 {
-  struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
+  struct dhdr dh;
   const char *cmdstr = cmdLine ? cmdLine : "\n";
   size_t cmdlen = strlen(cmdstr) + 1;
   dos_far_ptr x86_cmdline;
   dos_far_ptr x86_rq;
-  request* rq;
+  request rq;
   char name[8];
 
-  //printf("init_device %s, r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
+  kernel_guest_read(kernel_guest_linear(x86_dhp), &dh, sizeof(dh));
 
-  /* rq, and (for C_INIT) a guest-RAM copy of the command line, both
-     live on the *guest* stack. The command-line copy matters because
-     r_bpbptr is dos_far_ptr (see device.h) - a real driver reads it
-     as a genuine far pointer during C_INIT (that's the standard DOS
-     convention for passing DEVICE=/DEVICEHIGH= switches through to
-     the driver) - so it can't point at cmdLine/"\n" directly, which
-     are native (ARM) memory the driver has no way to address. */
   x86_cmdline = guest_stack_alloc(cpu, (uint16_t)(sizeof(request) + cmdlen));
-  /* rq sits just above the command-line copy; wrap the offset (see
-     guest_stack_alloc()). */
   x86_rq = MK_FP(FP_SEG(x86_cmdline),
                  (uint16_t)(FP_OFF(x86_cmdline) + cmdlen));
-  rq = (request*)ARM_PTR(x86_rq);
-  memset(rq, 0, sizeof(request));
-  /* cmdstr copy goes into guest stack space, which can straddle a segment
-     end, so use the wrapping copy rather than a linear strcpy. */
+
+  memset(&rq, 0, sizeof(rq));
   guest_strcpy(x86_cmdline, cmdstr);
 
   if (cmdLine) {
@@ -1453,80 +1508,69 @@ BOOL init_device(/*struct dhdr*/ dos_far_ptr x86_dhp, char *cmdLine, COUNT mode,
         break;
       p++;
       if (ch == '\\' || ch == '/' || ch == ':')
-        q = p; /* remember position after path */
+        q = p;
     }
     for (i = 0; i < 8; i++) {
       ch = '\0';
       if (p != q && *q != '.')
         ch = *q++;
-      /* copy name, without extension */
       name[i] = ch;
     }
   }
 
-  rq->r_unit = 0;
-  rq->r_status = 0;
-  rq->r_command = C_INIT;
-  rq->r_length = sizeof(request);
-  rq->r_endaddr = *r_top;
-  rq->r_bpbptr = x86_cmdline;
-  rq->r_firstunit = LoL->nblkdev;
+  rq.r_unit = 0;
+  rq.r_status = 0;
+  rq.r_command = C_INIT;
+  rq.r_length = sizeof(request);
+  rq.r_endaddr = *r_top;
+  rq.r_bpbptr = x86_cmdline;
+  rq.r_firstunit = kernel_lol_read8(offsetof(struct lol, nblkdev));
+  kernel_guest_write(kernel_guest_linear(x86_rq), &rq, sizeof(rq));
 
   execrh(x86_rq, x86_dhp);
+  kernel_guest_read(kernel_guest_linear(x86_rq), &rq, sizeof(rq));
 
-/*
- *  Added needed Error handle
- */
-  if ((rq->r_status & (S_ERROR | S_DONE)) == S_ERROR)
+  if ((rq.r_status & (S_ERROR | S_DONE)) == S_ERROR)
       goto ok;
+
+  kernel_guest_read(kernel_guest_linear(x86_dhp), &dh, sizeof(dh));
 
   if (cmdLine)
   {
-    /* Don't link in device drivers which do not take up memory */
-    if ((struct dhdr*)ARM_PTR(rq->r_endaddr) == dhp)
+    if (kernel_guest_linear(rq.r_endaddr) == kernel_guest_linear(x86_dhp))
       goto ok;
 
-    /* Don't link in block device drivers which indicate no units */
-    if (!(dhp->dh_attr & ATTR_CHAR) && !rq->r_nunits)
+    if (!(dh.dh_attr & ATTR_CHAR) && !rq.r_nunits)
     {
-      rq->r_endaddr = x86_dhp;
+      rq.r_endaddr = x86_dhp;
+      kernel_guest_write(kernel_guest_linear(x86_rq), &rq, sizeof(rq));
       goto ok;
     }
 
-
-    /* Fix for multisegmented device drivers:                          */
-    /*   If there are multiple device drivers in a single driver file, */
-    /*   only the END ADDRESS returned by the last INIT call should be */
-    /*   the used.  It is recommended that all the device drivers in   */
-    /*   the file return the same address                              */
-    if (FP_OFF(dhp->dh_next) == 0xffff) {
-        drv_watch_capture("before-KernelAllocPara", x86_dhp, rq);
-        KernelAllocPara(FP_SEG(rq->r_endaddr) + (FP_OFF(rq->r_endaddr) + 15)/16 - FP_SEG(x86_dhp), 'D', name, mode);
-        drv_watch_capture("after-KernelAllocPara", x86_dhp, rq);
+    if (FP_OFF(dh.dh_next) == 0xffff) {
+        drv_watch_capture("before-KernelAllocPara", x86_dhp, &rq);
+        KernelAllocPara(FP_SEG(rq.r_endaddr) +
+                        (FP_OFF(rq.r_endaddr) + 15)/16 -
+                        FP_SEG(x86_dhp), 'D', name, mode);
+        drv_watch_capture("after-KernelAllocPara", x86_dhp, &rq);
     }
 
-    /* Another fix for multisegmented device drivers:                  */
-    /*   To help emulate the functionallity experienced with other DOS */
-    /*   operating systems when calling multiple device drivers in a   */
-    /*   single driver file, save the end address returned from the    */
-    /*   last INIT call which will then be passed as the end address   */
-    /*   for the next INIT call.                                       */
-    *r_top = rq->r_endaddr;
-    //printf("init_device(%s), r_top: %p\n", cmdLine, (void*)EFFECTIVE(*r_top));
+    *r_top = rq.r_endaddr;
   }
 
-  if (!(dhp->dh_attr & ATTR_CHAR) && (rq->r_nunits != 0))
+  if (!(dh.dh_attr & ATTR_CHAR) && (rq.r_nunits != 0))
   {
-    drv_watch_capture("after-C_INIT-before-update_dcb", x86_dhp, rq);
-    dhp->dh_name[0] = rq->r_nunits;
+    drv_watch_capture("after-C_INIT-before-update_dcb", x86_dhp, &rq);
+    pstore8(kernel_guest_linear(x86_dhp) + offsetof(struct dhdr, dh_name),
+            rq.r_nunits);
     update_dcb(x86_dhp);
-    drv_watch_capture("after-update_dcb", x86_dhp, rq);
+    drv_watch_capture("after-update_dcb", x86_dhp, &rq);
   }
 
-  if (dhp->dh_attr & ATTR_CONIN)
-    LoL->syscon = x86_dhp;
-  else if (dhp->dh_attr & ATTR_CLOCK)
-    LoL->clock = x86_dhp;
+  if (dh.dh_attr & ATTR_CONIN)
+    kernel_lol_write_far(offsetof(struct lol, syscon), x86_dhp);
+  else if (dh.dh_attr & ATTR_CLOCK)
+    kernel_lol_write_far(offsetof(struct lol, clock), x86_dhp);
 
   CPU_SP += sizeof(request) + cmdlen;
   return FALSE;
@@ -1537,13 +1581,14 @@ ok:
 
 STATIC void InitIO()
 {
-    dos_far_ptr x86_device = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev);
-    struct dhdr* device = (struct dhdr*)ARM_PTR(x86_device);
-    /* Initialize driver chain                                      */
+    dos_far_ptr x86_device =
+        ADD_OFF(x86_FIXED_DATA, offsetof(struct lol, nul_dev));
+
     do {
+        struct dhdr dh;
         init_device(x86_device, NULL, 0, &lpTop);
-        x86_device = device->dh_next;
-        device = (struct dhdr*)ARM_PTR(x86_device);
+        kernel_guest_read(kernel_guest_linear(x86_device), &dh, sizeof(dh));
+        x86_device = dh.dh_next;
     }
     while (FP_OFF(x86_device) != 0xffff);
 }
@@ -1574,87 +1619,40 @@ void setvec(uint8_t intno, dos_far_ptr vec) {
 
 STATIC void PSPInit(void)
 {
-  psp far *p = (psp far *) ARM_PTR(x86_PSP);
+  psp p;
+  UBYTE os_major = kernel_lol_read8(offsetof(struct lol, os_setver_major));
+  UBYTE os_minor = kernel_lol_read8(offsetof(struct lol, os_setver_minor));
 
-  /* Clear out new psp first                              */
-  memset(p, 0, sizeof(psp));
-  /* high half is used as environment */
+  memset(&p, 0, sizeof(p));
 
-  /* initialize all entries and exits                     */
-  /* CP/M-like exit point                                 */
-  p->ps_exit = 0x20cd;
+  p.ps_exit = 0x20cd;
+  p.ps_farcall = 0x9a;
+  p.ps_reentry = MK_FP(0, 0x30 * 4);
 
-  /* CP/M-like entry point - call far to special entry    */
-  p->ps_farcall = 0x9a;
-  p->ps_reentry = MK_FP(0, 0x30 * 4);
+  write86(0x00c0, 0xea);
+  writew86(0x00c1, 0x0030);
+  writew86(0x00c3, 0xffe0);
 
-  /*
-   * DOS keeps the CP/M CALL-5 gateway in the low IVT region: PSP:0005h
-   * CALL FARs to 0000:00C0 (== 0030h*4, the slot ps_reentry points at),
-   * and 0000:00C0 is itself a FAR JMP - executable bytes, not a vector:
-   *
-   *   EA 30 00 E0 FF            JMP FAR FFE0:0030
-   *
-   * FFE0:0030 is the native fake-BIOS page; the dispatcher routes it to
-   * fdos_30h(). Without this, every PSP advertised a CALL-5 entry that
-   * jumped into an unwritten IVT slot - CP/M-style programs using CALL 5
-   * crashed. (Writing it once per PSPInit is harmless: the bytes are
-   * identical and the location is fixed.)
-   */
-  write86(0x00c0, 0xea);         /* JMP FAR opcode        */
-  writew86(0x00c1, 0x0030);      /* target offset 0030h   */
-  writew86(0x00c3, 0xffe0);      /* target segment FFE0h  */
-  /* unix style call - 0xcd 0x21 0xcb (int 21, retf)      */
-  p->ps_unix[0] = 0xcd;
-  p->ps_unix[1] = 0x21;
-  p->ps_unix[2] = 0xcb;
+  p.ps_unix[0] = 0xcd;
+  p.ps_unix[1] = 0x21;
+  p.ps_unix[2] = 0xcb;
 
-  /* Now for parent-child relationships                   */
-  /* parent psp segment                                   */
-  p->ps_parent = FP_SEG(x86_PSP);
-  /* previous psp pointer                                 */
-  p->ps_prevpsp = MK_FP(0xffff,0xffff);
+  p.ps_parent = FP_SEG(x86_PSP);
+  p.ps_prevpsp = MK_FP((UWORD)-1, (UWORD)-1);
+  p.ps_environ = DOS_PSP + 8;
+  p.ps_isv22 = getvec(0x22);
+  p.ps_isv23 = getvec(0x23);
+  p.ps_isv24 = getvec(0x24);
 
-  /* Environment and memory useage parameters             */
-  /* memory size in paragraphs                            */
-  /*  p->ps_size = 0; clear from above                    */
-  /* environment paragraph                                */
-  p->ps_environ = DOS_PSP + 8;
-  /* terminate address                                    */
-  p->ps_isv22 = getvec(0x22);
-  /* break address                                        */
-  p->ps_isv23 = getvec(0x23);
-  /* critical error address                               */
-  p->ps_isv24 = getvec(0x24);
+  p.ps_maxfiles = 20;
+  memset(p.ps_files, 0xff, 20);
+  p.ps_filetab = MK_FP(FP_SEG(x86_PSP), offsetof(psp, ps_files));
+  p.ps_retdosver = ((UWORD)os_minor << 8) + os_major;
 
-  /* user stack pointer - int 21                          */
-  /* p->ps_stack = NULL; clear from above                 */
+  memset(p.ps_fcb1.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
+  memset(p.ps_fcb2.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
 
-  /* File System parameters                               */
-  /* maximum open files                                   */
-  p->ps_maxfiles = 20;
-  memset(p->ps_files, 0xff, 20);
-
-  /* open file table pointer                              */
-  /* Canonical far pair <psp_seg>:0018h. NOT linear_to_far(p->ps_files):
-     that normalises to (lin>>4):(lin&0xF), i.e. (psp_seg+1):0008h - the same
-     LINEAR address, but a different seg:off pair. Programs and TSRs test the
-     pair itself to decide whether the JFT is still the default one inside the
-     PSP (that is what SetJFTSize() moves), so the normalised form reads to
-     them as "JFT already relocated". Build it from the segment we know. */
-  p->ps_filetab = MK_FP(FP_SEG(x86_PSP), offsetof(psp, ps_files));
-
-  /* default system version for int21/ah=30               */
-  p->ps_retdosver = (LoL->os_setver_minor << 8) + LoL->os_setver_major;
-
-  /* first command line argument                          */
-  /* p->ps_fcb1.fcb_drive = 0; already set                */
-  memset(p->ps_fcb1.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
-  /* second command line argument                         */
-  /* p->ps_fcb2.fcb_drive = 0; already set                */
-  memset(p->ps_fcb2.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
-
-  /* do not modify command line tail, used as environment */
+  kernel_guest_write(kernel_guest_linear(x86_PSP), &p, sizeof(p));
 }
 
 /*
@@ -2736,77 +2734,52 @@ dtime dos_gettime(void)
 
 STATIC VOID FsConfig(VOID)
 {
-  dos_far_ptr x86_dpb = LoL->DPBp;
-  struct dpb* dpb = (struct dpb*)ARM_PTR(x86_dpb);
+  dos_far_ptr x86_dpb = kernel_lol_read_far(offsetof(struct lol, DPBp));
+  dos_far_ptr cds_base = kernel_lol_read_far(offsetof(struct lol, CDSp));
+  UBYTE lastdrive = kernel_lol_read8(offsetof(struct lol, lastdrive));
+  UBYTE nblkdev = kernel_lol_read8(offsetof(struct lol, nblkdev));
   int i;
 
-  /* Initialize the current directory structures    */
-  for (i = 0; i < LoL->lastdrive; i++)
+  for (i = 0; i < lastdrive; i++)
   {
-    struct cds* pcds_table = (struct cds*)ARM_PTR(LoL->CDSp) + i;
+    uint32_t cds_lin = kernel_guest_linear(cds_base) +
+                       (uint32_t)i * sizeof(struct cds);
+    struct cds c;
 
-    memcpy(pcds_table->cdsCurrentPath, "A:\\\0", 4);
+    kernel_guest_read(cds_lin, &c, sizeof(c));
+    memcpy(c.cdsCurrentPath, "A:\\\0", 4);
+    c.cdsCurrentPath[0] += i;
 
-    pcds_table->cdsCurrentPath[0] += i;
-
-    if (i < LoL->nblkdev && !far_is_end(x86_dpb))
+    if (i < nblkdev && !far_is_end(x86_dpb))
     {
-      pcds_table->cdsDpb = x86_dpb;
-      /*
-printf("DBG FsConfig cds[%d] path='%s' flags=%04X cdsDpb=%04X:%04X x86_dpb=%04X:%04X dpb_next=%04X:%04X\n",
-       i,
-       pcds_table->cdsCurrentPath,
-       pcds_table->cdsFlags,
-       FP_SEG(pcds_table->cdsDpb), FP_OFF(pcds_table->cdsDpb),
-       FP_SEG(x86_dpb), FP_OFF(x86_dpb),
-       FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next));
-*/
-      pcds_table->cdsFlags = CDSPHYSDRV;
-      x86_dpb = dpb->dpb_next;
-      dpb = (struct dpb*)ARM_PTR(x86_dpb);
+      struct dpb d;
+      c.cdsDpb = x86_dpb;
+      c.cdsFlags = CDSPHYSDRV;
+      kernel_guest_read(kernel_guest_linear(x86_dpb), &d, sizeof(d));
+      x86_dpb = d.dpb_next;
     }
     else
     {
-      pcds_table->cdsFlags = 0;
+      c.cdsFlags = 0;
     }
-    pcds_table->cdsStrtClst = 0xffff;
-    pcds_table->cdsParam = 0xffff;
-    pcds_table->cdsStoreUData = 0xffff;
-    pcds_table->cdsJoinOffset = 2;
-/*
-printf("DBG FsConfig cds[%d] path='%s' flags=%04X dpb=%04X:%04X\n",
-       i, pcds_table->cdsCurrentPath, pcds_table->cdsFlags,
-       FP_SEG(pcds_table->cdsDpb), FP_OFF(pcds_table->cdsDpb));
-*/     
+
+    c.cdsStrtClst = 0xffff;
+    c.cdsParam = 0xffff;
+    c.cdsStoreUData = 0xffff;
+    c.cdsJoinOffset = 2;
+    kernel_guest_write(cds_lin, &c, sizeof(c));
   }
 
-  /* Log-in the default drive. */
-  init_setdrive(LoL->BootDrive - 1);
+  init_setdrive(kernel_lol_read8(offsetof(struct lol, BootDrive)) - 1);
 
-  /* The system file tables need special handling and are "hand   */
-  /* built. Included is the stdin, stdout, stdaux and stdprn. */
-  /* a little bit of shuffling is necessary for compatibility */
+  open(ADD_OFF(x86_FIXED_DATA, offsetof(struct lol, aux_str)), O_RDWR);
+  open(ADD_OFF(x86_FIXED_DATA, offsetof(struct lol, con_str)), O_RDWR);
 
-  /* sft_idx=0 is /dev/aux                                        */
-  open(x86_FAR_PTR(DOS_PSP, LoL->aux_str), O_RDWR);
-
-  /* handle 1, sft_idx=1 is /dev/con (stdout) */
-  open(x86_FAR_PTR(DOS_PSP, LoL->con_str), O_RDWR);
-
-  /* 3 is /dev/aux                */
   dup2(STDIN, STDAUX);
-
-  /* 0 is /dev/con (stdin)        */
   dup2(STDOUT, STDIN);
-
-  /* 2 is /dev/con (stdin)        */
   dup2(STDOUT, STDERR);
 
-  /* 4 is /dev/prn                                                */
-  open(x86_FAR_PTR(DOS_PSP, LoL->prn_str), O_WRONLY);
-
-  /* Initialize the disk buffer management functions */
-  /* init_call_init_buffers(); done from CONFIG.C   */
+  open(ADD_OFF(x86_FIXED_DATA, offsetof(struct lol, prn_str)), O_WRONLY);
 }
 
 /*
@@ -2854,13 +2827,14 @@ STATIC VOID InitSerialPorts(VOID)
 static void InitializeAllBPBs(VOID)
 {
   int drive, fileno;
-  char* path = (char*)ARM_PTR(x86_szLine);
-  dos_far_ptr x86_path = x86_szLine;
-  strcpy(path, "A:-@JUNK@-.TMP");
-  for (drive = 'C'; drive < 'A' + LoL->nblkdev; drive++)
+  char path[] = "A:-@JUNK@-.TMP";
+  UBYTE nblkdev = kernel_lol_read8(offsetof(struct lol, nblkdev));
+
+  for (drive = 'C'; drive < 'A' + nblkdev; drive++)
   {
-    path[0] = drive;
-    if ((fileno = open( x86_path, O_RDONLY)) >= 0)
+    path[0] = (char)drive;
+    kernel_guest_write(kernel_guest_linear(x86_szLine), path, sizeof(path));
+    if ((fileno = open(x86_szLine, O_RDONLY)) >= 0)
       close(fileno);
   }
 }
@@ -2869,8 +2843,10 @@ STATIC void init_kernel(CPU* cpu)
 {
     COUNT i;
 
-    LoL->os_setver_major = LoL->os_major = MAJOR_RELEASE;
-    LoL->os_setver_minor = LoL->os_minor = MINOR_RELEASE;
+    pstore8(KERNEL_LOL_LINEAR + offsetof(struct lol, os_major), MAJOR_RELEASE);
+    pstore8(KERNEL_LOL_LINEAR + offsetof(struct lol, os_setver_major), MAJOR_RELEASE);
+    pstore8(KERNEL_LOL_LINEAR + offsetof(struct lol, os_minor), MINOR_RELEASE);
+    pstore8(KERNEL_LOL_LINEAR + offsetof(struct lol, os_setver_minor), MINOR_RELEASE);
 
     /* Init oem hook - returns memory size in KB, just read BDA */
     ram_top = pload16(0x413);
@@ -2894,13 +2870,14 @@ STATIC void init_kernel(CPU* cpu)
     /* we can read config.sys later.  */
 
     /* use largest possible value for the initial CDS */
-    LoL->lastdrive = 26;
+    pstore8(KERNEL_LOL_LINEAR + offsetof(struct lol, lastdrive), 26);
 
     /*  init_device((struct dhdr FAR *)&blk_dev, NULL, 0, &ram_top); */
     /*  WARNING: dsk_init() must be called prior to update_dcb() to ensure
         _Dyn (start of Dynamic memory block) is the start of drive data table (see getddt() in dsk.c)
      */
-    blk_dev->dh_name[0] = dsk_init(cpu);
+    pstore8(kernel_guest_linear(x86_blk_dev) + offsetof(struct dhdr, dh_name),
+            dsk_init(cpu));
 
     PreConfig();
 /*
@@ -2909,7 +2886,7 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
        LoL->lastdrive, LoL->nblkdev, FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));
 */
     /* Number of units */
-    if (blk_dev->dh_name[0] > 0) {
+    if (pload8(kernel_guest_linear(x86_blk_dev) + offsetof(struct dhdr, dh_name)) > 0) {
         update_dcb(x86_blk_dev);
     }
     /* Now config the temporary file system */
@@ -2954,13 +2931,15 @@ printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPB
     DoConfig(2);
 
     {
-      dos_far_ptr _dpb = LoL->DPBp;
+      dos_far_ptr _dpb = kernel_lol_read_far(offsetof(struct lol, DPBp));
       unsigned guard = 0;
 
-      while (!far_is_end(_dpb) && !far_is_null(_dpb) && guard++ < LoL->nblkdev + 4) {
-        struct dpb *dpb = (struct dpb *)ARM_PTR(_dpb);
-        drv_watch_capture("after-DoConfig2-dpb-device", dpb->dpb_device, NULL);
-        _dpb = dpb->dpb_next;
+      while (!far_is_end(_dpb) && !far_is_null(_dpb) &&
+             guard++ < kernel_lol_read8(offsetof(struct lol, nblkdev)) + 4) {
+        struct dpb d;
+        kernel_guest_read(kernel_guest_linear(_dpb), &d, sizeof(d));
+        drv_watch_capture("after-DoConfig2-dpb-device", d.dpb_device, NULL);
+        _dpb = d.dpb_next;
       }
     }
 
@@ -3033,9 +3012,11 @@ STATIC void prep_shell(CPU* cpu)
 {
   CommandTail Cmd;
   dpb_watch_check_chain("prep_shell-entry");
-  char* master_env  = ((char *)ARM_PTR(x86_master_env));
-  if (master_env[0] == '\0')   /* some shells panic on empty master env. */
-    memcpy(master_env, "PATH=.\0\0\0\0", sizeof("PATH=.\0\0\0\0"));
+  if (pload8(kernel_guest_linear(x86_master_env)) == 0) {
+    static const char default_env[] = "PATH=.\0\0\0\0";
+    kernel_guest_write(kernel_guest_linear(x86_master_env),
+                       default_env, sizeof(default_env));
+  }
 
   /* process 0       */
   /* Execute command.com from the drive we just booted from    */
@@ -3090,65 +3071,61 @@ STATIC void prep_shell(CPU* cpu)
 
 void kernel(CPU* _cpu) {
     cpu = _cpu;
-    con_dev = (struct dhdr*)ARM_PTR(x86_con_dev);
-    memcpy(con_dev, &_con_dev, sizeof(struct dhdr));
-    prn_dev = (struct dhdr*)ARM_PTR(x86_prn_dev);
-    memcpy(prn_dev, &_prn_dev, sizeof(struct dhdr));
-    aux_dev = (struct dhdr*)ARM_PTR(x86_aux_dev);
-    memcpy(aux_dev, &_aux_dev, sizeof(struct dhdr));
-    lpt1_dev = (struct dhdr*)ARM_PTR(x86_lpt1_dev);
-    memcpy(lpt1_dev, &_lpt1_dev, sizeof(struct dhdr));
-    lpt2_dev = (struct dhdr*)ARM_PTR(x86_lpt2_dev);
-    memcpy(lpt2_dev, &_lpt2_dev, sizeof(struct dhdr));
-    lpt3_dev = (struct dhdr*)ARM_PTR(x86_lpt3_dev);
-    memcpy(lpt3_dev, &_lpt3_dev, sizeof(struct dhdr));
-    com1_dev = (struct dhdr*)ARM_PTR(x86_com1_dev);
-    memcpy(com1_dev, &_com1_dev, sizeof(struct dhdr));
-    com2_dev = (struct dhdr*)ARM_PTR(x86_com2_dev);
-    memcpy(com2_dev, &_com2_dev, sizeof(struct dhdr));
-    com3_dev = (struct dhdr*)ARM_PTR(x86_com3_dev);
-    memcpy(com3_dev, &_com3_dev, sizeof(struct dhdr));
-    com4_dev = (struct dhdr*)ARM_PTR(x86_com4_dev);
-    memcpy(com4_dev, &_com4_dev, sizeof(struct dhdr));
-    clk_dev = (struct dhdr*)ARM_PTR(x86_clk_dev);
-    memcpy(clk_dev, &_clk_dev, sizeof(struct dhdr));
-    blk_dev = (struct dhdr*)ARM_PTR(x86_blk_dev);
-    memcpy(blk_dev, &_blk_dev, sizeof(struct dhdr));
+    /* Fixed guest-resident objects can cross paging pages.  Initialize them
+       through guest writes rather than treating the first mapped page as a
+       contiguous native buffer. */
+    kernel_guest_write(kernel_guest_linear(x86_con_dev), &_con_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_prn_dev), &_prn_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_aux_dev), &_aux_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_lpt1_dev), &_lpt1_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_lpt2_dev), &_lpt2_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_lpt3_dev), &_lpt3_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_com1_dev), &_com1_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_com2_dev), &_com2_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_com3_dev), &_com3_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_com4_dev), &_com4_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_clk_dev), &_clk_dev, sizeof(struct dhdr));
+    kernel_guest_write(kernel_guest_linear(x86_blk_dev), &_blk_dev, sizeof(struct dhdr));
 
     init_nls_hardcoded();
 
-    LoL = (struct lol*)ARM_PTR(x86_FIXED_DATA);
-    memcpy(LoL, &lol, sizeof(struct lol));
+    kernel_guest_write(kernel_guest_linear(x86_FIXED_DATA), &lol, sizeof(struct lol));
+    kernel_guest_fill(kernel_guest_linear(x86_INTERNAL_DATA), 0,
+                      sizeof(struct dos_data));
 
+    /* Legacy globals remain for not-yet-migrated C units, but initialization
+       itself no longer relies on contiguous host mappings. */
+    LoL = (struct lol*)ARM_PTR(x86_FIXED_DATA);
     internal_data = (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
-    memset(internal_data, 0, sizeof(struct dos_data));
-    internal_data->switchar = '/';
-    internal_data->net_set_count = 1;
-    internal_data->CritPatchPad = 0x90; // NOP pad byte
-    internal_data->break_ena = 1;
-    internal_data->DayOfMonth = 1;
-    internal_data->Month = 1;
-    internal_data->daysSince1980 = 0xFFFF;
-    internal_data->DayOfWeek = 2;
-    internal_data->dosidle_flag = 1;
-    internal_data->last_component = 0xffff; // 296 - 0xffff or offset of last component in filename
-    /* stacks are made to initialize to no-ops so that high-water
-       testing can be performed (kernel.asm: apistk_bottom..apistk_top) */
-    memset(
-        internal_data->sda_tmp_dm_ren,
+
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, switchar), '/');
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, net_set_count), 1);
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, CritPatchPad), 0x90);
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, break_ena), 1);
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, DayOfMonth), 1);
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, Month), 1);
+    pstore16(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, daysSince1980), 0xffff);
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, DayOfWeek), 2);
+    pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, dosidle_flag), 1);
+    pstore16(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, last_component), 0xffff);
+
+    kernel_guest_fill(
+        KERNEL_IDATA_LINEAR + offsetof(struct dos_data, sda_tmp_dm_ren),
         0x90,
-        sizeof(internal_data->sda_tmp_dm_ren) + sizeof(internal_data->SearchDir_ren) +
-        sizeof(internal_data->error_stack) +
-        sizeof(internal_data->disk_stack) + sizeof(internal_data->char_stack)
-    );
+        sizeof(((struct dos_data *)0)->sda_tmp_dm_ren) +
+        sizeof(((struct dos_data *)0)->SearchDir_ren) +
+        sizeof(((struct dos_data *)0)->error_stack) +
+        sizeof(((struct dos_data *)0)->disk_stack) +
+        sizeof(((struct dos_data *)0)->char_stack));
 
     // adjust boot drive to DOS format
-    LoL->BootDrive  = CPU_BL + 1;
-    if (LoL->BootDrive > 0x80) {
-        LoL->BootDrive = 3;
+    {
+      UBYTE boot_drive = (UBYTE)(CPU_BL + 1);
+      if (boot_drive > 0x80)
+        boot_drive = 3;
+      pstore8(KERNEL_LOL_LINEAR + offsetof(struct lol, BootDrive), boot_drive);
+      pstore8(KERNEL_LOL_LINEAR + offsetof(struct lol, cpu), cpu->gen);
     }
-
-    LoL->cpu = cpu->gen;
 
     /*
      * INIT guest stack: SDA apistk_top (верх char_stack, DOS_PSP-регион
@@ -3182,7 +3159,7 @@ void kernel(CPU* _cpu) {
     SET_SS(DOS_PSP);
     CPU_SP = (UWORD)(X86_INTERNAL_DATA_OFF +
                      offsetof(struct dos_data, char_stack) +
-                     sizeof(internal_data->char_stack));
+                     sizeof(((struct dos_data *)0)->char_stack));
 
     /* install DOS API and other interrupt service routines, basic kernel functionality works */
     setup_int_vectors();
@@ -3202,7 +3179,7 @@ void kernel(CPU* _cpu) {
 
 #ifdef DEBUG
     /* Non-portable message kludge alert!   */
-    printf("KERNEL: Boot drive = %c\n", 'A' + LoL->BootDrive - 1);
+    printf("KERNEL: Boot drive = %c\n", 'A' + pload8(KERNEL_LOL_LINEAR + offsetof(struct lol, BootDrive)) - 1);
 #endif
 
     dpb_watch_check_chain("kernel-before-DoInstall");

@@ -15,13 +15,25 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
-if(BOARD STREQUAL "C2")
+# Build with a standard 128 KiB EGA-compatible video adapter.
+option(EGA128 "Build with 128 KiB EGA video memory/capabilities" ON)
+if(EGA128)
+    add_compile_definitions(EGA128=1)
+endif()
+
+if(BOARD STREQUAL "Z2")
+    # Waveshare RP2350-PiZero uses RP2350B (48 GPIOs). The stock pico2
+    # board definition selects RP2350A and therefore caps GPIOs at 0..29,
+    # breaking Z2 peripherals on GPIO30..47 and PIO's movable GPIO window.
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards CACHE PATH "" FORCE)
+    set(PICO_BOARD "waveshare_rp2350_pizero" CACHE STRING "Pico board type" FORCE)
+elseif(BOARD STREQUAL "C2")
     # FRANK Core 2 master is an RP2350B. The stock pico2 definition
     # declares PICO_RP2350A 1, capping NUM_BANK0_GPIOS at 30 and
     # switching off PIO's movable GPIO window — the link bus (GPIO20..42),
@@ -83,12 +95,6 @@ set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
-
-# Build with a standard 128 KiB EGA-compatible video adapter.
-option(EGA128 "Build with 128 KiB EGA video memory/capabilities" ON)
-if(EGA128)
-    add_compile_definitions(EGA128=1)
-endif()
 
 # USB role is selected at runtime (HOST by default, DEVICE via config.ini).
 # Both TinyUSB roles are compiled into every firmware image.
@@ -342,8 +348,8 @@ set(EMU_CORE_SOURCES
     src/fdos/initclk.c
     src/fdos/initdisk.c
     src/fdos/dyninit.c
-    src/fdos/config.c
-    src/fdos/memmgr.c
+    src/fdos/config.cpp
+    src/fdos/memmgr.cpp
     src/fdos/inithma.c
     src/fdos/dsk.c
     src/fdos/dosfns.c
@@ -357,9 +363,10 @@ set(EMU_CORE_SOURCES
     src/fdos/kernel.c
     src/fdos/task.c
     src/fdos/fcom/fcom.c
+    src/fdos/fcom/fcom_guest.cpp
     src/fdos/nls.c
     src/fdos/ioctl.c
-    src/fdos/fdos_21h.c
+    src/fdos/fdos_21h.cpp
     src/fdos/fdos_2528.c
     src/fdos/fdos_29h.c
     src/fdos/fdos_2fh.c
@@ -429,6 +436,7 @@ add_executable(${BUILD_NAME}
 if(EGA128)
     target_sources(${BUILD_NAME} PRIVATE src/ega128_paging.c)
     if(BOARD STREQUAL "M1")
+        target_include_directories(${BUILD_NAME} PRIVATE drivers/psram_spi)
         target_sources(${BUILD_NAME} PRIVATE drivers/psram_spi/psram_spi.c)
     endif()
 endif()
@@ -686,8 +694,8 @@ set(FDOS_WARN_SOURCES
     src/fdos/initclk.c
     src/fdos/initdisk.c
     src/fdos/dyninit.c
-    src/fdos/config.c
-    src/fdos/memmgr.c
+    src/fdos/config.cpp
+    src/fdos/memmgr.cpp
     src/fdos/inithma.c
     src/fdos/dsk.c
     src/fdos/dosfns.c
@@ -701,9 +709,10 @@ set(FDOS_WARN_SOURCES
     src/fdos/kernel.c
     src/fdos/task.c
     src/fdos/fcom/fcom.c
+    src/fdos/fcom/fcom_guest.cpp
     src/fdos/nls.c
     src/fdos/ioctl.c
-    src/fdos/fdos_21h.c
+    src/fdos/fdos_21h.cpp
     src/fdos/fdos_2528.c
     src/fdos/fdos_29h.c
     src/fdos/fdos_2fh.c

@@ -15,12 +15,9 @@
 #define PAGE_COUNT       (EGA128_VIRTUAL_RAM_SIZE / EGA128_PAGE_SIZE)
 #define CACHE_PAGE_COUNT (RAM_PAGES_SIZE / EGA128_PAGE_SIZE)
 #define INVALID_PAGE     0xffffu
-#define FDOS_DIRECT_BYTES (32u << 10)
-#define FDOS_DIRECT_PAGES (FDOS_DIRECT_BYTES / EGA128_PAGE_SIZE)
 
 static uint16_t cache_page[CACHE_PAGE_COUNT];
 static uint8_t cache_dirty[CACHE_PAGE_COUNT];
-static uint8_t cache_pinned[CACHE_PAGE_COUNT];
 static uint8_t backing_valid[PAGE_COUNT / 8u];
 static uint16_t victim;
 static bool active;
@@ -51,7 +48,20 @@ static bool backing_read(uint32_t page, uint8_t *dst)
     }
 #ifdef BOARD_M1
     if (use_spi_psram) {
-        psram_read(&psram_spi, page * EGA128_PAGE_SIZE, dst, EGA128_PAGE_SIZE);
+        /*
+         * psram_read() encodes the requested read length in one byte as a
+         * bit count (PIO: out y, 8), so a single transaction is limited to
+         * 255 bits.  Keep each transfer at <= 31 bytes.
+         */
+        uint32_t addr = page * EGA128_PAGE_SIZE;
+        size_t left = EGA128_PAGE_SIZE;
+        while (left) {
+            size_t chunk = left > 31u ? 31u : left;
+            psram_read(&psram_spi, addr, dst, chunk);
+            addr += (uint32_t)chunk;
+            dst += chunk;
+            left -= chunk;
+        }
         return true;
     }
 #endif
@@ -65,7 +75,19 @@ static bool backing_write(uint32_t page, const uint8_t *src)
 {
 #ifdef BOARD_M1
     if (use_spi_psram) {
-        psram_write(&psram_spi, page * EGA128_PAGE_SIZE, src, EGA128_PAGE_SIZE);
+        /*
+         * psram_write() encodes (4 + payload_bytes) * 8 in one byte
+         * (PIO: out x, 8), so the payload is limited to 27 bytes.
+         */
+        uint32_t addr = page * EGA128_PAGE_SIZE;
+        size_t left = EGA128_PAGE_SIZE;
+        while (left) {
+            size_t chunk = left > 27u ? 27u : left;
+            psram_write(&psram_spi, addr, src, chunk);
+            addr += (uint32_t)chunk;
+            src += chunk;
+            left -= chunk;
+        }
         backing_page_set_valid(page);
         return true;
     }
@@ -88,11 +110,8 @@ static uint32_t __not_in_flash_func(map_page)(uint32_t page, bool write_access)
         }
     }
 
-    uint32_t slot;
-    do {
-        slot = victim++;
-        if (victim == CACHE_PAGE_COUNT) victim = 0;
-    } while (cache_pinned[slot]);
+    uint32_t slot = victim++;
+    if (victim == CACHE_PAGE_COUNT) victim = 0;
 
     if (cache_page[slot] != INVALID_PAGE && cache_dirty[slot]) {
         if (!backing_write(cache_page[slot], ram_pages + slot * EGA128_PAGE_SIZE)) {
@@ -106,30 +125,6 @@ static uint32_t __not_in_flash_func(map_page)(uint32_t page, bool write_access)
     cache_page[slot] = (uint16_t)page;
     cache_dirty[slot] = write_access ? 1 : 0;
     return slot;
-}
-
-
-static void pin_fdos_direct_region(void)
-{
-    /*
-     * Native FreeDOS historically keeps real host pointers to its resident
-     * low-memory data (LoL, SDA/internal_data, path buffers, request headers).
-     * Keep that small fixed area 1:1 in the first cache slots so those
-     * pointers remain stable while the rest of guest RAM is pageable.
-     *
-     * map_page() starts with victim == 0, therefore mapping guest pages
-     * 0..FDOS_DIRECT_PAGES-1 here places them in slots with the same number.
-     * x86_FAR_PTR(DOS_PSP, host_ptr) consequently retains its old subtraction
-     * semantics for all resident FDOS objects in this range.
-     */
-    for (uint32_t page = 0; page < FDOS_DIRECT_PAGES; ++page) {
-        uint32_t slot = map_page(page, false);
-        if (slot != page) {
-            printf("EGA128 paging: FDOS direct map mismatch p%u/s%u\n",
-                   (unsigned)page, (unsigned)slot);
-        }
-        cache_pinned[slot] = 1;
-    }
 }
 
 uint8_t *__not_in_flash_func(ega128_page_ptr)(uint32_t addr, uint32_t *span, bool write_access)
@@ -324,7 +319,6 @@ bool ega128_paging_init(void)
 {
     memset(cache_page, 0xff, sizeof(cache_page));
     memset(cache_dirty, 0, sizeof(cache_dirty));
-    memset(cache_pinned, 0, sizeof(cache_pinned));
     memset(backing_valid, 0, sizeof(backing_valid));
     memset(ram_pages, 0, RAM_PAGES_SIZE);
     victim = 0;
@@ -337,7 +331,6 @@ bool ega128_paging_init(void)
     if (use_spi_psram) {
         ega128_select_paged_backend();
         active = true;
-        pin_fdos_direct_region();
         printf("EGA128 paging: 128 KiB cache -> SPI PSRAM\n");
         return true;
     }
@@ -355,7 +348,6 @@ bool ega128_paging_init(void)
     pagefile_open = true;
     ega128_select_paged_backend();
     active = true;
-    pin_fdos_direct_region();
     printf("EGA128 paging: 128 KiB cache -> " SD_DATA_DIR_SLASH "pagefile.sys\n");
     return true;
 }

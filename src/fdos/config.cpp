@@ -14,6 +14,7 @@ extern "C" {
 #undef load
 #endif
 #include "guest_ref.hpp"
+extern "C" char *strchr(const char *, int);
 
 using fdos_guest::lol_ref;
 using fdos_guest::dos_data_ref;
@@ -21,6 +22,43 @@ static constexpr uint32_t config_fixed_data_linear = ((uint32_t)DOS_PSP << 4) + 
 static constexpr uint32_t config_internal_data_linear = ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
 static const lol_ref config_lol(config_fixed_data_linear);
 static const dos_data_ref config_idata(config_internal_data_linear);
+static inline uint32_t cfg_guest_linear(dos_far_ptr p)
+{
+  return ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p);
+}
+
+static inline void cfg_guest_read(uint32_t addr, void *dst, size_t len)
+{
+  UBYTE *d = (UBYTE *)dst;
+  while (len--)
+    *d++ = pload8(addr++);
+}
+
+static inline void cfg_guest_write(uint32_t addr, const void *src, size_t len)
+{
+  const UBYTE *s = (const UBYTE *)src;
+  while (len--)
+    pstore8(addr++, *s++);
+}
+
+static inline void cfg_guest_fill(uint32_t addr, UBYTE value, size_t len)
+{
+  while (len--)
+    pstore8(addr++, value);
+}
+
+static inline dos_far_ptr cfg_guest_read_far(uint32_t addr)
+{
+  dos_far_ptr v;
+  cfg_guest_read(addr, &v, sizeof(v));
+  return v;
+}
+
+static inline void cfg_guest_write_far(uint32_t addr, dos_far_ptr v)
+{
+  cfg_guest_write(addr, &v, sizeof(v));
+}
+
 
 #define HMA_NONE 0              /* do nothing */
 #define HMA_REQ 1               /* DOS = HIGH detected */
@@ -168,7 +206,6 @@ STATIC void config_init_buffers_ex(int wantedbuffers, int allow_hma)
 
   config_lol.nbuffers() = buffers;
   config_lol.inforecptr(config_lol.firstbuf());
-  struct buffer *pbuffer;
   dos_far_ptr x86_buffer;
   {
     size_t bytes = sizeof(struct buffer) * buffers;
@@ -186,7 +223,6 @@ STATIC void config_init_buffers_ex(int wantedbuffers, int allow_hma)
       /* space in HMA beyond requested buffers available as user space */
       x86_firstAvailableBuf = MK_FP(FP_SEG(x86_buffer), FP_OFF(x86_buffer) + wantedbuffers * sizeof(struct buffer));
     }
-    pbuffer = (struct buffer*)ARM_PTR(x86_buffer);
   }
   config_lol.deblock_buf(DiskTransferBuffer);
   config_lol.firstbuf(x86_buffer);
@@ -199,11 +235,16 @@ STATIC void config_init_buffers_ex(int wantedbuffers, int allow_hma)
   {
     unsigned last = buffers;
     unsigned idx;
+    uint32_t base_linear = cfg_guest_linear(x86_buffer);
     for (idx = 0; idx <= last; idx++)
     {
-      pbuffer->b_prev = base_off + (idx ? idx - 1 : last) * sizeof(struct buffer);
-      pbuffer->b_next = base_off + (idx == last ? 0 : idx + 1) * sizeof(struct buffer);
-      pbuffer++;
+      uint32_t b = base_linear + idx * sizeof(struct buffer);
+      UWORD prev = (UWORD)(base_off +
+          (idx ? idx - 1 : last) * sizeof(struct buffer));
+      UWORD next = (UWORD)(base_off +
+          (idx == last ? 0 : idx + 1) * sizeof(struct buffer));
+      pstore16(b + offsetof(struct buffer, b_prev), prev);
+      pstore16(b + offsetof(struct buffer, b_next), next);
     }
   }
 
@@ -528,8 +569,8 @@ STATIC VOID init_stacks(dos_far_ptr x86_base, COUNT stacks, COUNT size)
   nStacks = stacks;
   stackSize = size;
 
-  memset(ARM_PTR(x86_stackBase), 0,
-         (size_t)nStacks * (size_t)stackSize);
+  cfg_guest_fill(cfg_guest_linear(x86_stackBase), 0,
+                 (size_t)nStacks * (size_t)stackSize);
 }
 
 static void _CmdInstall(BYTE *pLine, int mode)
@@ -979,7 +1020,7 @@ STATIC VOID Numlock(BYTE * pLine)
   keycheck();
 }
 
-STATIC struct table commands[];
+extern struct table commands[];
 
 STATIC VOID CfgSwitches(BYTE * pLine)
 {
@@ -1368,7 +1409,7 @@ STATIC VOID CmdChain(BYTE * pLine)
 struct CountrySpecificInfoSmall {
   short CountryID;    /*  = W1 W437   # Country ID */
   char  DateFormat;           /*    Date format: 0/1/2: U.S.A./Europe/Japan */
-  char  CurrencyString[3];    /* '$' ,'EUR'   */
+  char  CurrencyString[4];    /* '$' ,'EUR' + NUL */
   char  ThousandSeparator;    /* ','          # Thousand's separator */
   char  DecimalPoint;         /* '.'        # Decimal point        */
   char  DateSeparator;        /* '-'  */
@@ -1436,6 +1477,7 @@ STATIC int LoadCountryInfoHardCoded(COUNT ctryCode)
  */
 STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
 {
+  u16 sp = CPU_SP;
   /* .max is the biggest payload we may copy out of COUNTRY.SYS for this
      subfunction; it is the capacity of the fixed hardcoded slot the data
      lands in (see NLS_HC_TBL*_SIZE / init_nls_hardcoded()).
@@ -1470,13 +1512,13 @@ STATIC BOOL LoadCountryInfo(char *filenam, UWORD ctryCode, UWORD codePage)
     return rc;
   }
 
+  {
   /* COUNTRY.SYS file data structures - see RBIL tables 2619-2622 */
   struct header {      /* file header */
     char name[8];       /* "\377COUNTRY.SYS" */
     char reserved[11];
     ULONG offset;       /* offset of first entry in file */
   };
-  u16 sp = CPU_SP;
   dos_far_ptr x86_header = guest_stack_alloc(cpu, sizeof(struct header));
   struct header* header = (struct header*)ARM_PTR(x86_header);
   if (read(fd, x86_header, sizeof(struct header)) != sizeof(struct header))
@@ -1602,6 +1644,7 @@ err:printf("%s has invalid format\n", filename);
     goto ret;
   }
   printf("could not find country info for country ID %u\n", ctryCode);
+  }
 ret:
   CPU_SP = sp;
   close(fd);
@@ -1774,7 +1817,7 @@ STATIC BOOL LoadDevice(BYTE * pLine, dos_far_ptr top, COUNT mode)
 
   /* The driver is loaded at the top of allocated memory.         */
   /* The device driver is paragraph aligned.                      */
-  eb.load.reloc = eb.load.load_seg = base;
+  eb.ldata._load.reloc = eb.ldata._load.load_seg = base;
 
   CfgDbgPrintf(("Loading device driver %s at segment %04x\n", szBuf, base));
 
@@ -1888,7 +1931,7 @@ STATIC void Device(BYTE * pLine)
   LoadDevice(pLine, lpTop, FALSE);
 }
 
-STATIC struct table commands[] = {
+struct table commands[] = {
   /* first = switches! this one is special; some options will
      always be ran, others depends on F5/F8 and ? processing */
   {"SWITCHES", 0, CfgSwitches},
@@ -2146,7 +2189,7 @@ VOID DoConfig(int nPass)
   /* do the table lookup and execute the handler for that         */
   /* function.                                                    */
 
-  BYTE* szLine = (BYTE*)ARM_PTR(x86_szLine);
+  BYTE szLine[256];
 #ifdef MEMDISK_ARGS
   for (; !bEof || (mdsk != NULL); nCfgLine++)
 #else
@@ -2167,14 +2210,15 @@ VOID DoConfig(int nPass)
     {
       /* pLine walks the szLine buffer, whose guest pointer is x86_szLine.
          Re-anchor on that segment instead of normalising a native address. */
-      if (read(nFileDesc,
-               x86_FAR_PTR(FP_SEG(x86_szLine), pLine) /* -> char[] */, 1) == 0)
+      if (read(nFileDesc, x86_szLine, 1) == 0)
       {
         bEof = TRUE;
         break;
       }
 
-      if (pLine >= szLine + szLine_len - 3)
+      *pLine = pload8(cfg_guest_linear(x86_szLine));
+
+      if (pLine >= szLine + sizeof(szLine) - 3)
       {
         CfgFailure(pLine);
         printf("error - line overflow line %d \n", nCfgLine);
@@ -2377,13 +2421,14 @@ VOID PreConfig2(VOID)
    * a second 3-entry SFT block, giving the initial 8 entries expected
    * before PostConfig() allocates the final FILES= block.
    */
-  sfttbl *sp = (sfttbl *)ARM_PTR(config_lol.sfthead());
+  dos_far_ptr x86_sft1 = config_lol.sfthead();
   dos_far_ptr x86_sft2 = KernelAlloc(sizeof(sftheader) + 3 * sizeof(sft), 'F', 0);
-  sp->sftt_next = x86_sft2;
+  cfg_guest_write_far(cfg_guest_linear(x86_sft1) + offsetof(sfttbl, sftt_next),
+                      x86_sft2);
 
-  sp = (sfttbl *)ARM_PTR(x86_sft2);
-  sp->sftt_next = MK_FP(-1, -1);
-  sp->sftt_count = 3;
+  cfg_guest_write_far(cfg_guest_linear(x86_sft2) + offsetof(sfttbl, sftt_next),
+                      MK_FP((UWORD)-1, (UWORD)-1));
+  pstore16(cfg_guest_linear(x86_sft2) + offsetof(sfttbl, sftt_count), 3);
 }
 
 #pragma pack(push, 1)
@@ -2439,13 +2484,13 @@ dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
   }
   cfg_mcb_add_size(start, (UWORD)nPara);
 
-  struct submcb* p = (struct submcb*)ARM_PTR(MK_FP(base, 0));
+  uint32_t submcb_linear = (uint32_t)base << 4;
   seg alloc_seg = base + 1;
-  p->type = type;
-  p->start = alloc_seg;
-  p->size = nPara-1;
+  pstore8(submcb_linear + offsetof(struct submcb, type), (UBYTE)type);
+  pstore16(submcb_linear + offsetof(struct submcb, start), alloc_seg);
+  pstore16(submcb_linear + offsetof(struct submcb, size), (UWORD)(nPara - 1));
   if (name)
-    memcpy(p->name, name, 8);
+    cfg_guest_write(submcb_linear + offsetof(struct submcb, name), name, 8);
   base += nPara;
   if (mode)
     umb_base_seg = base;
@@ -2481,7 +2526,6 @@ dos_far_ptr KernelAlloc(size_t nBytes, char type, int mode)
 VOID PostConfig(VOID)
 {
   dos_far_ptr x86_sp;
-  sfttbl *sp;
   COUNT extra_files;
 
   /* DOS=UMB requests UMB use during pass 1, but historically umb_init()
@@ -2514,9 +2558,8 @@ VOID PostConfig(VOID)
    * built-in 5-entry block. Now append the final FILES= extension.
    */
   x86_sp = config_lol.sfthead();
-  sp = (sfttbl *)ARM_PTR(x86_sp);
-  x86_sp = sp->sftt_next;
-  sp = (sfttbl *)ARM_PTR(x86_sp);
+  x86_sp = cfg_guest_read_far(cfg_guest_linear(x86_sp) +
+                              offsetof(sfttbl, sftt_next));
 
   extra_files = Config.cfgFiles - 8;
   if (extra_files > 0)
@@ -2525,18 +2568,24 @@ VOID PostConfig(VOID)
       KernelAlloc(sizeof(sftheader) + extra_files * sizeof(sft),
                   'F', Config.cfgFilesHigh);
 
-    sp->sftt_next = x86_sft3;
-    sp = (sfttbl *)ARM_PTR(x86_sft3);
-    sp->sftt_next = MK_FP(-1, -1);
-    sp->sftt_count = extra_files;
+    cfg_guest_write_far(cfg_guest_linear(x86_sp) + offsetof(sfttbl, sftt_next),
+                        x86_sft3);
+    cfg_guest_write_far(cfg_guest_linear(x86_sft3) + offsetof(sfttbl, sftt_next),
+                        MK_FP((UWORD)-1, (UWORD)-1));
+    pstore16(cfg_guest_linear(x86_sft3) + offsetof(sfttbl, sftt_count),
+             (UWORD)extra_files);
   }
 
   config_lol.cds(KernelAlloc(sizeof(struct cds) * config_lol.lastdrive(),
                           'L', Config.cfgLastdriveHigh));
 
-  CfgDbgPrintf((" sft table %04x:%04x\n",
-                FP_SEG(((sfttbl *)ARM_PTR(config_lol.sfthead()))->sftt_next),
-                FP_OFF(((sfttbl *)ARM_PTR(config_lol.sfthead()))->sftt_next)));
+  {
+    dos_far_ptr next_sft =
+      cfg_guest_read_far(cfg_guest_linear(config_lol.sfthead()) +
+                         offsetof(sfttbl, sftt_next));
+    CfgDbgPrintf((" sft table %04x:%04x\n",
+                  FP_SEG(next_sft), FP_OFF(next_sft)));
+  }
   CfgDbgPrintf((" CDS table %04x:%04x\n", FP_SEG(config_lol.cds()), FP_OFF(config_lol.cds())));
   CfgDbgPrintf((" DPB table %04x:%04x\n", FP_SEG(config_lol.dpb()), FP_OFF(config_lol.dpb())));
 
