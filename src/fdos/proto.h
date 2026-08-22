@@ -382,6 +382,7 @@ UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth);
 
 /* task.c */
 COUNT DosExec(COUNT mode, exec_blk FAR * ep, BYTE FAR * lp);
+COUNT DosExecGuest(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp);
 void new_psp(seg para, seg cur_psp);        /* INT 21h AH=26h */
 void child_psp(seg para, seg cur_psp, int psize); /* INT 21h AH=55h */
 COUNT DosComLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd);

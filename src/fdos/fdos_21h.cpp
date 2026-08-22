@@ -1691,9 +1691,19 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         /* EXEC - load and/or execute a program                        */
       case 0x4b: {
-          exec_blk *ep = (exec_blk *) ARM_PTR(MK_FP(R_ES, R_BX));
-          BYTE *lp = (BYTE *) ARM_PTR(R_FP_DS_DX);
-          rc = DosExec(R_AL, ep, lp);
+          const dos_far_ptr x86_ep = MK_FP(R_ES, R_BX);
+          const dos_far_ptr x86_lp = R_FP_DS_DX;
+          exec_blk ep;
+
+          /* ES:BX and DS:DX are DOS far pointers, not native pointers.
+             Keep the EXEC parameter block in a native snapshot while the
+             loader is allowed to page guest memory; only EXEC_LOAD returns
+             modified stack/start fields to the caller. */
+          guest_read(&ep, x86_ep, sizeof(ep));
+          rc = DosExecGuest(R_AL, &ep, x86_lp);
+          if (rc == SUCCESS && (R_AL & 0x7f) == EXEC_LOAD)
+            guest_write(x86_ep, &ep, sizeof(ep));
+
           dpb_watch_check_chain("0x4b");
           if (rc < SUCCESS)
           {

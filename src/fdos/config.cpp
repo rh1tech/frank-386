@@ -18,7 +18,6 @@ extern "C" char *strchr(const char *, int);
 
 using fdos_guest::lol_ref;
 using fdos_guest::dos_data_ref;
-extern "C" COUNT DosExecGuest(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp);
 static constexpr uint32_t config_fixed_data_linear = ((uint32_t)DOS_PSP << 4) + 0x08F0u;
 static constexpr uint32_t config_internal_data_linear = ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
 static const lol_ref config_lol(config_fixed_data_linear);
