@@ -964,9 +964,7 @@ bool fdos_21h(CPU* _cpu) {
     CPU_SP = guard_sp;
     cpu_regs_ref regs_ref(((uint32_t)entry_ss << 4) + regs_sp);
     dos_data_ref idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
-    CPU_regs saved_regs;
-    cpu_save_regs(_cpu, &saved_regs);
-    regs_ref.write_from(saved_regs);
+    regs_ref.save_cpu(_cpu);
     regs_ref.flags() = (uint32_t(regs_ref.flags()) & ~0x0041u) | (flags_on_stack & 0x0041u);
 
     psp_ref current_psp((seg)(UWORD)idata.cu_psp());
@@ -1500,11 +1498,9 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          * reads and writes live CPU_* registers.  Isolate that API here;
          * the rest of INT 21h uses the local frame. */
         cpu_save_regs(_cpu, &live_saved);
-        regs_ref.read_into(saved_regs);
-        cpu_restore_regs(_cpu, &saved_regs);
+        regs_ref.restore_cpu(_cpu);
         rc = DosDevIOctl();      /* can set critical error code! */
-        cpu_save_regs(_cpu, &saved_regs);
-        regs_ref.write_from(saved_regs);
+        regs_ref.save_cpu(_cpu);
         cpu_restore_regs(_cpu, &live_saved);
 
         if (rc < SUCCESS)
@@ -2732,8 +2728,7 @@ exit_dispatch:
 
     /* Upstream copies its local lregs frame back only after dispatch.
      * Do the same here, then patch CF/ZF in the caller's IRET frame. */
-    regs_ref.read_into(saved_regs);
-    cpu_restore_regs(_cpu, &saved_regs);
+    regs_ref.restore_cpu(_cpu);
     dpb_watch_int21_checkpoint(cpu, "exit");
     writew86(stk_lin(entry_ss, entry_sp, 4), flags_on_stack);
     dpb_watch_int21_checkpoint(cpu, "after-flags-write");

@@ -210,6 +210,7 @@ public:
         : addr_(addr), native_(X86_RAM_BASE + addr) {}
 #define FDOS_CPU_REG_PROXY(type, off) scalar_proxy<type>(native_ + (off))
 #endif
+    __attribute__((always_inline)) scalar_proxy<uint32_t> r32(unsigned i) const { return FDOS_CPU_REG_PROXY(uint32_t, offsetof(CPU_regs, gprx) + i * sizeof(gprx_t)); }
     __attribute__((always_inline)) scalar_proxy<uint16_t> r16(unsigned i) const { return FDOS_CPU_REG_PROXY(uint16_t, offsetof(CPU_regs, gprx) + i * sizeof(gprx_t)); }
     __attribute__((always_inline)) scalar_proxy<uint8_t> r8l(unsigned i) const { return FDOS_CPU_REG_PROXY(uint8_t, offsetof(CPU_regs, gprx) + i * sizeof(gprx_t)); }
     __attribute__((always_inline)) scalar_proxy<uint8_t> r8h(unsigned i) const { return FDOS_CPU_REG_PROXY(uint8_t, offsetof(CPU_regs, gprx) + i * sizeof(gprx_t) + 1u); }
@@ -221,19 +222,24 @@ public:
 #undef FDOS_CPU_REG_PROXY
     __attribute__((always_inline)) flag_proxy carry() const { return {addr_ + offsetof(CPU_regs, flags), 0x0001u}; }
     __attribute__((always_inline)) flag_proxy zero() const { return {addr_ + offsetof(CPU_regs, flags), 0x0040u}; }
-    void read_into(CPU_regs &out) const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-        auto *d = reinterpret_cast<uint8_t *>(&out); for (size_t i=0;i<sizeof(out);++i) d[i]=pload8(addr_+(uint32_t)i);
-#else
-        __builtin_memcpy(&out, native_, sizeof(out));
-#endif
+    __attribute__((always_inline)) void save_cpu(const CPU *cpu) const {
+        for (unsigned i = 0; i < 8; ++i)
+            r32(i) = cpu->gprx[i].r32;
+        flags() = cpu->flags.value;
+        es() = cpu->ext_accessors->get_seg16(cpu, SEG_ES);
+        ds() = cpu->ext_accessors->get_seg16(cpu, SEG_DS);
+        fs() = cpu->ext_accessors->get_seg16(cpu, SEG_FS);
+        gs() = cpu->ext_accessors->get_seg16(cpu, SEG_GS);
     }
-    void write_from(const CPU_regs &in) const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-        const auto *d = reinterpret_cast<const uint8_t *>(&in); for (size_t i=0;i<sizeof(in);++i) pstore8(addr_+(uint32_t)i,d[i]);
-#else
-        __builtin_memcpy(native_, &in, sizeof(in));
-#endif
+
+    __attribute__((always_inline)) void restore_cpu(CPU *cpu) const {
+        cpu->flags.value = flags();
+        cpu->ext_accessors->set_seg16(cpu, SEG_ES, es());
+        cpu->ext_accessors->set_seg16(cpu, SEG_DS, ds());
+        cpu->ext_accessors->set_seg16(cpu, SEG_FS, fs());
+        cpu->ext_accessors->set_seg16(cpu, SEG_GS, gs());
+        for (unsigned i = 0; i < 8; ++i)
+            cpu->gprx[i].r32 = r32(i);
     }
 private:
     linear_t addr_;
