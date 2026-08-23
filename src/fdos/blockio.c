@@ -34,6 +34,8 @@
 #include "hdr/debug.h"
 #include "hdr/buffer.h"
 #include "hdr/file.h"
+#include "blockio_guest.h"
+#include "fatfs_guest.h"
 #include "config.h"
 #include "hdr/network.h"
 #include "init-mod.h"
@@ -211,17 +213,24 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
 
 STATIC void move_buffer(dos_far_ptr/*struct buffer*/ _bp, UWORD firstbp)
 {
-  UWORD bp_off = FP_OFF(_bp);
-  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
-  /* connect bp->b_prev and bp->b_next */
-  b_next(_bp, bp)->b_prev = bp->b_prev;
-  b_prev(_bp, bp)->b_next = bp->b_next;
+  const UWORD bp_off = FP_OFF(_bp);
+  const UWORD prev = fdos_buffer_prev(_bp);
+  const UWORD next = fdos_buffer_next(_bp);
+  const dos_far_ptr prev_bp = MK_FP(FP_SEG(_bp), prev);
+  const dos_far_ptr next_bp = MK_FP(FP_SEG(_bp), next);
+  const dos_far_ptr first = MK_FP(FP_SEG(_bp), firstbp);
+  const UWORD first_prev = fdos_buffer_prev(first);
 
-  /* insert bp between firstbp and firstbp->b_prev */
-  bp->b_prev = bufptr(_bp, firstbp)->b_prev;
-  bp->b_next = firstbp;
-  b_next(_bp, bp)->b_prev = bp_off;
-  b_prev(_bp, bp)->b_next = bp_off;
+  /* Detach _bp from its current position.  All list links are guest state;
+     never retain a host pointer while touching another buffer page. */
+  fdos_buffer_prev_set(next_bp, prev);
+  fdos_buffer_next_set(prev_bp, next);
+
+  /* Insert _bp between first and first->prev. */
+  fdos_buffer_prev_set(_bp, first_prev);
+  fdos_buffer_next_set(_bp, firstbp);
+  fdos_buffer_prev_set(first, bp_off);
+  fdos_buffer_next_set(MK_FP(FP_SEG(_bp), first_prev), bp_off);
 }
 
 /*
@@ -240,78 +249,72 @@ STATIC dos_far_ptr/*struct buffer*/ searchblock(ULONG blkno, COUNT dsk)
   int fat_count = 0;
   UWORD lastNonFat = 0;
   UWORD uncacheBuf = 0;
-  UWORD firstbp = FP_OFF(LoL->firstbuf);
+  dos_far_ptr first = fdos_buffer_first();
+  const UWORD firstbp = FP_OFF(first);
+  const UWORD nbuffers = fdos_buffer_count();
+  dos_far_ptr _bp = first;
 
-  dos_far_ptr _bp = LoL->firstbuf;
-  struct buffer* bp = (struct buffer *)ARM_PTR(_bp);
   do
   {
-    if ((bp->b_blkno == blkno) && (bp->b_flag & BFR_VALID) && (bp->b_unit == dsk))
+    const ULONG b_blkno = fdos_buffer_blkno(_bp);
+    BYTE b_flag = fdos_buffer_flag(_bp);
+    const BYTE b_unit = fdos_buffer_unit(_bp);
+
+    if ((b_blkno == blkno) && (b_flag & BFR_VALID) && (b_unit == dsk))
     {
-      /* found it -- rearrange LRU links      */
-      bp->b_flag &= ~BFR_UNCACHE;  /* reset uncache attribute */
+      b_flag &= (BYTE)~BFR_UNCACHE;
+      fdos_buffer_flag_set(_bp, b_flag);
       if (FP_OFF(_bp) != firstbp)
       {
-        UWORD bp_off = FP_OFF(_bp);
-        LoL->firstbuf = MK_FP(FP_SEG(LoL->firstbuf), bp_off);
+        const UWORD bp_off = FP_OFF(_bp);
+        fdos_buffer_first_set(MK_FP(FP_SEG(first), bp_off));
         move_buffer(_bp, firstbp);
       }
       return _bp;
     }
 
-    if (bp->b_flag & BFR_UNCACHE)
+    if (b_flag & BFR_UNCACHE)
       uncacheBuf = FP_OFF(_bp);
-
-    if (bp->b_flag & BFR_FAT)
+    if (b_flag & BFR_FAT)
       fat_count++;
     else
       lastNonFat = FP_OFF(_bp);
 
     {
-      UWORD cur = FP_OFF(_bp);
-      UWORD next = bp->b_next;
-
-      if (next == 0xffff || guard >= LoL->nbuffers)
+      const UWORD cur = FP_OFF(_bp);
+      const UWORD next = fdos_buffer_next(_bp);
+      if (next == 0xffff || guard >= nbuffers)
       {
         printf("PANIC: bad buffer link blk=%lu dsk=%d seg=%04X first=%04X cur=%04X next=%04X prev=%04X flags=%02X unit=%u bblk=%lu nbuffers=%u\n",
-               (unsigned long)blkno, dsk, FP_SEG(LoL->firstbuf), firstbp, cur, next, bp->b_prev,
-               bp->b_flag, bp->b_unit, (unsigned long)bp->b_blkno, LoL->nbuffers);
+               (unsigned long)blkno, dsk, FP_SEG(first), firstbp, cur, next,
+               fdos_buffer_prev(_bp), (unsigned)b_flag, (unsigned)b_unit,
+               (unsigned long)b_blkno, (unsigned)nbuffers);
         while(1);
       }
+      _bp = MK_FP(FP_SEG(_bp), next);
       guard++;
     }
-
-    _bp = b_next_fp(_bp, bp);
-    bp = (struct buffer *)ARM_PTR(_bp);
   } while (FP_OFF(_bp) != firstbp);
-
-  /*
-     now take either the last buffer in chain (not used recently)
-     or, if we are low on FAT buffers, the last non FAT buffer
-   */
 
   if (uncacheBuf)
   {
     _bp = MK_FP(FP_SEG(_bp), uncacheBuf);
   }
-  else if ((bp->b_flag & BFR_FAT) && fat_count < 3 && lastNonFat)
+  else if ((fdos_buffer_flag(_bp) & BFR_FAT) && fat_count < 3 && lastNonFat)
   {
     _bp = MK_FP(FP_SEG(_bp), lastNonFat);
   }
   else
   {
-    struct buffer *first = bufptr(_bp, firstbp);
-    _bp = MK_FP(FP_SEG(_bp), first->b_prev);
+    _bp = MK_FP(FP_SEG(_bp), fdos_buffer_prev(first));
   }
-  bp = (struct buffer *)ARM_PTR(_bp);
 
-  bp->b_flag |= BFR_UNCACHE;  /* set uncache attribute */
-
-  if (FP_OFF(_bp) != firstbp)          /* move to front */
+  fdos_buffer_flag_set(_bp, fdos_buffer_flag(_bp) | BFR_UNCACHE);
+  if (FP_OFF(_bp) != firstbp)
   {
-    UWORD bp_off = FP_OFF(_bp);
+    const UWORD bp_off = FP_OFF(_bp);
     move_buffer(_bp, firstbp);
-    LoL->firstbuf = MK_FP(FP_SEG(_bp), bp_off);
+    fdos_buffer_first_set(MK_FP(FP_SEG(_bp), bp_off));
   }
   return _bp;
 }
@@ -320,49 +323,43 @@ STATIC dos_far_ptr/*struct buffer*/ searchblock(ULONG blkno, COUNT dsk)
 STATIC BOOL flush1(dos_far_ptr/*struct buffer*/ _bp)
 {
   BOOL ok = TRUE;
-  struct buffer *bp = (struct buffer *)ARM_PTR(_bp);
-  if ((bp->b_flag & (BFR_VALID | BFR_DIRTY)) == (BFR_VALID | BFR_DIRTY))
+  BYTE flag = fdos_buffer_flag(_bp);
+  if ((flag & (BFR_VALID | BFR_DIRTY)) == (BFR_VALID | BFR_DIRTY))
   {
     ULONG b_offset = 0;
     UBYTE b_copies = 1;
-    ULONG blkno = bp->b_blkno;
-    if (bp->b_flag & BFR_FAT)
-    {
-      b_copies = bp->b_copies;
-      b_offset = bp->b_offset;
-#ifdef WITHFAT32
-      /* b_offset == 0 means FAT32 (dpb_fatsize is a 16-bit field and FAT32
-         keeps the real size in the 32-bit dpb_xfatsize instead), so we have
-         to go back to the DPB for it.
+    ULONG blkno = fdos_buffer_blkno(_bp);
+    const BYTE unit = fdos_buffer_unit(_bp);
 
-         Reaching that DPB relies on an invariant that spans two files:
-         BFR_FAT is set in exactly one place (getFATblock(), fattab.c), which
-         sets b_dpbp on the very next line - every other site only ever
-         CLEARS BFR_FAT. So b_dpbp is always valid here. The check below
-         costs nothing and makes the invariant enforced rather than merely
-         true: if it were ever broken, ARM_PTR(0000:0000) would read a bogus
-         "xfatsize" out of the guest IVT and the loop underneath would write
-         FAT copies to sectors computed from it. Degrade to "one copy, no
-         stride" instead of writing to a garbage sector. */
-      if (b_offset == 0) /* FAT32 FS */
+    if (flag & BFR_FAT)
+    {
+      b_copies = fdos_buffer_copies(_bp);
+      b_offset = fdos_buffer_offset(_bp);
+#ifdef WITHFAT32
+      if (b_offset == 0)
       {
-        if (far_is_null(bp->b_dpbp) || far_is_end(bp->b_dpbp))
-          b_copies = 1;                 /* invariant broken: write once, in place */
+        const dos_far_ptr dpbp = fdos_buffer_dpbp(_bp);
+        if (far_is_null(dpbp) || far_is_end(dpbp))
+          b_copies = 1;
         else
-          b_offset = ((struct dpb *)ARM_PTR(bp->b_dpbp))->dpb_xfatsize;
+          b_offset = fdos_dpb_xfatsize(dpbp);
       }
 #endif
     }
+
     while (b_copies--)
     {
-      if (dskxfer(bp->b_unit, blkno, b_buffer_fp(_bp), 1, DSKWRITE))
+      if (dskxfer(unit, blkno, b_buffer_fp(_bp), 1, DSKWRITE))
         ok = FALSE;
       blkno += b_offset;
     }
   }
-  bp->b_flag &= ~BFR_DIRTY;     /* even if error, mark not dirty */
-  if (!ok)                      /* otherwise system has trouble  */
-    bp->b_flag &= ~BFR_VALID;   /* continuing.           */
+
+  flag = fdos_buffer_flag(_bp);
+  flag &= (BYTE)~BFR_DIRTY;
+  if (!ok)
+    flag &= (BYTE)~BFR_VALID;
+  fdos_buffer_flag_set(_bp, flag);
   return ok;
 }
 
@@ -376,48 +373,35 @@ STATIC BOOL flush1(dos_far_ptr/*struct buffer*/ _bp)
 struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 {
   dos_far_ptr _bp = searchblock(blkno, dsk);
-  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
+  BYTE flag = fdos_buffer_flag(_bp);
 
-  if (!(bp->b_flag & BFR_UNCACHE))
+  if (!(flag & BFR_UNCACHE))
   {
 #ifdef FDOS_BUFFER_NOCACHE
-    /* Diagnostic: force a re-read of every clean read hit. Dirty buffers
-       (an un-flushed write must not be dropped) and overwrite requests
-       (caller fills the whole block) stay on the fast path. Falling
-       through: flush1() is a no-op on a clean buffer, and the
-       dskxfer(...,DSKREAD) below refills THIS buffer exactly as on a
-       genuine cache miss. */
-    if (((bp->b_flag & BFR_DIRTY) || overwrite)
+    if (((flag & BFR_DIRTY) || overwrite)
 #ifdef FDOS_BUFFER_NOCACHE_UNIT
         || dsk != (FDOS_BUFFER_NOCACHE_UNIT)
 #endif
        )
-      return bp;
-    /* else fall through to the miss/refill path below */
+      return (struct buffer *)ARM_PTR(_bp);
 #else
-    return bp;
+    return (struct buffer *)ARM_PTR(_bp);
 #endif
   }
 
-  /* The block we need is not in a buffer, we must make a buffer  */
-  /* available, and fill it with the desired block                */
-
   if (!flush1(_bp))
     return NULL;
-/*
-  printf("getblk fill blk=%lu dsk=%d bp=%p buf=%p next=%04X prev=%04X\n",
-         (unsigned long)blkno, dsk, bp, bp->b_buffer, bp->b_next, bp->b_prev);
-*/
+
   if (!overwrite && dskxfer(dsk, blkno, b_buffer_fp(_bp), 1, DSKREAD))
-  {
     return NULL;
-  }
 
-  bp->b_flag = BFR_VALID | BFR_DATA;
-  bp->b_unit = (BYTE)dsk;
-  bp->b_blkno = blkno;
+  fdos_buffer_flag_set(_bp, BFR_VALID | BFR_DATA);
+  fdos_buffer_unit_set(_bp, (BYTE)dsk);
+  fdos_buffer_blkno_set(_bp, blkno);
 
-  return bp;
+  /* Legacy callers still consume a struct buffer*.  Resolve it only after
+     every operation capable of remapping guest RAM has completed. */
+  return (struct buffer *)ARM_PTR(_bp);
 }
 
 /*      Mark all buffers for a disk as not valid                        */

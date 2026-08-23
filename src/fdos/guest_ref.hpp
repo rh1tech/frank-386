@@ -509,4 +509,40 @@ private:
     linear_t addr_;
 };
 
+class buffer_ref final : private ref_base<buffer> {
+public:
+    explicit constexpr buffer_ref(dos_far_ptr p)
+        : ref_base<buffer>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+
+    UWORD next() const { return scalar_load<UWORD>(offsetof(buffer, b_next)); }
+    void next(UWORD v) const { scalar_store<UWORD>(offsetof(buffer, b_next), v); }
+    UWORD prev() const { return scalar_load<UWORD>(offsetof(buffer, b_prev)); }
+    void prev(UWORD v) const { scalar_store<UWORD>(offsetof(buffer, b_prev), v); }
+    BYTE unit() const { return scalar_load<BYTE>(offsetof(buffer, b_unit)); }
+    void unit(BYTE v) const { scalar_store<BYTE>(offsetof(buffer, b_unit), v); }
+    BYTE flag() const { return scalar_load<BYTE>(offsetof(buffer, b_flag)); }
+    void flag(BYTE v) const { scalar_store<BYTE>(offsetof(buffer, b_flag), v); }
+    ULONG blkno() const { return scalar_load<ULONG>(offsetof(buffer, b_blkno)); }
+    void blkno(ULONG v) const { scalar_store<ULONG>(offsetof(buffer, b_blkno), v); }
+    UBYTE copies() const { return scalar_load<UBYTE>(offsetof(buffer, b_copies)); }
+    void copies(UBYTE v) const { scalar_store<UBYTE>(offsetof(buffer, b_copies), v); }
+    UWORD offset() const { return scalar_load<UWORD>(offsetof(buffer, b_offset)); }
+    void offset(UWORD v) const { scalar_store<UWORD>(offsetof(buffer, b_offset), v); }
+    dos_far_ptr dpbp() const { return far_load(offsetof(buffer, b_dpbp)); }
+    void dpbp(dos_far_ptr v) const { far_store(offsetof(buffer, b_dpbp), v); }
+
+private:
+    dos_far_ptr far_load(std::size_t off) const {
+        uint32_t x = scalar_load<uint32_t>(off);
+        dos_far_ptr p{};
+        __builtin_memcpy(&p, &x, sizeof(p));
+        return p;
+    }
+    void far_store(std::size_t off, dos_far_ptr p) const {
+        uint32_t x;
+        __builtin_memcpy(&x, &p, sizeof(x));
+        scalar_store<uint32_t>(off, x);
+    }
+};
+
 } // namespace fdos_guest

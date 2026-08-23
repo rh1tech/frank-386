@@ -73,6 +73,14 @@ extern "C" BYTE fdos_media_request_mcretcode(void) { return fdos_guest::media_re
 extern "C" dos_far_ptr fdos_media_request_bpptr(void) { return fdos_guest::media_req.bpptr(); }
 extern "C" BOOL fdos_bpb_is_fat32(dos_far_ptr p) { return fdos_guest::bpb_ref(p).bpb_nfsect() == 0; }
 extern "C" UBYTE fdos_dpb_unit(dos_far_ptr p) { return fdos_guest::dpb_ref(p).dpb_unit(); }
+extern "C" ULONG fdos_dpb_xfatsize(dos_far_ptr p) {
+#ifdef WITHFAT32
+    return fdos_guest::dpb_ref(p).dpb_xfatsize();
+#else
+    (void)p;
+    return 0;
+#endif
+}
 extern "C" UBYTE fdos_dpb_subunit(dos_far_ptr p) { return fdos_guest::dpb_ref(p).dpb_subunit(); }
 extern "C" UWORD fdos_dpb_secsize(dos_far_ptr p) { return fdos_guest::dpb_ref(p).dpb_secsize(); }
 extern "C" UWORD fdos_dpb_dirents(dos_far_ptr p) { return fdos_guest::dpb_ref(p).dpb_dirents(); }

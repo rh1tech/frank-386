@@ -11,6 +11,7 @@ BYTE fdos_media_request_mcretcode(void);
 dos_far_ptr fdos_media_request_bpptr(void);
 BOOL fdos_bpb_is_fat32(dos_far_ptr bpbp);
 UBYTE fdos_dpb_unit(dos_far_ptr dpb);
+ULONG fdos_dpb_xfatsize(dos_far_ptr dpb);
 UBYTE fdos_dpb_subunit(dos_far_ptr dpb);
 UWORD fdos_dpb_secsize(dos_far_ptr dpb);
 UWORD fdos_dpb_dirents(dos_far_ptr dpb);

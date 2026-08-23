@@ -22,7 +22,7 @@ if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
 endif()
 
 # Build with a standard 128 KiB EGA-compatible video adapter.
-option(EGA128 "Build with 128 KiB EGA video memory/capabilities" ON)
+option(EGA128 "Build with 128 KiB EGA video memory/capabilities" OFF)
 if(EGA128)
     add_compile_definitions(EGA128=1)
 endif()
@@ -360,6 +360,7 @@ set(EMU_CORE_SOURCES
     src/fdos/fattab.c
     src/fdos/fatdir.c
     src/fdos/blockio.c
+    src/fdos/blockio_guest.cpp
     src/fdos/chario.c
     src/fdos/kernel.c
     src/fdos/task.c
@@ -707,6 +708,7 @@ set(FDOS_WARN_SOURCES
     src/fdos/fattab.c
     src/fdos/fatdir.c
     src/fdos/blockio.c
+    src/fdos/blockio_guest.cpp
     src/fdos/chario.c
     src/fdos/kernel.c
     src/fdos/task.c
