@@ -189,7 +189,6 @@ COUNT dos_read(COUNT fd, VOID FAR * buffer, UCOUNT count);
 COUNT dos_write(COUNT fd, const VOID FAR * buffer, UCOUNT count);
 CLUSTER dos_free(dos_far_ptr /* -> struct dpb */ x86_dpbp);
 BOOL dir_exists(char * path);
-VOID dpb16to32(struct dpb FAR *dpbp);
 struct xfreespace;
 UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc);
 COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace* xfsp);
@@ -208,12 +207,12 @@ struct dhdr FAR * select_unit(COUNT drive);
 void dos_merge_file_changes(int fd);
 
 /* fattab.c */
-void read_fsinfo(struct dpb FAR * dpbp);
+void read_fsinfo(dos_far_ptr dpbp);
 void write_fsinfo(struct dpb FAR * dpbp);
 #ifdef WITHFAT32
-VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp, BOOL extended);
+VOID bpb_to_dpb(dos_far_ptr bpbp, dos_far_ptr dpbp, BOOL extended);
 #else
-VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp);
+VOID bpb_to_dpb(dos_far_ptr bpbp, dos_far_ptr dpbp);
 #endif
 CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
                  REG CLUSTER Cluster2);

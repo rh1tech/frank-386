@@ -412,6 +412,8 @@ private:
 
 class dpb_ref final : private ref_base<dpb> {
 public:
+    __attribute__((always_inline)) explicit dpb_ref(linear_t addr)
+        : ref_base<dpb>(addr) {}
     __attribute__((always_inline)) explicit dpb_ref(dos_far_ptr p)
         : ref_base<dpb>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
 
@@ -441,7 +443,15 @@ public:
 
     __attribute__((always_inline)) BYTE flags() const { return scalar_load<BYTE>(offsetof(dpb, dpb_flags)); }
     __attribute__((always_inline)) void flags(BYTE v) const { scalar_store<BYTE>(offsetof(dpb, dpb_flags), v); }
+    __attribute__((always_inline)) UWORD cluster() const { return scalar_load<UWORD>(offsetof(dpb, dpb_cluster)); }
     __attribute__((always_inline)) void cluster(UWORD v) const { scalar_store<UWORD>(offsetof(dpb, dpb_cluster), v); }
+    __attribute__((always_inline)) UWORD nfree() const {
+#ifdef WITHFAT32
+        return scalar_load<UWORD>(offsetof(dpb, dpb_nfreeclst_un));
+#else
+        return scalar_load<UWORD>(offsetof(dpb, dpb_nfreeclst));
+#endif
+    }
     __attribute__((always_inline)) void nfree(UWORD v) const {
 #ifdef WITHFAT32
         scalar_store<UWORD>(offsetof(dpb, dpb_nfreeclst_un), v);
@@ -449,6 +459,11 @@ public:
         scalar_store<UWORD>(offsetof(dpb, dpb_nfreeclst), v);
 #endif
     }
+#ifdef WITHFAT32
+    __attribute__((always_inline)) void nfree_hi(UWORD v) const {
+        scalar_store<UWORD>(offsetof(dpb, dpb_nfreeclst_un) + sizeof(UWORD), v);
+    }
+#endif
     __attribute__((always_inline)) dos_far_ptr device() const { return far_load(offsetof(dpb, dpb_device)); }
 
 #ifdef WITHFAT32
@@ -481,9 +496,9 @@ public:
     __attribute__((always_inline)) explicit bpb_ref(dos_far_ptr p)
         : ref_base<bpb>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
 
-#define FDOS_GUEST_R8(name) UBYTE name() const { return scalar_load<UBYTE>(offsetof(bpb, name)); }
-#define FDOS_GUEST_R16(name) UWORD name() const { return scalar_load<UWORD>(offsetof(bpb, name)); }
-#define FDOS_GUEST_R32(name) ULONG name() const { return scalar_load<ULONG>(offsetof(bpb, name)); }
+#define FDOS_GUEST_R8(name) __attribute__((always_inline)) UBYTE name() const { return scalar_load<UBYTE>(offsetof(bpb, name)); }
+#define FDOS_GUEST_R16(name) __attribute__((always_inline)) UWORD name() const { return scalar_load<UWORD>(offsetof(bpb, name)); }
+#define FDOS_GUEST_R32(name) __attribute__((always_inline)) ULONG name() const { return scalar_load<ULONG>(offsetof(bpb, name)); }
     FDOS_GUEST_R16(bpb_nbyte)
     FDOS_GUEST_R8(bpb_nsector)
     FDOS_GUEST_R16(bpb_nreserved)

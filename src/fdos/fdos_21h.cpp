@@ -12,7 +12,6 @@ extern "C" {
 #endif
 #include <cstring>
 #include "guest_ref.hpp"
-#include "fatfs_guest.h"
 
 using fdos_guest::cpu_regs_ref;
 using fdos_guest::dos_data_ref;
@@ -21,10 +20,12 @@ using fdos_guest::lol_ref;
 using fdos_guest::cds_ref;
 using fdos_guest::sft_ref;
 using fdos_guest::sfttbl_ref;
+using fdos_guest::dpb_ref;
 
 static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
 
+#if PDB_DEBUG
 extern "C" int snprintf(char *s, size_t n, const char *fmt, ...);
 static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
 {
@@ -35,7 +36,9 @@ static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
     snprintf(tag, 40, "INT21-%s AH=%02x AL=%02x", where, CPU_AH, CPU_AL);
     dpb_watch_check_chain(tag);
 }
-
+#else
+#define dpb_watch_int21_checkpoint(...)
+#endif
 /*
  * Guest-visible INT 21h register frame.
  *
@@ -694,8 +697,6 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
     /* Get extended drive parameter block */
     case 0x02:
     {
-      struct xdpbdata FAR *xddp;
-
       if (R_CX < sizeof(struct xdpbdata))
         return DE_INVLDBUF;
 
@@ -703,25 +704,40 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
       if (rc != SUCCESS)
         return rc;
 
-      struct dpb* dpb = (struct dpb*)ARM_PTR(_dpb);
-      flush_buffers(dpb->dpb_unit);
-      dpb->dpb_flags = M_CHANGED;
+      const dpb_ref src_dpb(_dpb);
+      flush_buffers(src_dpb.dpb_unit());
+      src_dpb.flags(M_CHANGED);
 
       if (media_check_tagged(_dpb, "INT21/7302/GetDriveDPB") < 0)
         return DE_INVLDDRV;
 
-      xddp = (struct xdpbdata FAR *)ARM_PTR(R_FP_ES_DI);
-      memcpy(&xddp->xdd_dpb, dpb, sizeof(struct dpb));
-      xddp->xdd_dpbsize = sizeof(struct dpb);
-
-      if (!ISFAT32(dpb) && dpb->dpb_xsize != dpb->dpb_size)
       {
-        xddp->xdd_dpb.dpb_nfreeclst_un.dpb_nfreeclst_st.dpb_nfreeclst_hi =
-          (dpb->dpb_nfreeclst == 0xFFFF ? 0xFFFF : 0);
-        dpb16to32(&xddp->xdd_dpb);
-        xddp->xdd_dpb.dpb_xfatsize = dpb->dpb_fatsize;
-        xddp->xdd_dpb.dpb_xcluster =
-          (dpb->dpb_cluster == 0xFFFF ? 0xFFFFFFFFuL : dpb->dpb_cluster);
+        const uint32_t src_linear =
+          (static_cast<uint32_t>(FP_SEG(_dpb)) << 4) + FP_OFF(_dpb);
+        const uint32_t out_linear =
+          (static_cast<uint32_t>(FP_SEG(R_FP_ES_DI)) << 4) + FP_OFF(R_FP_ES_DI);
+        const uint32_t out_dpb_linear =
+          out_linear + offsetof(struct xdpbdata, xdd_dpb);
+        const dpb_ref out_dpb(out_dpb_linear);
+
+        pstore16(out_linear + offsetof(struct xdpbdata, xdd_dpbsize),
+                 sizeof(struct dpb));
+        pstore_block(out_dpb_linear, src_linear, sizeof(struct dpb));
+
+        if (src_dpb.dpb_fatsize() != 0 &&
+            src_dpb.dpb_xsize() != src_dpb.dpb_size())
+        {
+          out_dpb.nfree_hi(src_dpb.nfree() == 0xFFFF ? 0xFFFF : 0);
+          out_dpb.dpb_xflags(0);
+          out_dpb.dpb_xfsinfosec(0xffff);
+          out_dpb.dpb_xbackupsec(0xffff);
+          out_dpb.dpb_xrootclst(0);
+          out_dpb.dpb_xdata(src_dpb.dpb_data());
+          out_dpb.dpb_xsize(src_dpb.dpb_size());
+          out_dpb.dpb_xfatsize(src_dpb.dpb_fatsize());
+          out_dpb.dpb_xcluster(
+            src_dpb.cluster() == 0xFFFF ? 0xFFFFFFFFuL : src_dpb.cluster());
+        }
       }
       break;
     }
@@ -2509,7 +2525,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* DOS 2+ internal - TRANSLATE BIOS PARAMETER BLOCK TO DRIVE
          PARAM BLOCK: DS:SI -> BPB, ES:BP -> DPB to fill              */
       case 0x53:
-        fdos_bpb_to_dpb_guest(MK_FP(R_DS, R_SI), MK_FP(R_ES, R_BP),
+        bpb_to_dpb(MK_FP(R_DS, R_SI), MK_FP(R_ES, R_BP),
 #ifdef WITHFAT32
                               (R_CX == 0x4558 && R_DX == 0x4152)
 #else

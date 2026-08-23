@@ -1,3 +1,9 @@
+#define new fdos_new
+#ifndef _Static_assert
+#define _Static_assert static_assert
+#define FDOS_LOCAL_STATIC_ASSERT_MACRO 1
+#endif
+extern "C" {
 #include <pico.h>
 #include <pico/time.h>
 #include <hardware/pio.h>
@@ -38,8 +44,22 @@
 #include "hdr/network.h"
 #include "init-mod.h"
 #include "dyndata.h"
-#include "fatfs_guest.h"
 
+
+}
+#ifdef FDOS_LOCAL_STATIC_ASSERT_MACRO
+#undef _Static_assert
+#undef FDOS_LOCAL_STATIC_ASSERT_MACRO
+#endif
+#undef new
+#ifdef load
+#undef load
+#endif
+
+#include "guest_ref.hpp"
+using fdos_guest::dpb_ref;
+
+extern "C" {
 #define printf(...) dos_printf(__VA_ARGS__)
 
 /* Description.
@@ -65,7 +85,7 @@ VOID dir_init_fnode(f_node_ptr fnp, CLUSTER dirstart)
   /* root directory */
 #ifdef WITHFAT32
   if (dirstart == 0)
-    dirstart = fdos_dpb_root_cluster(fnp->f_dpb);
+    { const dpb_ref d(fnp->f_dpb); dirstart = d.dpb_fatsize() == 0 ? d.dpb_xrootclst() : 0; }
 #endif
   fnp->f_cluster = fnp->f_dmp->dm_dircluster = dirstart;
 }
@@ -102,7 +122,8 @@ STATIC void swap_deleted(char *name)
 COUNT dir_read(REG f_node_ptr fnp)
 {
   struct buffer *bp;
-  const UWORD secsize = fdos_dpb_secsize(fnp->f_dpb);
+  const dpb_ref d(fnp->f_dpb);
+  const UWORD secsize = d.dpb_secsize();
   unsigned sector;
   unsigned entry = fnp->f_dmp->dm_entry;
 
@@ -117,12 +138,12 @@ COUNT dir_read(REG f_node_ptr fnp)
 
   if (fnp->f_dmp->dm_dircluster == 0)
   {
-    const UWORD dirents = fdos_dpb_dirents(fnp->f_dpb);
+    const UWORD dirents = d.dpb_dirents();
     if (entry >= dirents)
       return DE_SEEK;
 
     fnp->f_dirsector = entry / (secsize / DIRENT_SIZE) +
-                       fdos_dpb_dirstrt(fnp->f_dpb);
+                       d.dpb_dirstrt();
   }
   else
   {
@@ -137,14 +158,20 @@ COUNT dir_read(REG f_node_ptr fnp)
     /* Re-read DPB geometry through the C++ wrapper after map_cluster():
        FAT/cache accesses above may have remapped the pageable DPB. */
     sector = (UBYTE)(fnp->f_offset / secsize) &
-             fdos_dpb_clsmask(fnp->f_dpb);
+             d.dpb_clsmask();
 
-    fnp->f_dirsector = fdos_dpb_clus2phys(fnp->f_dpb, fnp->f_cluster) +
+    fnp->f_dirsector = (((ULONG)(fnp->f_cluster - 2u) << d.dpb_shftcnt()) +
+#ifdef WITHFAT32
+             (d.dpb_fatsize() == 0 ? d.dpb_xdata() : d.dpb_data())
+#else
+             d.dpb_data()
+#endif
+            ) +
                        sector;
     /* Get the block we need from cache             */
   }
 
-  bp = getblock(fnp->f_dirsector, fdos_dpb_unit(fnp->f_dpb));
+  bp = getblock(fnp->f_dirsector, d.dpb_unit());
 
   /* Now that we have the block for our entry, get the    */
   /* directory entry.                                     */
@@ -180,7 +207,7 @@ COUNT dir_read(REG f_node_ptr fnp)
     char* strings throughout (see ConvertNameSZToName83() above), so
     no address-translation changes are needed here.
 */
-f_node_ptr dir_open(register const char *dirname, BOOL split, f_node_ptr fnp)
+f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
 {
   int i;
   char *fcbname;
@@ -511,3 +538,5 @@ void ConvertName83ToNameSZ(BYTE FAR * destSZ, BYTE FAR * srcFCBName)
   }
   *destSZ = '\0';
 }
+
+} /* extern "C" */

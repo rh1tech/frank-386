@@ -1,7 +1,36 @@
+#define new fdos_new
+#ifndef _Static_assert
+#define _Static_assert static_assert
+#define FDOS_LOCAL_STATIC_ASSERT_MACRO 1
+#endif
+extern "C" {
 #include "hdrs.h"
-#include "fatfs_guest.h"
+}
+#ifdef FDOS_LOCAL_STATIC_ASSERT_MACRO
+#undef _Static_assert
+#undef FDOS_LOCAL_STATIC_ASSERT_MACRO
+#endif
+#undef new
+#ifdef load
+#undef load
+#endif
+
+#include "guest_ref.hpp"
+
+using fdos_guest::bpb_ref;
+using fdos_guest::dpb_ref;
+using fdos_guest::request_ref;
+
+extern "C" {
 
 static const char *media_check_source = "?";
+
+static constexpr fdos_guest::linear_t media_req_linear =
+    (static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + X86_INTERNAL_DATA_OFF +
+    offsetof(dos_data, MediaReqHdr);
+static const request_ref media_req(media_req_linear);
+static const dos_far_ptr media_req_far =
+    MK_FP(DOS_PSP, X86_INTERNAL_DATA_OFF + offsetof(dos_data, MediaReqHdr));
 #if DIAG
 extern volatile unsigned int dos_diag_kernel_code;
 #endif
@@ -711,7 +740,7 @@ int find_fname(const char *path, int attr, f_node_ptr fnp)
 
 STATIC VOID wipe_out(f_node_ptr fnp);
 STATIC int alloc_find_free(f_node_ptr fnp, char *path);
-STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, char *name);
+STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, const char *name);
 
 /*
 Migrated from fatfs.c verbatim.
@@ -1060,17 +1089,23 @@ dos_far_ptr/*struct dpb*/ get_dpb(COUNT dsk)
 
 STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
 {
+  const dpb_ref d(_dpbp);
  retry:
-  fdos_media_request_prepare(_dpbp, command);
+  media_req.length(sizeof(request));
+  media_req.unit(d.dpb_subunit());
+  media_req.command(command);
+  media_req.mcmdesc(d.dpb_mdb());
+  media_req.status(0);
+  if (command == C_BLDBPB)
+    media_req.bpfat(DiskTransferBuffer);
 
-  drv_watch_set_dpb_context(_dpbp, command, fdos_dpb_unit(_dpbp),
-                            fdos_dpb_subunit(_dpbp),
-                            media_check_source);
+  drv_watch_set_dpb_context(_dpbp, command, d.dpb_unit(),
+                            d.dpb_subunit(), media_check_source);
 
   dpb_watch_check("rqblockio-before-execrh", _dpbp);
-  execrh(fdos_media_request_far(), fdos_dpb_device(_dpbp));
+  execrh(media_req_far, d.device());
   dpb_watch_check("rqblockio-after-execrh", _dpbp);
-  UWORD status = fdos_media_request_status();
+  UWORD status = media_req.status();
   if ((status & S_ERROR) || !(status & S_DONE))
   {
     if ((status & (S_ERROR | S_MASK)) == (S_ERROR | E_NOTRDY))
@@ -1078,8 +1113,7 @@ STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
 
     FOREVER
     {
-      switch (block_error_status(status, fdos_dpb_unit(_dpbp),
-                                 fdos_dpb_device(_dpbp), 0))
+      switch (block_error_status(status, d.dpb_unit(), d.device(), 0))
       {
       case ABORT:
       case FAIL:
@@ -1097,94 +1131,61 @@ STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
 }
 
 #ifdef WITHFAT32
-VOID dpb16to32(struct dpb FAR *dpbp)
-{
-  dpbp->dpb_xflags = 0;
-  dpbp->dpb_xfsinfosec = 0xffff;
-  dpbp->dpb_xbackupsec = 0xffff;
-  dpbp->dpb_xrootclst = 0;
-  dpbp->dpb_xdata = dpbp->dpb_data;
-  dpbp->dpb_xsize = dpbp->dpb_size;
-}
-
-VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp, BOOL extended)
+VOID bpb_to_dpb(dos_far_ptr bp, dos_far_ptr dp, BOOL extended)
 #else
-VOID bpb_to_dpb(bpb FAR * bpbp, REG struct dpb FAR * dpbp)
+VOID bpb_to_dpb(dos_far_ptr bp, dos_far_ptr dp)
 #endif
 {
-  ULONG size;
-  REG UWORD shftcnt;
-  bpb sbpb;
+  const bpb_ref b(bp);
+  const dpb_ref d(dp);
+  const UBYTE nsector = b.bpb_nsector();
+  UWORD shftcnt;
+  if (nsector == 0) shftcnt = 8;
+  else for (shftcnt = 0; (nsector >> shftcnt) > 1; ++shftcnt) {}
 
-  memcpy(&sbpb, bpbp, sizeof(sbpb));
-  if (sbpb.bpb_nsector == 0) {
-    shftcnt = 8;
-  } else {
-    for (shftcnt = 0; (sbpb.bpb_nsector >> shftcnt) > 1; shftcnt++)
-      ;
-  }
-  dpbp->dpb_shftcnt = shftcnt;
+  const UWORD secsize = b.bpb_nbyte();
+  const UWORD fatstrt = b.bpb_nreserved();
+  const UBYTE fats = b.bpb_nfat();
+  const UWORD fatsize = b.bpb_nfsect();
+  const UWORD dirents = b.bpb_ndirent();
+  const UWORD dirstrt = (UWORD)(fatstrt + fats * fatsize);
+  const UWORD data = (UWORD)(dirstrt + (dirents + secsize / DIRENT_SIZE - 1) / (secsize / DIRENT_SIZE));
+  const ULONG size = b.bpb_nsize() == 0 ? b.bpb_huge() : (ULONG)b.bpb_nsize();
+  UWORD clusters = (UWORD)(((size - data) >> shftcnt) + 1u);
 
-  dpbp->dpb_mdb = sbpb.bpb_mdesc;
-  dpbp->dpb_secsize = sbpb.bpb_nbyte;
-  dpbp->dpb_clsmask = (sbpb.bpb_nsector - 1) & 0xFF;
-  dpbp->dpb_fatstrt = sbpb.bpb_nreserved;
-  dpbp->dpb_fats = sbpb.bpb_nfat;
-  dpbp->dpb_dirents = sbpb.bpb_ndirent;
-  size = sbpb.bpb_nsize == 0 ? sbpb.bpb_huge : (ULONG) sbpb.bpb_nsize;
-  dpbp->dpb_fatsize = sbpb.bpb_nfsect;
-  dpbp->dpb_dirstrt = dpbp->dpb_fatstrt + dpbp->dpb_fats * dpbp->dpb_fatsize;
-  dpbp->dpb_data = dpbp->dpb_dirstrt
-      + (dpbp->dpb_dirents + dpbp->dpb_secsize/DIRENT_SIZE - 1) /
-          (dpbp->dpb_secsize/DIRENT_SIZE);
-  dpbp->dpb_size = (UWORD)((size - dpbp->dpb_data) >> shftcnt) + 1;
-  { /* Make sure the number of FAT sectors is actually enough to hold that */
-    /* many clusters. Otherwise back the number of clusters down (LG & AB) */
-    unsigned fatsiz;
-    ULONG tmp = dpbp->dpb_fatsize * (ULONG)(dpbp->dpb_secsize / 2);/* entries/2 */
-    if (tmp >= 0x10000UL)
-      goto ckok;
-    fatsiz = (unsigned) tmp;
-    if (dpbp->dpb_size > FAT_MAGIC) {/* FAT16 */
-      if (fatsiz <= FAT_MAGIC)       /* FAT12 - let it pass through rather */
-        goto ckok;                   /* than lose data correcting FAT type */
-    } else {                         /* FAT12 */
-      if (fatsiz >= 0x4000)
-        goto ckok;
-      fatsiz = fatsiz * 4 / 3;
-    }
-    if (dpbp->dpb_size >= fatsiz)    /* FAT too short */
-      dpbp->dpb_size = fatsiz - 1;   /* - 2 reserved entries + 1 */
-ckok:;
-  }
-  dpbp->dpb_flags = 0;
-  dpbp->dpb_cluster = UNKNCLUSTER;
-  /* number of free clusters */
-  dpbp->dpb_nfreeclst = UNKNCLSTFREE;
-
-#ifdef WITHFAT32
-  if (extended)
   {
-    dpbp->dpb_xfatsize = sbpb.bpb_nfsect == 0 ? sbpb.bpb_xnfsect
-        : sbpb.bpb_nfsect;
-    dpbp->dpb_xcluster = UNKNCLUSTER;
-    dpbp->dpb_xnfreeclst = XUNKNCLSTFREE;       /* number of free clusters */
+    unsigned fatsiz;
+    const ULONG tmp = fatsize * (ULONG)(secsize / 2u);
+    if (tmp < 0x10000UL) {
+      fatsiz = (unsigned)tmp;
+      if (clusters > FAT_MAGIC) {
+        if (fatsiz > FAT_MAGIC && clusters >= fatsiz) clusters = (UWORD)(fatsiz - 1u);
+      } else if (fatsiz < 0x4000u) {
+        fatsiz = fatsiz * 4u / 3u;
+        if (clusters >= fatsiz) clusters = (UWORD)(fatsiz - 1u);
+      }
+    }
+  }
 
-    dpb16to32(dpbp);
-
-    if (ISFAT32(dpbp))
-    {
-      dpbp->dpb_xflags = sbpb.bpb_xflags;
-      dpbp->dpb_xfsinfosec = sbpb.bpb_xfsinfosec;
-      dpbp->dpb_xbackupsec = sbpb.bpb_xbackupsec;
-      dpbp->dpb_dirents = 0;
-      dpbp->dpb_dirstrt = 0xffff;
-      dpbp->dpb_size = 0;
-      dpbp->dpb_xdata =
-          dpbp->dpb_fatstrt + dpbp->dpb_fats * dpbp->dpb_xfatsize;
-      dpbp->dpb_xsize = ((size - dpbp->dpb_xdata) >> shftcnt) + 1;
-      dpbp->dpb_xrootclst = sbpb.bpb_xrootclst;
-      read_fsinfo(dpbp);
+  d.dpb_shftcnt((UBYTE)shftcnt);
+  d.dpb_mdb(b.bpb_mdesc()); d.dpb_secsize(secsize);
+  d.dpb_clsmask((UBYTE)((nsector - 1u) & 0xffu)); d.dpb_fatstrt(fatstrt);
+  d.dpb_fats(fats); d.dpb_dirents(dirents); d.dpb_fatsize(fatsize);
+  d.dpb_dirstrt(dirstrt); d.dpb_data(data); d.dpb_size(clusters);
+  d.flags(0); d.cluster(UNKNCLUSTER); d.nfree(UNKNCLSTFREE);
+#ifdef WITHFAT32
+  if (extended) {
+    const ULONG xfatsize = fatsize == 0 ? b.bpb_xnfsect() : fatsize;
+    d.dpb_xfatsize(xfatsize); d.dpb_xcluster(UNKNCLUSTER); d.xnfree(XUNKNCLSTFREE);
+    d.dpb_xflags(0); d.dpb_xfsinfosec(0xffff); d.dpb_xbackupsec(0xffff);
+    d.dpb_xrootclst(0); d.dpb_xdata(data); d.dpb_xsize(clusters);
+    if (d.dpb_fatsize() == 0) {
+      d.dpb_xflags(b.bpb_xflags()); d.dpb_xfsinfosec(b.bpb_xfsinfosec());
+      d.dpb_xbackupsec(b.bpb_xbackupsec()); d.dpb_dirents(0); d.dpb_dirstrt(0xffff);
+      d.dpb_size(0);
+      const ULONG xdata = fatstrt + (ULONG)fats * xfatsize;
+      d.dpb_xdata(xdata); d.dpb_xsize(((size - xdata) >> shftcnt) + 1u);
+      d.dpb_xrootclst(b.bpb_xrootclst()); read_fsinfo(dp);
     }
   }
 #endif
@@ -1267,9 +1268,10 @@ COUNT media_check_tagged(dos_far_ptr /*struct dpb*/ _dpbp, const char *source)
   if (ret < SUCCESS)
     return ret;
 
-  const UBYTE unit = fdos_dpb_unit(_dpbp);
+  const dpb_ref d(_dpbp);
+  const UBYTE unit = d.dpb_unit();
   dpb_watch_check("media_check-before-switch", _dpbp);
-  switch (fdos_media_request_mcretcode() | fdos_dpb_flags(_dpbp))
+  switch (media_req.mcretcode() | d.flags())
   {
     case M_NOT_CHANGED:
       dpb_watch_check("media_check-case-not-changed", _dpbp);
@@ -1292,11 +1294,11 @@ COUNT media_check_tagged(dos_far_ptr /*struct dpb*/ _dpbp, const char *source)
       if (ret < SUCCESS)
         return ret;
       {
-        dos_far_ptr bpbp = fdos_media_request_bpptr();
+        const dos_far_ptr bpbp = media_req.bpptr();
 #ifdef WITHFAT32
-        fdos_bpb_to_dpb_guest(bpbp, _dpbp, fdos_bpb_is_fat32(bpbp));
+        bpb_to_dpb(bpbp, _dpbp, bpb_ref(bpbp).bpb_nfsect() == 0);
 #else
-        fdos_bpb_to_dpb_guest(bpbp, _dpbp, FALSE);
+        bpb_to_dpb(bpbp, _dpbp);
 #endif
       }
       dpb_watch_check("media_check-after-bpb_to_dpb", _dpbp);
@@ -1855,7 +1857,7 @@ STATIC CLUSTER find_fat_free(f_node_ptr fnp)
 }
 
 /* initialize directory entry (creation/access stamps 0 as per MS-DOS 7.10) */
-STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, char *name)
+STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, const char *name)
 {
   memset(dentry, 0, sizeof(struct dirent));
   memcpy(dentry->dir_name, name, FNAME_SIZE + FEXT_SIZE);
@@ -2142,3 +2144,5 @@ BOOL fcmp_wild(const char * s1, const char * s2, unsigned n)
       return FALSE;
   return TRUE;
 }
+
+} /* extern "C" */

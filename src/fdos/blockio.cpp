@@ -295,12 +295,14 @@ static dos_far_ptr searchblock(ULONG blkno, COUNT dsk)
     ++guard;
   } while (FP_OFF(p) != firstbp);
 
+  const dos_far_ptr lru = MK_FP(FP_SEG(first), buffer_ref(first).prev());
+
   if (uncache_buf)
-    p = MK_FP(FP_SEG(p), uncache_buf);
-  else if ((buffer_ref(p).flag() & BFR_FAT) && fat_count < 3 && last_non_fat)
-    p = MK_FP(FP_SEG(p), last_non_fat);
+    p = MK_FP(FP_SEG(first), uncache_buf);
+  else if ((buffer_ref(lru).flag() & BFR_FAT) && fat_count < 3 && last_non_fat)
+    p = MK_FP(FP_SEG(first), last_non_fat);
   else
-    p = MK_FP(FP_SEG(p), buffer_ref(first).prev());
+    p = lru;
 
   buffer_ref(p).flag(static_cast<BYTE>(buffer_ref(p).flag() | BFR_UNCACHE));
   if (FP_OFF(p) != firstbp) {

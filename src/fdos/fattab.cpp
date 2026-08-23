@@ -504,35 +504,34 @@ BOOL is_free_cluster(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER ClusterNu
 }
 
 #ifdef WITHFAT32
-void read_fsinfo(struct dpb FAR * dpbp)
+void read_fsinfo(dos_far_ptr x86_dpbp)
 {
-  struct buffer FAR *bp;
-  struct fsinfo FAR *fip;
-  CLUSTER cluster;
-
-  if (dpbp->dpb_xfsinfosec == 0xffff)
+  const fdos_guest::dpb_ref d(x86_dpbp);
+  const UWORD sec = d.dpb_xfsinfosec();
+  if (sec == 0xffff)
     return;
 
-  bp = getblock(dpbp->dpb_xfsinfosec, dpbp->dpb_unit);
-  /* Upstream omits this check; there a NULL far pointer is survivable, here
-     bp is a native pointer and dereferencing NULL faults the core. The FSInfo
-     sector is only a free-space HINT, so a failed read is not fatal: leave the
-     cached counts alone and carry on. */
-  if (bp == NULL)
+  struct buffer *native_bp = getblock(sec, d.dpb_unit());
+  if (native_bp == NULL)
     return;
-  bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT | BFR_DIRTY);
-  bp->b_flag |= BFR_VALID;
 
-  fip = (struct fsinfo FAR *)&bp->b_buffer[0x1e4];
-  /* need to range check values because they may not be correct */
-  cluster = fip->fi_nfreeclst;
-  if (cluster >= dpbp->dpb_xsize)
+  const dos_far_ptr x86_bp = linear_to_far(native_bp);
+  const fdos_guest::buffer_ref b(x86_bp);
+  BYTE flag = b.flag();
+  flag &= (BYTE)~(BFR_DATA | BFR_DIR | BFR_FAT | BFR_DIRTY);
+  flag |= BFR_VALID;
+  b.flag(flag);
+
+  CLUSTER cluster = b.data32(0x1e4u + offsetof(struct fsinfo, fi_nfreeclst));
+  const ULONG max_cluster = d.dpb_xsize();
+  if (cluster >= max_cluster)
     cluster = XUNKNCLSTFREE;
-  dpbp->dpb_xnfreeclst = cluster;
-  cluster = fip->fi_cluster;
-  if (cluster < 2 || cluster > dpbp->dpb_xsize)
+  d.xnfree(cluster);
+
+  cluster = b.data32(0x1e4u + offsetof(struct fsinfo, fi_cluster));
+  if (cluster < 2 || cluster > max_cluster)
     cluster = UNKNCLUSTER;
-  dpbp->dpb_xcluster = cluster;
+  d.dpb_xcluster(cluster);
 }
 
 void write_fsinfo(struct dpb FAR * dpbp)

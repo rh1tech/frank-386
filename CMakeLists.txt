@@ -376,10 +376,9 @@ set(EMU_CORE_SOURCES
     src/fdos/dosfns.cpp
     src/fdos/fcbfns.c
     src/fdos/lfnapi.c
-    src/fdos/fatfs.c
-    src/fdos/fatfs_guest.cpp
+    src/fdos/fatfs.cpp
     src/fdos/fattab.cpp
-    src/fdos/fatdir.c
+    src/fdos/fatdir.cpp
     src/fdos/blockio.cpp
     src/fdos/chario.c
     src/fdos/kernel.c
@@ -724,10 +723,9 @@ set(FDOS_WARN_SOURCES
     src/fdos/dosfns.cpp
     src/fdos/fcbfns.c
     src/fdos/lfnapi.c
-    src/fdos/fatfs.c
-    src/fdos/fatfs_guest.cpp
+    src/fdos/fatfs.cpp
     src/fdos/fattab.cpp
-    src/fdos/fatdir.c
+    src/fdos/fatdir.cpp
     src/fdos/blockio.cpp
     src/fdos/chario.c
     src/fdos/kernel.c
