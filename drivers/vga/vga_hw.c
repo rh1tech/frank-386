@@ -1211,6 +1211,9 @@ void vga_hw_init(void) {
         SELECT_VGA = true;
     #elif defined(FORCE_HDMI)
         SELECT_VGA = false;
+    #elif defined(BOARD_Z2)
+        /* Waveshare RP2350-PiZero has HDMI output only. */
+        SELECT_VGA = false;
     #else
         uint8_t linkVGA01 = testPins(VGA_BASE_PIN, VGA_BASE_PIN + 1);
         #if defined(BOARD_Z0) || defined(BOARD_Z2) || defined(BOARD_DV)

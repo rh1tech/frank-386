@@ -15,14 +15,14 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "Z2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
 # Build with a standard 128 KiB EGA-compatible video adapter.
-option(EGA128 "Build with 128 KiB EGA video memory/capabilities" OFF)
+option(EGA128 "Build with 128 KiB EGA video memory/capabilities" ON)
 if(EGA128)
     add_compile_definitions(EGA128=1)
 endif()

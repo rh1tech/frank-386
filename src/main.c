@@ -1095,14 +1095,17 @@ static bool init_hardware(void) {
 #ifndef EGA128  // TODO: remove it for test EGA128+QSPI
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
-#endif
 
     /* Probe PSRAM before video as before, but do not stop here: the error OSD
      * can only be shown after the video core has completed initialization.
      * Full/cached capacity handling remains below, after clock configuration. */
     bool psram_missing = psram_detect_size() < (1u << 20);
+#else
+    bool psram_missing = true;
+#endif
     early_psram_missing = psram_missing;
     __dmb();
+
 #ifdef EGA128
     if (psram_missing) {
         guest_ram_base = ram_pages;
@@ -1265,7 +1268,7 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
     DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
     DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
-    if (!ps2_init(pio0, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
+    if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
         printf("WARNING: PS/2 PIO init failed\n");
     }
 

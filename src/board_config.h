@@ -467,12 +467,19 @@ static inline char get_rp2350_package_letter(void) {
 // Common PIO Assignments
 //=============================================================================
 
-// Video output uses PIO1
+/* Z2 uses the same PIO assignment as the known-good ZERO2 HDMI path:
+ * PIO0 drives GPIO32..39 with gpio_base=16, while PS/2 stays on a separate
+ * PIO instance whose gpio_base remains 0.  Other boards keep the existing
+ * allocation. */
+#ifdef BOARD_Z2
+#define PIO_VIDEO       pio0
+#define PIO_VIDEO_ADDR  pio0
+#define PIO_PS2KBD      pio1
+#else
 #define PIO_VIDEO       pio1
 #define PIO_VIDEO_ADDR  pio1
-
-// PS/2 Keyboard uses PIO0
 #define PIO_PS2KBD      pio0
+#endif
 
 // SD Card PIO (if using PIO SPI)
 #define PIO_SDCARD      pio1
@@ -521,8 +528,12 @@ static inline char get_rp2350_package_letter(void) {
 // SD Card Configuration
 //=============================================================================
 
-// SD Card SPI bus (use hardware SPI0 or PIO)
+// SD Card SPI bus. Waveshare RP2350-PiZero routes GPIO30/31/40 to SPI1.
+#ifdef BOARD_Z2
+#define SDCARD_SPI_BUS spi1
+#else
 #define SDCARD_SPI_BUS spi0
+#endif
 
 /*
  * Enable PIO-based SD card for better performance.
@@ -538,7 +549,7 @@ static inline char get_rp2350_package_letter(void) {
  * which are exactly the hardware SPI0 pins (RX/CSn/SCK/TX), so the
  * non-PIO path in sdcard.c drives it directly.
  */
-#ifndef BOARD_C2
+#if !defined(BOARD_C2) && !defined(BOARD_Z2)
 #define SDCARD_PIO 1
 #endif
 
