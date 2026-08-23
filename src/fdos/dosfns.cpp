@@ -1,14 +1,29 @@
+#define new fdos_new
+extern "C" {
 #include "bios/bios.h"
 #include "hdrs.h"
+}
+#undef new
+#ifdef load
+#undef load
+#endif
+#include "guest_ref.hpp"
 
-long fdos_jft_find_free(void);
-int fdos_jft_get(UCOUNT hndl);
-COUNT fdos_jft_set(UCOUNT hndl, UBYTE sft_idx);
-dos_far_ptr fdos_sft_find_free(COUNT *sft_idx);
-int fdos_sft_index_to_far(int index, dos_far_ptr *out);
-void fdos_sft_prepare_open(dos_far_ptr p, unsigned flags, unsigned attrib);
-void fdos_sft_begin_disk_open(dos_far_ptr p, UBYTE drive);
-void fdos_sft_open_failed(dos_far_ptr p);
+using fdos_guest::dos_data_ref;
+using fdos_guest::lol_ref;
+using fdos_guest::psp_ref;
+using fdos_guest::sft_ref;
+using fdos_guest::sfttbl_ref;
+
+static const lol_ref dosfns_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
+static const dos_data_ref dosfns_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
+
+static inline uint32_t dosfns_far_linear(dos_far_ptr p)
+{
+  return ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p);
+}
+
+extern "C" {
 
 #if DIAG
 extern volatile unsigned int dos_diag_kernel_code;
@@ -134,7 +149,24 @@ STATIC void set_fcbname(const char *path)
 */
 STATIC dos_far_ptr/*sft*/ get_free_sft(COUNT *sft_idx)
 {
-  return fdos_sft_find_free(sft_idx);
+  COUNT sys_idx = 0;
+  for (dos_far_ptr block = dosfns_lol.sfthead(); !far_is_end(block); )
+  {
+    const sfttbl_ref table(block);
+    const UWORD count = table.count();
+    for (UWORD i = 0; i < count; ++i, ++sys_idx)
+    {
+      const dos_far_ptr entry = table.entry(i);
+      if (sft_ref(entry).count() == 0)
+      {
+        *sft_idx = sys_idx;
+        dosfns_idata.current_sft_idx() = (UWORD)sys_idx;
+        return entry;
+      }
+    }
+    block = table.next();
+  }
+  return MK_FP((UWORD)-1, (UWORD)-1);
 }
 
 
@@ -270,7 +302,15 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   dpb_watch_check_chain("DosOpenSft 3");
   if (far_is_end(lpCurSft))
     return DE_TOOMANY;
-  fdos_sft_prepare_open(lpCurSft, flags, attrib);
+  {
+    sft entry{};
+    entry.sft_psp = dosfns_idata.cu_psp();
+    entry.sft_mode = flags & 0xf0ffu;
+    entry.sft_shroff = -1;
+    entry.sft_attrib = (UBYTE)(attrib | D_ARCHIVE);
+    sft_ref(lpCurSft).store(entry);
+    dosfns_idata.open_mode() = (UBYTE)flags;
+  }
   attrib |= D_ARCHIVE;
   dpb_watch_check_chain("DosOpenSft 4");
 
@@ -355,7 +395,14 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 
 /* /// End of additions for SHARE.  - Ron Cemer */
 
-  fdos_sft_begin_disk_open(lpCurSft, (UBYTE)(open_path[0] - 'A'));
+  {
+    sft entry;
+    sft_ref ref(lpCurSft);
+    ref.read_struct(entry);
+    ++entry.sft_count;
+    entry.sft_flags = (UBYTE)(open_path[0] - 'A');
+    ref.store(entry);
+  }
   long open_result = dos_open(open_path, flags, attrib, sft_idx);
   dpb_watch_check_chain("DosOpenSft 10");
   if (open_result < 0)
@@ -373,7 +420,14 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
       }
     }
 /* /// End of additions for SHARE.  - Ron Cemer */
-    fdos_sft_open_failed(lpCurSft);
+    {
+      sft entry;
+      sft_ref ref(lpCurSft);
+      ref.read_struct(entry);
+      if (entry.sft_count != 0)
+        --entry.sft_count;
+      ref.store(entry);
+    }
     return open_result;
   }
   dpb_watch_check_chain("DosOpenSft 11");
@@ -396,8 +450,27 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 */
 int idx_to_sft_(int SftIndex)
 {
-  dos_far_ptr entry;
-  return fdos_sft_index_to_far(SftIndex, &entry);
+  int index = SftIndex;
+  if (index < 0)
+  {
+    dosfns_idata.lp_cur_sft(MK_FP((UWORD)-1, (UWORD)-1));
+    return -1;
+  }
+  for (dos_far_ptr block = dosfns_lol.sfthead(); !far_is_end(block); )
+  {
+    const sfttbl_ref table(block);
+    const UWORD count = table.count();
+    if (index < (int)count)
+    {
+      const dos_far_ptr entry = table.entry((UWORD)index);
+      dosfns_idata.lp_cur_sft(entry);
+      return index;
+    }
+    index -= count;
+    block = table.next();
+  }
+  dosfns_idata.lp_cur_sft(MK_FP((UWORD)-1, (UWORD)-1));
+  return -1;
 }
 
 
@@ -435,7 +508,13 @@ UBYTE *jft_of(psp *p)
 
 int get_sft_idx(unsigned hndl)
 {
-  return fdos_jft_get(hndl);
+  const psp_ref process(dosfns_idata.cu_psp());
+  const UWORD count = process.max_files();
+  const dos_far_ptr table = process.file_table();
+  if (hndl >= count || far_is_null(table) || far_is_end(table))
+    return DE_INVLDHNDL;
+  const UBYTE idx = pload8(dosfns_far_linear(table) + hndl);
+  return idx == 0xff ? DE_INVLDHNDL : idx;
 }
 
 /*
@@ -698,7 +777,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
 const char *get_root(const char *fname)
 {
   /* find the end                                 */
-  register unsigned length = strlen(fname);
+  unsigned length = strlen(fname);
   char c;
 
   /* now back up to first path seperator or start */
@@ -808,7 +887,16 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
 */
 STATIC long get_free_hndl(void)
 {
-  return fdos_jft_find_free();
+  const psp_ref process(dosfns_idata.cu_psp());
+  const UWORD count = process.max_files();
+  const dos_far_ptr table = process.file_table();
+  if (far_is_null(table) || far_is_end(table))
+    return DE_TOOMANY;
+  const uint32_t base = dosfns_far_linear(table);
+  for (UWORD h = 0; h < count; ++h)
+    if (pload8(base + h) == 0xff)
+      return h;
+  return DE_TOOMANY;
 }
 
 /*
@@ -837,8 +925,14 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
   if (result < SUCCESS)
     return result;
 
-  if (fdos_jft_set(hndl, (UBYTE)result) < SUCCESS)
-    return DE_TOOMANY;
+  {
+    const psp_ref process(dosfns_idata.cu_psp());
+    const UWORD count = process.max_files();
+    const dos_far_ptr table = process.file_table();
+    if (hndl >= count || far_is_null(table) || far_is_end(table))
+      return DE_TOOMANY;
+    pstore8(dosfns_far_linear(table) + hndl, (UBYTE)result);
+  }
 
   return hndl | (result & 0xffff0000l);
 }
@@ -1613,3 +1707,5 @@ COUNT DosSetFtimeSft(int sft_idx, ddate dp, dtime tp)
 
   return SUCCESS;
 }
+
+} /* extern "C" */

@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
 #include "ems.h"
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
 #include "ega128_paging.h"
@@ -65,7 +67,8 @@ void reset_umb();
  * ядро в него не целится, а запись в видеопамять обязана идти через
  * write86/iomem.
  */
-static inline uint8_t *guest_span_ptr(uint32_t addr, uint32_t *span)
+static inline uint8_t *guest_span_ptr_ex(uint32_t addr, uint32_t *span,
+                                         bool write_access)
 {
     *span = 0x4000u - (addr & 0x3FFFu);
 #if EMULATE_LTEMS
@@ -74,9 +77,62 @@ static inline uint8_t *guest_span_ptr(uint32_t addr, uint32_t *span)
 #endif
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (unlikely(ega128_paging_active()))
-        return ega128_page_ptr(addr, span, true);
+        return ega128_page_ptr(addr, span, write_access);
+#else
+    (void)write_access;
 #endif
     return PC_RAM + addr;
+}
+
+static inline uint8_t *guest_span_ptr(uint32_t addr, uint32_t *span)
+{
+    return guest_span_ptr_ex(addr, span, true);
+}
+
+static inline const uint8_t *guest_span_ptr_read(uint32_t addr, uint32_t *span)
+{
+    return guest_span_ptr_ex(addr, span, false);
+}
+
+/* Native <-> guest block copies.  Paging/EMS window boundaries are resolved
+ * here once per contiguous span; callers must not open-code pload8/pstore8
+ * loops for bulk transfers.  VGA remains device I/O and is handled through
+ * iomem rather than exposing a raw host pointer. */
+static inline void guest_read_block(uint32_t src, void *dst, size_t len)
+{
+    uint8_t *out = (uint8_t *)dst;
+    while (len) {
+        if (unlikely(VGA_WINDOW(src))) {
+            *out++ = iomem_read8(g_pc, src++);
+            --len;
+            continue;
+        }
+        uint32_t span;
+        const uint8_t *p = guest_span_ptr_read(src, &span);
+        size_t n = len < span ? len : span;
+        memcpy(out, p, n);
+        out += n;
+        src += (uint32_t)n;
+        len -= n;
+    }
+}
+
+static inline void guest_write_block(uint32_t dst, const void *src, size_t len)
+{
+    const uint8_t *in = (const uint8_t *)src;
+    while (len) {
+        if (unlikely(VGA_WINDOW(dst))) {
+            (void)iomem_write_string_ptr(g_pc, dst, in, (int)len);
+            return;
+        }
+        uint32_t span;
+        uint8_t *p = guest_span_ptr(dst, &span);
+        size_t n = len < span ? len : span;
+        memcpy(p, in, n);
+        in += n;
+        dst += (uint32_t)n;
+        len -= n;
+    }
 }
 /* fdos_2fh.c: pick the UMB map matching the selected BIOS */
 void umb_select_map(int native_bios, uint32_t rom_start, int vga_bios_loaded);

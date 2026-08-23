@@ -64,6 +64,7 @@ void dos_printf(const char *fmt, ...) {
 }
 
 #include "hdrs.h"
+#include "native_devices.h"
 
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
@@ -119,16 +120,12 @@ static inline uint32_t kernel_guest_linear(dos_far_ptr p)
 
 static void kernel_guest_write(uint32_t addr, const void *src, size_t len)
 {
-  const UBYTE *s = (const UBYTE *)src;
-  while (len--)
-    pstore8(addr++, *s++);
+  guest_write_block(addr, src, len);
 }
 
 static void kernel_guest_read(uint32_t addr, void *dst, size_t len)
 {
-  UBYTE *d = (UBYTE *)dst;
-  while (len--)
-    *d++ = pload8(addr++);
+  guest_read_block(addr, dst, len);
 }
 
 static void kernel_guest_fill(uint32_t addr, UBYTE value, size_t len)
@@ -379,389 +376,6 @@ void keycheck(void)
     CPU_AH = 0x01;
     bios_intcall(cpu, 0x16, "KEYCHECK");
     cpu_restore_regs(cpu, &saved);
-}
-
-/* FreeDOS CON returns an extended key as two bytes: 00h first, then the
- * scan code on the next read. */
-static BYTE con_scan_code;
-
-static void ConIntr(request FAR *rq) {
-    CPU_regs saved;
-    switch (rq->r_command) {
-    case C_INIT:
-        con_scan_code = 0;
-        /* Original FreeDOS ConInit derives _kbdType from BDA 0040:0096 bit 4. */
-        kbdType = read86(0x496) & 0x10;
-        rq_done(rq);
-        break;
-
-    case C_IFLUSH:
-        /* Original ConInpFlush also forgets a pending second byte. */
-        con_scan_code = 0;
-        cpu_save_regs(cpu, &saved);
-        while (1) {
-            CPU_AH = (BYTE)(0x01 + kbdType);
-            bios_intcall(cpu, 0x16, "CON INTR");
-            if (zf)
-                break;
-            CPU_AH = kbdType;
-            bios_intcall(cpu, 0x16, "CON INTR");
-        }
-        cpu_restore_regs(cpu, &saved);
-        rq_done(rq);
-        break;
-
-    case C_NDREAD:
-        /* A saved extended scan code is already a byte waiting at CON. */
-        if (con_scan_code) {
-            rq->r_ndbyte = con_scan_code;
-            rq_done(rq);
-            break;
-        }
-
-        cpu_save_regs(cpu, &saved);
-        CPU_AH = (BYTE)(0x01 + kbdType);
-        bios_intcall(cpu, 0x16, "C_NDREAD");
-        if (zf || CPU_AX == 0) {
-            rq->r_status = S_DONE | S_BUSY;
-        } else {
-            BYTE ch = CPU_AL;
-            /* Enhanced INT 16h uses E0h for extended keys; DOS CON exposes 00h. */
-            if (ch == 0xE0 && CPU_AH != 0)
-                ch = 0;
-            rq->r_ndbyte = ch;
-            rq_done(rq);
-        }
-        cpu_restore_regs(cpu, &saved);
-        break;
-
-    case C_ISTAT:
-        if (con_scan_code) {
-            rq_done(rq);
-            break;
-        }
-
-        cpu_save_regs(cpu, &saved);
-        CPU_AH = (BYTE)(0x01 + kbdType);
-        bios_intcall(cpu, 0x16, "C_ISTAT");
-        rq->r_status = zf ? (S_DONE | S_BUSY) : S_DONE;
-        cpu_restore_regs(cpu, &saved);
-        break;
-
-    case C_INPUT:
-        /* Match FreeDOS ConRead/KbdRdChar: satisfy the requested byte count and
-         * preserve AH of an extended key for the following byte/read. */
-        cpu_save_regs(cpu, &saved);
-        if (rq->r_count > 0 && EFFECTIVE(rq->r_trans)) {
-            BYTE *p = (BYTE *)ARM_PTR(rq->r_trans);
-            UWORD want = rq->r_count;
-            UWORD done = 0;
-
-            while (done < want) {
-                BYTE ch;
-
-                if (con_scan_code) {
-                    ch = con_scan_code;
-                    con_scan_code = 0;
-                } else {
-                    do {
-                        CPU_AH = kbdType;
-                        bios_intcall(cpu, 0x16, "C_INPUT");
-                    } while (CPU_AX == 0);
-
-                    if (CPU_AX == 0x7200) {
-                        /* Original FreeDOS maps Ctrl-PrintScreen to ^P. */
-                        ch = 0x10;
-                    } else {
-                        ch = CPU_AL;
-                        if (ch == 0xE0 && CPU_AH != 0)
-                            ch = 0;
-                        if (ch == 0 && CPU_AH != 0)
-                            con_scan_code = CPU_AH;
-                    }
-                }
-
-                p[done++] = ch;
-            }
-            rq->r_count = done;
-        } else {
-            rq->r_count = 0;
-        }
-        cpu_restore_regs(cpu, &saved);
-        rq_done(rq);
-        break;
-
-    case C_OUTPUT:
-    case C_OUTVFY:
-        /* teletype output via INT 10h AH=0Eh */
-        cpu_save_regs(cpu, &saved);
-        {
-            BYTE* p   = (BYTE*)ARM_PTR(rq->r_trans);
-            UWORD cnt = rq->r_count;
-            while (cnt--) {
-                CPU_AH = 0x0E;
-                CPU_AL = *p++;
-                CPU_BX = 0x0007;    /* page 0, attribute 7 */
-                bios_intcall(cpu, 0x10, "C_OUTVFY/C_OUTPUT");
-            }
-        }
-        cpu_restore_regs(cpu, &saved);
-        rq_done(rq);
-        break;
-
-    default:
-        rq_error(rq, E_CMD);
-        break;
-    }
-}
-
-static void PrnIntr(request FAR *rq) {
-    /*
-     * PRN pseudo-device interrupt entry.
-     *
-     * In FreeDOS this is a generic printer device that can be redirected
-     * to selected LPT/COM targets by MODE. Native implementation can begin
-     * as "not ready" or route output to the configured printer/log backend.
-     */
-    switch (rq->r_command) {
-    case C_INIT:
-        rq_done(rq);
-        break;
-    default:
-        rq_error(rq, E_CMD);
-        break;
-    }
-}
-
-static void AuxIntr(request FAR *rq) {
-    /*
-     * AUX / COM1-style serial pseudo-device interrupt entry.
-     *
-     * Used for AUX and COM1 in io.asm. Native implementation should map
-     * character read/write/status requests to the configured serial backend,
-     * or return a DOS device error if serial is not available.
-     */
-    switch (rq->r_command) {
-    case C_INIT:
-        rq_done(rq);
-        break;
-    default:
-        rq_error(rq, E_CMD);
-        break;
-    }
-}
-
-static void Lpt1Intr(request FAR *rq) {
-    /*
-     * LPT1 printer device interrupt entry.
-     *
-     * Native implementation should handle printer output/status for LPT1.
-     * Minimal safe behaviour: report not ready / command error for unsupported
-     * operations while still completing init/status requests consistently.
-     */
-    PrnIntr(rq);
-}
-
-static void Lpt2Intr(request FAR *rq) {
-    /*
-     * LPT2 printer device interrupt entry.
-     *
-     * Same semantics as LPT1, but for logical printer unit 2.
-     */
-    PrnIntr(rq);
-}
-
-static void Lpt3Intr(request FAR *rq) {
-    /*
-     * LPT3 printer device interrupt entry.
-     *
-     * Same semantics as LPT1, but for logical printer unit 3.
-     */
-    PrnIntr(rq);
-}
-
-static void Com2Intr(request FAR *rq) {
-    /*
-     * COM2 serial device interrupt entry.
-     *
-     * Same character-device request model as AUX/COM1, mapped to logical
-     * serial unit 2.
-     */
-    AuxIntr(rq);
-}
-
-static void Com3Intr(request FAR *rq) {
-    /*
-     * COM3 serial device interrupt entry.
-     *
-     * Same character-device request model as AUX/COM1, mapped to logical
-     * serial unit 3.
-     */
-    AuxIntr(rq);
-}
-
-static void Com4Intr(request FAR *rq) {
-    /*
-     * COM4 serial device interrupt entry.
-     *
-     * Same character-device request model as AUX/COM1, mapped to logical
-     * serial unit 4.
-     */
-    AuxIntr(rq);
-}
-
-UWORD ASM DaysSinceEpoch = 0;
-typedef UDWORD ticks_t;
-
-static void ClkEntry(request FAR *rq) {
-    /*
-     * CLOCK$ device interrupt entry.
-     *
-     * Handles DOS clock-device requests. Native implementation should bridge
-     * date/time operations to the emulator BIOS time source / RTC layer and
-     * fill the request packet using DOS CLOCK$ transfer format.
-     */
-    switch (rq->r_command) {
-    case C_INIT:
-        rq->r_nunits = 0;
-        rq_done(rq);
-        break;
-    case C_OFLUSH:
-    case C_IFLUSH:
-        rq_done(rq);
-        break;
-    case C_INPUT:
-      {
-        struct ClockRecord clk;
-        uint32_t bios_ticks;
-        uint32_t total_hundredths;
-
-        if (sizeof(struct ClockRecord) != rq->r_count) {
-            rq_error(rq, E_LENGTH);
-            break;
-        }
-
-        /*
-         * BDA 0040:006C contains BIOS timer ticks since midnight.
-         * Standard PC tick rate is PIT_FREQ / 65536 ~= 18.2065 Hz.
-         *
-         * Convert BIOS ticks to hundredths of second:
-         *
-         *   hundredths = ticks * 100 * 65536 / PIT_FREQ
-         *
-         * Use 64-bit intermediate to avoid overflow.
-         */
-        bios_ticks = pload32(0x46C);
-        total_hundredths =
-            (uint32_t)(((uint64_t)bios_ticks * 100u * 65536u) / PIT_FREQ);
-
-        total_hundredths %= 24u * 60u * 60u * 100u;
-
-        clk.clkHours = total_hundredths / (60u * 60u * 100u);
-        total_hundredths %= 60u * 60u * 100u;
-
-        clk.clkMinutes = total_hundredths / (60u * 100u);
-        total_hundredths %= 60u * 100u;
-
-        clk.clkSeconds = total_hundredths / 100u;
-        clk.clkHundredths = total_hundredths % 100u;
-
-        clk.clkDays = DaysSinceEpoch;
-
-        memcpy(ARM_PTR(rq->r_trans), &clk, sizeof(struct ClockRecord));
-      }
-        rq_done(rq);
-        break;
-    case C_OUTPUT:
-      {
-        struct ClockRecord clk;
-        uint32_t total_hundredths;
-        uint32_t bios_ticks;
-
-        if (sizeof(struct ClockRecord) != rq->r_count) {
-            rq_error(rq, E_LENGTH);
-            break;
-        }
-
-        memcpy(&clk, ARM_PTR(rq->r_trans), sizeof(struct ClockRecord));
-
-        /*
-         * Store DOS date counter.
-         * clkDays is days since 1980-01-01.
-         */
-        DaysSinceEpoch = clk.clkDays;
-
-        /*
-         * Convert CLOCK$ time to BIOS ticks since midnight.
-         *
-         * BDA 0040:006C stores ticks at PIT_FREQ / 65536 Hz.
-         *
-         *   ticks = hundredths * PIT_FREQ / (100 * 65536)
-         *
-         * Use 64-bit intermediate to avoid overflow.
-         */
-        total_hundredths =
-            ((uint32_t)clk.clkHours * 60u * 60u * 100u) +
-            ((uint32_t)clk.clkMinutes * 60u * 100u) +
-            ((uint32_t)clk.clkSeconds * 100u) +
-            (uint32_t)clk.clkHundredths;
-
-        total_hundredths %= 24u * 60u * 60u * 100u;
-
-        bios_ticks =
-            (uint32_t)(((uint64_t)total_hundredths * PIT_FREQ) /
-                       (100u * 65536u));
-
-        pstore32(0x46C, bios_ticks);
-        pstore8(0x470, 0);   /* midnight rollover flag */        
-      }
-        rq_done(rq);
-        break;
-    default:
-        rq_error(rq, E_FAILURE);
-        break;
-    }
-}
-
-static void BlkEntry(request FAR *rq) {
-    /*
-     * Internal block-device interrupt entry.
-     *
-     * The whole dispatch (media check, build BPB, read/write, open/close,
-     * removable media, get/set logical device, ioctl query, ...) lives in
-     * dsk.c:blk_driver(), which mirrors the dispatch[] table of the original
-     * kernel. It also does the unit-range check and sets r_status.
-     */
-    blk_driver(cpu, rq);
-}
-
-static void NulIntr(request FAR *rq) {
-    /*
-     * NUL device interrupt entry.
-     *
-     * Original kernel.asm behaviour:
-     * - for read request, set transferred count to 0;
-     * - mark request as done.
-     *
-     * Native implementation should complete all supported NUL requests
-     * successfully, discard writes, and return EOF/zero bytes for reads.
-     */
-    switch (rq->r_command) {
-    case C_INIT:
-        rq_done(rq);
-        break;
-
-    default:
-        /*
-         * Safe minimal NUL behavior:
-         * - reads return zero bytes;
-         * - writes are discarded;
-         * - unsupported control commands can be tightened later.
-         */
-        rq->r_count = 0;
-        rq_done(rq);
-        break;
-    }
 }
 
 static const struct dhdr _blk_dev = {
@@ -1286,8 +900,12 @@ static void drv_watch_panic_if_bad(dos_far_ptr dhp, const struct dhdr *d)
    in hdr/device.h for why (that's also what keeps this layout
    byte-for-byte compatible with real, unmodified .SYS driver files).
 */
-static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far_ptr x86_dhp) {
-  drv_watch_panic_if_bad(x86_dhp, dhp);
+static void x86_execrh(/*request*/ dos_far_ptr x86_rq, dos_far_ptr x86_dhp, UWORD dh_strategy, UWORD dh_interrupt) {
+#if PDB_DEBUG
+  struct dhdr debug_dh;
+  kernel_guest_read(kernel_guest_linear(x86_dhp), &debug_dh, sizeof(debug_dh));
+  drv_watch_panic_if_bad(x86_dhp, &debug_dh);
+#endif
   bool ifl_old = ifl;
 //  ifl = 1;
 //  df = 0;
@@ -1340,18 +958,22 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   SET_ES ( FP_SEG(x86_rq) );
   CPU_BX = FP_OFF(x86_rq);
   #if EXEC_DEBUG
-  printf("x86_execrh: dh_strategy @ %04x:%04x stack: %04x:%04x\n", hdr_seg, dhp->x86.dh_strategy, CPU_SS, CPU_SP);
+  const uint32_t dh_lin = kernel_guest_linear(x86_dhp);
+  const uint32_t dh_next_raw = pload32(dh_lin + offsetof(struct dhdr, dh_next));
+  const dos_far_ptr dh_next = MK_FP((UWORD)(dh_next_raw >> 16), (UWORD)dh_next_raw);
+  const UWORD dh_attr = pload16(dh_lin + offsetof(struct dhdr, dh_attr));
+  printf("x86_execrh: dh_strategy @ %04x:%04x stack: %04x:%04x\n", hdr_seg, dh_strategy, CPU_SS, CPU_SP);
   printf("x86_execrh: DS=%04x ES=%04x BX=%04x rq=%04x:%04x\n", CPU_DS, CPU_ES, CPU_BX, FP_SEG(x86_rq), FP_OFF(x86_rq));
   printf("x86_execrh: hdr next=%04x:%04x attr=%04x strat=%04x intr=%04x "
          "rq len=%02x unit=%02x cmd=%02x status=%04x "
          "strat-op=%02x %02x %02x %02x %02x\n",
-         FP_SEG(dhp->dh_next), FP_OFF(dhp->dh_next),
-         dhp->dh_attr, dhp->x86.dh_strategy, dhp->x86.dh_interrupt,
+         FP_SEG(dh_next), FP_OFF(dh_next),
+         dh_attr, dh_strategy, dh_interrupt,
          getmem8(FP_SEG(x86_rq), FP_OFF(x86_rq) + 0),
          getmem8(FP_SEG(x86_rq), FP_OFF(x86_rq) + 1),
          getmem8(FP_SEG(x86_rq), FP_OFF(x86_rq) + 2),
          getmem16(FP_SEG(x86_rq), FP_OFF(x86_rq) + 3),
-         getmem8(hdr_seg, dhp->x86.dh_strategy + 0), getmem8(hdr_seg, dhp->x86.dh_strategy + 1), getmem8(hdr_seg, dhp->x86.dh_strategy + 2), getmem8(hdr_seg, dhp->x86.dh_strategy + 3), getmem8(hdr_seg, dhp->x86.dh_strategy + 4));
+         getmem8(hdr_seg, dh_strategy + 0), getmem8(hdr_seg, dh_strategy + 1), getmem8(hdr_seg, dh_strategy + 2), getmem8(hdr_seg, dh_strategy + 3), getmem8(hdr_seg, dh_strategy + 4));
   #endif
   /* push si; push di */
   CPU_SP -= 2;
@@ -1359,7 +981,7 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   CPU_SP -= 2;
   writew86(((uint32_t)CPU_SS << 4) + CPU_SP, CPU_DI);
 
-  cpu_far_call(cpu, hdr_seg, dhp->x86.dh_strategy);
+  cpu_far_call(cpu, hdr_seg, dh_strategy);
   ifl = ifl_old;
 
   /* pop di; pop si */
@@ -1369,9 +991,9 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
   CPU_SP += 2;
 
   #if EXEC_DEBUG
-  printf("x86_execrh: dh_interrupt @ %04x:%04x\n", hdr_seg, dhp->x86.dh_interrupt);
+  printf("x86_execrh: dh_interrupt @ %04x:%04x\n", hdr_seg, dh_interrupt);
   #endif
-  cpu_far_call(cpu, hdr_seg, dhp->x86.dh_interrupt);
+  cpu_far_call(cpu, hdr_seg, dh_interrupt);
 
   /* sti; cld */
   ifl = 1;
@@ -1390,19 +1012,18 @@ static void x86_execrh(/*request*/ dos_far_ptr x86_rq, struct dhdr *dhp, dos_far
 }
 
 WORD execrh(/*request*/ dos_far_ptr _rq, /*struct dhdr*/ dos_far_ptr _dhp) {
-  struct dhdr dh;
-  request rq;
+  UWORD status;
+  UWORD strategy;
+  UWORD interrupt;
 
-  kernel_guest_read(kernel_guest_linear(_dhp), &dh, sizeof(dh));
+  /* Native device callbacks consume the guest request through request_ref;
+     no dhdr/request snapshot or copyback is required. */
+  if (fdos_native_execrh(_dhp, _rq, &status))
+    return status;
 
-  if (dh.dh_attr & ATTR_NATIVE) {
-    kernel_guest_read(kernel_guest_linear(_rq), &rq, sizeof(rq));
-    dh.arm.dh_interrupt(&rq);
-    kernel_guest_write(kernel_guest_linear(_rq), &rq, sizeof(rq));
-    return rq.r_status;
-  }
-
-  x86_execrh(_rq, &dh, _dhp);
+  /* Real x86 drivers need only the two entry offsets from their guest header. */
+  fdos_x86_dhdr_entries(_dhp, &strategy, &interrupt);
+  x86_execrh(_rq, _dhp, strategy, interrupt);
   return pload16(kernel_guest_linear(_rq) + offsetof(request, r_status));
 }
 

@@ -25,131 +25,6 @@ using fdos_guest::sfttbl_ref;
 static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
 
-static inline uint32_t fdos_far_linear(dos_far_ptr p)
-{
-    return (static_cast<uint32_t>(FP_SEG(p)) << 4) + FP_OFF(p);
-}
-
-extern "C" dos_far_ptr fdos_sft_find_free(COUNT *sft_idx)
-{
-    COUNT sys_idx = 0;
-
-    for (dos_far_ptr block = fdos_lol.sfthead(); !far_is_end(block); ) {
-        const sfttbl_ref table(block);
-        const UWORD count = table.count();
-
-        for (UWORD i = 0; i < count; ++i, ++sys_idx) {
-            const dos_far_ptr entry = table.entry(i);
-            if (sft_ref(entry).count() == 0) {
-                *sft_idx = sys_idx;
-                fdos_idata.current_sft_idx() = (UWORD)sys_idx;
-                return entry;
-            }
-        }
-        block = table.next();
-    }
-    return MK_FP((UWORD)-1, (UWORD)-1);
-}
-
-extern "C" int fdos_sft_index_to_far(int index, dos_far_ptr *out)
-{
-    if (index < 0) {
-        *out = MK_FP((UWORD)-1, (UWORD)-1);
-        fdos_idata.lp_cur_sft(*out);
-        return -1;
-    }
-
-    for (dos_far_ptr block = fdos_lol.sfthead(); !far_is_end(block); ) {
-        const sfttbl_ref table(block);
-        const UWORD count = table.count();
-        if (index < (int)count) {
-            *out = table.entry((UWORD)index);
-            fdos_idata.lp_cur_sft(*out);
-            return index;
-        }
-        index -= count;
-        block = table.next();
-    }
-
-    *out = MK_FP((UWORD)-1, (UWORD)-1);
-    fdos_idata.lp_cur_sft(*out);
-    return -1;
-}
-
-extern "C" void fdos_sft_prepare_open(dos_far_ptr p, unsigned flags, unsigned attrib)
-{
-    sft entry{};
-    entry.sft_psp = fdos_idata.cu_psp();
-    entry.sft_mode = flags & 0xf0ffu;
-    entry.sft_shroff = -1;
-    entry.sft_attrib = (UBYTE)(attrib | D_ARCHIVE);
-    sft_ref(p).store(entry);
-    fdos_idata.open_mode() = (UBYTE)flags;
-}
-
-extern "C" void fdos_sft_begin_disk_open(dos_far_ptr p, UBYTE drive)
-{
-    sft entry;
-    sft_ref ref(p);
-    ref.load(entry);
-    ++entry.sft_count;
-    entry.sft_flags = drive;
-    ref.store(entry);
-}
-
-extern "C" void fdos_sft_open_failed(dos_far_ptr p)
-{
-    sft entry;
-    sft_ref ref(p);
-    ref.load(entry);
-    if (entry.sft_count != 0)
-        --entry.sft_count;
-    ref.store(entry);
-}
-
-extern "C" long fdos_jft_find_free(void)
-{
-    const psp_ref process(fdos_idata.cu_psp());
-    const UWORD count = process.max_files();
-    const dos_far_ptr table = process.file_table();
-
-    if (far_is_null(table) || far_is_end(table))
-        return DE_TOOMANY;
-
-    const uint32_t base = fdos_far_linear(table);
-    for (UWORD h = 0; h < count; ++h) {
-        if (pload8(base + h) == 0xff)
-            return h;
-    }
-    return DE_TOOMANY;
-}
-
-extern "C" int fdos_jft_get(UCOUNT hndl)
-{
-    const psp_ref process(fdos_idata.cu_psp());
-    const UWORD count = process.max_files();
-    const dos_far_ptr table = process.file_table();
-
-    if (hndl >= count || far_is_null(table) || far_is_end(table))
-        return DE_INVLDHNDL;
-
-    const UBYTE idx = pload8(fdos_far_linear(table) + hndl);
-    return idx == 0xff ? DE_INVLDHNDL : idx;
-}
-
-extern "C" COUNT fdos_jft_set(UCOUNT hndl, UBYTE sft_idx)
-{
-    const psp_ref process(fdos_idata.cu_psp());
-    const UWORD count = process.max_files();
-    const dos_far_ptr table = process.file_table();
-
-    if (hndl >= count || far_is_null(table) || far_is_end(table))
-        return DE_INVLDHNDL;
-
-    pstore8(fdos_far_linear(table) + hndl, sft_idx);
-    return SUCCESS;
-}
-
 extern "C" int snprintf(char *s, size_t n, const char *fmt, ...);
 static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
 {
@@ -586,7 +461,7 @@ void fdos_guest_copy_cstr(dos_far_ptr src, char *dst, size_t dst_size)
 
 void fdos_guest_cds_load(dos_far_ptr src, struct cds *dst)
 {
-  cds_ref(src).load(*dst);
+  cds_ref(src).read_struct(*dst);
 }
 
 void fdos_guest_cds_current_path_byte(dos_far_ptr cds_ptr, unsigned index, UBYTE value)

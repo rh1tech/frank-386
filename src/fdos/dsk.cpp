@@ -1,3 +1,4 @@
+extern "C" {
 #include <pico.h>
 #include <pico/time.h>
 #include <hardware/pio.h>
@@ -38,6 +39,8 @@
 #include "hdr/network.h"
 #include "init-mod.h"
 #include "dyndata.h"
+}
+#include "guest_ref.hpp"
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
@@ -74,7 +77,7 @@ static inline UBYTE blk_dev_units(void)
  */
 static BOOL disk_guest_int13 = FALSE;
 
-VOID fdos_disk_enable_guest_int13(VOID)
+extern "C" VOID fdos_disk_enable_guest_int13(VOID)
 {
   disk_guest_int13 = TRUE;
 }
@@ -394,27 +397,27 @@ STATIC WORD getbpb(CPU *cpu, ddt *pddt)
   return 0;
 }
 
-STATIC WORD blk_mediachk(CPU *cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_mediachk(CPU *cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   if (pddt->ddt_descflags & DF_REFORMAT) {
     pddt->ddt_descflags &= ~DF_REFORMAT;
-    rq->r_mcretcode = M_CHANGED;
+    rq.mcretcode(M_CHANGED);
   } else if (pddt->ddt_descflags & DF_DISKCHANGE) {
     pddt->ddt_descflags &= ~DF_DISKCHANGE;
-    rq->r_mcretcode = M_DONT_KNOW;
+    rq.mcretcode(M_DONT_KNOW);
   } else {
-    rq->r_mcretcode = diskchange(cpu, pddt);
+    rq.mcretcode(diskchange(cpu, pddt));
 
-    if (rq->r_mcretcode == M_NO_MEDIA)
+    if (rq.mcretcode() == M_NO_MEDIA)
     {
       /* Media check must report a change, not fail immediately.  The DOS
          filesystem layer will invalidate its cached buffers and then issue
          C_BLDBPB, which returns E_NOTRDY while the drive is empty. */
-      rq->r_mcretcode = M_CHANGED;
+      rq.mcretcode(M_CHANGED);
       return S_DONE;
     }
 
-    if (rq->r_mcretcode == M_DONT_KNOW)
+    if (rq.mcretcode() == M_DONT_KNOW)
     {
       ULONG serialno = pddt->ddt_serialno;
       WORD result = getbpb(cpu, pddt);
@@ -423,14 +426,14 @@ STATIC WORD blk_mediachk(CPU *cpu, request FAR *rq, ddt *pddt)
         return result;
 
       if (serialno != pddt->ddt_serialno)
-        rq->r_mcretcode = M_CHANGED;
+        rq.mcretcode(M_CHANGED);
     }
   }
 
   return S_DONE;
 }
 
-STATIC WORD blk_bldbpb(CPU *cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_bldbpb(CPU *cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   WORD ret = getbpb(cpu, pddt);
 
@@ -443,7 +446,7 @@ STATIC WORD blk_bldbpb(CPU *cpu, request FAR *rq, ddt *pddt)
      contiguous array to get its far base, then add the field offset. The
      dispatch signature stays uniform (no extra parameter). */
   int dev = (int)(pddt - getddt(0));
-  rq->r_bpptr = ADD_OFF(getddt_far(dev), offsetof(ddt, ddt_bpb));
+  rq.bpptr(ADD_OFF(getddt_far(dev), offsetof(ddt, ddt_bpb)));
   return S_DONE;
 }
 
@@ -772,7 +775,7 @@ STATIC int LBA_Transfer(CPU* cpu,
 /*
     C_INPUT / C_OUTPUT / C_OUTVFY - migrated from blockio() in dsk.c.
 */
-STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_rw(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   ULONG start, size;
   WORD ret;
@@ -780,7 +783,7 @@ STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
   int action;
   const bpb *pbpb;
 
-  switch (rq->r_command)
+  switch (rq.command())
   {
     case C_INPUT:
       action = LBA_READ;
@@ -799,23 +802,23 @@ STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
     return failure(E_NOTRDY);
 
   tmark(pddt);
-  start = (rq->r_start != HUGECOUNT ? rq->r_start : rq->r_huge);
+  start = (rq.start() != HUGECOUNT ? rq.start() : rq.huge());
   pbpb = hd(pddt->ddt_descflags) ? &pddt->ddt_defbpb : &pddt->ddt_bpb;
   size = (pbpb->bpb_nsize ? pbpb->bpb_nsize : pbpb->bpb_huge);
 
   /* The request must stay inside the volume - without this check a bogus
      r_start went straight into LBA_Transfer(). 0408h == S_ERROR|S_DONE|E_NOTFND
      ("sector not found"), the value the original returns here. */
-  if (start >= size || start + rq->r_count > size)
+  if (start >= size || start + rq.count() > size)
   {
     return 0x0408;
   }
   start += pddt->ddt_offset;
 
-  ret = (WORD)LBA_Transfer(cpu, pddt, action, rq->r_trans,
-                           start, rq->r_count, &done);
+  ret = (WORD)LBA_Transfer(cpu, pddt, action, rq.trans(),
+                           start, rq.count(), &done);
 
-  rq->r_count = done;
+  rq.count(done);
 
   if (ret != 0)
     return ret;
@@ -827,16 +830,16 @@ STATIC WORD blk_rw(CPU* cpu, request FAR *rq, ddt *pddt)
 /* The remaining dispatch entries, ported from dsk.c                         */
 /* ------------------------------------------------------------------------ */
 
-STATIC WORD blk_error(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_error(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   UNREFERENCED_PARAMETER(cpu);
   UNREFERENCED_PARAMETER(pddt);
 
-  rq->r_count = 0;
+  rq.count(0);
   return failure(E_FAILURE);    /* general failure */
 }
 
-STATIC WORD blk_noerr(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_noerr(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   UNREFERENCED_PARAMETER(cpu);
   UNREFERENCED_PARAMETER(rq);
@@ -845,7 +848,7 @@ STATIC WORD blk_noerr(CPU* cpu, request FAR *rq, ddt *pddt)
   return S_DONE;
 }
 
-STATIC WORD blk_nondr(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_nondr(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   UNREFERENCED_PARAMETER(cpu);
   UNREFERENCED_PARAMETER(rq);
@@ -854,7 +857,7 @@ STATIC WORD blk_nondr(CPU* cpu, request FAR *rq, ddt *pddt)
   return S_BUSY | S_DONE;
 }
 
-STATIC WORD blk_Open(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_Open(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   UNREFERENCED_PARAMETER(cpu);
   UNREFERENCED_PARAMETER(rq);
@@ -863,7 +866,7 @@ STATIC WORD blk_Open(CPU* cpu, request FAR *rq, ddt *pddt)
   return S_DONE;
 }
 
-STATIC WORD blk_Close(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_Close(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   UNREFERENCED_PARAMETER(cpu);
   UNREFERENCED_PARAMETER(rq);
@@ -872,7 +875,7 @@ STATIC WORD blk_Close(CPU* cpu, request FAR *rq, ddt *pddt)
   return S_DONE;
 }
 
-STATIC WORD blk_Media(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD blk_Media(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   UNREFERENCED_PARAMETER(cpu);
   UNREFERENCED_PARAMETER(rq);
@@ -887,7 +890,7 @@ STATIC WORD blk_Media(CPU* cpu, request FAR *rq, ddt *pddt)
    0 if not set, 1 = a, 2 = b, etc, assume set.
    page 424 MS Programmer's Ref.
  */
-STATIC WORD Getlogdev(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD Getlogdev(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   int i;
   ddt *pddt2;
@@ -895,7 +898,7 @@ STATIC WORD Getlogdev(CPU* cpu, request FAR *rq, ddt *pddt)
   UNREFERENCED_PARAMETER(cpu);
 
   if (!(pddt->ddt_descflags & DF_MULTLOG)) {
-    rq->r_unit = 0;
+    rq.unit(0);
     return S_DONE;
   }
 
@@ -908,36 +911,36 @@ STATIC WORD Getlogdev(CPU* cpu, request FAR *rq, ddt *pddt)
         break;
   }
 
-  rq->r_unit = i + 1;
+  rq.unit(i + 1);
   return S_DONE;
 }
 
-STATIC WORD Setlogdev(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD Setlogdev(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
-  unsigned char unit = rq->r_unit;
+  unsigned char unit = rq.unit();
 
   Getlogdev(cpu, rq, pddt);
-  if (rq->r_unit == 0)
+  if (rq.unit() == 0)
     return S_DONE;
 
-  getddt(rq->r_unit - 1)->ddt_descflags &= ~DF_CURLOG;
+  getddt(rq.unit() - 1)->ddt_descflags &= ~DF_CURLOG;
   pddt->ddt_descflags |= DF_CURLOG;
-  rq->r_unit = unit + 1;
+  rq.unit(unit + 1);
   return S_DONE;
 }
 
-STATIC WORD IoctlQueblk(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD IoctlQueblk(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
   UNREFERENCED_PARAMETER(cpu);
   UNREFERENCED_PARAMETER(pddt);
 
 #ifdef WITHFAT32
-  if (rq->r_cat == 8 || rq->r_cat == 0x48)
+  if (rq.cat() == 8 || rq.cat() == 0x48)
 #else
-  if (rq->r_cat == 8)
+  if (rq.cat() == 8)
 #endif
   {
-    switch (rq->r_fun)
+    switch (rq.fun())
     {
     case 0x46:
     case 0x47:
@@ -1074,7 +1077,7 @@ STATIC BOOL gen_rw_sane(const ddt *pddt, const struct gblkrw *rw)
 #define BLK_GENIOCTL 1
 #endif
 
-STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
+STATIC WORD Genblkdev(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt)
 {
 #if !BLK_GENIOCTL
   UNREFERENCED_PARAMETER(cpu);
@@ -1088,18 +1091,18 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 #ifdef WITHFAT32
   int extended = 0;
 
-  if (rq->r_cat == 0x48)
+  if (rq.cat() == 0x48)
     extended = 1;
   else
 #endif
-  if (rq->r_cat != 8)
+  if (rq.cat() != 8)
     return failure(E_CMD);
 
-  switch (rq->r_fun)
+  switch (rq.fun())
   {
     case 0x40:                 /* set device parameters */
       {
-        struct gblkio *gblp = (struct gblkio *)ARM_PTR(rq->r_io);
+        struct gblkio *gblp = (struct gblkio *)ARM_PTR(rq.io());
         bpb *pbpb;
 
         pddt->ddt_type = gblp->gbio_devtype;
@@ -1122,7 +1125,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x41:                 /* write track - CHS is absolute not relative to partition start */
       {
-        struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq->r_rw);
+        struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq.rw());
         if (!gen_rw_sane(pddt, rw))
           return failure(E_FAILURE);
         ret = GenblockioAbs(cpu, pddt, LBA_WRITE, rw->gbrw_head, rw->gbrw_cyl,
@@ -1134,7 +1137,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x42:                 /* format/verify track */
       {
-        struct gblkfv *fv = (struct gblkfv *)ARM_PTR(rq->r_fv);
+        struct gblkfv *fv = (struct gblkfv *)ARM_PTR(rq.fv());
         BYTE *dtb = (BYTE *)ARM_PTR(DiskTransferBuffer);
         COUNT tracks;
         struct thst {
@@ -1237,7 +1240,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x62:                 /* verify track */
       {
-        struct gblkfv *fv = (struct gblkfv *)ARM_PTR(rq->r_fv);
+        struct gblkfv *fv = (struct gblkfv *)ARM_PTR(rq.fv());
 
         {
           /* gbfv_ntracks comes straight from the caller's buffer, and the
@@ -1261,7 +1264,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x61:                 /* read track - CHS is absolute on disk not relative to start of partition */
       {
-        struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq->r_rw);
+        struct gblkrw *rw = (struct gblkrw *)ARM_PTR(rq.rw());
         if (!gen_rw_sane(pddt, rw))
           return failure(E_FAILURE);
         ret = GenblockioAbs(cpu, pddt, LBA_READ, rw->gbrw_head, rw->gbrw_cyl,
@@ -1273,7 +1276,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x46:                 /* set volume serial number */
       {
-        struct Gioc_media *gioc = (struct Gioc_media *)ARM_PTR(rq->r_gioc);
+        struct Gioc_media *gioc = (struct Gioc_media *)ARM_PTR(rq.gioc());
         BYTE *buf = (BYTE *)ARM_PTR(DiskTransferBuffer);
         struct FS_info *fs;
         BYTE extended_BPB_signature;
@@ -1309,7 +1312,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x47:                 /* set access flag */
       {
-        struct Access_info *ai = (struct Access_info *)ARM_PTR(rq->r_ai);
+        struct Access_info *ai = (struct Access_info *)ARM_PTR(rq.ai());
         pddt->ddt_descflags = (descflags & ~DF_NOACCESS) |
           (ai->AI_Flag ? 0 : DF_NOACCESS);
       }
@@ -1317,7 +1320,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x60:                 /* get device parameters */
       {
-        struct gblkio *gblp = (struct gblkio *)ARM_PTR(rq->r_io);
+        struct gblkio *gblp = (struct gblkio *)ARM_PTR(rq.io());
         bpb *pbpb;
 
         gblp->gbio_devtype = pddt->ddt_type;
@@ -1341,7 +1344,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x66:                 /* get volume serial number */
       {
-        struct Gioc_media *gioc = (struct Gioc_media *)ARM_PTR(rq->r_gioc);
+        struct Gioc_media *gioc = (struct Gioc_media *)ARM_PTR(rq.gioc());
 
         ret = getbpb(cpu, pddt);
         if (ret != 0)
@@ -1356,7 +1359,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 
     case 0x67:                 /* get access flag */
       {
-        struct Access_info *ai = (struct Access_info *)ARM_PTR(rq->r_ai);
+        struct Access_info *ai = (struct Access_info *)ARM_PTR(rq.ai());
         ai->AI_Flag = descflags & DF_NOACCESS ? 0 : 1;        /* bit 9 */
       }
       break;
@@ -1371,7 +1374,7 @@ STATIC WORD Genblkdev(CPU* cpu, request FAR *rq, ddt *pddt)
 /*                                                                      */
 /* the function dispatch table                                          */
 /*                                                                      */
-typedef WORD blk_proc(CPU* cpu, request FAR *rq, ddt *pddt);
+typedef WORD blk_proc(CPU* cpu, fdos_guest::request_ref &rq, ddt *pddt);
 
 STATIC blk_proc * const dispatch[NENTRY] =
 {
@@ -1411,21 +1414,21 @@ STATIC blk_proc * const dispatch[NENTRY] =
     block device) for every request the file system layer builds through
     execrh()/dskxfer().
 */
-void blk_driver(CPU* cpu, request FAR *rq)
+void blk_driver(CPU* cpu, fdos_guest::request_ref &rq)
 {
-  if (rq->r_unit >= blk_dev_units() && rq->r_command != C_INIT)
+  if (rq.unit() >= blk_dev_units() && rq.command() != C_INIT)
   {
-    rq->r_status = failure(E_UNIT);
+    rq.status(failure(E_UNIT));
     return;
   }
 
-  if (rq->r_command >= NENTRY)
+  if (rq.command() >= NENTRY)
   {
-    rq->r_status = failure(E_FAILURE);   /* general failure */
+    rq.status(failure(E_FAILURE));   /* general failure */
     return;
   }
 
-  rq->r_status = (*dispatch[rq->r_command])(cpu, rq, getddt(rq->r_unit));
+  rq.status((*dispatch[rq.command()])(cpu, rq, getddt(rq.unit())));
 }
 
 /*

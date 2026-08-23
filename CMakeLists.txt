@@ -372,18 +372,18 @@ set(EMU_CORE_SOURCES
     src/fdos/config.cpp
     src/fdos/memmgr.cpp
     src/fdos/inithma.c
-    src/fdos/dsk.c
-    src/fdos/dosfns.c
+    src/fdos/dsk.cpp
+    src/fdos/dosfns.cpp
     src/fdos/fcbfns.c
     src/fdos/lfnapi.c
     src/fdos/fatfs.c
     src/fdos/fatfs_guest.cpp
-    src/fdos/fattab.c
+    src/fdos/fattab.cpp
     src/fdos/fatdir.c
-    src/fdos/blockio.c
-    src/fdos/blockio_guest.cpp
+    src/fdos/blockio.cpp
     src/fdos/chario.c
     src/fdos/kernel.c
+    src/fdos/native_devices.cpp
     src/fdos/task.c
     src/fdos/fcom/fcom.c
     src/fdos/fcom/fcom_guest.cpp
@@ -720,18 +720,18 @@ set(FDOS_WARN_SOURCES
     src/fdos/config.cpp
     src/fdos/memmgr.cpp
     src/fdos/inithma.c
-    src/fdos/dsk.c
-    src/fdos/dosfns.c
+    src/fdos/dsk.cpp
+    src/fdos/dosfns.cpp
     src/fdos/fcbfns.c
     src/fdos/lfnapi.c
     src/fdos/fatfs.c
     src/fdos/fatfs_guest.cpp
-    src/fdos/fattab.c
+    src/fdos/fattab.cpp
     src/fdos/fatdir.c
-    src/fdos/blockio.c
-    src/fdos/blockio_guest.cpp
+    src/fdos/blockio.cpp
     src/fdos/chario.c
     src/fdos/kernel.c
+    src/fdos/native_devices.cpp
     src/fdos/task.c
     src/fdos/fcom/fcom.c
     src/fdos/fcom/fcom_guest.cpp

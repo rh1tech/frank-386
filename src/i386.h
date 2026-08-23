@@ -187,23 +187,31 @@ struct CPU {
 typedef struct CPU CPU;
 
 /* ARM32 ABI guards: fail the build instead of silently changing public layout. */
-#if UINTPTR_MAX == 0xffffffffu
-_Static_assert(sizeof(CPU_CB) == 48, "CPU_CB ABI size");
-_Static_assert(sizeof(struct tlb_entry) == 16, "tlb_entry ABI size");
-_Static_assert(sizeof(cpu_int_hook_t) == 8, "cpu_int_hook_t ABI size");
-_Static_assert(sizeof(bios_callback_params_t) == 24, "bios_callback_params_t ABI size");
-_Static_assert(sizeof(CPU_ext_accessors_t) == 68, "CPU_ext_accessors_t ABI size");
-_Static_assert(sizeof(x86_flags_t) == 4, "x86_flags_t ABI size");
-_Static_assert(sizeof(gprx_t) == 4, "gprx_t ABI size");
-_Static_assert(offsetof(struct CPU, intr) == 48, "CPU.intr ABI offset");
-_Static_assert(offsetof(struct CPU, gen) == 52, "CPU.gen ABI offset");
-_Static_assert(offsetof(struct CPU, cb) == 64, "CPU.cb ABI offset");
-_Static_assert(offsetof(struct CPU, bios) == 120, "CPU.bios ABI offset");
-_Static_assert(offsetof(struct CPU, prefetch_base) == 128, "CPU.prefetch_base ABI offset");
-_Static_assert(offsetof(struct CPU, int_hooks) == 148, "CPU.int_hooks ABI offset");
-_Static_assert(offsetof(struct CPU, fpu) == 1172, "CPU.fpu ABI offset");
-_Static_assert(sizeof(struct CPU) == 1176, "CPU ABI size");
+#ifdef __cplusplus
+#define CPU_ABI_STATIC_ASSERT(cond, msg) static_assert((cond), msg)
+#else
+#define CPU_ABI_STATIC_ASSERT(cond, msg) _Static_assert((cond), msg)
 #endif
+
+#if UINTPTR_MAX == 0xffffffffu
+CPU_ABI_STATIC_ASSERT(sizeof(CPU_CB) == 48, "CPU_CB ABI size");
+CPU_ABI_STATIC_ASSERT(sizeof(struct tlb_entry) == 16, "tlb_entry ABI size");
+CPU_ABI_STATIC_ASSERT(sizeof(cpu_int_hook_t) == 8, "cpu_int_hook_t ABI size");
+CPU_ABI_STATIC_ASSERT(sizeof(bios_callback_params_t) == 24, "bios_callback_params_t ABI size");
+CPU_ABI_STATIC_ASSERT(sizeof(CPU_ext_accessors_t) == 68, "CPU_ext_accessors_t ABI size");
+CPU_ABI_STATIC_ASSERT(sizeof(x86_flags_t) == 4, "x86_flags_t ABI size");
+CPU_ABI_STATIC_ASSERT(sizeof(gprx_t) == 4, "gprx_t ABI size");
+CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, intr) == 48, "CPU.intr ABI offset");
+CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, gen) == 52, "CPU.gen ABI offset");
+CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, cb) == 64, "CPU.cb ABI offset");
+CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, bios) == 120, "CPU.bios ABI offset");
+CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, prefetch_base) == 128, "CPU.prefetch_base ABI offset");
+CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, int_hooks) == 148, "CPU.int_hooks ABI offset");
+CPU_ABI_STATIC_ASSERT(offsetof(struct CPU, fpu) == 1172, "CPU.fpu ABI offset");
+CPU_ABI_STATIC_ASSERT(sizeof(struct CPU) == 1176, "CPU ABI size");
+#endif
+
+#undef CPU_ABI_STATIC_ASSERT
 
 #pragma pack(pop)
 // native system support

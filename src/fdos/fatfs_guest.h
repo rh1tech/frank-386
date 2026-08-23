@@ -22,8 +22,6 @@ ULONG fdos_dpb_clus2phys(dos_far_ptr dpb, CLUSTER cluster);
 BYTE fdos_dpb_flags(dos_far_ptr dpb);
 dos_far_ptr fdos_dpb_device(dos_far_ptr dpb);
 void fdos_bpb_to_dpb_guest(dos_far_ptr bpbp, dos_far_ptr dpbp, BOOL extended);
-CLUSTER fdos_read_fat_guest(dos_far_ptr dpbp, CLUSTER cluster);
-CLUSTER fdos_dpb_max_cluster(dos_far_ptr dpbp);
 
 #ifdef __cplusplus
 }

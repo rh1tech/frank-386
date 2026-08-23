@@ -208,7 +208,6 @@ int close(int fd);
 dos_far_ptr linear_to_far(const void *p);
 VOID DoConfig(int nPass);
 void BIOS_drive_reset(CPU* cpu, unsigned drive);
-void blk_driver(CPU* cpu, request FAR *rq);   /* dsk.c, was blockio() */
 int ASMPASCAL init_switchar(int chr);
 dos_far_ptr getvec(uint8_t intno);
 void setvec(uint8_t intno, dos_far_ptr vec);

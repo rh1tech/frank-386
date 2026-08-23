@@ -2,6 +2,12 @@
 #include <pico/time.h>
 #include <hardware/pio.h>
 #include <ctype.h>
+#define new fdos_new
+#ifndef _Static_assert
+#define _Static_assert static_assert
+#define FDOS_UNDEF_STATIC_ASSERT 1
+#endif
+extern "C" {
 #include "286/cpu.h"
 #include "bios/bios.h"
 #include "fdos.h"
@@ -38,7 +44,17 @@
 #include "hdr/network.h"
 #include "init-mod.h"
 #include "dyndata.h"
-#include "fatfs_guest.h"
+}
+#ifdef FDOS_UNDEF_STATIC_ASSERT
+#undef _Static_assert
+#undef FDOS_UNDEF_STATIC_ASSERT
+#endif
+#undef new
+#ifdef load
+#undef load
+#endif
+
+#include "guest_ref.hpp"
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
@@ -83,30 +99,133 @@ STATIC void clusterMessage(const char *msg, CLUSTER clussec)
 STATIC struct buffer *getFATblock(dos_far_ptr /* -> struct dpb */ x86_dpbp,
                                   CLUSTER clussec)
 {
-  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
-  /* *** why dpbp->dpb_unit? only useful to know in context of the dpbp...? *** */
-  struct buffer *bp = getblock(clussec, dpbp->dpb_unit);
+  using fdos_guest::buffer_ref;
+  using fdos_guest::dpb_ref;
+  const dpb_ref d(x86_dpbp);
+  struct buffer *native_bp = getblock(clussec, d.dpb_unit());
 
-  if (bp)
+  if (native_bp)
   {
-    bp->b_flag &= ~(BFR_DATA | BFR_DIR);
-    bp->b_flag |= BFR_FAT | BFR_VALID;
-    bp->b_dpbp = x86_dpbp;   /* the caller's genuine guest DPB pointer */
-    bp->b_copies = dpbp->dpb_fats;
-    bp->b_offset = dpbp->dpb_fatsize; /* 0 for FAT32 but blockio.c knows that */
+    /* Capture the guest address before touching the DPB again. */
+    const dos_far_ptr x86_bp = linear_to_far(native_bp);
+    const buffer_ref b(x86_bp);
+    BYTE flag = b.flag();
+    flag = static_cast<BYTE>((flag & ~(BFR_DATA | BFR_DIR)) |
+                             BFR_FAT | BFR_VALID);
+    b.flag(flag);
+    b.dpbp(x86_dpbp);
+    b.copies(d.dpb_fats());
+    b.offset(d.dpb_fatsize());
 #ifdef WITHFAT32
-    if (ISFAT32(dpbp))
-    {
-      if (dpbp->dpb_xflags & FAT_NO_MIRRORING)
-        bp->b_copies = 1;
-    }
+    if (d.dpb_fatsize() == 0 && (d.dpb_xflags() & FAT_NO_MIRRORING))
+      b.copies(1);
+#endif
+    return (struct buffer *)ARM_PTR(x86_bp);
+  }
+
+  clusterMessage("I/O: 0x", clussec);
+  return NULL;
+}
+
+static CLUSTER read_fat_guest(dos_far_ptr x86_dpbp, CLUSTER cluster1)
+{
+  using namespace fdos_guest;
+  const dpb_ref d(x86_dpbp);
+#ifdef WITHFAT32
+  const bool fat32 = d.dpb_fatsize() == 0;
+#else
+  const bool fat32 = false;
+#endif
+  const UWORD dpb_size = d.dpb_size();
+  const bool fat12 = (dpb_size - 1u) < FAT_MAGIC;
+  const bool fat16 = !fat12 && dpb_size <= FAT_MAGIC16;
+  CLUSTER max_cluster = dpb_size;
+#ifdef WITHFAT32
+  if (fat32)
+    max_cluster = d.dpb_xsize();
+#endif
+  if (cluster1 <= 1 || cluster1 > max_cluster)
+    return 1;
+
+  unsigned secdiv = d.dpb_secsize();
+  CLUSTER clussec = cluster1;
+  if (fat12) {
+    clussec = static_cast<CLUSTER>(static_cast<unsigned>(clussec) * 3u);
+    secdiv *= 2u;
+  } else {
+    secdiv /= 2u;
+#ifdef WITHFAT32
+    if (fat32)
+      secdiv /= 2u;
 #endif
   }
-  else
-  {
-    clusterMessage("I/O: 0x", clussec);
+
+  const unsigned idx = static_cast<unsigned>(clussec % secdiv);
+  clussec /= secdiv;
+  clussec += d.dpb_fatstrt();
+#ifdef WITHFAT32
+  if (fat32) {
+    const UWORD xflags = d.dpb_xflags();
+    if (xflags & FAT_NO_MIRRORING)
+      clussec += static_cast<CLUSTER>(xflags & 0x0fu) * d.dpb_xfatsize();
   }
-  return bp;
+#endif
+
+  auto get_fat_block = [&](CLUSTER sector, dos_far_ptr &out) -> bool {
+    struct buffer *native_bp = getFATblock(x86_dpbp, sector);
+    if (native_bp == nullptr)
+      return false;
+    /* Capture the guest address before any further guest access. */
+    out = linear_to_far(native_bp);
+    return true;
+  };
+
+  dos_far_ptr x86_bp{};
+  if (!get_fat_block(clussec, x86_bp))
+    return 1;
+  const buffer_ref b(x86_bp);
+
+  if (fat12) {
+    const unsigned byte_index = idx / 2u;
+    const UBYTE lo = b.data8(byte_index);
+    UBYTE hi;
+    if (byte_index >= static_cast<unsigned>(d.dpb_secsize()) - 1u) {
+      dos_far_ptr x86_bp1{};
+      if (!get_fat_block(clussec + 1u, x86_bp1))
+        return 1;
+      hi = buffer_ref(x86_bp1).data8(0);
+    } else {
+      hi = b.data8(byte_index + 1u);
+    }
+    unsigned cluster = static_cast<unsigned>(lo) | (static_cast<unsigned>(hi) << 8);
+    if (cluster1 & 1u)
+      cluster >>= 4;
+    cluster &= 0x0fffu;
+    if (cluster >= MASK12)
+      return LONG_LAST_CLUSTER;
+    if (cluster == BAD12)
+      return LONG_BAD;
+    return cluster;
+  }
+
+  if (fat16) {
+    const UWORD res = b.data16(idx * 2u);
+    if (res >= MASK16)
+      return LONG_LAST_CLUSTER;
+    if (res == BAD16)
+      return LONG_BAD;
+    return res;
+  }
+
+#ifdef WITHFAT32
+  if (fat32) {
+    const ULONG res = b.data32(idx * 4u) & LONG_LAST_CLUSTER;
+    if (res > LONG_BAD)
+      return LONG_LAST_CLUSTER;
+    return res;
+  }
+#endif
+  return 1;
 }
 
 /* either read the value at Cluster1 (if Cluster2 is READ_CLUSTER) */
@@ -123,7 +242,7 @@ CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
                  REG CLUSTER Cluster2)
 {
   if ((unsigned)Cluster2 == READ_CLUSTER)
-    return fdos_read_fat_guest(x86_dpbp, Cluster1);
+    return read_fat_guest(x86_dpbp, Cluster1);
 
   struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   struct buffer *bp;
@@ -356,7 +475,14 @@ CLUSTER next_cluster(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER ClusterNu
   /* empty (0) error (1) bad (LONG_BAD) last (>LONG_BAD) need no checks */
   if (candidate < 2 || candidate >= LONG_BAD)
     return candidate;
-  max_cluster = fdos_dpb_max_cluster(x86_dpbp);
+  {
+    const fdos_guest::dpb_ref d(x86_dpbp);
+#ifdef WITHFAT32
+    max_cluster = d.dpb_fatsize() == 0 ? d.dpb_xsize() : d.dpb_size();
+#else
+    max_cluster = d.dpb_size();
+#endif
+  }
   /* FAT entry points to a possibly invalid next cluster */
   following = link_fat(x86_dpbp, candidate, READ_CLUSTER);
   if (following < 2 || (following < LONG_BAD && following > max_cluster))

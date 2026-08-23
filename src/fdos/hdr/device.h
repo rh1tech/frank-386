@@ -145,7 +145,7 @@ struct dhdr {
     union {
       struct {
         // no dh_strategy support for native drivers
-        VOID(*dh_interrupt)(struct request *rq);
+        VOID(*dh_interrupt)(dos_far_ptr rq);
       } arm;
       struct {
         UWORD dh_strategy;    /* offset, within this header's own segment */
