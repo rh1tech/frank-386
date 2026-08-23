@@ -2623,11 +2623,12 @@ VOID PostConfig(VOID)
     config_lol.lastdrive() = config_lol.nblkdev();
 
   CfgDbgPrintf(("starting FAR allocations at %x\n", base_seg));
-  /* Original FreeDOS reinitializes buffers here after first_mcb exists.
-   * The preliminary PreConfig() buffers are only temporary.  In this port,
-   * keep the final buffers in low MCB memory for now: HMA buffer placement
-   * is a separate path and conflicts with the current HMA model. */
-  config_init_buffers_ex(Config.cfgBuffers, 0);
+  /*
+   * Original FreeDOS reinitializes the temporary PreConfig() buffers here.
+   * Preserve the normal HMA placement when DOS=HIGH; config_init_buffers_ex()
+   * already falls back to low MCB memory if HMA allocation is unavailable.
+   */
+  config_init_buffers_ex(Config.cfgBuffers, 1);
 
   /*
    * PreConfig2() appended the second 3-entry SFT block after the

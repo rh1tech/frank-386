@@ -35,6 +35,7 @@
 
 #include "i386.h"        /* pulls in mem.h -> pstore16() */
 #include "diag.h"
+#include "core0_stack.h"
 
 /* RP2040 has TIMER_IRQ_0; RP2350 has two timers, so TIMER0_IRQ_0.. */
 #if defined(PICO_RP2040) && PICO_RP2040
@@ -126,8 +127,13 @@ static void diag_paint_stack(void)
     uint32_t sp;
     __asm volatile ("mov %0, sp" : "=r" (sp));
 
-    diag_lo = &__StackBottom;
-    diag_hi = &__StackTop;
+    if (core0_stack_uses_gfx_buffer) {
+        diag_lo = (uint32_t *)core0_stack_floor_runtime;
+        diag_hi = (uint32_t *)core0_stack_top_runtime;
+    } else {
+        diag_lo = &__StackBottom;
+        diag_hi = &__StackTop;
+    }
 
     uint32_t *end = (uint32_t *)((sp - 256) & ~3u);
     if (end > diag_hi) end = diag_hi;
@@ -379,11 +385,10 @@ void diag_init(void)
     scb_hw->shcsr |= (1u << 16) | (1u << 17) | (1u << 18);
 
     /* ARMv8-M stack limit: turn a silent overflow into a precise UsageFault.
-       Floor is the bottom of TEXT_BUFFER, so the stack is allowed to grow all
-       the way down through CORE0_STACK_EXT and TEXT_BUFFER; only a push below
-       __text_buffer_area__ (into main RAM / the heap) faults. */
+       The runtime floor is TEXT_BUFFER for the normal stack, or the end of
+       active video RAM when the unused GFX_BUFFER tail is the core0 stack. */
     __asm volatile ("msr msplim, %0"
-                    :: "r" ((uint32_t)(uintptr_t)&__text_buffer_area__));
+                    :: "r" ((uint32_t)core0_stack_floor_runtime));
 
     diag_alarm_num = (int)hardware_alarm_claim_unused(true);
     irq_set_exclusive_handler((uint)(DIAG_TIMER_IRQ_BASE + diag_alarm_num),

@@ -216,9 +216,9 @@ void *__not_in_flash_func(nf_memset)(void *ptr, int value, size_t len)
     return ptr;
 }
 
-static void *__not_in_flash_func(dos_api_memcpy)(void *dst,
-                                                  const void *src,
-                                                  size_t len)
+void *__not_in_flash_func(dos_api_memcpy)(void *dst,
+                                          const void *src,
+                                          size_t len)
 {
     uint8_t *d = (uint8_t *)dst;
     const uint8_t *s = (const uint8_t *)src;

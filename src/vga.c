@@ -430,6 +430,71 @@ static int update_palette16(VGAState *s, uint32_t *palette)
 /* VGA graphics controller bit masks */
 #define VGA_GR06_GRAPHICS_MODE  0x01
 
+/* Physical VRAM size is a build-time property. Mask only after the VGA
+ * address translation has produced an offset into the backing array. */
+#if defined(MCGA)
+#define VGA_PHYS_ADDR_MASK 0x0ffffu
+#elif defined(EGA128) || defined(VGA128)
+#define VGA_PHYS_ADDR_MASK 0x1ffffu
+#else
+#define VGA_PHYS_ADDR_MASK 0x3ffffu
+#endif
+
+static inline uint32_t __attribute__((always_inline)) vga_phys_offset(uint32_t addr)
+{
+    return addr & VGA_PHYS_ADDR_MASK;
+}
+
+static inline uint32_t __attribute__((always_inline)) vga_plane_word_offset(uint32_t addr)
+{
+    return addr & (VGA_PHYS_ADDR_MASK >> 2);
+}
+
+static inline void __attribute__((always_inline))
+vga_phys_write16(uint8_t *vram, uint32_t addr, uint16_t val)
+{
+    addr = vga_phys_offset(addr);
+    if (addr != VGA_PHYS_ADDR_MASK) {
+        *(uint16_t *)(vram + addr) = val;
+    } else {
+        vram[addr] = (uint8_t)val;
+        vram[0] = (uint8_t)(val >> 8);
+    }
+}
+
+static inline void __attribute__((always_inline))
+vga_phys_write32(uint8_t *vram, uint32_t addr, uint32_t val)
+{
+    addr = vga_phys_offset(addr);
+    if (addr <= VGA_PHYS_ADDR_MASK - 3u) {
+        *(uint32_t *)(vram + addr) = val;
+    } else {
+        vram[addr] = (uint8_t)val;
+        vram[vga_phys_offset(addr + 1u)] = (uint8_t)(val >> 8);
+        vram[vga_phys_offset(addr + 2u)] = (uint8_t)(val >> 16);
+        vram[vga_phys_offset(addr + 3u)] = (uint8_t)(val >> 24);
+    }
+}
+
+void *__not_in_flash_func(dos_api_memcpy)(void *dst,
+                                          const void *src,
+                                          size_t len);
+
+static inline void vga_phys_memcpy(uint8_t *vram, uint32_t addr,
+                                   const uint8_t *src, size_t len)
+{
+    while (len) {
+        addr = vga_phys_offset(addr);
+        size_t chunk = (size_t)VGA_PHYS_ADDR_MASK + 1u - addr;
+        if (chunk > len)
+            chunk = len;
+        dos_api_memcpy(vram + addr, src, chunk);
+        addr += (uint32_t)chunk;
+        src += chunk;
+        len -= chunk;
+    }
+}
+
 static bool vbe_enabled(VGAState *s)
 {
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
@@ -1673,7 +1738,7 @@ void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
     plane = addr & 3;
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-        * (uint16_t *) &(s->vga_ram[addr]) = val;
+        vga_phys_write16(s->vga_ram, addr, (uint16_t)val);
     }
 }
 
@@ -1721,7 +1786,7 @@ void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
     plane = addr & 3;
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-        * (uint32_t *) &(s->vga_ram[addr]) = val;
+        vga_phys_write32(s->vga_ram, addr, val);
     }
 }
 
@@ -1764,7 +1829,7 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
     plane = addr & 3;
     mask = (1 << plane);
     if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-        memcpy(s->vga_ram + addr, buf, len);
+        vga_phys_memcpy(s->vga_ram, addr, buf, (size_t)len);
         return true;
     }
     return false;
@@ -1824,8 +1889,7 @@ void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, u
 
 #if defined(VGA128) || defined(MCGA)
     if (reduced_linear_mono_access(s)) {
-        if (addr < (uint32_t)s->vga_ram_size)
-            s->vga_ram[addr] = (uint8_t)val;
+        s->vga_ram[vga_phys_offset(addr)] = (uint8_t)val;
         return;
     }
 #endif
@@ -1835,7 +1899,7 @@ void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, u
         plane = addr & 3;
         mask = (1 << plane);
         if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
-            s->vga_ram[addr] = val;
+            s->vga_ram[vga_phys_offset(addr)] = val;
 #ifdef DEBUG_VGA_MEM
             printf("vga: chain4: [0x" TARGET_FMT_plx "]\n", addr);
 #endif
@@ -1848,9 +1912,7 @@ void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, u
         mask = (1 << plane);
         if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
             addr = ((addr & ~1) << 1) | plane;
-            if (addr >= s->vga_ram_size) {
-                return;
-            }
+            addr = vga_phys_offset(addr);
             s->vga_ram[addr] = val;
 #ifdef DEBUG_VGA_MEM
             printf("vga: odd/even: [0x" TARGET_FMT_plx "]\n", addr);
@@ -1924,9 +1986,7 @@ void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, u
         mask = s->sr[VGA_SEQ_PLANE_WRITE];
 //        s->plane_updated |= mask; /* only used to detect font change */
         write_mask = mask16[mask];
-        if (addr * sizeof(uint32_t) >= s->vga_ram_size) {
-            return;
-        }
+        addr = vga_plane_word_offset(addr);
         ((uint32_t *)s->vga_ram)[addr] =
             (((uint32_t *)s->vga_ram)[addr] & ~write_mask) |
             (val & write_mask);
@@ -1970,29 +2030,23 @@ uint8_t __not_in_flash_func(vga_mem_read)(VGAState *s, uint32_t addr)
 
 #if defined(VGA128) || defined(MCGA)
     if (reduced_linear_mono_access(s)) {
-        if (addr >= (uint32_t)s->vga_ram_size)
-            return 0xff;
-        return s->vga_ram[addr];
+        return s->vga_ram[vga_phys_offset(addr)];
     }
 #endif
 
     if (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         /* chain 4 mode : simplest access */
 //        assert(addr < s->vram_size);
-        ret = s->vga_ram[addr];
+        ret = s->vga_ram[vga_phys_offset(addr)];
     } else if (s->gr[VGA_GFX_MODE] & 0x10) {
         /* odd/even mode (aka text mode mapping) */
         plane = (s->gr[VGA_GFX_PLANE_READ] & 2) | (addr & 1);
         addr = ((addr & ~1) << 1) | plane;
-        if (addr >= s->vga_ram_size) { // s->vram_size) {
-            return 0xff;
-        }
+        addr = vga_phys_offset(addr);
         ret = s->vga_ram[addr];
     } else {
         /* standard VGA latched access */
-        if (addr * sizeof(uint32_t) >= s->vga_ram_size) {//s->vram_size) {
-            return 0xff;
-        }
+        addr = vga_plane_word_offset(addr);
         s->latch = ((uint32_t *)s->vga_ram)[addr];
 
         if (!(s->gr[VGA_GFX_MODE] & 0x08)) {

@@ -530,6 +530,9 @@ public:
     void offset(UWORD v) const { scalar_store<UWORD>(offsetof(buffer, b_offset), v); }
     dos_far_ptr dpbp() const { return far_load(offsetof(buffer, b_dpbp)); }
     void dpbp(dos_far_ptr v) const { far_store(offsetof(buffer, b_dpbp), v); }
+    UBYTE data8(std::size_t off) const { return scalar_load<UBYTE>(offsetof(buffer, b_buffer) + off); }
+    UWORD data16(std::size_t off) const { return scalar_load<UWORD>(offsetof(buffer, b_buffer) + off); }
+    ULONG data32(std::size_t off) const { return scalar_load<ULONG>(offsetof(buffer, b_buffer) + off); }
 
 private:
     dos_far_ptr far_load(std::size_t off) const {

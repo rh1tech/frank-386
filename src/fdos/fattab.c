@@ -38,6 +38,7 @@
 #include "hdr/network.h"
 #include "init-mod.h"
 #include "dyndata.h"
+#include "fatfs_guest.h"
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
@@ -121,6 +122,9 @@ STATIC struct buffer *getFATblock(dos_far_ptr /* -> struct dpb */ x86_dpbp,
 CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
                  REG CLUSTER Cluster2)
 {
+  if ((unsigned)Cluster2 == READ_CLUSTER)
+    return fdos_read_fat_guest(x86_dpbp, Cluster1);
+
   struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   struct buffer *bp;
   unsigned idx;
@@ -347,17 +351,12 @@ CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
 */
 CLUSTER next_cluster(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER ClusterNum)
 {
-  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
   CLUSTER candidate, following, max_cluster;
   candidate = link_fat(x86_dpbp, ClusterNum, READ_CLUSTER);
   /* empty (0) error (1) bad (LONG_BAD) last (>LONG_BAD) need no checks */
   if (candidate < 2 || candidate >= LONG_BAD)
     return candidate;
-  max_cluster = dpbp->dpb_size;
-#ifdef WITHFAT32
-  if (ISFAT32(dpbp))
-    max_cluster = dpbp->dpb_xsize;
-#endif
+  max_cluster = fdos_dpb_max_cluster(x86_dpbp);
   /* FAT entry points to a possibly invalid next cluster */
   following = link_fat(x86_dpbp, candidate, READ_CLUSTER);
   if (following < 2 || (following < LONG_BAD && following > max_cluster))

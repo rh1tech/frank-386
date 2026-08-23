@@ -7,6 +7,9 @@ extern "C" {
 dos_far_ptr fdos_buffer_first(void);
 void fdos_buffer_first_set(dos_far_ptr p);
 UWORD fdos_buffer_count(void);
+dos_far_ptr fdos_buffer_search(ULONG blkno, COUNT dsk);
+BOOL fdos_buffer_flush(dos_far_ptr p);
+dos_far_ptr fdos_buffer_getblk(ULONG blkno, COUNT dsk, BOOL overwrite);
 UWORD fdos_buffer_next(dos_far_ptr p);
 UWORD fdos_buffer_prev(dos_far_ptr p);
 void fdos_buffer_next_set(dos_far_ptr p, UWORD v);

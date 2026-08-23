@@ -211,156 +211,27 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
 #define b_prev(_bp, bp) bufptr(_bp, (bp)->b_prev)
 #define b_buffer_fp(_bp) MK_FP(FP_SEG(_bp), FP_OFF(_bp) + offsetof(struct buffer, b_buffer))
 
-STATIC void move_buffer(dos_far_ptr/*struct buffer*/ _bp, UWORD firstbp)
-{
-  const UWORD bp_off = FP_OFF(_bp);
-  const UWORD prev = fdos_buffer_prev(_bp);
-  const UWORD next = fdos_buffer_next(_bp);
-  const dos_far_ptr prev_bp = MK_FP(FP_SEG(_bp), prev);
-  const dos_far_ptr next_bp = MK_FP(FP_SEG(_bp), next);
-  const dos_far_ptr first = MK_FP(FP_SEG(_bp), firstbp);
-  const UWORD first_prev = fdos_buffer_prev(first);
-
-  /* Detach _bp from its current position.  All list links are guest state;
-     never retain a host pointer while touching another buffer page. */
-  fdos_buffer_prev_set(next_bp, prev);
-  fdos_buffer_next_set(prev_bp, next);
-
-  /* Insert _bp between first and first->prev. */
-  fdos_buffer_prev_set(_bp, first_prev);
-  fdos_buffer_next_set(_bp, firstbp);
-  fdos_buffer_prev_set(first, bp_off);
-  fdos_buffer_next_set(MK_FP(FP_SEG(_bp), first_prev), bp_off);
-}
-
 /*
-    this searches the buffer list for the given disk/block.
-
-    returns: a pointer to the buffer.
-
-    If the buffer is found the UNCACHE bit is not set, else it is set
-    (and the buffer is moved to the front of the LRU list either way).
-
-    Migrated from blockio.c.
+    Search and LRU movement are one C++ wrapper operation.  This keeps the
+    no-pinning guest-pointer model without paying a C/C++ call per buffer
+    field in this hot path.
 */
 STATIC dos_far_ptr/*struct buffer*/ searchblock(ULONG blkno, COUNT dsk)
 {
-  unsigned guard = 0;
-  int fat_count = 0;
-  UWORD lastNonFat = 0;
-  UWORD uncacheBuf = 0;
-  dos_far_ptr first = fdos_buffer_first();
-  const UWORD firstbp = FP_OFF(first);
-  const UWORD nbuffers = fdos_buffer_count();
-  dos_far_ptr _bp = first;
-
-  do
+  dos_far_ptr bp = fdos_buffer_search(blkno, dsk);
+  if (far_is_end(bp))
   {
-    const ULONG b_blkno = fdos_buffer_blkno(_bp);
-    BYTE b_flag = fdos_buffer_flag(_bp);
-    const BYTE b_unit = fdos_buffer_unit(_bp);
-
-    if ((b_blkno == blkno) && (b_flag & BFR_VALID) && (b_unit == dsk))
-    {
-      b_flag &= (BYTE)~BFR_UNCACHE;
-      fdos_buffer_flag_set(_bp, b_flag);
-      if (FP_OFF(_bp) != firstbp)
-      {
-        const UWORD bp_off = FP_OFF(_bp);
-        fdos_buffer_first_set(MK_FP(FP_SEG(first), bp_off));
-        move_buffer(_bp, firstbp);
-      }
-      return _bp;
-    }
-
-    if (b_flag & BFR_UNCACHE)
-      uncacheBuf = FP_OFF(_bp);
-    if (b_flag & BFR_FAT)
-      fat_count++;
-    else
-      lastNonFat = FP_OFF(_bp);
-
-    {
-      const UWORD cur = FP_OFF(_bp);
-      const UWORD next = fdos_buffer_next(_bp);
-      if (next == 0xffff || guard >= nbuffers)
-      {
-        printf("PANIC: bad buffer link blk=%lu dsk=%d seg=%04X first=%04X cur=%04X next=%04X prev=%04X flags=%02X unit=%u bblk=%lu nbuffers=%u\n",
-               (unsigned long)blkno, dsk, FP_SEG(first), firstbp, cur, next,
-               fdos_buffer_prev(_bp), (unsigned)b_flag, (unsigned)b_unit,
-               (unsigned long)b_blkno, (unsigned)nbuffers);
-        while(1);
-      }
-      _bp = MK_FP(FP_SEG(_bp), next);
-      guard++;
-    }
-  } while (FP_OFF(_bp) != firstbp);
-
-  if (uncacheBuf)
-  {
-    _bp = MK_FP(FP_SEG(_bp), uncacheBuf);
+    printf("PANIC: bad buffer link blk=%lu dsk=%d\n",
+           (unsigned long)blkno, dsk);
+    while (1);
   }
-  else if ((fdos_buffer_flag(_bp) & BFR_FAT) && fat_count < 3 && lastNonFat)
-  {
-    _bp = MK_FP(FP_SEG(_bp), lastNonFat);
-  }
-  else
-  {
-    _bp = MK_FP(FP_SEG(_bp), fdos_buffer_prev(first));
-  }
-
-  fdos_buffer_flag_set(_bp, fdos_buffer_flag(_bp) | BFR_UNCACHE);
-  if (FP_OFF(_bp) != firstbp)
-  {
-    const UWORD bp_off = FP_OFF(_bp);
-    move_buffer(_bp, firstbp);
-    fdos_buffer_first_set(MK_FP(FP_SEG(_bp), bp_off));
-  }
-  return _bp;
+  return bp;
 }
 
 /*      Write one disk buffer                                           */
 STATIC BOOL flush1(dos_far_ptr/*struct buffer*/ _bp)
 {
-  BOOL ok = TRUE;
-  BYTE flag = fdos_buffer_flag(_bp);
-  if ((flag & (BFR_VALID | BFR_DIRTY)) == (BFR_VALID | BFR_DIRTY))
-  {
-    ULONG b_offset = 0;
-    UBYTE b_copies = 1;
-    ULONG blkno = fdos_buffer_blkno(_bp);
-    const BYTE unit = fdos_buffer_unit(_bp);
-
-    if (flag & BFR_FAT)
-    {
-      b_copies = fdos_buffer_copies(_bp);
-      b_offset = fdos_buffer_offset(_bp);
-#ifdef WITHFAT32
-      if (b_offset == 0)
-      {
-        const dos_far_ptr dpbp = fdos_buffer_dpbp(_bp);
-        if (far_is_null(dpbp) || far_is_end(dpbp))
-          b_copies = 1;
-        else
-          b_offset = fdos_dpb_xfatsize(dpbp);
-      }
-#endif
-    }
-
-    while (b_copies--)
-    {
-      if (dskxfer(unit, blkno, b_buffer_fp(_bp), 1, DSKWRITE))
-        ok = FALSE;
-      blkno += b_offset;
-    }
-  }
-
-  flag = fdos_buffer_flag(_bp);
-  flag &= (BYTE)~BFR_DIRTY;
-  if (!ok)
-    flag &= (BYTE)~BFR_VALID;
-  fdos_buffer_flag_set(_bp, flag);
-  return ok;
+  return fdos_buffer_flush(_bp);
 }
 
 /*
@@ -368,39 +239,20 @@ STATIC BOOL flush1(dos_far_ptr/*struct buffer*/ _bp)
     holding the requested disk block, reading it first unless
     "overwrite" says the caller will fill the whole block itself.
 
-    Migrated from blockio.c.
+    Search, flush and cache metadata updates are one C++ wrapper operation;
+    resolve the legacy host pointer only after all page-remapping work ends.
 */
 struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 {
-  dos_far_ptr _bp = searchblock(blkno, dsk);
-  BYTE flag = fdos_buffer_flag(_bp);
-
-  if (!(flag & BFR_UNCACHE))
+  dos_far_ptr _bp = fdos_buffer_getblk(blkno, dsk, overwrite);
+  if (far_is_end(_bp))
   {
-#ifdef FDOS_BUFFER_NOCACHE
-    if (((flag & BFR_DIRTY) || overwrite)
-#ifdef FDOS_BUFFER_NOCACHE_UNIT
-        || dsk != (FDOS_BUFFER_NOCACHE_UNIT)
-#endif
-       )
-      return (struct buffer *)ARM_PTR(_bp);
-#else
-    return (struct buffer *)ARM_PTR(_bp);
-#endif
+    printf("PANIC: bad buffer link blk=%lu dsk=%d\n",
+           (unsigned long)blkno, dsk);
+    while (1);
   }
-
-  if (!flush1(_bp))
+  if (far_is_null(_bp))
     return NULL;
-
-  if (!overwrite && dskxfer(dsk, blkno, b_buffer_fp(_bp), 1, DSKREAD))
-    return NULL;
-
-  fdos_buffer_flag_set(_bp, BFR_VALID | BFR_DATA);
-  fdos_buffer_unit_set(_bp, (BYTE)dsk);
-  fdos_buffer_blkno_set(_bp, blkno);
-
-  /* Legacy callers still consume a struct buffer*.  Resolve it only after
-     every operation capable of remapping guest RAM has completed. */
   return (struct buffer *)ARM_PTR(_bp);
 }
 

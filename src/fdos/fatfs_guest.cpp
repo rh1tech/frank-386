@@ -107,6 +107,129 @@ extern "C" ULONG fdos_dpb_clus2phys(dos_far_ptr p, CLUSTER cluster) {
 extern "C" BYTE fdos_dpb_flags(dos_far_ptr p) { return fdos_guest::dpb_ref(p).flags(); }
 extern "C" dos_far_ptr fdos_dpb_device(dos_far_ptr p) { return fdos_guest::dpb_ref(p).device(); }
 
+extern "C" CLUSTER fdos_dpb_max_cluster(dos_far_ptr p)
+{
+    const fdos_guest::dpb_ref d(p);
+#ifdef WITHFAT32
+    if (d.dpb_fatsize() == 0)
+        return d.dpb_xsize();
+#endif
+    return d.dpb_size();
+}
+
+extern "C" CLUSTER fdos_read_fat_guest(dos_far_ptr x86_dpbp, CLUSTER cluster1)
+{
+    using namespace fdos_guest;
+    const dpb_ref d(x86_dpbp);
+#ifdef WITHFAT32
+    const bool fat32 = d.dpb_fatsize() == 0;
+#else
+    const bool fat32 = false;
+#endif
+    const UWORD dpb_size = d.dpb_size();
+    const bool fat12 = (dpb_size - 1u) < FAT_MAGIC;
+    const bool fat16 = !fat12 && dpb_size <= FAT_MAGIC16;
+    CLUSTER max_cluster = dpb_size;
+#ifdef WITHFAT32
+    if (fat32)
+        max_cluster = d.dpb_xsize();
+#endif
+    if (cluster1 <= 1 || cluster1 > max_cluster)
+        return 1;
+
+    unsigned secdiv = d.dpb_secsize();
+    CLUSTER clussec = cluster1;
+    if (fat12) {
+        clussec = static_cast<CLUSTER>(static_cast<unsigned>(clussec) * 3u);
+        secdiv *= 2u;
+    } else {
+        secdiv /= 2u;
+#ifdef WITHFAT32
+        if (fat32)
+            secdiv /= 2u;
+#endif
+    }
+
+    unsigned idx = static_cast<unsigned>(clussec % secdiv);
+    clussec /= secdiv;
+    clussec += d.dpb_fatstrt();
+#ifdef WITHFAT32
+    if (fat32) {
+        const UWORD xflags = d.dpb_xflags();
+        if (xflags & FAT_NO_MIRRORING)
+            clussec += static_cast<CLUSTER>(xflags & 0x0fu) * d.dpb_xfatsize();
+    }
+#endif
+
+    auto get_fat_block = [&](CLUSTER sector, dos_far_ptr &out) -> bool {
+        struct buffer *native_bp = getblock(sector, d.dpb_unit());
+        if (native_bp == nullptr)
+            return false;
+
+        /* Capture the guest address before any further guest access. */
+        out = linear_to_far(native_bp);
+        const buffer_ref b(out);
+        BYTE flag = b.flag();
+        flag = static_cast<BYTE>((flag & ~(BFR_DATA | BFR_DIR)) | BFR_FAT | BFR_VALID);
+        b.flag(flag);
+        b.dpbp(x86_dpbp);
+        b.copies(d.dpb_fats());
+        b.offset(d.dpb_fatsize());
+#ifdef WITHFAT32
+        if (fat32 && (d.dpb_xflags() & FAT_NO_MIRRORING))
+            b.copies(1);
+#endif
+        return true;
+    };
+
+    dos_far_ptr x86_bp{};
+    if (!get_fat_block(clussec, x86_bp))
+        return 1;
+    const buffer_ref b(x86_bp);
+
+    if (fat12) {
+        const unsigned byte_index = idx / 2u;
+        UBYTE lo = b.data8(byte_index);
+        UBYTE hi;
+        if (byte_index >= static_cast<unsigned>(d.dpb_secsize()) - 1u) {
+            dos_far_ptr x86_bp1{};
+            if (!get_fat_block(clussec + 1u, x86_bp1))
+                return 1;
+            hi = buffer_ref(x86_bp1).data8(0);
+        } else {
+            hi = b.data8(byte_index + 1u);
+        }
+        unsigned cluster = static_cast<unsigned>(lo) | (static_cast<unsigned>(hi) << 8);
+        if (cluster1 & 1u)
+            cluster >>= 4;
+        cluster &= 0x0fffu;
+        if (cluster >= MASK12)
+            return LONG_LAST_CLUSTER;
+        if (cluster == BAD12)
+            return LONG_BAD;
+        return cluster;
+    }
+
+    if (fat16) {
+        const UWORD res = b.data16(idx * 2u);
+        if (res >= MASK16)
+            return LONG_LAST_CLUSTER;
+        if (res == BAD16)
+            return LONG_BAD;
+        return res;
+    }
+
+#ifdef WITHFAT32
+    if (fat32) {
+        const ULONG res = b.data32(idx * 4u) & LONG_LAST_CLUSTER;
+        if (res > LONG_BAD)
+            return LONG_LAST_CLUSTER;
+        return res;
+    }
+#endif
+    return 1;
+}
+
 extern "C" void fdos_bpb_to_dpb_guest(dos_far_ptr bp, dos_far_ptr dp, BOOL extended)
 {
     using namespace fdos_guest;

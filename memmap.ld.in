@@ -229,8 +229,11 @@ SECTIONS
      * striped group (physical SRAM4..7). This must precede the generic
      * .bss wildcard below. */
     .gfx_buffer (NOLOAD) : {
+        __gfx_buffer_start__ = .;
         KEEP(*(.bss.gfx_buffer))
+        __gfx_video_end__ = .;
         KEEP(*(.bss.gfx_buffer.*))
+        __gfx_buffer_end__ = .;
     } > GFX_BUFFER
 
     .tbss (NOLOAD) : {

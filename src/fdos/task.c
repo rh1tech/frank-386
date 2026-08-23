@@ -23,6 +23,7 @@
 #include <ctype.h>
 #include "fcom/fcom.h"
 #include "../diag.h"
+#include "../core0_stack.h"
 #include "../../apps/api/ez.h"
 #include "../mem.h"
 
@@ -5572,14 +5573,12 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
 static uint32_t native_stack_free(void)
 {
 #if defined(__arm__) || defined(__thumb__)
-  /* Floor is the bottom of TEXT_BUFFER (= MSPLIM), the lowest the core0 stack
-     may reach. Below it lies main RAM / the heap. The stack legitimately
-     extends down through CORE0_STACK_EXT and TEXT_BUFFER, so measure the free
-     bytes to that floor, not to the old CORE0_STACK bottom. */
-  extern uint32_t __text_buffer_area__;
+  /* Runtime floor follows the selected core0 stack: normally TEXT_BUFFER,
+     or the unused tail of GFX_BUFFER when reduced VRAM uses direct QSPI RAM. */
   uint32_t sp;
   __asm volatile ("mov %0, sp" : "=r" (sp));
-  return sp - (uint32_t)(uintptr_t)&__text_buffer_area__;
+  uint32_t floor = (uint32_t)core0_stack_floor_runtime;
+  return sp > floor ? sp - floor : 0;
 #else
   return 0xffffffffu;   /* host-сборки для статического анализа */
 #endif

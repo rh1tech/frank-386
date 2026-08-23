@@ -30,6 +30,7 @@
 
 #include "board_config.h"
 #include "psram_init.h"
+#include "core0_stack.h"
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
 #include "ega128_paging.h"
 #endif
@@ -1591,7 +1592,33 @@ static void show_welcome_screen(void) {
 // Main Entry Point
 //=============================================================================
 
+uintptr_t core0_stack_floor_runtime;
+uintptr_t core0_stack_top_runtime;
+bool core0_stack_uses_gfx_buffer;
+
+static void __attribute__((noinline, noreturn)) main_after_hardware(void);
+
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+static void __attribute__((naked, noreturn)) core0_stack_switch_and_continue(uintptr_t new_sp)
+{
+    __asm volatile (
+        "mov sp, r0\n"
+        "ldr r1, =core0_stack_floor_runtime\n"
+        "ldr r1, [r1]\n"
+        "msr msplim, r1\n"
+        "ldr r0, =main_after_hardware\n"
+        "bx r0\n"
+    );
+}
+#endif
+
 int main(void) {
+    extern uint8_t __text_buffer_area__[];
+    extern uint8_t __StackTop;
+    core0_stack_floor_runtime = (uintptr_t)&__text_buffer_area__;
+    core0_stack_top_runtime = (uintptr_t)&__StackTop;
+    core0_stack_uses_gfx_buffer = false;
+
     /* Initialize .core0_stack_ext (CORE0_STACK_EXT) from its FLASH image before
        anything uses it. Nothing in the SDK crt0 copies this region (unlike
        .data / scratch), so without this any `= {0}` or initialized variable
@@ -1665,6 +1692,26 @@ int main(void) {
             sleep_ms(1000);
         }
     }
+
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    /* With direct QSPI guest RAM the ram_pages tail of GFX_BUFFER is unused.
+       Reuse that SRAM as a large core0 stack without adding any checks to the
+       guest-memory hot paths. Paging/fallback builds keep the original stack. */
+    if (guest_ram_base == (uint8_t *)PSRAM_BASE_ADDR && !ega128_paging_active()) {
+        extern uint8_t __gfx_video_end__;
+        extern uint8_t __gfx_buffer_end__;
+        core0_stack_floor_runtime = (uintptr_t)&__gfx_video_end__;
+        core0_stack_top_runtime = (uintptr_t)&__gfx_buffer_end__;
+        core0_stack_uses_gfx_buffer = true;
+        core0_stack_switch_and_continue(core0_stack_top_runtime);
+    }
+#endif
+
+    main_after_hardware();
+}
+
+static void __attribute__((noinline, noreturn)) main_after_hardware(void)
+{
 #ifdef DIAG_ENABLED
     /* Arm MSPLIM, fault handlers and the stall alarm on core0. Must be after
        init_hardware() (it needs the clocks/timer up) and before the pc_step
@@ -1861,5 +1908,4 @@ int main(void) {
     watchdog_reboot(0, 0, 0);
     while (true);
     __unreachable();
-    return 0;
 }
