@@ -30,7 +30,7 @@
 
 #include "board_config.h"
 #include "psram_init.h"
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 #include "ega128_paging.h"
 #endif
 #include "ems.h"
@@ -54,7 +54,7 @@
 #include "pc.h"
 #include "mem.h"
 #include "bulk_bounce.h"
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 bool ega128_paging_flush(void);
 #endif
 #include "i8259.h"
@@ -435,7 +435,7 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
                file, (unsigned long)size, (unsigned long)addr, dest);
     }
 
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
         uint32_t guest_addr = backward ? (uint32_t)(addr - size) : (uint32_t)addr;
         FSIZE_t left = size;
@@ -469,7 +469,7 @@ int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
     f_close(&fp);
 
     // Debug: verify data was written to memory
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
         uint32_t first = backward ? (uint32_t)(addr - size) : (uint32_t)addr;
         uint32_t last = first + (uint32_t)size - 8u;
@@ -834,7 +834,7 @@ static void load_default_config(void) {
     // Guest RAM follows the physically detected PSRAM.  The optional
     // Lo-tech EMS board reserves its fixed 2 MiB backing store at the top.
     size_t detected_psram = psram_detected_size();
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (guest_ram_base == ram_pages)
         detected_psram = ega128_paging_active() ? EGA128_VIRTUAL_RAM_SIZE : RAM_PAGES_SIZE;
 #endif
@@ -1109,7 +1109,7 @@ static bool init_hardware(void) {
 #ifdef EGA128
     if (psram_missing) {
         guest_ram_base = ram_pages;
-        printf("PSRAM not detected; using 128 KiB SRAM guest-RAM fallback\n");
+        printf("PSRAM not detected; using %u KiB SRAM guest-RAM fallback\n", (unsigned)(RAM_PAGES_SIZE >> 10));
     } else {
         guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
         ega128_select_direct_backend();
@@ -1127,11 +1127,11 @@ static bool init_hardware(void) {
     }
     __dmb();
 
-#ifndef EGA128
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
     if (psram_missing) {
         show_error_screen(" PSRAM Error ",
                           "QSPI PSRAM not detected (>= 4 MB is required).",
-                          "Try *-EGA128.uf2 version (for a case)...");
+                          "Try a reduced-VRAM (EGA128/VGA128/MCGA) build.");
         __unreachable();
     }
 #endif
@@ -1246,9 +1246,9 @@ static bool init_hardware(void) {
         } else {
             detected_psram = psram_missing ? 0 : psram_detect_size();
             if (detected_psram < (1u << 20)) {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
                 if (!ega128_paging_init()) {
-                    printf("ERROR: EGA128 paging backing store initialization failed!\n");
+                    printf("ERROR: guest-RAM paging backing store initialization failed!\n");
                     return false;
                 }
                 guest_ram_base = ram_pages;
@@ -1482,7 +1482,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     config_clear_changes();
 
     __dmb();
-#ifndef EGA128
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
     if (early_psram_missing)
         audio_play_tone(300u, 500u);
 #endif

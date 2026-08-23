@@ -1,6 +1,6 @@
 #include "ega128_paging.h"
 
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 #include <string.h>
 #include <stdio.h>
 #include "ff.h"
@@ -115,12 +115,12 @@ static uint32_t __not_in_flash_func(map_page)(uint32_t page, bool write_access)
 
     if (cache_page[slot] != INVALID_PAGE && cache_dirty[slot]) {
         if (!backing_write(cache_page[slot], ram_pages + slot * EGA128_PAGE_SIZE)) {
-            printf("EGA128 paging: backing write failed for page %u\n", cache_page[slot]);
+            printf("guest-RAM paging: backing write failed for page %u\n", cache_page[slot]);
         }
     }
     if (!backing_read(page, ram_pages + slot * EGA128_PAGE_SIZE)) {
         memset(ram_pages + slot * EGA128_PAGE_SIZE, 0, EGA128_PAGE_SIZE);
-        printf("EGA128 paging: backing read failed for page %u\n", (unsigned)page);
+        printf("guest-RAM paging: backing read failed for page %u\n", (unsigned)page);
     }
     cache_page[slot] = (uint16_t)page;
     cache_dirty[slot] = write_access ? 1 : 0;
@@ -309,10 +309,19 @@ bool ega128_paging_active(void)
 const char *ega128_paging_post_label(void)
 {
 #ifdef BOARD_M1
-    if (active && use_spi_psram)
+    if (active && use_spi_psram) {
+#ifdef MCGA
+        return "SPI PSRAM: 8 MB [192 KB / 96 pages]";
+#else
         return "SPI PSRAM: 8 MB [128 KB / 64 pages]";
 #endif
+    }
+#endif
+#ifdef MCGA
+    return "SWAP     : 8 MB [192 KB / 96 pages]";
+#else
     return "SWAP     : 8 MB [128 KB / 64 pages]";
+#endif
 }
 
 bool ega128_paging_init(void)
@@ -331,7 +340,7 @@ bool ega128_paging_init(void)
     if (use_spi_psram) {
         ega128_select_paged_backend();
         active = true;
-        printf("EGA128 paging: 128 KiB cache -> SPI PSRAM\n");
+        printf("guest-RAM paging: %u KiB cache -> SPI PSRAM\n", (unsigned)(RAM_PAGES_SIZE >> 10));
         return true;
     }
 #endif
@@ -348,7 +357,7 @@ bool ega128_paging_init(void)
     pagefile_open = true;
     ega128_select_paged_backend();
     active = true;
-    printf("EGA128 paging: 128 KiB cache -> " SD_DATA_DIR_SLASH "pagefile.sys\n");
+    printf("guest-RAM paging: %u KiB cache -> " SD_DATA_DIR_SLASH "pagefile.sys\n", (unsigned)(RAM_PAGES_SIZE >> 10));
     return true;
 }
 #endif

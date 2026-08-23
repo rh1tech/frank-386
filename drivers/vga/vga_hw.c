@@ -159,10 +159,12 @@ static uint vga_sm = 0;
 uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4))) __attribute__((section(".text_buffer")));
 static volatile int update_requested = 0;  // Set by update call
 
-#ifdef EGA128
-#define GFX_BUFFER_SIZE (128 * 1024)
+#ifdef MCGA
+#define GFX_BUFFER_SIZE (64u * 1024u)
+#elif defined(EGA128) || defined(VGA128)
+#define GFX_BUFFER_SIZE (128u * 1024u)
 #else
-#define GFX_BUFFER_SIZE (256 * 1024)
+#define GFX_BUFFER_SIZE (256u * 1024u)
 #endif
 uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((section(".bss.gfx_buffer"), aligned(4)));
 
@@ -186,7 +188,7 @@ static uint8_t cga_palette[4];
 // Current video mode (0=blank, 1=text, 2=graphics)
 int current_mode = 1;  // Default text mode
 
-// Graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8
+// Graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640
 int gfx_submode = 3;
 int gfx_width = 320;
 int gfx_height = 200;
@@ -338,7 +340,7 @@ static void init_palettes(void) {
 // DMA Interrupt Handler - Renders each scanline
 // ============================================================================
 
-#ifndef EGA128
+#if !defined(EGA128) && !defined(MCGA)
 // Render VGA 256-color planar (Mode X: 320x200x256, unchained)
 // VRAM layout in our emulator: packed planes in dwords.
 // Each dword holds 4 bytes: plane0..plane3, and those bytes are pixels x%4.
@@ -385,7 +387,7 @@ static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, u
     }
 }
 
-#endif /* !EGA128 */
+#endif /* !EGA128 && !MCGA */
 
 // Render graphics line directly from SRAM framebuffer (for IRQ use)
 // Uses dithered 16-bit palette for ~2197 perceived colors
@@ -443,7 +445,7 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
     }
 }
 
-#ifndef EGA128
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
 // Render VBE 100h: 640x400x8 packed pixels, one VRAM byte per pixel.
 static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
                                                         uint32_t *output_buffer) {
@@ -476,7 +478,7 @@ static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
     }
 }
 
-#endif /* !EGA128 */
+#endif /* !EGA128 && !VGA128 && !MCGA */
 
 // Render CGA 4-color graphics line (320x200, 2 bits per pixel, interleaved)
 // VGA stores CGA data in odd/even mode with interleaved planes
@@ -588,6 +590,51 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *
             *out32++ = (p0) | (p1 << 8) | (p2 << 16) | (p3 << 24);
             *out32++ = (p4) | (p5 << 8) | (p6 << 16) | (p7 << 24);
         }
+    }
+}
+
+// Render VGA/MCGA mode 11h: 640x480x2, one packed bit per pixel.
+// VGA128/MCGA store this mode linearly (80 bytes/scanline); full VGA
+// keeps plane 0 in the normal four-plane representation.
+static void __time_critical_func(render_gfx_line_mono640)(uint32_t line, uint32_t *output_buffer) {
+    uint32_t *out32 = (uint32_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
+
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        uint32_t blank = TMPL_LINE | (TMPL_LINE << 8) |
+                         (TMPL_LINE << 16) | (TMPL_LINE << 24);
+        for (int i = 0; i < 160; ++i)
+            out32[i] = blank;
+        return;
+    }
+
+    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 80u;
+    uint32_t offset;
+    if (frame_line_compare >= 0 && line >= (uint32_t)frame_line_compare)
+        offset = (line - (uint32_t)frame_line_compare) * stride;
+    else
+        offset = frame_vram_offset + line * stride;
+    offset &= 0xFFFFu;
+
+    uint8_t bg = cga_palette[0];
+    uint8_t fg = cga_palette[3];
+    for (int i = 0; i < 80; ++i) {
+#if defined(VGA128) || defined(MCGA)
+        uint8_t byte = gfx_buffer[offset + (uint32_t)i];
+#else
+        uint8_t byte = gfx_buffer[(offset + (uint32_t)i) * 4u];
+#endif
+        uint8_t p0 = (byte & 0x80) ? fg : bg;
+        uint8_t p1 = (byte & 0x40) ? fg : bg;
+        uint8_t p2 = (byte & 0x20) ? fg : bg;
+        uint8_t p3 = (byte & 0x10) ? fg : bg;
+        uint8_t p4 = (byte & 0x08) ? fg : bg;
+        uint8_t p5 = (byte & 0x04) ? fg : bg;
+        uint8_t p6 = (byte & 0x02) ? fg : bg;
+        uint8_t p7 = (byte & 0x01) ? fg : bg;
+        *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 8) |
+                   ((uint32_t)p2 << 16) | ((uint32_t)p3 << 24);
+        *out32++ = (uint32_t)p4 | ((uint32_t)p5 << 8) |
+                   ((uint32_t)p6 << 16) | ((uint32_t)p7 << 24);
     }
 }
 
@@ -869,19 +916,26 @@ static void __not_in_flash_func(render_line)(uint32_t line, uint32_t *output_buf
         } else if (gfx_submode == 4) {
             // CGA 2-color (640x200 monochrome)
             render_gfx_line_cga2(line, output_buffer);
-#ifndef EGA128
+        } else if (gfx_submode == 8) {
+            // VGA/MCGA mode 11h: 640x480x2
+            render_gfx_line_mono640(line, output_buffer);
+#if !defined(EGA128) && !defined(MCGA)
         } else if (gfx_submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
+#endif
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
         } else if (gfx_submode == 7) {
             // VBE 100h: 640x400x256 packed pixels
             render_gfx_line_vbe8(line, output_buffer);
+#endif
+#ifndef EGA128
         } else {
-            // VGA 256-color (mode 13h) - default
+            // VGA/MCGA 256-color mode 13h
             render_gfx_line_from_sram(line, output_buffer);
 #else
         } else {
-            // EGA128 has no 256-color/Mode X/VBE renderer.
+            // Keep the existing EGA128-only renderer restriction.
             render_gfx_line_ega(line, output_buffer);
 #endif
         }
@@ -1441,7 +1495,7 @@ void vga_hw_set_palette16(const uint8_t *palette16_data) {
     }
 }
 
-// Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8
+// Set graphics sub-mode: 1=CGA4, 2=EGA, 3=VGA256, 4=CGA2, 5=ModeX, 7=VBE packed8, 8=mono640
 void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
     gfx_submode = submode;
     gfx_width = width;

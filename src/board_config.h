@@ -491,13 +491,9 @@ static inline char get_rp2350_package_letter(void) {
 // HDMI Configuration
 //=============================================================================
 
-// HDMI differential pair encoding options
-#define HDMI_PIN_RGB_notBGR       1
-#define HDMI_PIN_invert_diffpairs 1
-
-// HDMI clock pins (relative to base)
-#define beginHDMI_PIN_clk   HDMI_BASE_PIN
-#define beginHDMI_PIN_data  (HDMI_BASE_PIN + 2)
+/* HDMI electrical lane order is board-specific and is defined in
+ * drivers/hdmi/hdmi.h.  In particular, Z0/Z2 route TMDS data on the first
+ * three pairs and TMDS clock on the last pair, unlike M1/M2. */
 
 //=============================================================================
 // VGA Display Configuration

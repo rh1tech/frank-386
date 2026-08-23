@@ -7164,7 +7164,7 @@ static void lh_mcb_load(UWORD mseg, mcb *out)
   /* MCBs are paragraph-aligned and 16 bytes long, so they never cross the
      2-KiB EGA128 paging boundary.  Copy immediately: keeping ARM_PTR()'s
      cache-slot pointer across another DOS memory operation is not safe. */
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
   if (guest_ram_base == ram_pages) {
     mcb_guest_load(mseg, out);    
     return;

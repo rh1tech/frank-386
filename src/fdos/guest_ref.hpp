@@ -16,7 +16,7 @@ protected:
 
     template <typename V>
     __attribute__((always_inline)) V scalar_load(std::size_t off) const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         const uint32_t a = addr_ + static_cast<uint32_t>(off);
         if constexpr (sizeof(V) == 1)
             return static_cast<V>(pload8(a));
@@ -37,7 +37,7 @@ protected:
 
     template <typename V>
     __attribute__((always_inline)) void scalar_store(std::size_t off, V value) const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         const uint32_t a = addr_ + static_cast<uint32_t>(off);
         if constexpr (sizeof(V) == 1)
             pstore8(a, static_cast<uint8_t>(value));
@@ -86,7 +86,7 @@ public:
         store_byte(offsetof(mcb, m_name) + i, static_cast<uint8_t>(v));
     }
     __attribute__((always_inline)) void clear_name() const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         pstore32(addr_ + offsetof(mcb, m_name), 0);
         pstore32(addr_ + offsetof(mcb, m_name) + 4, 0);
 #else
@@ -119,7 +119,7 @@ class scalar_proxy {
 public:
     constexpr scalar_proxy(linear_t addr) : addr_(addr) {}
     __attribute__((always_inline)) operator V() const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         if constexpr (sizeof(V) == 1) {
             return static_cast<V>(pload8(addr_));
         } else if constexpr (sizeof(V) == 2) {
@@ -133,7 +133,7 @@ public:
 #endif
     }
     __attribute__((always_inline)) scalar_proxy &operator=(V v) {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         if constexpr (sizeof(V) == 1) pstore8(addr_, static_cast<uint8_t>(v));
         else if constexpr (sizeof(V) == 2) pstore16(addr_, static_cast<uint16_t>(v));
         else { static_assert(sizeof(V) == 4, "guest scalar must be 1, 2 or 4 bytes"); pstore32(addr_, static_cast<uint32_t>(v)); }
@@ -182,14 +182,14 @@ public:
     __attribute__((always_inline)) flag_proxy carry() const { return {addr_ + offsetof(CPU_regs, flags), 0x0001u}; }
     __attribute__((always_inline)) flag_proxy zero() const { return {addr_ + offsetof(CPU_regs, flags), 0x0040u}; }
     void read_into(CPU_regs &out) const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         auto *d = reinterpret_cast<uint8_t *>(&out); for (size_t i=0;i<sizeof(out);++i) d[i]=pload8(addr_+(uint32_t)i);
 #else
         __builtin_memcpy(&out, reinterpret_cast<const void *>(X86_RAM_BASE + addr_), sizeof(out));
 #endif
     }
     void write_from(const CPU_regs &in) const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         const auto *d = reinterpret_cast<const uint8_t *>(&in); for (size_t i=0;i<sizeof(in);++i) pstore8(addr_+(uint32_t)i,d[i]);
 #else
         __builtin_memcpy(reinterpret_cast<void *>(X86_RAM_BASE + addr_), &in, sizeof(in));
@@ -233,7 +233,7 @@ public:
 
     dos_far_ptr far_value(std::size_t off) const {
         dos_far_ptr v{};
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         auto *d = reinterpret_cast<uint8_t *>(&v);
         for (std::size_t i = 0; i < sizeof(v); ++i)
             d[i] = pload8(addr_ + static_cast<uint32_t>(off + i));
@@ -243,7 +243,7 @@ public:
         return v;
     }
     void far_value(std::size_t off, dos_far_ptr v) const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         const auto *d = reinterpret_cast<const uint8_t *>(&v);
         for (std::size_t i = 0; i < sizeof(v); ++i)
             pstore8(addr_ + static_cast<uint32_t>(off + i), d[i]);
@@ -285,7 +285,7 @@ public:
     }
 
     void load(cds &out) const {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
         auto *d = reinterpret_cast<uint8_t *>(&out);
         for (std::size_t i = 0; i < sizeof(out); ++i)
             d[i] = pload8(addr_ + static_cast<uint32_t>(i));

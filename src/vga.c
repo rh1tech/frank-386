@@ -432,7 +432,12 @@ static int update_palette16(VGAState *s, uint32_t *palette)
 
 static bool vbe_enabled(VGAState *s)
 {
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    (void)s;
+    return false;
+#else
     return s->vbe_regs[VBE_DISPI_INDEX_ENABLE] & VBE_DISPI_ENABLED;
+#endif
 }
 
 /*
@@ -1462,6 +1467,10 @@ static void vga_write_ ## base(void *opaque, uint32_t addr, uint32_t val, int si
 
 void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
 {
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    if (offset != 0)
+        return;
+#endif
     if (offset == 0) {
         s->vbe_index = val;
     } else {
@@ -1761,6 +1770,23 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
     return false;
 }
 
+#if defined(VGA128) || defined(MCGA)
+static inline bool reduced_linear_mono_access(const VGAState *s)
+{
+    int w = (s->cr[0x01] + 1) * 8;
+    int h = s->cr[0x12] |
+            ((s->cr[0x07] & 0x02) << 7) |
+            ((s->cr[0x07] & 0x40) << 3);
+    h++;
+
+    return w >= 640 && h >= 480 &&
+           !(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&
+           !(s->gr[VGA_GFX_MODE] & 0x10) &&
+           s->sr[VGA_SEQ_PLANE_WRITE] == 0x01 &&
+           ((s->gr[VGA_GFX_MISC] >> 2) & 3) == 1;
+}
+#endif
+
 void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, uint8_t val8)
 {
 	cp_vga_write();
@@ -1795,6 +1821,14 @@ void __not_in_flash("vga_mem_write") vga_mem_write(VGAState *s, uint32_t addr, u
             return;
         break;
     }
+
+#if defined(VGA128) || defined(MCGA)
+    if (reduced_linear_mono_access(s)) {
+        if (addr < (uint32_t)s->vga_ram_size)
+            s->vga_ram[addr] = (uint8_t)val;
+        return;
+    }
+#endif
 
     if (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         /* chain 4 mode : simplest access */
@@ -1933,6 +1967,14 @@ uint8_t __not_in_flash_func(vga_mem_read)(VGAState *s, uint32_t addr)
             return 0xff;
         break;
     }
+
+#if defined(VGA128) || defined(MCGA)
+    if (reduced_linear_mono_access(s)) {
+        if (addr >= (uint32_t)s->vga_ram_size)
+            return 0xff;
+        return s->vga_ram[addr];
+    }
+#endif
 
     if (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) {
         /* chain 4 mode : simplest access */
@@ -2467,7 +2509,8 @@ void __time_critical_func(vga_get_palette16)(VGAState *s, uint8_t *palette16)
 
 /* Get detailed graphics mode information for hardware rendering
  * Returns: 0=text, 1=CGA 4-color, 2=EGA 16-color, 3=VGA 256-color (mode 13h),
- *          4=CGA 2-color, 5=Mode X (VGA 256-color planar unchained)
+ *          4=CGA 2-color, 5=Mode X (VGA 256-color planar unchained),
+ *          7=VBE packed 8bpp, 8=VGA/MCGA 640x480x2
  * Also fills in width, height if pointers are non-NULL
  */
 int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *height)
@@ -2482,7 +2525,7 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
         return 0;  // text mode
     }
 
-#ifndef EGA128
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
     // Minimal hardware-renderer fast path for banked VBE packed 8bpp.
     if (vbe_enabled(s) && s->vbe_regs[VBE_DISPI_INDEX_BPP] == 8) {
         if (width)  *width  = s->vbe_regs[VBE_DISPI_INDEX_XRES];
@@ -2527,7 +2570,7 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     //   VL_DePlaneVGA: SR[4] = (old & ~8) | 4  →  chain4=0 (bit3), seq=1 (bit2)
     // -----------------------------------------------------------------------
     int rv;
-#ifndef EGA128
+#if !defined(EGA128) && !defined(MCGA)
     if (!(s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_CHN_4M) &&   /* chain4 OFF */
          (s->sr[VGA_SEQ_MEMORY_MODE] & VGA_SR04_SEQ_MODE) &&  /* sequential ON */
          (s->ar[0x10] & 0x40) &&                               /* 8-bit DAC color */
@@ -2536,7 +2579,9 @@ int __time_critical_func(vga_get_graphics_mode)(VGAState *s, int *width, int *he
     } else
 #endif
     if (shift_control == 0) {
-        if ((s->gr[0x06] & 0x0C) == 0x0C && w >= 640)
+        if (s->sr[VGA_SEQ_PLANE_WRITE] == 0x01 && w >= 640 && h >= 480)
+            rv = 8;  // VGA/MCGA mode 11h: packed one-plane monochrome
+        else if ((s->gr[0x06] & 0x0C) == 0x0C && w >= 640)
             rv = 4;  // CGA 2-color
         else if (!(s->cr[0x17] & 0x01) && w >= 640)
             rv = 4;  // CGA 2-color

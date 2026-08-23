@@ -678,7 +678,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	uword pde = pload32(base_addr + i * 4);
 	if (!(pde & 1))
 		return false;
-	#ifdef EGA128
+	#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 	pstore8(base_addr + i * 4, pload8(base_addr + i * 4) | (1 << 5));
 #else
 	PC_RAM[base_addr + i * 4] |= 1 << 5; // accessed
@@ -689,7 +689,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	if (!(pte & 1))
 		return false;
 
-	#ifdef EGA128
+	#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 	pstore8(base_addr2 + j * 4, pload8(base_addr2 + j * 4) | (1 << 5));
 #else
 	PC_RAM[base_addr2 + j * 4] |= 1 << 5; // accessed
@@ -700,7 +700,7 @@ static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgn
 	ent->xaddr = (pte & ~0xfff) ^ (lpgno << 12);
 	pte = pte & ((pde & 7) | 0xfffffff8);
 	ent->pte_lookup = pte_lookup[!!(cpu->cr0 & CR0_WP)][(pte >> 1) & 3];
-	#ifdef EGA128
+	#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 	ent->ppte = (u8 *)(uintptr_t)(base_addr2 + j * 4);
 #else
 	ent->ppte = &(PC_RAM[base_addr2 + j * 4]);
@@ -736,7 +736,7 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 	}
 	*paddr = ent->xaddr ^ laddr;
 	if (rwm & 2) {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 		uword ppte_addr = (uword)(uintptr_t)ent->ppte;
 		pstore8(ppte_addr, pload8(ppte_addr) | (1 << 6)); // dirty
 #else
@@ -979,7 +979,7 @@ prefetch_fill(CPUI386 *cpu, uword paddr)
 	cp_note(base);
 	cpu->prefetch_base = base;
 	register u32* prefetch = (u32*)cpu->prefetch;
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 	*prefetch++ = pload32(base);
 	*prefetch++ = pload32(base + 4);
 	*prefetch++ = pload32(base + 8);

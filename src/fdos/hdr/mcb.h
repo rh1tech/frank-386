@@ -87,7 +87,7 @@ _Static_assert(offsetof(mcb, m_name) == 8, "mcb owner name must stay at +8 (docu
  */
 static inline void mcb_guest_load(seg s, mcb *out)
 {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
   const BYTE *src = (const BYTE *)ega128_guest_ptr((ULONG)s << 4, false);
   BYTE *dst = (BYTE *)out;
   unsigned i;
@@ -100,7 +100,7 @@ static inline void mcb_guest_load(seg s, mcb *out)
 
 static inline void mcb_guest_store(seg s, const mcb *in)
 {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
   BYTE *dst = (BYTE *)ega128_guest_ptr((ULONG)s << 4, true);
   const BYTE *src = (const BYTE *)in;
   unsigned i;

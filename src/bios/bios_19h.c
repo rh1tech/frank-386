@@ -14,7 +14,7 @@ static int read_boot_sector(FIL *f)
         return 0;
     if (f_lseek(f, 0) != FR_OK)
         return 0;
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
         if (f_read(f, guest_bulk_buf, 512, &br) != FR_OK || br != 512) return 0;
         for (uint32_t i = 0; i < 512; ++i) pstore8(BOOT_ADDR + i, guest_bulk_buf[i]);
@@ -27,7 +27,7 @@ static int read_boot_sector(FIL *f)
 
 static int read_bios_hdd_boot_sector(uint8_t bios_index)
 {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
         if (!bios_hdd_read(bios_index, 0, guest_bulk_buf, 1)) return 0;
         for (uint32_t i = 0; i < 512; ++i) pstore8(BOOT_ADDR + i, guest_bulk_buf[i]);
@@ -138,7 +138,7 @@ static int read_iso_boot_sector(FIL *f)
     UINT br = 0;
     if (f_lseek(f, (FSIZE_t)image_lba * 2048u) != FR_OK)
         return 0;
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
         if (f_read(f, guest_bulk_buf, bytes, &br) != FR_OK || br < 512) return 0;
         for (uint32_t i = 0; i < br; ++i) pstore8(BOOT_ADDR + i, guest_bulk_buf[i]);

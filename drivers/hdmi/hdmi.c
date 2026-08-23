@@ -35,7 +35,13 @@ extern uint32_t palette_a[256];
 #define SCREEN_WIDTH (320)
 #define SCREEN_HEIGHT (240)
 
-#define GFX_BUFFER_SIZE (256 * 1024)
+#ifdef MCGA
+#define GFX_BUFFER_SIZE (64u * 1024u)
+#elif defined(EGA128) || defined(VGA128)
+#define GFX_BUFFER_SIZE (128u * 1024u)
+#else
+#define GFX_BUFFER_SIZE (256u * 1024u)
+#endif
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
 extern uint8_t text_buffer_sram[80 * 25 * 2];
 extern int text_cols;
@@ -499,6 +505,35 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint8_t *o
     }
 }
 
+// VGA/MCGA mode 11h: 640x480x2. HDMI line storage packs two
+// monochrome pixels into each byte, so 80 source bytes become 320 bytes.
+static void __time_critical_func(render_gfx_line_mono640)(uint32_t line, uint8_t *output_buffer) {
+    if (line >= (uint32_t)gfx_height || gfx_width != 640) {
+        nf_memset(output_buffer, 0, SCREEN_WIDTH);
+        return;
+    }
+
+    uint32_t stride = gfx_line_offset > 0 ? (uint32_t)gfx_line_offset * 2u : 80u;
+    uint32_t offset;
+    if (frame_line_compare >= 0 && line >= (uint32_t)frame_line_compare)
+        offset = (line - (uint32_t)frame_line_compare) * stride;
+    else
+        offset = frame_vram_offset + line * stride;
+    offset &= 0xFFFFu;
+
+    for (int i = 0; i < 80; ++i) {
+#if defined(VGA128) || defined(MCGA)
+        uint8_t byte = gfx_buffer[offset + (uint32_t)i];
+#else
+        uint8_t byte = gfx_buffer[(offset + (uint32_t)i) * 4u];
+#endif
+        *output_buffer++ = ((byte >> 7) << 1) | ((byte >> 6) & 1);
+        *output_buffer++ = (((byte >> 5) & 1) << 1) | ((byte >> 4) & 1);
+        *output_buffer++ = (((byte >> 3) & 1) << 1) | ((byte >> 2) & 1);
+        *output_buffer++ = (((byte >> 1) & 1) << 1) | (byte & 1);
+    }
+}
+
 // Spread 8 bits of a byte into positions 0,4,8,...28
 extern uint32_t spread8_lut[256];
 
@@ -711,17 +746,26 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
             render_gfx_line_cga2(line, output_buffer);
             return;
         }
+        if (submode == 8) {
+            // VGA/MCGA mode 11h: 640x480x2
+            render_gfx_line_mono640(line, output_buffer);
+            return;
+        }
+#if !defined(EGA128) && !defined(MCGA)
         if (submode == 5) {
             // VGA 256-color planar (Mode X)
             render_gfx_line_vga_planar256(line, output_buffer);
             return;
         }
+#endif
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
         if (submode == 7) {
             // VBE 100h: 640x400x256 packed pixels
             render_gfx_line_vbe8(line, output_buffer);
             return;
         }
-        // VGA 256-color (mode 13h) - default
+#endif
+        // VGA/MCGA 256-color (mode 13h) - default
         render_gfx_line_from_sram(line, output_buffer);
         return;
     }

@@ -29,7 +29,7 @@ uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
 void netredirect_init(CPU *cpu, int enable);
 
 unsigned long phys_mem_size = 8l << 20;
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 uint8_t* __scratch_y("guest_ram_base") guest_ram_base = (uint8_t *)PSRAM_BASE_ADDR;
 uint8_t ram_pages[RAM_PAGES_SIZE]
     __attribute__((section(".bss.gfx_buffer.ram_pages"), aligned(4)));
@@ -1038,7 +1038,7 @@ bool __not_in_flash_func(iomem_write_string_ptr)(void *iomem, uint32_t addr, con
 // Старая версия теперь через новую
 bool __not_in_flash_func(iomem_write_string)(void *iomem, uint32_t addr, uint32_t buf, int len)
 {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (unlikely(ega128_paging_active())) {
         while (len > 0) {
             uint32_t span;
@@ -1059,7 +1059,7 @@ static void pc_reset_request(void *p)
 	pc->reset_request = 1;
 }
 
-extern uint8_t gfx_buffer[256ul << 10];
+extern uint8_t gfx_buffer[];
 
 static CMOS *_pc_cmos_for_floppy = NULL;
 static void cmos_floppy_update(uint8_t ta, uint8_t tb) {
@@ -1126,7 +1126,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 	PC *pc = malloc(sizeof(PC));
 	g_pc = pc;
 	CPU_CB *cb = NULL;
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 	if (!ega128_paging_active())
 #endif
 	for(int i = 0; i < (conf->mem_size >> 2); ++i)
@@ -1255,16 +1255,14 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	pc->boot_start_time = 0;
 
-#ifdef EGA128
-	/* Standard 128 KiB EGA configuration. */
+	/* The build profile owns the physical video-memory size.  Normal VGA is
+	 * 256 KiB; EGA128/VGA128 use 128 KiB and MCGA uses 64 KiB. */
+#ifdef MCGA
+	pc->vga_mem_size = 64u << 10;
+#elif defined(EGA128) || defined(VGA128)
 	pc->vga_mem_size = 128u << 10;
 #else
-	/* gfx_buffer is always 256 KB — always use exactly that, ignoring
-	 * whatever vga_mem the config says.  This ensures Wolf3D's three video
-	 * pages (dword offsets 0 / 16640 / 33280, up to byte 133120) are never
-	 * dropped.  Old SD-card configs with vga_mem=128K would otherwise leave
-	 * the third page zeroed (black) due to the size check in vga_mem_write. */
-	pc->vga_mem_size = 256u << 10;   /* fixed: gfx_buffer is always 256 KB */
+	pc->vga_mem_size = 256u << 10;
 #endif
 	pc->vga_mem = gfx_buffer;
 	memset(pc->vga_mem, 0, pc->vga_mem_size);
@@ -1544,16 +1542,25 @@ static void bios_post_components(PC *pc, size_t psram_size)
     bios_post_table_rule(pc, 0xDA, 0xC2, 0xBF);
     bios_post_table_row(pc, left, right);
 
-#ifdef EGA128
+#if defined(EGA128)
     snprintf(left, sizeof(left), "Video    : EGA 128 KB [%s]",
              SELECT_VGA ? "VGA" : "HDMI");
+#elif defined(VGA128)
+    snprintf(left, sizeof(left), "Video    : VGA 128 KB [%s]",
+             SELECT_VGA ? "VGA" : "HDMI");
+#elif defined(MCGA)
+    snprintf(left, sizeof(left), "Video    : MCGA 64 KB [%s]",
+             SELECT_VGA ? "VGA" : "HDMI");
+#else
+    snprintf(left, sizeof(left), "Video    : VGA VBE 1.2 256 KB [%s]",
+             SELECT_VGA ? "VGA" : "HDMI");
+#endif
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active())
         snprintf(right, sizeof(right), "%s", ega128_paging_post_label());
     else
         snprintf(right, sizeof(right), "QSPI PSRAM Up to 16 MB");
 #else
-    snprintf(left, sizeof(left), "Video    : VGA VBE 1.2 256 KB [%s]",
-             SELECT_VGA ? "VGA" : "HDMI");
     snprintf(right, sizeof(right), "QSPI PSRAM Up to 16 MB");
 #endif
     bios_post_table_row(pc, left, right);
@@ -1625,7 +1632,7 @@ void pc_play_pending_post_beep(PC *pc)
     pcspk_ioport_write(pc->pcspk, old61);
 }
 
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 static bool bios_post_paged_memory_test(PC *pc)
 {
     const uint32_t total = EGA128_VIRTUAL_RAM_SIZE;
@@ -1863,7 +1870,9 @@ void bios_post(PC *pc) {
 	pstore16(0x482, 0x003E);                             /* keyboard buffer end */
 	pstore8 (0x484, 24);                                 /* rows minus one */
 	pstore16(0x485, 16);                                 /* char height */
-#ifdef EGA128
+#ifdef MCGA
+	pstore8 (0x487, 0x00);                               /* video_ctl: 64K */
+#elif defined(EGA128) || defined(VGA128)
 	pstore8 (0x487, 0x20);                               /* video_ctl: 128K */
 #else
 	pstore8 (0x487, 0x60);                               /* video_ctl: 256K */
@@ -2007,7 +2016,7 @@ void bios_post(PC *pc) {
 
         /* Memory test and its result tone are cold-POST features only. */
         if (cold_post) {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
             bool memory_ok = ega128_paging_active()
                        ? bios_post_paged_memory_test(pc)
                        : bios_post_psram_test(pc, psram_size);
@@ -2179,13 +2188,13 @@ void load_bios_and_reset(PC *pc)
 		umb_select_map(1, 0x100000u, 0);
 		bios_post(pc);
 	}
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 	/* Fake/native BIOS (F9000-FFFFF) and external ROM images share the
 	 * pageable physical backing with UMB RAM.  There is deliberately no
 	 * ROM overlay over F0000-F8FFF: that range is native-BIOS UMB. */
 	extern bool ega128_paging_flush(void);
 	if (ega128_paging_active() && !ega128_paging_flush())
-		printf("ERROR: EGA128 paging flush failed before reset\n");
+		printf("ERROR: guest-RAM paging flush failed before reset\n");
 #endif
 	sn76489_reset();
 	cpu_reset(pc->cpu);

@@ -188,7 +188,7 @@ extern char DosDataSeg[];
 #ifndef PSRAM_BASE_ADDR
 #define PSRAM_BASE_ADDR   0x11000000
 #endif
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 extern uint8_t *guest_ram_base;
 #define X86_RAM_BASE (guest_ram_base)
 #include "ega128_paging.h"
@@ -218,7 +218,7 @@ extern uint8_t *guest_ram_base;
    inverses over the whole range, instead of almost-inverses with a
    16-byte hole that fails silently. */
 static inline bool is_guest_ptr(const void *p) {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
         uint32_t linear;
         return ega128_cache_ptr_to_linear(p, &linear) &&
@@ -232,7 +232,7 @@ static inline bool is_guest_ptr(const void *p) {
 
 static inline uint32_t fdos_arm_linear(const void *p)
 {
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
         uint32_t linear;
         if (ega128_cache_ptr_to_linear(p, &linear))
@@ -352,7 +352,7 @@ static inline dos_far_ptr add_far_x86(dos_far_ptr p, uint32_t n) {
 }
 ///#define DHDR_END ((void*)(uintptr_t)-1)
 #define EFFECTIVE(a) (((uint32_t)(a).segment << 4) + (a).offset)
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
 /*
  * In the pageable build a DOS far pointer still denotes a GUEST address, not
  * a host pointer.  Resolve it only when C code actually asks for direct

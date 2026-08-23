@@ -22,6 +22,7 @@
  */
 #define BIOS10_DCC_VGA_COLOR_ANALOG  0x08
 #define BIOS10_DCC_EGA_COLOR          0x04
+#define BIOS10_DCC_MCGA_COLOR_ANALOG  0x0C
 
 /*
  * INT 10h/AX=1B00h GET FUNCTIONALITY/STATE INFORMATION.
@@ -54,8 +55,12 @@
  * Bits set here match vga_modes[]:
  *   00h..07h, 0Dh..13h
  */
-#ifdef EGA128
-#define BIOS10_FUNC_MODES_BITMAP      0x0001E0FFu
+#if defined(EGA128)
+#define BIOS10_FUNC_MODES_BITMAP      0x0001E0FFu /* 00h..07h, 0Dh..10h */
+#elif defined(VGA128)
+#define BIOS10_FUNC_MODES_BITMAP      0x000BE0FFu /* 00h..11h, 13h; no 12h */
+#elif defined(MCGA)
+#define BIOS10_FUNC_MODES_BITMAP      0x000A00FFu /* 00h..07h, 11h, 13h */
 #else
 #define BIOS10_FUNC_MODES_BITMAP      0x000FE0FFu
 #endif
@@ -76,6 +81,7 @@
  *
  * Plain VGA has 256 KiB addressable video RAM.
  */
+#define BIOS10_EGA_INFO_MEM_64K       0x00
 #define BIOS10_EGA_INFO_MEM_128K      0x01
 #define BIOS10_EGA_INFO_MEM_256K      0x03
 
@@ -511,6 +517,18 @@ static const VgaRegs vga_640x350x16 = {
      0x01,0x00,0x0F,0x00,0x00}
 };
 
+static const VgaRegs vga_640x480x2 = {
+    0xE3,
+    {0x03,0x01,0x01,0x00,0x06},
+    {0x5F,0x4F,0x50,0x82,0x54,0x80,0x0B,0x3E,
+     0x00,0x40,0x00,0x00,0x00,0x00,0x00,0x00,
+     0xEA,0x8C,0xDF,0x28,0x00,0xE7,0x04,0xE3,0xFF},
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x05,0x0F,0xFF},
+    {0x00,0x01,0x02,0x03,0x04,0x05,0x14,0x07,
+     0x38,0x39,0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,
+     0x01,0x00,0x0F,0x00,0x00}
+};
+
 static const VgaRegs vga_640x480x16 = {
     0xE3,
     {0x03,0x01,0x0F,0x00,0x06},
@@ -546,13 +564,17 @@ static const VgaMode vga_modes[] = {
     {0x06,0,80,24,8, 0x4000,0x3D4,0xB8000,0x4000,&vga_640x200x2},
     {0x07,1,80,24,16,0x1000,0x3B4,0xB0000,0x8000,&vga_80x25_text},
 
+#ifndef MCGA
     {0x0D,0,40,24,8, 0x2000,0x3D4,0xA0000,0x20000,&vga_320x200x16},
     {0x0E,0,80,24,8, 0x4000,0x3D4,0xA0000,0x20000,&vga_640x200x16},
     {0x0F,0,80,24,14,0x8000,0x3B4,0xA0000,0x20000,&vga_640x350x16},
     {0x10,0,80,24,14,0x8000,0x3D4,0xA0000,0x20000,&vga_640x350x16},
+#endif
 #ifndef EGA128
-    {0x11,0,80,29,16,0x0000,0x3D4,0xA0000,0x10000,&vga_640x480x16},
+    {0x11,0,80,29,16,0x0000,0x3D4,0xA0000,0x09600,&vga_640x480x2},
+#if !defined(VGA128) && !defined(MCGA)
     {0x12,0,80,29,16,0x0000,0x3D4,0xA0000,0x20000,&vga_640x480x16},
+#endif
     {0x13,0,40,24,8, 0x1000,0x3D4,0xA0000,0x10000,&vga_320x200x256},
 #endif
 };
@@ -768,7 +790,7 @@ static bool bios_10h_00h(CPU* cpu)
         return true;
     }
 
-#ifndef EGA128
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
     /* Legacy VGA mode set must leave DISPI/VBE mode first. */
     cpu_portout16(0x1CE, VBE_DISPI_INDEX_ENABLE);
     cpu_portout16(0x1CF, VBE_DISPI_DISABLED);
@@ -796,7 +818,9 @@ static bool bios_10h_00h(CPU* cpu)
        video_ctl - это BDA 0x487 (vgabios.c:303: 0x60 = 256K, адаптер
        активен; бит 7 = no_clear). Пишем канонические IBM-значения
        3x8 по номеру режима. */
-#ifdef EGA128
+#ifdef MCGA
+    write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0x80 : 0x00);
+#elif defined(EGA128) || defined(VGA128)
     write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xA0 : 0x20);
 #else
     write86(BIOS10_BDA_VIDEO_CTL, no_clear ? 0xE0 : 0x60);
@@ -807,7 +831,13 @@ static bool bios_10h_00h(CPU* cpu)
         write86(BIOS10_BDA_VIDEO_MSR, (mode < 8) ? crt_msr[mode] : 0x29);
     }
     write86(0x488, 0xF9);                               /* video_switches */
-    write86(0x48A, 0x08);                               /* dcc_index: VGA color */
+#ifdef MCGA
+    write86(0x48A, BIOS10_DCC_MCGA_COLOR_ANALOG);
+#elif defined(EGA128)
+    write86(0x48A, BIOS10_DCC_EGA_COLOR);
+#else
+    write86(0x48A, BIOS10_DCC_VGA_COLOR_ANALOG);
+#endif
     if (m->text) {
         /* Плоскость 2 - общая планарная память: легальные записи
            графических режимов (Mode X/Y и т.п.) стирают знакогенератор.
@@ -1586,6 +1616,25 @@ static void bios_10h_putpixel_planar16(const VgaMode *m,
     }
 }
 
+/* Write one pixel in VGA/MCGA mode 11h (640x480x2).
+ * Guest-visible storage is one linear bit plane at A000:0000. */
+static void bios_10h_putpixel_mono640(uint16_t x, uint16_t y,
+                                      uint8_t color, bool xor_mode)
+{
+    uint32_t addr = VGA_MEM_BASE_GFX + (uint32_t)y * 80u + (x >> 3);
+    uint8_t mask = (uint8_t)(0x80u >> (x & 7u));
+    uint8_t old = read86(addr);
+
+    if (xor_mode) {
+        if (color & 1u) old ^= mask;
+    } else if (color & 1u) {
+        old |= mask;
+    } else {
+        old &= (uint8_t)~mask;
+    }
+    write86(addr, old);
+}
+
 /*
  * Write one pixel in VGA 320x200 256-color mode 13h.
  *
@@ -1651,6 +1700,10 @@ static bool bios_10h_0Ch(CPU* cpu)
 
     case 0x06:
         bios_10h_putpixel_cga2(x, y, color, xor_mode);
+        break;
+
+    case 0x11:
+        bios_10h_putpixel_mono640(x, y, color, xor_mode);
         break;
 
     default:
@@ -1733,6 +1786,12 @@ static uint8_t bios_10h_getpixel_planar16(const VgaMode *m,
     return color;
 }
 
+static uint8_t bios_10h_getpixel_mono640(uint16_t x, uint16_t y)
+{
+    uint32_t addr = VGA_MEM_BASE_GFX + (uint32_t)y * 80u + (x >> 3);
+    return (read86(addr) & (uint8_t)(0x80u >> (x & 7u))) ? 1u : 0u;
+}
+
 /*
  * Read one pixel in VGA 320x200 256-color mode 13h.
  *
@@ -1788,6 +1847,10 @@ static bool bios_10h_0Dh(CPU* cpu)
 
     case 0x06:
         CPU_AL = bios_10h_getpixel_cga2(x, y);
+        break;
+
+    case 0x11:
+        CPU_AL = bios_10h_getpixel_mono640(x, y);
         break;
 
     case 0x13:
@@ -2452,7 +2515,11 @@ no second physical display.
 static bool bios_10h_1A00h(CPU* cpu)
 {
     CPU_AL = 0x1A;
+#ifdef MCGA
+    CPU_BL = BIOS10_DCC_MCGA_COLOR_ANALOG;
+#else
     CPU_BL = BIOS10_DCC_VGA_COLOR_ANALOG;
+#endif
     CPU_BH = 0;
     cf = 0;
     return true;
@@ -2506,7 +2573,11 @@ static bool bios_10h_1B00h(CPU* cpu)
         write86(info + 0x04 + i, read86(0x449 + i));
     for (uint8_t i = 0; i < 3; i++)
         write86(info + 0x22 + i, read86(0x484 + i));
+#ifdef MCGA
+    write86 (info + 0x25, BIOS10_DCC_MCGA_COLOR_ANALOG);
+#else
     write86 (info + 0x25, BIOS10_DCC_VGA_COLOR_ANALOG);
+#endif
     write86 (info + 0x26, 0x00);
     writew86(info + 0x27, 16);
     write86 (info + 0x29, 8);
@@ -2515,7 +2586,13 @@ static bool bios_10h_1B00h(CPU* cpu)
     write86 (info + 0x2C, 0);
     write86 (info + 0x2D, 0);
     write86 (info + 0x2E, 0);
+#ifdef MCGA
+    write86 (info + 0x31, BIOS10_EGA_INFO_MEM_64K);
+#elif defined(EGA128) || defined(VGA128)
+    write86 (info + 0x31, BIOS10_EGA_INFO_MEM_128K);
+#else
     write86 (info + 0x31, BIOS10_EGA_INFO_MEM_256K);
+#endif
     write86 (info + 0x32, 0x00);
     write86 (info + 0x33, read86(BIOS10_BDA_MODESET_CTL));
     CPU_AL = 0x1B;
@@ -2716,13 +2793,10 @@ CH = feature connector bits
 CL = switch settings
 
 Desc:
-This is an old EGA/VGA detection call.  Programs use it to distinguish
+This is an old EGA/VGA detection call. Programs use it to distinguish
 CGA-only BIOSes from EGA/VGA BIOSes and to determine adapter RAM size.
-
-The native BIOS exposes a plain VGA-compatible adapter:
-  - standard CGA/EGA/VGA register set;
-  - 256 KiB VGA memory;
-  - no SVGA/VESA claim here.
+The MCGA profile deliberately does not dispatch BL=10h.  Software such as
+Thexder uses an unchanged EGA-information probe as part of MCGA detection.
 
 BDA 40:88 stores the EGA/VGA switch byte. Its high nibble contains feature
 connector bits, while the full byte is returned as CL by this BIOS call.
@@ -2744,7 +2818,9 @@ static bool bios_10h_1210h(CPU* cpu)
         BIOS10_EGA_INFO_MONO_IO :
         BIOS10_EGA_INFO_COLOR_IO;
 
-#ifdef EGA128
+#ifdef MCGA
+    CPU_BL = BIOS10_EGA_INFO_MEM_64K;
+#elif defined(EGA128) || defined(VGA128)
     CPU_BL = BIOS10_EGA_INFO_MEM_128K;
 #else
     CPU_BL = BIOS10_EGA_INFO_MEM_256K;
@@ -3679,8 +3755,10 @@ bool bios_10h(CPU* cpu) {
                 break;
             case 0x12: bios_10h_1012h(cpu); // SET BLOCK OF DAC REGISTERS
                 break;
-            case 0x13: bios_10h_1013h(cpu); // SELECT VIDEO DAC COLOR PAGE
+#ifndef MCGA
+            case 0x13: bios_10h_1013h(cpu); // SELECT VIDEO DAC COLOR PAGE (VGA)
                 break;
+#endif
             case 0x15: bios_10h_1015h(cpu); // READ INDIVIDUAL DAC REGISTER
                 break;
             case 0x17: bios_10h_1017h(cpu); // READ BLOCK OF DAC REGISTERS
@@ -3689,8 +3767,10 @@ bool bios_10h(CPU* cpu) {
                 break;
             case 0x19: bios_10h_1019h(cpu); // READ PEL MASK
                 break;
-            case 0x1A: bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE
+#ifndef MCGA
+            case 0x1A: bios_10h_101Ah(cpu); // GET VIDEO DAC COLOR PAGE STATE (VGA)
                 break;
+#endif
             case 0x1B: bios_10h_101Bh(cpu); // PERFORM GRAY-SCALE SUMMING
                 break;
 #endif
@@ -3734,25 +3814,31 @@ bool bios_10h(CPU* cpu) {
             break;
         case 0x12:
             switch(CPU_BL) {
+#ifndef MCGA
             case 0x10: bios_10h_1210h(cpu); // GET EGA/VGA INFORMATION
                 break;
+#endif
             case 0x20: bios_10h_1220h(cpu); // ALTERNATE PRINT SCREEN
                 break;
 #ifndef EGA128
+#ifndef MCGA
             case 0x30: bios_10h_1230h(cpu); // SELECT TEXT SCAN LINES
                 break;
+#endif
             case 0x31: bios_10h_1231h(cpu); // DEFAULT PALETTE LOADING
                 break;
             case 0x32: bios_10h_1232h(cpu); // VIDEO ADDRESSING
                 break;
             case 0x33: bios_10h_1233h(cpu); // GRAYSCALE SUMMING
                 break;
+#ifndef MCGA
             case 0x34: bios_10h_1234h(cpu); // CURSOR EMULATION
                 break;
             case 0x35: bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
                 break;
             case 0x36: bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
                 break;
+#endif
 #endif
             default:
                 goto err;
@@ -3774,11 +3860,13 @@ bool bios_10h(CPU* cpu) {
             else
                 goto err;
             break;
+#ifndef MCGA
         case 0x1C:
             bios_10h_1Ch(cpu); // SAVE/RESTORE VIDEO STATE
             break;
 #endif
-#ifndef EGA128
+#endif
+#if !defined(EGA128) && !defined(VGA128) && !defined(MCGA)
         case 0x4F:
             if (!bios_10h_4Fh(cpu))
                 goto err;
@@ -3818,6 +3906,8 @@ void bios_10h_install_rom_fonts(CPU* cpu) // calling from load_bios_and_reset
     write86(BIOS10_BDA_MODESET_CTL, 0x51);
 #ifdef EGA128
     write86(0x48A, BIOS10_DCC_EGA_COLOR);
+#elif defined(MCGA)
+    write86(0x48A, BIOS10_DCC_MCGA_COLOR_ANALOG);
 #else
     write86(0x48A, BIOS10_DCC_VGA_COLOR_ANALOG);
 #endif

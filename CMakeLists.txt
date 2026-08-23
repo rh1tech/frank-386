@@ -21,10 +21,25 @@ if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
-# Build with a standard 128 KiB EGA-compatible video adapter.
-option(EGA128 "Build with 128 KiB EGA video memory/capabilities" ON)
-if(EGA128)
+# Video adapter profile: one mutually exclusive build mode.
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
+set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
+string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
+
+if(VIDEO_MODE STREQUAL "MCGA")
+    add_compile_definitions(MCGA=1)
+    set(EMU_VGA_MEM_SIZE_KB 64)
+elseif(VIDEO_MODE STREQUAL "EGA128")
     add_compile_definitions(EGA128=1)
+    set(EMU_VGA_MEM_SIZE_KB 128)
+elseif(VIDEO_MODE STREQUAL "VGA128")
+    add_compile_definitions(VGA128=1)
+    set(EMU_VGA_MEM_SIZE_KB 128)
+elseif(VIDEO_MODE STREQUAL "VGA256")
+    add_compile_definitions(VGA256=1)
+    set(EMU_VGA_MEM_SIZE_KB 256)
+else()
+    message(FATAL_ERROR "Invalid VIDEO_MODE='${VIDEO_MODE}'; expected MCGA, EGA128, VGA128 or VGA256")
 endif()
 
 if(BOARD STREQUAL "Z2")
@@ -303,8 +318,14 @@ if(EMM)
 else ()
     SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
 endif()
-if(EGA128)
+if(VIDEO_MODE STREQUAL "EGA128")
     SET(BUILD_NAME "${BUILD_NAME}-EGA128")
+elseif(VIDEO_MODE STREQUAL "VGA128")
+    SET(BUILD_NAME "${BUILD_NAME}-VGA128")
+elseif(VIDEO_MODE STREQUAL "MCGA")
+    SET(BUILD_NAME "${BUILD_NAME}-MCGA")
+elseif(VIDEO_MODE STREQUAL "VGA256")
+    SET(BUILD_NAME "${BUILD_NAME}-VGA256")
 endif()
 
 #=============================================================================
@@ -435,7 +456,7 @@ add_executable(${BUILD_NAME}
     ${EMU_CORE_SOURCES}
 )
 
-if(EGA128)
+if(NOT VIDEO_MODE STREQUAL "VGA256")
     target_sources(${BUILD_NAME} PRIVATE src/ega128_paging.c)
     if(BOARD STREQUAL "M1")
         target_include_directories(${BUILD_NAME} PRIVATE drivers/psram_spi)
@@ -463,7 +484,7 @@ target_include_directories(${BUILD_NAME} PRIVATE
 if(BOARD STREQUAL "C2")
     pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/link/link_bus.pio)
 endif()
-if(EGA128 AND BOARD STREQUAL "M1")
+if((NOT VIDEO_MODE STREQUAL "VGA256") AND BOARD STREQUAL "M1")
     target_include_directories(${BUILD_NAME} PRIVATE ${CMAKE_CURRENT_LIST_DIR}/drivers/psram_spi)
     pico_generate_pio_header(${BUILD_NAME} ${CMAKE_CURRENT_LIST_DIR}/drivers/psram_spi/psram_spi.pio)
     target_compile_definitions(${BUILD_NAME} PRIVATE
@@ -541,7 +562,7 @@ target_compile_definitions(${BUILD_NAME} PRIVATE
     RP2350_BUILD=1
 
     # Emulator configuration (8MB PSRAM)
-    EMU_VGA_MEM_SIZE_KB=256
+    EMU_VGA_MEM_SIZE_KB=${EMU_VGA_MEM_SIZE_KB}
     EMU_CPU_GEN=4
 
     # Disable features for initial port
@@ -776,7 +797,8 @@ message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
 message(STATUS "  Audio Type:     ${AUDIO_TYPE}")
 message(STATUS "  USB:            runtime HOST/DEVICE")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
-message(STATUS "  EGA 128 KiB:    ${EGA128}")
+message(STATUS "  Video Mode:     ${VIDEO_MODE}")
+message(STATUS "  Video VRAM:     ${EMU_VGA_MEM_SIZE_KB} KiB")
 message(STATUS "  Build Name:     ${BUILD_NAME}")
 message(STATUS "")
 
