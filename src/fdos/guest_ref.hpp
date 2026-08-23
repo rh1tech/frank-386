@@ -203,6 +203,15 @@ public:
     explicit constexpr psp_ref(seg s) : addr_(static_cast<linear_t>(s) << 4) {}
     __attribute__((always_inline)) dos_far_ptr stack() const { dos_far_ptr v; uint32_t x=scalar_proxy<uint32_t>(addr_+offsetof(psp,ps_stack)); __builtin_memcpy(&v,&x,sizeof(v)); return v; }
     __attribute__((always_inline)) void stack(dos_far_ptr v) const { uint32_t x; __builtin_memcpy(&x,&v,sizeof(x)); scalar_proxy<uint32_t>(addr_+offsetof(psp,ps_stack))=x; }
+    __attribute__((always_inline)) UWORD max_files() const {
+        return scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_maxfiles));
+    }
+    __attribute__((always_inline)) dos_far_ptr file_table() const {
+        dos_far_ptr v;
+        uint32_t x = scalar_proxy<uint32_t>(addr_ + offsetof(psp, ps_filetab));
+        __builtin_memcpy(&v, &x, sizeof(v));
+        return v;
+    }
 private: linear_t addr_;
 };
 

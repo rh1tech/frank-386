@@ -1,6 +1,10 @@
 #include "bios/bios.h"
 #include "hdrs.h"
 
+long fdos_jft_find_free(void);
+int fdos_jft_get(UCOUNT hndl);
+COUNT fdos_jft_set(UCOUNT hndl, UBYTE sft_idx);
+
 #if DIAG
 extern volatile unsigned int dos_diag_kernel_code;
 #endif
@@ -473,39 +477,7 @@ UBYTE *jft_of(psp *p)
 
 int get_sft_idx(unsigned hndl)
 {
-  psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  UBYTE *jft;
-  int idx;
-
-  if (hndl >= p->ps_maxfiles)
-  {
-#if DIAG
-    dos_diag_kernel_code = 0x42fe0000u | ((hndl & 0xffu) << 8)
-                         | ((unsigned)p->ps_maxfiles & 0xffu);
-#endif
-    return DE_INVLDHNDL;
-  }
-
-  if ((jft = jft_of(p)) == NULL)
-  {
-#if DIAG
-    dos_diag_kernel_code = 0x42fd0000u | (hndl & 0xffffu);
-#endif
-    return DE_INVLDHNDL;
-  }
-
-  idx = jft[hndl];
-
-#if DIAG
-  dos_diag_kernel_code = 0x43000000u
-                       | (((unsigned)idx & 0xffu) << 16)
-                       | ((hndl & 0xffu) << 8)
-                       | ((unsigned)p->ps_maxfiles & 0xffu);
-#endif
-
-  if (idx == 0xff)
-    return DE_INVLDHNDL;
-  return idx;
+  return fdos_jft_get(hndl);
 }
 
 /*
@@ -878,13 +850,7 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
 */
 STATIC long get_free_hndl(void)
 {
-  psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  UBYTE *q = jft_of(p);
-  UBYTE *r;
-  if (q == NULL) return DE_TOOMANY;
-  r = (UBYTE *)memchr(q, 0xff, p->ps_maxfiles);
-  if (r == NULL) return DE_TOOMANY;
-  return (unsigned)(r - q);
+  return fdos_jft_find_free();
 }
 
 /*
@@ -898,7 +864,6 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
 {
   long result;
   unsigned hndl;
-  psp *p;
 
   /* test if mode is in range                     */
   if ((mode & ~O_VALIDMASK) != 0)
@@ -914,14 +879,8 @@ long DosOpen(dos_far_ptr fname, unsigned mode, unsigned attrib)
   if (result < SUCCESS)
     return result;
 
-  p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  {
-    UBYTE *jft = jft_of(p);
-    if (jft == NULL)          /* unreachable: get_free_hndl() above already
-                                 rejected an unusable JFT */
-      return DE_TOOMANY;
-    jft[hndl] = (UBYTE)result;
-  }
+  if (fdos_jft_set(hndl, (UBYTE)result) < SUCCESS)
+    return DE_TOOMANY;
 
   return hndl | (result & 0xffff0000l);
 }

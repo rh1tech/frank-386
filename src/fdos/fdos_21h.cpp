@@ -22,6 +22,54 @@ using fdos_guest::cds_ref;
 static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
 
+static inline uint32_t fdos_far_linear(dos_far_ptr p)
+{
+    return (static_cast<uint32_t>(FP_SEG(p)) << 4) + FP_OFF(p);
+}
+
+extern "C" long fdos_jft_find_free(void)
+{
+    const psp_ref process(fdos_idata.cu_psp());
+    const UWORD count = process.max_files();
+    const dos_far_ptr table = process.file_table();
+
+    if (far_is_null(table) || far_is_end(table))
+        return DE_TOOMANY;
+
+    const uint32_t base = fdos_far_linear(table);
+    for (UWORD h = 0; h < count; ++h) {
+        if (pload8(base + h) == 0xff)
+            return h;
+    }
+    return DE_TOOMANY;
+}
+
+extern "C" int fdos_jft_get(UCOUNT hndl)
+{
+    const psp_ref process(fdos_idata.cu_psp());
+    const UWORD count = process.max_files();
+    const dos_far_ptr table = process.file_table();
+
+    if (hndl >= count || far_is_null(table) || far_is_end(table))
+        return DE_INVLDHNDL;
+
+    const UBYTE idx = pload8(fdos_far_linear(table) + hndl);
+    return idx == 0xff ? DE_INVLDHNDL : idx;
+}
+
+extern "C" COUNT fdos_jft_set(UCOUNT hndl, UBYTE sft_idx)
+{
+    const psp_ref process(fdos_idata.cu_psp());
+    const UWORD count = process.max_files();
+    const dos_far_ptr table = process.file_table();
+
+    if (hndl >= count || far_is_null(table) || far_is_end(table))
+        return DE_INVLDHNDL;
+
+    pstore8(fdos_far_linear(table) + hndl, sft_idx);
+    return SUCCESS;
+}
+
 extern "C" int snprintf(char *s, size_t n, const char *fmt, ...);
 static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
 {
