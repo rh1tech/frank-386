@@ -102,9 +102,14 @@ STATIC void ConvertPathNameToFCBName(char *FCBName, const char *PathName)
   FCBName[FNAME_SIZE + FEXT_SIZE] = '\0';
 }
 
-STATIC void set_fcbname(void)
+STATIC void set_fcbname(const char *path)
 {
-  ConvertPathNameToFCBName(((struct dirent *)internal_data->DirEntBuffer)->dir_name, PriPathName);
+  /* Leaf-only direct mapping: ConvertPathNameToFCBName() performs no guest
+     accesses, so the mapped SDA page cannot be displaced while this pointer
+     is live. */
+  struct dos_data *idata =
+      (struct dos_data *)ARM_PTR(MK_FP(DOS_PSP, X86_INTERNAL_DATA_OFF));
+  ConvertPathNameToFCBName(((struct dirent *)idata->DirEntBuffer)->dir_name, path);
 }
 
 /*
@@ -263,7 +268,8 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
    * later open/device paths.  Revisit only if a new .su build still shows
    * this frame on the measured worst-case chain.
    */
-  COUNT path_result = truename(fname, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  char open_path[FDOS_PATHLEN];
+  COUNT path_result = truename(fname, open_path, CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosOpenSft 1");
   if (path_result < SUCCESS) {
     dpb_watch_check_chain("DosOpenSft 1err");
@@ -271,7 +277,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   }
   const unsigned path_kind = (unsigned)path_result;
 
-  set_fcbname();
+  set_fcbname(open_path);
   dpb_watch_check_chain("DosOpenSft 2");
 
   /* now get a free system file table entry       */
@@ -369,8 +375,8 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 /* /// End of additions for SHARE.  - Ron Cemer */
 
   sftp->sft_count++;
-  sftp->sft_flags = PriPathName[0] - 'A';
-  long open_result = dos_open(PriPathName, flags, attrib, sft_idx);
+  sftp->sft_flags = open_path[0] - 'A';
+  long open_result = dos_open(open_path, flags, attrib, sft_idx);
   dpb_watch_check_chain("DosOpenSft 10");
   if (open_result < 0)
   {
@@ -941,7 +947,7 @@ COUNT DosGetFattr(dos_far_ptr name)
   if (PriPathName[3] == '\0')
     return 0x10;
 
-  set_fcbname();
+  set_fcbname(PriPathName);
 /// TODO:
 ///  if (result & IS_NETWORK)
 ///    return network_redirector(REM_GETATTRZ);
@@ -964,7 +970,7 @@ COUNT DosSetFattr(dos_far_ptr name, UWORD attrp)
   if (result < SUCCESS)
     return result;
 
-  set_fcbname();
+  set_fcbname(PriPathName);
 /// TODO:
 ///  if (result & IS_NETWORK)
 ///    return remote_setfattr(attrp);
@@ -996,7 +1002,7 @@ COUNT DosMkRmdir(const dos_far_ptr dir, int action)
   if (result < SUCCESS)
     return result;
 
-  set_fcbname();
+  set_fcbname(PriPathName);
 /// TODO:
 ///  if (result & IS_NETWORK)
 ///    return network_redirector(action == 0x39 ? REM_MKDIR : REM_RMDIR);
@@ -1040,7 +1046,7 @@ COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2)
   if (result < SUCCESS)
     return result;
 
-  set_fcbname();
+  set_fcbname(PriPathName);
 
   if ((result & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE)
     return DE_FILENOTFND;
@@ -1066,7 +1072,7 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
        that points DI near the end of its segment must have the tail wrap
        back to ES:0000, not run on into the next segment. */
     guest_strcpy(dest, PriPathName);
-    set_fcbname();
+    set_fcbname(PriPathName);
   }
   return rc;
 }
@@ -1457,7 +1463,7 @@ COUNT DosChangeDir(dos_far_ptr s)
   if (result < SUCCESS)
     return DE_PATHNOTFND;
 
-  set_fcbname();
+  set_fcbname(PriPathName);
 
   if (CDS_WRITABLE(internal_data->current_ldt) && (strlen(PriPathName) >= MAX_CDSPATH))
     return DE_PATHNOTFND;
@@ -1498,7 +1504,7 @@ COUNT DosDelete(dos_far_ptr path, int attrib)
   if (result < SUCCESS)
     return result;
 
-  set_fcbname();
+  set_fcbname(PriPathName);
 
   /// TODO:
   ///  if (result & IS_NETWORK)
@@ -1595,7 +1601,7 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
   if (rc < SUCCESS)
     return rc;
 
-  set_fcbname();
+  set_fcbname(PriPathName);
 
   SAttrD = (BYTE) attr;
 

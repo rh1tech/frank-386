@@ -16,6 +16,11 @@ extern "C" {
 using fdos_guest::cpu_regs_ref;
 using fdos_guest::dos_data_ref;
 using fdos_guest::psp_ref;
+using fdos_guest::lol_ref;
+using fdos_guest::cds_ref;
+
+static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
+static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
 
 extern "C" int snprintf(char *s, size_t n, const char *fmt, ...);
 static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
@@ -429,6 +434,47 @@ int DosSetTime(CPU *cpu)
  * services use it when they need the CDS slot itself, including disabled,
  * JOINed or not-yet-completely-initialized entries.
  */
+void fdos_guest_copy_cstr(dos_far_ptr src, char *dst, size_t dst_size)
+{
+  if (dst_size == 0)
+    return;
+
+  const uint32_t base = ((uint32_t)FP_SEG(src) << 4) + FP_OFF(src);
+  size_t i = 0;
+  for (; i + 1u < dst_size; ++i) {
+    const char c = (char)pload8(base + (uint32_t)i);
+    dst[i] = c;
+    if (c == '\0')
+      return;
+  }
+  dst[i] = '\0';
+}
+
+void fdos_guest_cds_load(dos_far_ptr src, struct cds *dst)
+{
+  cds_ref(src).load(*dst);
+}
+
+void fdos_guest_cds_current_path_byte(dos_far_ptr cds_ptr, unsigned index, UBYTE value)
+{
+  cds_ref(cds_ptr).current_path_byte(index, value);
+}
+
+UBYTE fdos_guest_default_drive(void)
+{
+  return fdos_idata.default_drive();
+}
+
+UBYTE fdos_guest_lastdrive(void)
+{
+  return fdos_lol.lastdrive();
+}
+
+void fdos_guest_set_current_ldt(dos_far_ptr value)
+{
+  fdos_idata.current_ldt(value);
+}
+
 struct cds FAR *get_cds_unvalidated(unsigned drive)
 {
   if (drive >= LoL->lastdrive || far_is_null(LoL->CDSp))
@@ -442,19 +488,26 @@ struct cds FAR *get_cds_unvalidated(unsigned drive)
    drive is not within range */
 dos_far_ptr/*struct cds*/ get_cds(unsigned drive)
 {
-  if (drive >= LoL->lastdrive)
-    return MK_FP(0, 0);
-  if (far_is_null(LoL->CDSp))
+  const UBYTE lastdrive = fdos_lol.lastdrive();
+  const dos_far_ptr cds_base = fdos_lol.cds();
+
+  if (drive >= lastdrive || far_is_null(cds_base))
     return MK_FP(0, 0);
 
-  struct cds* CDSp = (struct cds*)ARM_PTR(LoL->CDSp) + drive;
-  unsigned flags = CDSp->cdsFlags;
-  /* Entry is disabled or JOINed drives are accessable by the path only */
+  const dos_far_ptr cds_ptr =
+      MK_FP(FP_SEG(cds_base),
+            (UWORD)(FP_OFF(cds_base) + drive * sizeof(struct cds)));
+  const cds_ref entry(cds_ptr);
+  const unsigned flags = entry.flags();
+
+  /* Entry is disabled or JOINed drives are accessable by the path only.
+     Do not materialize a host pointer here: truename() keeps this guest
+     address across media/path operations which may fault another page in. */
   if (!(flags & CDSVALID) || (flags & CDSJOINED) != 0)
     return MK_FP(0, 0);
-  if (!(flags & CDSNETWDRV) && EFFECTIVE(CDSp->cdsDpb) == 0)
+  if (!(flags & CDSNETWDRV) && EFFECTIVE(entry.dpb()) == 0)
     return MK_FP(0, 0);
-  return x86_FAR_PTR(FP_SEG(LoL->CDSp), CDSp);
+  return cds_ptr;
 }
 
 UBYTE DosSelectDrv(UBYTE drv)
@@ -474,12 +527,13 @@ UBYTE DosSelectDrv(UBYTE drv)
    * get_cds() signals "drive unavailable" with 0000:0000, so the test never
    * fired and an invalid drive became the default one.
    */
-  internal_data->current_ldt = get_cds(drv);
+  const dos_far_ptr current = get_cds(drv);
+  fdos_idata.current_ldt(current);
 
-  if (!far_is_null(internal_data->current_ldt))
-    internal_data->default_drive = drv;
+  if (!far_is_null(current))
+    fdos_idata.default_drive() = drv;
 
-  return LoL->lastdrive;
+  return fdos_lol.lastdrive();
 }
 
 static int fcb_parse_common_sep(int c)

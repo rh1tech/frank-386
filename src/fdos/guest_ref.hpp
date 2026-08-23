@@ -260,6 +260,40 @@ private:
     linear_t addr_;
 };
 
+
+class cds_ref final : private ref_base<cds> {
+public:
+    explicit constexpr cds_ref(dos_far_ptr p)
+        : ref_base<cds>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)), far_(p) {}
+
+    __attribute__((always_inline)) dos_far_ptr far_ptr() const { return far_; }
+    __attribute__((always_inline)) UWORD flags() const { return scalar_load<UWORD>(offsetof(cds, cdsFlags)); }
+    __attribute__((always_inline)) dos_far_ptr dpb() const {
+        uint32_t x = scalar_load<uint32_t>(offsetof(cds, cdsDpb));
+        dos_far_ptr v;
+        __builtin_memcpy(&v, &x, sizeof(v));
+        return v;
+    }
+
+    void load(cds &out) const {
+#ifdef EGA128
+        auto *d = reinterpret_cast<uint8_t *>(&out);
+        for (std::size_t i = 0; i < sizeof(out); ++i)
+            d[i] = pload8(addr_ + static_cast<uint32_t>(i));
+#else
+        __builtin_memcpy(&out, reinterpret_cast<const void *>(X86_RAM_BASE + addr_), sizeof(out));
+#endif
+    }
+
+    __attribute__((always_inline)) void current_path_byte(std::size_t index, UBYTE value) const {
+        if (index < sizeof(((cds *)0)->cdsCurrentPath))
+            store_byte(offsetof(cds, cdsCurrentPath) + index, value);
+    }
+
+private:
+    dos_far_ptr far_;
+};
+
 class dos_data_ref final {
 public:
     explicit constexpr dos_data_ref(linear_t addr) : addr_(addr) {}
@@ -270,6 +304,9 @@ public:
     __attribute__((always_inline)) scalar_proxy<UBYTE> indos() const { return {addr_+offsetof(dos_data,InDOS)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> error_mode() const { return {addr_+offsetof(dos_data,ErrorMode)}; }
     __attribute__((always_inline)) scalar_proxy<UWORD> crit_err_code() const { return {addr_+offsetof(dos_data,CritErrCode)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> default_drive() const { return {addr_+offsetof(dos_data,default_drive)}; }
+    __attribute__((always_inline)) dos_far_ptr current_ldt() const { return far_load(offsetof(dos_data,current_ldt)); }
+    __attribute__((always_inline)) void current_ldt(dos_far_ptr v) const { far_store(offsetof(dos_data,current_ldt),v); }
     __attribute__((always_inline)) dos_far_ptr user_r() const { return far_load(offsetof(dos_data,user_r)); }
     __attribute__((always_inline)) dos_far_ptr prev_user_r() const { return far_load(offsetof(dos_data,prev_user_r)); }
     __attribute__((always_inline)) void user_r(dos_far_ptr v) const { far_store(offsetof(dos_data,user_r),v); }

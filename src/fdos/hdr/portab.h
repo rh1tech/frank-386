@@ -196,6 +196,11 @@ extern uint8_t *guest_ram_base;
 #define X86_RAM_BASE ((uint8_t *)PSRAM_BASE_ADDR)
 #endif
 
+/* Shared DOS canonical-path buffer size.  Keep truename() and callers that
+   retain its result on the same bound instead of duplicating the numeric
+   value in individual translation units. */
+#define FDOS_PATHLEN 128
+
 /* Highest linear address any real-mode seg:off pair can name: FFFF:FFFF
    -> (0xFFFF << 4) + 0xFFFF == 0x10FFEF. Everything from 0x100000 up to
    here is the HMA and IS reachable (as FFFF:xxxx). */
@@ -349,11 +354,12 @@ static inline dos_far_ptr add_far_x86(dos_far_ptr p, uint32_t n) {
 /*
  * In the pageable build a DOS far pointer still denotes a GUEST address, not
  * a host pointer.  Resolve it only when C code actually asks for direct
- * access.  The returned pointer addresses the currently mapped 2-KiB chunk;
- * resident FDOS low memory is pinned 1:1 by ega128_paging.c, while transient
- * objects are fetched on demand.  Mark the page dirty because legacy ARM_PTR
- * sites are intentionally read/write and C gives us no way to infer access
- * direction from a later -> or * operator.
+ * access.  The returned pointer addresses only the currently mapped 2-KiB
+ * chunk and must never be retained across another guest-memory access: EGA128
+ * deliberately has no pinned pages.  New code must keep guest addresses and
+ * use guest_ref/accessors; ARM_PTR remains only for legacy leaf accesses.
+ * Mark the page dirty because C gives us no way to infer access direction
+ * from a later -> or * operator.
  */
 static inline uint8_t *fdos_guest_arm_ptr(dos_far_ptr p_x86)
 {
