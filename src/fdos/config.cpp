@@ -1,13 +1,23 @@
 #include <ctype.h>
 
+#if defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wwrite-strings"
+#endif
+
 #define new fdos_new
 #define strchr fdos_strchr_compat
+#ifndef _Static_assert
 #define _Static_assert static_assert
+#define FDOS_LOCAL_STATIC_ASSERT_MACRO 1
+#endif
 extern "C" {
 #include "bios/bios.h"
 #include "hdrs.h"
 }
+#ifdef FDOS_LOCAL_STATIC_ASSERT_MACRO
 #undef _Static_assert
+#undef FDOS_LOCAL_STATIC_ASSERT_MACRO
+#endif
 #undef strchr
 #undef new
 #ifdef load
@@ -50,13 +60,15 @@ static inline void cfg_guest_fill(uint32_t addr, UBYTE value, size_t len)
 static inline dos_far_ptr cfg_guest_read_far(uint32_t addr)
 {
   dos_far_ptr v;
-  cfg_guest_read(addr, &v, sizeof(v));
+  v.offset = pload16(addr);
+  v.segment = pload16(addr + 2u);
   return v;
 }
 
 static inline void cfg_guest_write_far(uint32_t addr, dos_far_ptr v)
 {
-  cfg_guest_write(addr, &v, sizeof(v));
+  pstore16(addr, v.offset);
+  pstore16(addr + 2u, v.segment);
 }
 
 static inline size_t cfg_guest_strnlen(uint32_t addr, size_t maxlen)
@@ -110,14 +122,14 @@ static COUNT nFileDesc BSS_INIT(0);
 struct CfgFile {
   COUNT nFileDesc;
   COUNT nCfgLine;
-} cfgFile[MAX_CHAINS] BSS_INIT({0});
+} cfgFile[MAX_CHAINS] BSS_INIT({});
 
 static COUNT nCurChain BSS_INIT(0);
 STATIC BOOL askThisSingleCommand BSS_INIT(0);
 STATIC BOOL DontAskThisSingleCommand BSS_INIT(0);
 STATIC unsigned MenuLine BSS_INIT(0);
 STATIC unsigned Menus BSS_INIT(0);
-STATIC dos_far_ptr x86_stackBase BSS_INIT({0});
+STATIC dos_far_ptr x86_stackBase BSS_INIT({});
 STATIC COUNT nStacks BSS_INIT(0);
 STATIC COUNT stackSize BSS_INIT(0);
 STATIC int MenuColor = -1;
@@ -144,7 +156,7 @@ struct MenuSelector
 /* Boot-only menu table; parked in CORE0_STACK_EXT. Zero-init now works because
    main() copies .stack_ext_area from its FLASH image at startup. */
 STATIC struct MenuSelector MenuStruct[MENULINESMAX]
-    __attribute__((section(".core0_stack_ext"))) BSS_INIT({0});
+    __attribute__((section(".core0_stack_ext"))) BSS_INIT({});
 STATIC int nMenuLine BSS_INIT(0);
 
 /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
@@ -2437,7 +2449,7 @@ STATIC VOID mcb_init_copy(UCOUNT seg, UWORD size, mcb *near_mcb)
 
 STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type)
 {
-  static mcb near_mcb BSS_INIT({0}); /// TODO: _BSS
+  static mcb near_mcb BSS_INIT({}); /// TODO: _BSS
   near_mcb.m_type = type;
   mcb_init_copy(seg, size, &near_mcb);
 }
@@ -2649,6 +2661,7 @@ VOID PostConfig(VOID)
                          offsetof(sfttbl, sftt_next));
     CfgDbgPrintf((" sft table %04x:%04x\n",
                   FP_SEG(next_sft), FP_OFF(next_sft)));
+    (void)next_sft;
   }
   CfgDbgPrintf((" CDS table %04x:%04x\n", FP_SEG(config_lol.cds()), FP_OFF(config_lol.cds())));
   CfgDbgPrintf((" DPB table %04x:%04x\n", FP_SEG(config_lol.dpb()), FP_OFF(config_lol.dpb())));

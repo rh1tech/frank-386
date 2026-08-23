@@ -12,12 +12,15 @@ extern "C" {
 #endif
 #include <cstring>
 #include "guest_ref.hpp"
+#include "fatfs_guest.h"
 
 using fdos_guest::cpu_regs_ref;
 using fdos_guest::dos_data_ref;
 using fdos_guest::psp_ref;
 using fdos_guest::lol_ref;
 using fdos_guest::cds_ref;
+using fdos_guest::sft_ref;
+using fdos_guest::sfttbl_ref;
 
 static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
@@ -25,6 +28,83 @@ static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DAT
 static inline uint32_t fdos_far_linear(dos_far_ptr p)
 {
     return (static_cast<uint32_t>(FP_SEG(p)) << 4) + FP_OFF(p);
+}
+
+extern "C" dos_far_ptr fdos_sft_find_free(COUNT *sft_idx)
+{
+    COUNT sys_idx = 0;
+
+    for (dos_far_ptr block = fdos_lol.sfthead(); !far_is_end(block); ) {
+        const sfttbl_ref table(block);
+        const UWORD count = table.count();
+
+        for (UWORD i = 0; i < count; ++i, ++sys_idx) {
+            const dos_far_ptr entry = table.entry(i);
+            if (sft_ref(entry).count() == 0) {
+                *sft_idx = sys_idx;
+                fdos_idata.current_sft_idx() = (UWORD)sys_idx;
+                return entry;
+            }
+        }
+        block = table.next();
+    }
+    return MK_FP((UWORD)-1, (UWORD)-1);
+}
+
+extern "C" int fdos_sft_index_to_far(int index, dos_far_ptr *out)
+{
+    if (index < 0) {
+        *out = MK_FP((UWORD)-1, (UWORD)-1);
+        fdos_idata.lp_cur_sft(*out);
+        return -1;
+    }
+
+    for (dos_far_ptr block = fdos_lol.sfthead(); !far_is_end(block); ) {
+        const sfttbl_ref table(block);
+        const UWORD count = table.count();
+        if (index < (int)count) {
+            *out = table.entry((UWORD)index);
+            fdos_idata.lp_cur_sft(*out);
+            return index;
+        }
+        index -= count;
+        block = table.next();
+    }
+
+    *out = MK_FP((UWORD)-1, (UWORD)-1);
+    fdos_idata.lp_cur_sft(*out);
+    return -1;
+}
+
+extern "C" void fdos_sft_prepare_open(dos_far_ptr p, unsigned flags, unsigned attrib)
+{
+    sft entry{};
+    entry.sft_psp = fdos_idata.cu_psp();
+    entry.sft_mode = flags & 0xf0ffu;
+    entry.sft_shroff = -1;
+    entry.sft_attrib = (UBYTE)(attrib | D_ARCHIVE);
+    sft_ref(p).store(entry);
+    fdos_idata.open_mode() = (UBYTE)flags;
+}
+
+extern "C" void fdos_sft_begin_disk_open(dos_far_ptr p, UBYTE drive)
+{
+    sft entry;
+    sft_ref ref(p);
+    ref.load(entry);
+    ++entry.sft_count;
+    entry.sft_flags = drive;
+    ref.store(entry);
+}
+
+extern "C" void fdos_sft_open_failed(dos_far_ptr p)
+{
+    sft entry;
+    sft_ref ref(p);
+    ref.load(entry);
+    if (entry.sft_count != 0)
+        --entry.sft_count;
+    ref.store(entry);
 }
 
 extern "C" long fdos_jft_find_free(void)
@@ -277,13 +357,19 @@ COUNT char_error(request * rq, dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
 }
 
 /* Abort, retry or fail for block devices                       */
+COUNT block_error_status(UWORD status, COUNT nDrive,
+                         dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode)
+{
+  fdos_idata.crit_err_code() = (status & S_MASK) + 0x13;
+  return CriticalError(EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE |
+                       (mode == DSKWRITE ? EFLG_WRITE : 0),
+                       nDrive, status & S_MASK, x86_lpDevice);
+}
+
 COUNT block_error(request * rq, COUNT nDrive,
                   dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode)
 {
-  internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
-  return CriticalError(EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE |
-                       (mode == DSKWRITE ? EFLG_WRITE : 0),
-                       nDrive, rq->r_status & S_MASK, x86_lpDevice);
+  return block_error_status(rq->r_status, nDrive, x86_lpDevice, mode);
 }
 
 /* common - call the clock driver */
@@ -1214,8 +1300,8 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* Get Date                                                     */
       case 0x2a:
         {
-          UWORD year;
-          UBYTE month, day;
+          UWORD year = 0;
+          UBYTE month = 0, day = 0;
           R_AL = DosGetDateRegs(&year, &month, &day);
           R_CX = year;
           R_DH = month;
@@ -1231,7 +1317,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* Get Time                                                     */
       case 0x2c:
         {
-          UBYTE hour, minute, second, hundredth;
+          UBYTE hour = 0, minute = 0, second = 0, hundredth = 0;
           DosGetTimeRegs(&hour, &minute, &second, &hundredth);
           R_CH = hour;
           R_CL = minute;
@@ -2552,14 +2638,13 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* DOS 2+ internal - TRANSLATE BIOS PARAMETER BLOCK TO DRIVE
          PARAM BLOCK: DS:SI -> BPB, ES:BP -> DPB to fill              */
       case 0x53:
+        fdos_bpb_to_dpb_guest(MK_FP(R_DS, R_SI), MK_FP(R_ES, R_BP),
 #ifdef WITHFAT32
-        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(R_DS, R_SI)),
-                   (struct dpb *) ARM_PTR (MK_FP(R_ES, R_BP)),
-                   (R_CX == 0x4558 && R_DX == 0x4152));
+                              (R_CX == 0x4558 && R_DX == 0x4152)
 #else
-        bpb_to_dpb((bpb *) ARM_PTR (MK_FP(R_DS, R_SI)),
-                   (struct dpb *) ARM_PTR (MK_FP(R_ES, R_BP)));
+                              FALSE
 #endif
+        );
         break;
 
       /* Get/Set disk serial number: original wraps generic IOCTL

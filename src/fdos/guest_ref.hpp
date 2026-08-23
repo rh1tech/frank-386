@@ -303,6 +303,185 @@ private:
     dos_far_ptr far_;
 };
 
+
+class sft_ref final : private ref_base<sft> {
+public:
+    explicit constexpr sft_ref(dos_far_ptr p)
+        : ref_base<sft>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+
+    __attribute__((always_inline)) UWORD count() const {
+        return scalar_load<UWORD>(offsetof(sft, sft_count));
+    }
+
+    void load(sft &out) const {
+#ifdef EGA128
+        auto *d = reinterpret_cast<uint8_t *>(&out);
+        for (std::size_t i = 0; i < sizeof(out); ++i)
+            d[i] = pload8(addr_ + static_cast<uint32_t>(i));
+#else
+        __builtin_memcpy(&out, reinterpret_cast<const void *>(X86_RAM_BASE + addr_), sizeof(out));
+#endif
+    }
+
+    void store(const sft &in) const {
+#ifdef EGA128
+        const auto *d = reinterpret_cast<const uint8_t *>(&in);
+        for (std::size_t i = 0; i < sizeof(in); ++i)
+            pstore8(addr_ + static_cast<uint32_t>(i), d[i]);
+#else
+        __builtin_memcpy(reinterpret_cast<void *>(X86_RAM_BASE + addr_), &in, sizeof(in));
+#endif
+    }
+};
+
+class sfttbl_ref final : private ref_base<sfttbl> {
+public:
+    explicit constexpr sfttbl_ref(dos_far_ptr p)
+        : ref_base<sfttbl>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)), far_(p) {}
+
+    __attribute__((always_inline)) UWORD count() const {
+        return scalar_load<UWORD>(offsetof(sfttbl, sftt_count));
+    }
+
+    __attribute__((always_inline)) dos_far_ptr next() const {
+        uint32_t x = scalar_load<uint32_t>(offsetof(sfttbl, sftt_next));
+        dos_far_ptr v;
+        __builtin_memcpy(&v, &x, sizeof(v));
+        return v;
+    }
+
+    __attribute__((always_inline)) dos_far_ptr entry(UWORD index) const {
+        return MK_FP(FP_SEG(far_),
+                     (UWORD)(FP_OFF(far_) + offsetof(sfttbl, sftt_table) +
+                             (uint32_t)index * sizeof(sft)));
+    }
+
+private:
+    dos_far_ptr far_;
+};
+
+class dpb_ref final : private ref_base<dpb> {
+public:
+    explicit constexpr dpb_ref(dos_far_ptr p)
+        : ref_base<dpb>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+
+#define FDOS_GUEST_RW8(name) \
+    UBYTE name() const { return scalar_load<UBYTE>(offsetof(dpb, name)); } \
+    void name(UBYTE v) const { scalar_store<UBYTE>(offsetof(dpb, name), v); }
+#define FDOS_GUEST_RW16(name) \
+    UWORD name() const { return scalar_load<UWORD>(offsetof(dpb, name)); } \
+    void name(UWORD v) const { scalar_store<UWORD>(offsetof(dpb, name), v); }
+#define FDOS_GUEST_RW32(name) \
+    ULONG name() const { return scalar_load<ULONG>(offsetof(dpb, name)); } \
+    void name(ULONG v) const { scalar_store<ULONG>(offsetof(dpb, name), v); }
+
+    FDOS_GUEST_RW8(dpb_unit)
+    FDOS_GUEST_RW8(dpb_subunit)
+    FDOS_GUEST_RW16(dpb_secsize)
+    FDOS_GUEST_RW8(dpb_clsmask)
+    FDOS_GUEST_RW8(dpb_shftcnt)
+    FDOS_GUEST_RW16(dpb_fatstrt)
+    FDOS_GUEST_RW8(dpb_fats)
+    FDOS_GUEST_RW16(dpb_dirents)
+    FDOS_GUEST_RW16(dpb_data)
+    FDOS_GUEST_RW16(dpb_size)
+    FDOS_GUEST_RW16(dpb_fatsize)
+    FDOS_GUEST_RW16(dpb_dirstrt)
+    FDOS_GUEST_RW8(dpb_mdb)
+
+    BYTE flags() const { return scalar_load<BYTE>(offsetof(dpb, dpb_flags)); }
+    void flags(BYTE v) const { scalar_store<BYTE>(offsetof(dpb, dpb_flags), v); }
+    void cluster(UWORD v) const { scalar_store<UWORD>(offsetof(dpb, dpb_cluster), v); }
+    void nfree(UWORD v) const {
+#ifdef WITHFAT32
+        scalar_store<UWORD>(offsetof(dpb, dpb_nfreeclst_un), v);
+#else
+        scalar_store<UWORD>(offsetof(dpb, dpb_nfreeclst), v);
+#endif
+    }
+    dos_far_ptr device() const { return far_load(offsetof(dpb, dpb_device)); }
+
+#ifdef WITHFAT32
+    FDOS_GUEST_RW16(dpb_xflags)
+    FDOS_GUEST_RW16(dpb_xfsinfosec)
+    FDOS_GUEST_RW16(dpb_xbackupsec)
+    FDOS_GUEST_RW32(dpb_xdata)
+    FDOS_GUEST_RW32(dpb_xsize)
+    FDOS_GUEST_RW32(dpb_xfatsize)
+    FDOS_GUEST_RW32(dpb_xrootclst)
+    FDOS_GUEST_RW32(dpb_xcluster)
+    void xnfree(ULONG v) const { scalar_store<ULONG>(offsetof(dpb, dpb_nfreeclst_un), v); }
+#endif
+
+#undef FDOS_GUEST_RW8
+#undef FDOS_GUEST_RW16
+#undef FDOS_GUEST_RW32
+
+private:
+    dos_far_ptr far_load(std::size_t off) const {
+        uint32_t x = scalar_load<uint32_t>(off);
+        dos_far_ptr p;
+        __builtin_memcpy(&p, &x, sizeof(p));
+        return p;
+    }
+};
+
+class bpb_ref final : private ref_base<bpb> {
+public:
+    explicit constexpr bpb_ref(dos_far_ptr p)
+        : ref_base<bpb>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+
+#define FDOS_GUEST_R8(name) UBYTE name() const { return scalar_load<UBYTE>(offsetof(bpb, name)); }
+#define FDOS_GUEST_R16(name) UWORD name() const { return scalar_load<UWORD>(offsetof(bpb, name)); }
+#define FDOS_GUEST_R32(name) ULONG name() const { return scalar_load<ULONG>(offsetof(bpb, name)); }
+    FDOS_GUEST_R16(bpb_nbyte)
+    FDOS_GUEST_R8(bpb_nsector)
+    FDOS_GUEST_R16(bpb_nreserved)
+    FDOS_GUEST_R8(bpb_nfat)
+    FDOS_GUEST_R16(bpb_ndirent)
+    FDOS_GUEST_R16(bpb_nsize)
+    FDOS_GUEST_R8(bpb_mdesc)
+    FDOS_GUEST_R16(bpb_nfsect)
+    FDOS_GUEST_R32(bpb_huge)
+#ifdef WITHFAT32
+    FDOS_GUEST_R32(bpb_xnfsect)
+    FDOS_GUEST_R16(bpb_xflags)
+    FDOS_GUEST_R32(bpb_xrootclst)
+    FDOS_GUEST_R16(bpb_xfsinfosec)
+    FDOS_GUEST_R16(bpb_xbackupsec)
+#endif
+#undef FDOS_GUEST_R8
+#undef FDOS_GUEST_R16
+#undef FDOS_GUEST_R32
+};
+
+class request_ref final : private ref_base<request> {
+public:
+    explicit constexpr request_ref(linear_t addr) : ref_base<request>(addr) {}
+    void length(UBYTE v) const { scalar_store<UBYTE>(offsetof(request, r_length), v); }
+    void unit(UBYTE v) const { scalar_store<UBYTE>(offsetof(request, r_unit), v); }
+    void command(UBYTE v) const { scalar_store<UBYTE>(offsetof(request, r_command), v); }
+    UWORD status() const { return scalar_load<UWORD>(offsetof(request, r_status)); }
+    void status(UWORD v) const { scalar_store<UWORD>(offsetof(request, r_status), v); }
+    void mcmdesc(BYTE v) const { scalar_store<BYTE>(offsetof(request, r_mcmdesc), v); }
+    BYTE mcretcode() const { return scalar_load<BYTE>(offsetof(request, r_mcretcode)); }
+    dos_far_ptr bpptr() const { return far_load(offsetof(request, r_bpptr)); }
+    void bpfat(dos_far_ptr p) const { far_store(offsetof(request, r_bpfat), p); }
+
+private:
+    dos_far_ptr far_load(std::size_t off) const {
+        uint32_t x = scalar_load<uint32_t>(off);
+        dos_far_ptr p;
+        __builtin_memcpy(&p, &x, sizeof(p));
+        return p;
+    }
+    void far_store(std::size_t off, dos_far_ptr p) const {
+        uint32_t x;
+        __builtin_memcpy(&x, &p, sizeof(x));
+        scalar_store<uint32_t>(off, x);
+    }
+};
+
 class dos_data_ref final {
 public:
     explicit constexpr dos_data_ref(linear_t addr) : addr_(addr) {}
@@ -314,6 +493,10 @@ public:
     __attribute__((always_inline)) scalar_proxy<UBYTE> error_mode() const { return {addr_+offsetof(dos_data,ErrorMode)}; }
     __attribute__((always_inline)) scalar_proxy<UWORD> crit_err_code() const { return {addr_+offsetof(dos_data,CritErrCode)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> default_drive() const { return {addr_+offsetof(dos_data,default_drive)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> open_mode() const { return {addr_+offsetof(dos_data,OpenMode)}; }
+    __attribute__((always_inline)) scalar_proxy<UWORD> current_sft_idx() const { return {addr_+offsetof(dos_data,current_sft_idx)}; }
+    __attribute__((always_inline)) dos_far_ptr lp_cur_sft() const { return far_load(offsetof(dos_data,lpCurSft)); }
+    __attribute__((always_inline)) void lp_cur_sft(dos_far_ptr v) const { far_store(offsetof(dos_data,lpCurSft),v); }
     __attribute__((always_inline)) dos_far_ptr current_ldt() const { return far_load(offsetof(dos_data,current_ldt)); }
     __attribute__((always_inline)) void current_ldt(dos_far_ptr v) const { far_store(offsetof(dos_data,current_ldt),v); }
     __attribute__((always_inline)) dos_far_ptr user_r() const { return far_load(offsetof(dos_data,user_r)); }

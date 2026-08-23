@@ -50,10 +50,12 @@ typedef struct native_tsm_slot
     uint32_t next_us;
     unsigned char in_use;
     unsigned char paused;
+    unsigned char skip_late;
 } native_tsm_slot;
 
 static native_tsm_slot native_tsm_slots[NATIVE_TSM_SLOTS];
 static int native_tsm_dispatching;
+static uint32_t native_tsm_current_us;
 
 void TSM_Install(int rate)
 {
@@ -62,7 +64,8 @@ void TSM_Install(int rate)
     native_tsm_dispatching = 0;
 }
 
-int TSM_NewService(int (*service)(void), int rate, int priority, int pause)
+static int TSM_NewServiceCommon(int (*service)(void), int rate, int priority,
+                                int pause, int skip_late)
 {
     uint32_t now;
     int id;
@@ -78,14 +81,26 @@ int TSM_NewService(int (*service)(void), int rate, int priority, int pause)
         return -1;
 
     now = dos_yield();
+    native_tsm_current_us = now;
     native_tsm_slots[id].service = service;
     native_tsm_slots[id].period_us = 1000000u / (uint32_t)rate;
     if (native_tsm_slots[id].period_us == 0)
         native_tsm_slots[id].period_us = 1;
     native_tsm_slots[id].next_us = now + native_tsm_slots[id].period_us;
     native_tsm_slots[id].paused = pause ? 1 : 0;
+    native_tsm_slots[id].skip_late = skip_late ? 1 : 0;
     native_tsm_slots[id].in_use = 1;
     return id;
+}
+
+int TSM_NewService(int (*service)(void), int rate, int priority, int pause)
+{
+    return TSM_NewServiceCommon(service, rate, priority, pause, 0);
+}
+
+int TSM_NewServiceSkipLate(int (*service)(void), int rate, int priority, int pause)
+{
+    return TSM_NewServiceCommon(service, rate, priority, pause, 1);
 }
 
 void TSM_DelService(int id)
@@ -105,8 +120,9 @@ void TSM_ResumeService(int id)
     if (id >= 0 && id < NATIVE_TSM_SLOTS && native_tsm_slots[id].in_use)
     {
         native_tsm_slots[id].paused = 0;
+        native_tsm_current_us = dos_yield();
         native_tsm_slots[id].next_us =
-            dos_yield() + native_tsm_slots[id].period_us;
+            native_tsm_current_us + native_tsm_slots[id].period_us;
     }
 }
 
@@ -122,6 +138,7 @@ uint32_t TSM_YieldTime(void)
     int id;
 
     now = dos_yield();
+    native_tsm_current_us = now;
     if (native_tsm_dispatching)
         return now;
 
@@ -135,6 +152,18 @@ uint32_t TSM_YieldTime(void)
             continue;
 
         /* Signed subtraction keeps the comparison correct across uint32 wrap. */
+        if (slot->skip_late)
+        {
+            if ((int32_t)(now - slot->next_us) >= 0)
+            {
+                uint32_t late = now - slot->next_us;
+                uint32_t periods = late / slot->period_us + 1u;
+                slot->next_us += periods * slot->period_us;
+                slot->service();
+            }
+            continue;
+        }
+
         while ((int32_t)(now - slot->next_us) >= 0)
         {
             slot->next_us += slot->period_us;
@@ -151,6 +180,11 @@ uint32_t TSM_YieldTime(void)
     }
     native_tsm_dispatching = 0;
     return now;
+}
+
+uint32_t TSM_CurrentTime(void)
+{
+    return native_tsm_current_us;
 }
 
 void TSM_Yield(void)
@@ -300,6 +334,20 @@ char *strcat(char *dst, const char *src)
     while ((*dst++ = *src++) != '\0')
         ;
     return ret;
+}
+
+char *strchr(const char *s, int c)
+{
+    char ch = (char)c;
+
+    for (;;)
+    {
+        if (*s == ch)
+            return (char *)s;
+        if (*s == '\0')
+            return NULL;
+        ++s;
+    }
 }
 
 int strcmp(const char *a, const char *b)

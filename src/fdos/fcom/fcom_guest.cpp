@@ -11,11 +11,17 @@
 
 #define new fdos_new
 #define strchr fdos_strchr_compat
+#ifndef _Static_assert
 #define _Static_assert static_assert
+#define FDOS_LOCAL_STATIC_ASSERT_MACRO 1
+#endif
 extern "C" {
 #include "fdos/hdrs.h"
 }
+#ifdef FDOS_LOCAL_STATIC_ASSERT_MACRO
 #undef _Static_assert
+#undef FDOS_LOCAL_STATIC_ASSERT_MACRO
+#endif
 #undef strchr
 #undef new
 #ifdef load

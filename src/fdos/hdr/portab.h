@@ -313,12 +313,12 @@ typedef char dos_far_ptr_size_check[ // like static assert
 #define PASCAL
 #define FAR
 #define far
-#define REG register
+#define REG
 #define GLOBAL extern
 #define ASM
 #define WIN31SUPPORT 1
 #define BSS_INIT(x) = x
-#define MK_FP(seg, off) ((dos_far_ptr){ .offset = (off), .segment = (seg)  })
+#define MK_FP(seg, off) ((dos_far_ptr){ .offset = (uint16_t)(off), .segment = (uint16_t)(seg) })
 #define FP_SEG(fp)             ((fp).segment)
 #define FP_OFF(fp)             ((fp).offset)
 #define ADD_OFF(p, n) MK_FP(FP_SEG(p), FP_OFF(p) + (n))
@@ -339,14 +339,16 @@ typedef char dos_far_ptr_size_check[ // like static assert
 static inline dos_far_ptr adjust_far_x86(dos_far_ptr p) {
     if (FP_SEG(p) == 0xffff)   /* HMA selector: leave as-is, like upstream */
         return p;
-    return MK_FP(FP_SEG(p) + (FP_OFF(p) >> 4), FP_OFF(p) & 0x000f);
+    return MK_FP((uint16_t)(FP_SEG(p) + (FP_OFF(p) >> 4)),
+                 (uint16_t)(FP_OFF(p) & 0x000f));
 }
 static inline dos_far_ptr add_far_x86(dos_far_ptr p, uint32_t n) {
     /* n can be up to 0x10000 (a full 64K transfer); do the add in 32 bits
        before normalising so it cannot itself truncate. */
     uint32_t off = (uint32_t)FP_OFF(p) + n;
-    return adjust_far_x86(MK_FP(FP_SEG(p) + (uint16_t)(off >> 4),
-                                (uint16_t)(off & 0x000f)));
+    return adjust_far_x86(MK_FP(
+        (uint16_t)(FP_SEG(p) + (uint16_t)(off >> 4)),
+        (uint16_t)(off & 0x000f)));
 }
 ///#define DHDR_END ((void*)(uintptr_t)-1)
 #define EFFECTIVE(a) (((uint32_t)(a).segment << 4) + (a).offset)
@@ -448,7 +450,7 @@ We might even deal with a pre-ANSI compiler. This will certainly not compile.
 #define FAR                     /* linear architecture  */
 #define NEAR                    /*    "        "        */
 #define INRPT          interrupt
-#define REG            register
+#define REG
 #define API            int      /* linear architecture  */
 #define NONNATIVE
 #define PARASIZE       4096     /* "paragraph" size     */
@@ -471,7 +473,7 @@ typedef unsigned       size_t;
 #define NEAR           near     /*    "          "      */
 #define INRPT          interrupt
 #define CONST          const
-#define REG            register
+#define REG
 #define API            int far pascal   /* segment architecture */
 #define NATIVE
 #define PARASIZE       16       /* "paragraph" size     */

@@ -1,4 +1,5 @@
 #include "hdrs.h"
+#include "fatfs_guest.h"
 
 static const char *media_check_source = "?";
 #if DIAG
@@ -28,18 +29,17 @@ extern volatile unsigned int dos_diag_kernel_code;
     self-consistent wherever it lives. Same proven pattern as lfnapi.c's
     lfn_fnode_slot table. fnode_slot(i) returns the native view.
 */
-static dos_far_ptr x86_fnode;   /* -> struct f_node[2] in guest RAM */
+/* f_node is kernel-only transient state.  It must not live in pageable guest
+   RAM: callers keep the pointer across FAT/cache/device accesses. */
+static struct f_node fnode[2];
 
 void fnode_init(void)
 {
-  if (far_is_null(x86_fnode))
-    x86_fnode = DynAlloc("fnode", 2, sizeof(struct f_node));
 }
 
-/* Native view of scratch node i (0 or 1). Valid only after fnode_init(). */
 f_node_ptr fnode_slot(int i)
 {
-  return (f_node_ptr)ARM_PTR(ADD_OFF(x86_fnode, (ULONG)i * sizeof(struct f_node)));
+  return &fnode[i];
 }
 
 /* /// Added - Ron Cemer */
@@ -130,21 +130,20 @@ STATIC int merge_file_changes(f_node_ptr fnp, int collect)
 */
 STATIC f_node_ptr sft_to_fnode(int fd)
 {
-  sft* sftp = (sft*) ARM_PTR (idx_to_sft(fd));
+  sft* sftp = (sft*) ARM_PTR(idx_to_sft(fd));
   f_node_ptr fnp = fnode_slot(0);
+  CLUSTER start_cluster;
 
+  /* Read every SFT field before mapping any other guest object. */
   fnp->f_sft_idx = (UBYTE)fd;
-
   fnp->f_flags = sftp->sft_flags;
-
   fnp->f_dir.dir_attrib = sftp->sft_attrib;
   memcpy(fnp->f_dir.dir_name, sftp->sft_name, FNAME_SIZE + FEXT_SIZE);
   fnp->f_dir.dir_time = sftp->sft_time;
   fnp->f_dir.dir_date = sftp->sft_date;
   fnp->f_dir.dir_size = sftp->sft_size;
   fnp->f_dpb = sftp->sft_dcb;
-  setdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir, sftp->sft_stclust);
-
+  start_cluster = sftp->sft_stclust;
   fnp->f_diridx = sftp->sft_diridx;
   fnp->f_dirsector = sftp->sft_dirsector;
   fnp->f_offset = sftp->sft_posit;
@@ -155,6 +154,9 @@ STATIC f_node_ptr sft_to_fnode(int fd)
 #else
   fnp->f_cluster_offset = sftp->sft_relclust;
 #endif
+
+  /* sftp is dead before this second guest mapping. */
+  setdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir, start_cluster);
   return fnp;
 }
 
@@ -239,18 +241,20 @@ STATIC COUNT dos_extend(f_node_ptr fnp, BOOL emptywrite)
 
 STATIC void fnode_to_sft(f_node_ptr fnp)
 {
+  CLUSTER start_cluster =
+      getdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir);
   dos_far_ptr _sftp = idx_to_sft(fnp->f_sft_idx);
-  sft *sftp = (sft*) ARM_PTR (_sftp);
+  sft *sftp = (sft*)ARM_PTR(_sftp);
 
+  /* fnp is native kernel scratch, so the DPB mapping above cannot invalidate
+     it.  Once SFT is mapped, no further guest object is mapped here. */
   sftp->sft_flags = fnp->f_flags;
-
   sftp->sft_attrib = fnp->f_dir.dir_attrib;
   memcpy(sftp->sft_name, fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE);
   sftp->sft_time = fnp->f_dir.dir_time;
   sftp->sft_date = fnp->f_dir.dir_date;
   sftp->sft_size = fnp->f_dir.dir_size;
-  sftp->sft_stclust = getdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir);
-
+  sftp->sft_stclust = start_cluster;
   sftp->sft_diridx = fnp->f_diridx;
   sftp->sft_dirsector = fnp->f_dirsector;
   sftp->sft_dcb = fnp->f_dpb;
@@ -659,31 +663,12 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
 
 long rwblock(COUNT fd, dos_far_ptr x86_buffer, UCOUNT count, int mode)
 {
-  UWORD saved_sp = CPU_SP;
-  UWORD work_sp = (UWORD)((saved_sp - sizeof(struct rwblock_workspace)) &
-                          (UWORD)~3u);
-  struct rwblock_workspace *work;
-  long result;
+  struct rwblock_workspace work;
 
-  /*
-   * The workspace contains only DOS-process state: current fnode/cache
-   * pointers, transfer counters and the complete-sector fast-path state.
-   * Reserve it below the active guest SS:SP so nested FAT/block/device calls
-   * naturally use lower addresses and the reservation remains valid until
-   * the operation completes.  This also removes the old function-static
-   * startoffset, which was shared by unrelated processes and prevented
-   * correct nesting.
-   *
-   * Deliberately retained on the native stack: the four call arguments, the
-   * workspace pointer, saved SP and return value.  Moving those scalars would
-   * add guest-memory traffic without materially reducing the ABI frame.
-   */
-  CPU_SP = work_sp;
-  work = (struct rwblock_workspace *)ARM_PTR(MK_FP(CPU_SS, work_sp));
-  work->x86_buffer = x86_buffer;
-  result = rwblock_worker(fd, count, mode, work);
-  CPU_SP = saved_sp;
-  return result;
+  /* Kernel transient state cannot be kept through a raw pointer into pageable
+     guest SS:SP: any FAT/cache/device guest access may remap that page. */
+  work.x86_buffer = x86_buffer;
+  return rwblock_worker(fd, count, mode, &work);
 }
 
 void dos_merge_file_changes(int fd)
@@ -1075,36 +1060,26 @@ dos_far_ptr/*struct dpb*/ get_dpb(COUNT dsk)
 
 STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
 {
-  struct dpb *dpbp = (struct dpb *)ARM_PTR(_dpbp);
  retry:
-  MediaReqHdrD.r_length = sizeof(request);
-  MediaReqHdrD.r_unit = dpbp->dpb_subunit;
-  MediaReqHdrD.r_command = command;
-  MediaReqHdrD.r_mcmdesc = dpbp->dpb_mdb;
-  MediaReqHdrD.r_status = 0;
+  fdos_media_request_prepare(_dpbp, command);
 
-  if (command == C_BLDBPB) /* help USBASPI.SYS & DI1000DD.SYS (TE) */
-    MediaReqHdrD.r_bpfat = DiskTransferBuffer;
-
-  drv_watch_set_dpb_context(_dpbp, command, dpbp->dpb_unit, dpbp->dpb_subunit, media_check_source);
+  drv_watch_set_dpb_context(_dpbp, command, fdos_dpb_unit(_dpbp),
+                            fdos_dpb_subunit(_dpbp),
+                            media_check_source);
 
   dpb_watch_check("rqblockio-before-execrh", _dpbp);
-  execrh(x86_FAR_PTR(DOS_PSP, &MediaReqHdrD) /* -> request */, dpbp->dpb_device);
+  execrh(fdos_media_request_far(), fdos_dpb_device(_dpbp));
   dpb_watch_check("rqblockio-after-execrh", _dpbp);
-  if ((MediaReqHdrD.r_status & S_ERROR) || !(MediaReqHdrD.r_status & S_DONE))
+  UWORD status = fdos_media_request_status();
+  if ((status & S_ERROR) || !(status & S_DONE))
   {
-    /*
-     * Empty removable media is not a recoverable device-driver fault here.
-     * Return it to the filesystem immediately instead of entering INT 24h;
-     * mounting an image is the only operation that can make the drive ready.
-     */
-    if ((MediaReqHdrD.r_status & (S_ERROR | S_MASK)) ==
-        (S_ERROR | E_NOTRDY))
+    if ((status & (S_ERROR | S_MASK)) == (S_ERROR | E_NOTRDY))
       return DE_INVLDDRV;
 
     FOREVER
     {
-      switch (block_error(&MediaReqHdrD, dpbp->dpb_unit, dpbp->dpb_device, 0))
+      switch (block_error_status(status, fdos_dpb_unit(_dpbp),
+                                 fdos_dpb_device(_dpbp), 0))
       {
       case ABORT:
       case FAIL:
@@ -1287,52 +1262,43 @@ COUNT media_check_tagged(dos_far_ptr /*struct dpb*/ _dpbp, const char *source)
     return DE_INVLDDRV;
   dpb_watch_check("media_check-entry", _dpbp);
 
-  /* First test if anyone has changed the removable media         */
   int ret = rqblockio(C_MEDIACHK, _dpbp);
   dpb_watch_check("media_check-after-C_MEDIACHK", _dpbp);
   if (ret < SUCCESS)
     return ret;
 
+  const UBYTE unit = fdos_dpb_unit(_dpbp);
   dpb_watch_check("media_check-before-switch", _dpbp);
-  struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp);
-  switch (MediaReqHdrD.r_mcretcode | dpbp->dpb_flags)
+  switch (fdos_media_request_mcretcode() | fdos_dpb_flags(_dpbp))
   {
     case M_NOT_CHANGED:
-      /* It was definitely not changed, so ignore it          */
       dpb_watch_check("media_check-case-not-changed", _dpbp);
       return SUCCESS;
 
-      /* If it is forced or the media may have changed,       */
-      /* rebuild the bpb                                      */
     case M_DONT_KNOW:
       dpb_watch_check("media_check-case-dont-know", _dpbp);
-      /* IBM PCDOS technical reference says to call BLDBPB if */
-      /* there are no used buffers                            */
-      if (dirty_buffers(dpbp->dpb_unit)) {
+      if (dirty_buffers(unit)) {
         dpb_watch_check("media_check-after-dirty_buffers", _dpbp);
         return SUCCESS;
       }
       dpb_watch_check("media_check-after-dirty_buffers2", _dpbp);
-      /* If it definitely changed, don't know (falls through) */
-      /* or has been changed, rebuild the bpb.                */
       __attribute__((fallthrough));
-    /* case M_CHANGED: */
     default:
       dpb_watch_check("media_check-case-default-before-setinvld", _dpbp);
-      setinvld(dpbp->dpb_unit);
+      setinvld(unit);
       dpb_watch_check("media_check-after-setinvld", _dpbp);
       ret = rqblockio(C_BLDBPB, _dpbp);
       dpb_watch_check("media_check-after-C_BLDBPB", _dpbp);
       if (ret < SUCCESS)
         return ret;
+      {
+        dos_far_ptr bpbp = fdos_media_request_bpptr();
 #ifdef WITHFAT32
-      /* extend dpb only for internal or FAT32 devices */
-      bpb_to_dpb((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr), dpbp,
-                 ((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr))->bpb_nfsect == 0
-      );
+        fdos_bpb_to_dpb_guest(bpbp, _dpbp, fdos_bpb_is_fat32(bpbp));
 #else
-      bpb_to_dpb((bpb *) ARM_PTR(MediaReqHdrD.r_bpptr), dpbp);
+        fdos_bpb_to_dpb_guest(bpbp, _dpbp, FALSE);
 #endif
+      }
       dpb_watch_check("media_check-after-bpb_to_dpb", _dpbp);
       return SUCCESS;
   }

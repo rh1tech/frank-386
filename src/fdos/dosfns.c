@@ -4,6 +4,11 @@
 long fdos_jft_find_free(void);
 int fdos_jft_get(UCOUNT hndl);
 COUNT fdos_jft_set(UCOUNT hndl, UBYTE sft_idx);
+dos_far_ptr fdos_sft_find_free(COUNT *sft_idx);
+int fdos_sft_index_to_far(int index, dos_far_ptr *out);
+void fdos_sft_prepare_open(dos_far_ptr p, unsigned flags, unsigned attrib);
+void fdos_sft_begin_disk_open(dos_far_ptr p, UBYTE drive);
+void fdos_sft_open_failed(dos_far_ptr p);
 
 #if DIAG
 extern volatile unsigned int dos_diag_kernel_code;
@@ -129,32 +134,7 @@ STATIC void set_fcbname(const char *path)
 */
 STATIC dos_far_ptr/*sft*/ get_free_sft(COUNT *sft_idx)
 {
-  COUNT sys_idx = 0;
-  dos_far_ptr x86_sp = LoL->sfthead;
-
-  for (; !far_is_end(x86_sp); )
-  {
-    sfttbl *sp = (sfttbl *)ARM_PTR(x86_sp);
-    REG COUNT i = sp->sftt_count;
-    sft *sfti = sp->sftt_table;
-
-    for (; --i >= 0; sys_idx++, sfti++)
-    {
-      if (sfti->sft_count == 0)
-      {
-        *sft_idx = sys_idx;
-
-        /* MS NET uses this on open/creat TE */
-        internal_data->current_sft_idx = sys_idx;
-
-        return MK_FP( FP_SEG(x86_sp), FP_OFF(x86_sp) + ((uintptr_t)sfti - (uintptr_t)sp) ) ;
-      }
-    }
-
-    x86_sp = sp->sftt_next;
-  }
-  /* If not found, return an error                */
-  return MK_FP(-1, -1);
+  return fdos_sft_find_free(sft_idx);
 }
 
 
@@ -290,16 +270,9 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   dpb_watch_check_chain("DosOpenSft 3");
   if (far_is_end(lpCurSft))
     return DE_TOOMANY;
-  sft* sftp = (sft*)ARM_PTR(lpCurSft);
-  memset(sftp, 0, sizeof(sft));
+  fdos_sft_prepare_open(lpCurSft, flags, attrib);
+  attrib |= D_ARCHIVE;
   dpb_watch_check_chain("DosOpenSft 4");
-
-  sftp->sft_psp = internal_data->cu_psp;
-  sftp->sft_mode = flags & 0xf0ff;
-  internal_data->OpenMode = (BYTE) flags;
-
-  sftp->sft_shroff = -1;        /* /// Added for SHARE - Ron Cemer */
-  sftp->sft_attrib = attrib = attrib | D_ARCHIVE;
 
   dpb_watch_check_chain("DosOpenSft 5");
   /* check for a (local) device */
@@ -307,6 +280,9 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
       dos_far_ptr dhp = IsDevice((const char *)ARM_PTR(fname));
       dpb_watch_check_chain("DosOpenSft 6");
       if (EFFECTIVE(dhp) != 0) {
+        /* DeviceOpenSft() is a legacy leaf path.  Map the SFT only now,
+           after IsDevice() has finished touching guest memory. */
+        sft *sftp = (sft *)ARM_PTR(lpCurSft);
         int rc = DeviceOpenSft(dhp, sftp);
         dpb_watch_check_chain("DosOpenSft 7");
         /* check the status code returned by the
@@ -369,6 +345,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 /* /// Added for SHARE.  - Ron Cemer */
   if (IsShareInstalled(TRUE))
   {
+    sft *sftp = (sft *)ARM_PTR(lpCurSft);
     if ((sftp->sft_shroff =
          share_open_check(x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
                           internal_data->cu_psp,
@@ -378,21 +355,25 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 
 /* /// End of additions for SHARE.  - Ron Cemer */
 
-  sftp->sft_count++;
-  sftp->sft_flags = open_path[0] - 'A';
+  fdos_sft_begin_disk_open(lpCurSft, (UBYTE)(open_path[0] - 'A'));
   long open_result = dos_open(open_path, flags, attrib, sft_idx);
   dpb_watch_check_chain("DosOpenSft 10");
   if (open_result < 0)
   {
 /* /// Added for SHARE *** CURLY BRACES ADDED ALSO!!! ***.  - Ron Cemer */
     /* if we allocated a share slot above, but open failed, free slot */
-    if (sftp->sft_shroff >= 0)  /* SHARE installed status can't change since check above */
+    if (IsShareInstalled(TRUE))
     {
-      share_close_file(sftp->sft_shroff);
-      sftp->sft_shroff = -1;
+      sft *sftp = (sft *)ARM_PTR(lpCurSft);
+      if (sftp->sft_shroff >= 0)
+      {
+        share_close_file(sftp->sft_shroff);
+        sftp = (sft *)ARM_PTR(lpCurSft);
+        sftp->sft_shroff = -1;
+      }
     }
 /* /// End of additions for SHARE.  - Ron Cemer */
-    sftp->sft_count--;
+    fdos_sft_open_failed(lpCurSft);
     return open_result;
   }
   dpb_watch_check_chain("DosOpenSft 11");
@@ -415,33 +396,10 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 */
 int idx_to_sft_(int SftIndex)
 {
-  dos_far_ptr block;
-  sfttbl *sp;
-
-   internal_data->lpCurSft = MK_FP(0xffff, 0xffff);
-  if (SftIndex < 0)
-    return -1;
-
-    /* Find the SFT block containing this system file number. */
-  for (block = LoL->sfthead; !far_is_end(block); block = sp->sftt_next)
-  {
-    sp = (sfttbl *)ARM_PTR(block);
-
-    if (SftIndex < sp->sftt_count)
-    {
-      internal_data->lpCurSft =
-          MK_FP(FP_SEG(block),
-                FP_OFF(block) + offsetof(sfttbl, sftt_table)
-                              + SftIndex * sizeof(sft));
-      return SftIndex;
-    }
-
-    SftIndex -= sp->sftt_count;
-  }
-
-  /* If not found, return an error                */
-  return -1;
+  dos_far_ptr entry;
+  return fdos_sft_index_to_far(SftIndex, &entry);
 }
+
 
 /*
     get_sft_idx(hndl) - translate a DOS file handle (as seen by the

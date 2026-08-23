@@ -539,6 +539,7 @@ dos_far_ptr getddt_far(int dev);
 /* error.c */
 COUNT char_error(request * rq, dos_far_ptr /* -> struct dhdr */ x86_lpDevice);
 COUNT block_error(request * rq, COUNT nDrive, dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode);
+COUNT block_error_status(UWORD status, COUNT nDrive, dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode);
 /* sysclk.c */
 WORD ASMCFUNC FAR clk_driver(rqptr rp);
 

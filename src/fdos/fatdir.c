@@ -38,6 +38,7 @@
 #include "hdr/network.h"
 #include "init-mod.h"
 #include "dyndata.h"
+#include "fatfs_guest.h"
 
 #define printf(...) dos_printf(__VA_ARGS__)
 
@@ -63,11 +64,8 @@ VOID dir_init_fnode(f_node_ptr fnp, CLUSTER dirstart)
 
   /* root directory */
 #ifdef WITHFAT32
-  if (dirstart == 0) {
-    struct dpb* dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
-    if (ISFAT32(dpb))
-      dirstart = dpb->dpb_xrootclst;
-  }
+  if (dirstart == 0)
+    dirstart = fdos_dpb_root_cluster(fnp->f_dpb);
 #endif
   fnp->f_cluster = fnp->f_dmp->dm_dircluster = dirstart;
 }
@@ -104,7 +102,7 @@ STATIC void swap_deleted(char *name)
 COUNT dir_read(REG f_node_ptr fnp)
 {
   struct buffer *bp;
-  REG UWORD secsize = ((struct dpb*)ARM_PTR(fnp->f_dpb))->dpb_secsize;
+  const UWORD secsize = fdos_dpb_secsize(fnp->f_dpb);
   unsigned sector;
   unsigned entry = fnp->f_dmp->dm_entry;
 
@@ -117,13 +115,14 @@ COUNT dir_read(REG f_node_ptr fnp)
   /* dirent portion of the fnode, set the SFT_FCLEAN bit and leave,*/
   /* but only for root directories                                */
 
-  struct dpb* dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
   if (fnp->f_dmp->dm_dircluster == 0)
   {
-    if (entry >= dpb->dpb_dirents)
+    const UWORD dirents = fdos_dpb_dirents(fnp->f_dpb);
+    if (entry >= dirents)
       return DE_SEEK;
 
-    fnp->f_dirsector = entry / (secsize / DIRENT_SIZE) + dpb->dpb_dirstrt;
+    fnp->f_dirsector = entry / (secsize / DIRENT_SIZE) +
+                       fdos_dpb_dirstrt(fnp->f_dpb);
   }
   else
   {
@@ -135,15 +134,17 @@ COUNT dir_read(REG f_node_ptr fnp)
     if (map_cluster(fnp, XFR_READ) != SUCCESS)
       return DE_SEEK;
 
-    /* Compute the block within the cluster and the */
-    /* offset within the block.                     */
-    sector = (UBYTE)(fnp->f_offset / secsize) & dpb->dpb_clsmask;
+    /* Re-read DPB geometry through the C++ wrapper after map_cluster():
+       FAT/cache accesses above may have remapped the pageable DPB. */
+    sector = (UBYTE)(fnp->f_offset / secsize) &
+             fdos_dpb_clsmask(fnp->f_dpb);
 
-    fnp->f_dirsector = clus2phys(fnp->f_cluster, dpb) + sector;
+    fnp->f_dirsector = fdos_dpb_clus2phys(fnp->f_dpb, fnp->f_cluster) +
+                       sector;
     /* Get the block we need from cache             */
   }
 
-  bp = getblock(fnp->f_dirsector, dpb->dpb_unit);
+  bp = getblock(fnp->f_dirsector, fdos_dpb_unit(fnp->f_dpb));
 
   /* Now that we have the block for our entry, get the    */
   /* directory entry.                                     */

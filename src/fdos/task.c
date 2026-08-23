@@ -118,13 +118,15 @@ static inline void task_guest_write(uint32_t addr, const void *src, size_t len)
 static inline dos_far_ptr task_guest_read_far(uint32_t addr)
 {
   dos_far_ptr v;
-  task_guest_read(addr, &v, sizeof(v));
+  v.offset = pload16(addr);
+  v.segment = pload16(addr + 2u);
   return v;
 }
 
 static inline void task_guest_write_far(uint32_t addr, dos_far_ptr v)
 {
-  task_guest_write(addr, &v, sizeof(v));
+  pstore16(addr, v.offset);
+  pstore16(addr + 2u, v.segment);
 }
 
 static const uint32_t task_idata_linear =

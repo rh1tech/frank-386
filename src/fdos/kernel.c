@@ -144,13 +144,15 @@ static void kernel_guest_fill(uint32_t addr, UBYTE value, size_t len)
 static dos_far_ptr kernel_guest_read_far(uint32_t addr)
 {
   dos_far_ptr p;
-  kernel_guest_read(addr, &p, sizeof(p));
+  p.offset = pload16(addr);
+  p.segment = pload16(addr + 2u);
   return p;
 }
 
 static void kernel_guest_write_far(uint32_t addr, dos_far_ptr p)
 {
-  kernel_guest_write(addr, &p, sizeof(p));
+  pstore16(addr, p.offset);
+  pstore16(addr + 2u, p.segment);
 }
 
 static UBYTE kernel_lol_read8(size_t off)
