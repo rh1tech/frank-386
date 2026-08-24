@@ -251,16 +251,22 @@ private:
 class psp_ref final {
 public:
     explicit constexpr psp_ref(seg s) : addr_(static_cast<linear_t>(s) << 4) {}
-    __attribute__((always_inline)) dos_far_ptr stack() const { dos_far_ptr v; uint32_t x=scalar_proxy<uint32_t>(addr_+offsetof(psp,ps_stack)); __builtin_memcpy(&v,&x,sizeof(v)); return v; }
-    __attribute__((always_inline)) void stack(dos_far_ptr v) const { uint32_t x; __builtin_memcpy(&x,&v,sizeof(x)); scalar_proxy<uint32_t>(addr_+offsetof(psp,ps_stack))=x; }
+    __attribute__((always_inline)) dos_far_ptr stack() const {
+        const UWORD offset = scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_stack));
+        const UWORD segment = scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_stack) + sizeof(UWORD));
+        return MK_FP(segment, offset);
+    }
+    __attribute__((always_inline)) void stack(dos_far_ptr v) const {
+        scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_stack)) = FP_OFF(v);
+        scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_stack) + sizeof(UWORD)) = FP_SEG(v);
+    }
     __attribute__((always_inline)) UWORD max_files() const {
         return scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_maxfiles));
     }
     __attribute__((always_inline)) dos_far_ptr file_table() const {
-        dos_far_ptr v;
-        uint32_t x = scalar_proxy<uint32_t>(addr_ + offsetof(psp, ps_filetab));
-        __builtin_memcpy(&v, &x, sizeof(v));
-        return v;
+        const UWORD offset = scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_filetab));
+        const UWORD segment = scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_filetab) + sizeof(UWORD));
+        return MK_FP(segment, offset);
     }
 private: linear_t addr_;
 };
@@ -355,25 +361,29 @@ public:
     __attribute__((always_inline)) UWORD count() const {
         return scalar_load<UWORD>(offsetof(sft, sft_count));
     }
-
-    void read_struct(sft &out) const {
-#ifdef EGA128
-        auto *d = reinterpret_cast<uint8_t *>(&out);
-        for (std::size_t i = 0; i < sizeof(out); ++i)
-            d[i] = pload8(addr_ + static_cast<uint32_t>(i));
-#else
-        __builtin_memcpy(&out, reinterpret_cast<const void *>(X86_RAM_BASE + addr_), sizeof(out));
-#endif
+    __attribute__((always_inline)) void count(UWORD v) const {
+        scalar_store<UWORD>(offsetof(sft, sft_count), v);
     }
-
-    void store(const sft &in) const {
-#ifdef EGA128
-        const auto *d = reinterpret_cast<const uint8_t *>(&in);
-        for (std::size_t i = 0; i < sizeof(in); ++i)
-            pstore8(addr_ + static_cast<uint32_t>(i), d[i]);
-#else
-        __builtin_memcpy(reinterpret_cast<void *>(X86_RAM_BASE + addr_), &in, sizeof(in));
-#endif
+    __attribute__((always_inline)) void mode(UWORD v) const {
+        scalar_store<UWORD>(offsetof(sft, sft_mode), v);
+    }
+    __attribute__((always_inline)) void attrib(UBYTE v) const {
+        scalar_store<UBYTE>(offsetof(sft, sft_attrib), v);
+    }
+    __attribute__((always_inline)) void flags(UWORD v) const {
+        scalar_store<UWORD>(offsetof(sft, sft_flags), v);
+    }
+    __attribute__((always_inline)) void psp(UWORD v) const {
+        scalar_store<UWORD>(offsetof(sft, sft_psp), v);
+    }
+    __attribute__((always_inline)) WORD shroff() const {
+        return scalar_load<WORD>(offsetof(sft, sft_shroff));
+    }
+    __attribute__((always_inline)) void shroff(WORD v) const {
+        scalar_store<WORD>(offsetof(sft, sft_shroff), v);
+    }
+    __attribute__((always_inline)) void clear() const {
+        guest_fill_block(addr_, 0, sizeof(sft));
     }
 };
 
@@ -387,10 +397,9 @@ public:
     }
 
     __attribute__((always_inline)) dos_far_ptr next() const {
-        uint32_t x = scalar_load<uint32_t>(offsetof(sfttbl, sftt_next));
-        dos_far_ptr v;
-        __builtin_memcpy(&v, &x, sizeof(v));
-        return v;
+        const UWORD offset = scalar_load<UWORD>(offsetof(sfttbl, sftt_next));
+        const UWORD segment = scalar_load<UWORD>(offsetof(sfttbl, sftt_next) + sizeof(UWORD));
+        return MK_FP(segment, offset);
     }
 
     __attribute__((always_inline)) dos_far_ptr entry(UWORD index) const {
@@ -477,10 +486,9 @@ public:
 
 private:
     __attribute__((always_inline)) dos_far_ptr far_load(std::size_t off) const {
-        uint32_t x = scalar_load<uint32_t>(off);
-        dos_far_ptr p;
-        __builtin_memcpy(&p, &x, sizeof(p));
-        return p;
+        const UWORD offset = scalar_load<UWORD>(off);
+        const UWORD segment = scalar_load<UWORD>(off + sizeof(UWORD));
+        return MK_FP(segment, offset);
     }
 };
 
@@ -646,15 +654,13 @@ public:
 
 private:
     __attribute__((always_inline)) dos_far_ptr far_load(std::size_t off) const {
-        uint32_t x = scalar_load<uint32_t>(off);
-        dos_far_ptr p{};
-        __builtin_memcpy(&p, &x, sizeof(p));
-        return p;
+        const UWORD offset = scalar_load<UWORD>(off);
+        const UWORD segment = scalar_load<UWORD>(off + sizeof(UWORD));
+        return MK_FP(segment, offset);
     }
     __attribute__((always_inline)) void far_store(std::size_t off, dos_far_ptr p) const {
-        uint32_t x;
-        __builtin_memcpy(&x, &p, sizeof(x));
-        scalar_store<uint32_t>(off, x);
+        scalar_store<UWORD>(off, FP_OFF(p));
+        scalar_store<UWORD>(off + sizeof(UWORD), FP_SEG(p));
     }
 };
 

@@ -303,12 +303,12 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   if (far_is_end(lpCurSft))
     return DE_TOOMANY;
   {
-    sft entry{};
-    entry.sft_psp = dosfns_idata.cu_psp();
-    entry.sft_mode = flags & 0xf0ffu;
-    entry.sft_shroff = -1;
-    entry.sft_attrib = (UBYTE)(attrib | D_ARCHIVE);
-    sft_ref(lpCurSft).store(entry);
+    const sft_ref ref(lpCurSft);
+    ref.clear();
+    ref.psp(dosfns_idata.cu_psp());
+    ref.mode((UWORD)(flags & 0xf0ffu));
+    ref.shroff(-1);
+    ref.attrib((UBYTE)(attrib | D_ARCHIVE));
     dosfns_idata.open_mode() = (UBYTE)flags;
   }
   attrib |= D_ARCHIVE;
@@ -385,23 +385,20 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 /* /// Added for SHARE.  - Ron Cemer */
   if (IsShareInstalled(TRUE))
   {
-    sft *sftp = (sft *)ARM_PTR(lpCurSft);
-    if ((sftp->sft_shroff =
-         share_open_check(x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
-                          internal_data->cu_psp,
-                          flags & 0x03, (flags >> 4) & 0x07)) < 0)
-      return sftp->sft_shroff;
+    const WORD shroff = (WORD)share_open_check(
+        x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
+        internal_data->cu_psp, flags & 0x03, (flags >> 4) & 0x07);
+    sft_ref(lpCurSft).shroff(shroff);
+    if (shroff < 0)
+      return shroff;
   }
 
 /* /// End of additions for SHARE.  - Ron Cemer */
 
   {
-    sft entry;
-    sft_ref ref(lpCurSft);
-    ref.read_struct(entry);
-    ++entry.sft_count;
-    entry.sft_flags = (UBYTE)(open_path[0] - 'A');
-    ref.store(entry);
+    const sft_ref ref(lpCurSft);
+    ref.count((UWORD)(ref.count() + 1u));
+    ref.flags((UWORD)(UBYTE)(open_path[0] - 'A'));
   }
   long open_result = dos_open(open_path, flags, attrib, sft_idx);
   dpb_watch_check_chain("DosOpenSft 10");
@@ -411,22 +408,19 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
     /* if we allocated a share slot above, but open failed, free slot */
     if (IsShareInstalled(TRUE))
     {
-      sft *sftp = (sft *)ARM_PTR(lpCurSft);
-      if (sftp->sft_shroff >= 0)
+      const WORD shroff = sft_ref(lpCurSft).shroff();
+      if (shroff >= 0)
       {
-        share_close_file(sftp->sft_shroff);
-        sftp = (sft *)ARM_PTR(lpCurSft);
-        sftp->sft_shroff = -1;
+        share_close_file(shroff);
+        sft_ref(lpCurSft).shroff(-1);
       }
     }
 /* /// End of additions for SHARE.  - Ron Cemer */
     {
-      sft entry;
-      sft_ref ref(lpCurSft);
-      ref.read_struct(entry);
-      if (entry.sft_count != 0)
-        --entry.sft_count;
-      ref.store(entry);
+      const sft_ref ref(lpCurSft);
+      const UWORD count = ref.count();
+      if (count != 0)
+        ref.count((UWORD)(count - 1u));
     }
     return open_result;
   }
