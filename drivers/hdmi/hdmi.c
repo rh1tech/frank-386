@@ -792,10 +792,11 @@ static void __time_critical_func(dma_handler_HDMI)() {
     // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
     if (vga_state) {
         if (line >= 480) {
-            vga_state->st01 |= ST01_V_RETRACE | ST01_DISP_ENABLE;
+            vga_state->st01 |= ST01_V_RETRACE;
         } else {
-            vga_state->st01 &= ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
+            vga_state->st01 &= ~ST01_V_RETRACE;
         }
+        vga_state->st01 &= ~ST01_DISP_ENABLE; // start visible line-part
     }
 
     // 4-buffer rendering: DMA reads buf (line % 4), ISR renders (line+2) % 4.
@@ -858,6 +859,9 @@ f:
                 frame_line_compare = (lc > 0 && lc < 480) ? lc : -1;
             }
         }
+    }
+    if (vga_state) {
+        vga_state->st01 |= ST01_DISP_ENABLE; // start invisible line-part
     }
 }
 

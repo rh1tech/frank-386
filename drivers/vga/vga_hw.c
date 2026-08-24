@@ -1151,10 +1151,11 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
     if (vga_state) {
         if (line >= N_LINES_VISIBLE) {
-            vga_state->st01 |= ST01_V_RETRACE | ST01_DISP_ENABLE;
+            vga_state->st01 |= ST01_V_RETRACE;
         } else {
-            vga_state->st01 &= ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
+            vga_state->st01 &= ~ST01_V_RETRACE;
         }
+        vga_state->st01 &= ~ST01_DISP_ENABLE; // start visible line-part
     }
 
     // Latch frame state late in vblank.  The control-channel IRQ is raised
@@ -1204,6 +1205,9 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
         render_load_bar(prepare_line, lines_pattern[render_buf]);
     }
 
+    if (vga_state) {
+        vga_state->st01 |= ST01_DISP_ENABLE; // start invisible line-part
+    }
     // Accumulate ISR busy time (µs)
     isr_busy_us_acc += timer_hw->timerawl - t_enter;
 }
