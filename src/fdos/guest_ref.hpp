@@ -288,6 +288,12 @@ public:
         const linear_t base = (static_cast<linear_t>(FP_SEG(table)) << 4) + FP_OFF(table);
         pstore8(base + index, value);
     }
+    __attribute__((always_inline)) UWORD return_dos_version() const {
+        return scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_retdosver));
+    }
+    __attribute__((always_inline)) void return_dos_version(UWORD v) const {
+        scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_retdosver)) = v;
+    }
 private: linear_t addr_;
 };
 
@@ -306,6 +312,9 @@ public:
     __attribute__((always_inline)) scalar_proxy<UWORD> uppermem_root() const { return {addr_ + offsetof(lol, uppermem_root)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> os_setver_major() const { return {addr_ + offsetof(lol, os_setver_major)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> os_setver_minor() const { return {addr_ + offsetof(lol, os_setver_minor)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> os_major() const { return {addr_ + offsetof(lol, os_major)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> os_minor() const { return {addr_ + offsetof(lol, os_minor)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> version_flags() const { return {addr_ + offsetof(lol, version_flags)}; }
 
     __attribute__((always_inline)) dos_far_ptr far_value(std::size_t off) const {
         const UWORD offset = scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off));
@@ -322,6 +331,7 @@ public:
     __attribute__((always_inline)) void cds(dos_far_ptr v) const { far_value(offsetof(lol, CDSp), v); }
     __attribute__((always_inline)) dos_far_ptr dpb() const { return far_value(offsetof(lol, DPBp)); }
     __attribute__((always_inline)) dos_far_ptr fcb() const { return far_value(offsetof(lol, FCBp)); }
+    __attribute__((always_inline)) dos_far_ptr clock() const { return far_value(offsetof(lol, clock)); }
     __attribute__((always_inline)) dos_far_ptr firstbuf() const { return far_value(offsetof(lol, firstbuf)); }
     __attribute__((always_inline)) void firstbuf(dos_far_ptr v) const { far_value(offsetof(lol, firstbuf), v); }
     __attribute__((always_inline)) dos_far_ptr inforecptr() const { return far_value(offsetof(lol, inforecptr)); }
@@ -692,7 +702,23 @@ public:
     __attribute__((always_inline)) scalar_proxy<UWORD> crit_err_code() const { return {addr_+offsetof(dos_data,CritErrCode)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> default_drive() const { return {addr_+offsetof(dos_data,default_drive)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> open_mode() const { return {addr_+offsetof(dos_data,OpenMode)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> switchar() const { return {addr_+offsetof(dos_data,switchar)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> verify_ena() const { return {addr_+offsetof(dos_data,verify_ena)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> abort_progress() const { return {addr_+offsetof(dos_data,abort_progress)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> crit_err_drive() const { return {addr_+offsetof(dos_data,CritErrDrive)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> crit_err_locus() const { return {addr_+offsetof(dos_data,CritErrLocus)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> crit_err_class() const { return {addr_+offsetof(dos_data,CritErrClass)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> crit_err_action() const { return {addr_+offsetof(dos_data,CritErrAction)}; }
     __attribute__((always_inline)) scalar_proxy<UWORD> current_sft_idx() const { return {addr_+offsetof(dos_data,current_sft_idx)}; }
+    __attribute__((always_inline)) scalar_proxy<UWORD> clock_days() const { return {addr_+offsetof(dos_data,ClkRecord)+offsetof(ClockRecord,clkDays)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> clock_minutes() const { return {addr_+offsetof(dos_data,ClkRecord)+offsetof(ClockRecord,clkMinutes)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> clock_hours() const { return {addr_+offsetof(dos_data,ClkRecord)+offsetof(ClockRecord,clkHours)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> clock_hundredths() const { return {addr_+offsetof(dos_data,ClkRecord)+offsetof(ClockRecord,clkHundredths)}; }
+    __attribute__((always_inline)) scalar_proxy<UBYTE> clock_seconds() const { return {addr_+offsetof(dos_data,ClkRecord)+offsetof(ClockRecord,clkSeconds)}; }
+    __attribute__((always_inline)) dos_far_ptr dta() const { return far_load(offsetof(dos_data,dta)); }
+    __attribute__((always_inline)) void dta(dos_far_ptr v) const { far_store(offsetof(dos_data,dta),v); }
+    __attribute__((always_inline)) dos_far_ptr crit_err_dev() const { return far_load(offsetof(dos_data,CritErrDev)); }
+    __attribute__((always_inline)) void crit_err_dev(dos_far_ptr v) const { far_store(offsetof(dos_data,CritErrDev),v); }
     __attribute__((always_inline)) dos_far_ptr lp_cur_sft() const { return far_load(offsetof(dos_data,lpCurSft)); }
     __attribute__((always_inline)) void lp_cur_sft(dos_far_ptr v) const { far_store(offsetof(dos_data,lpCurSft),v); }
     __attribute__((always_inline)) dos_far_ptr current_ldt() const { return far_load(offsetof(dos_data,current_ldt)); }

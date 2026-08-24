@@ -110,7 +110,6 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
               (UWORD)~3u);
   struct critical_error_workspace *work =
       (struct critical_error_workspace *)ARM_PTR(MK_FP(DOS_PSP, work_sp));
-  psp *p;
   dos_far_ptr user_stack;
   dos_far_ptr /* -> struct dhdr */ device = x86_lpDevice;
   UWORD saved_ss;
@@ -119,11 +118,10 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
   COUNT action;
   BOOL have_frame;
 
-  if (internal_data->ErrorMode != 0)
+  if ((UBYTE)fdos_idata.error_mode() != 0)
     return FAIL;
 
-  p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-  user_stack = p->ps_stack;
+  user_stack = psp_ref((seg)(UWORD)fdos_idata.cu_psp()).stack();
   have_frame = !far_is_null(user_stack) && !far_is_end(user_stack);
 
   /*
@@ -149,8 +147,8 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * by the higher-level DOS error path, not derivable from the device
    * request status alone.
    */
-  internal_data->CritErrDrive = (UBYTE)nDrive;
-  internal_data->CritErrDev = device;
+  fdos_idata.crit_err_drive() = (UBYTE)nDrive;
+  fdos_idata.crit_err_dev(device);
 
   /*
    * The original kernel runs INT 24h processing on _error_tos, a dedicated
@@ -165,12 +163,12 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    */
   cpu_save_regs(cpu, &work->saved_regs);
   saved_ss = CPU_SS;
-  saved_error_mode = internal_data->ErrorMode;
-  saved_indos = internal_data->InDOS;
+  saved_error_mode = fdos_idata.error_mode();
+  saved_indos = fdos_idata.indos();
 
-  ++internal_data->ErrorMode;
-  if (internal_data->InDOS != 0)
-    --internal_data->InDOS;
+  fdos_idata.error_mode() = (UBYTE)(fdos_idata.error_mode() + 1u);
+  if ((UBYTE)fdos_idata.indos() != 0)
+    fdos_idata.indos() = (UBYTE)(fdos_idata.indos() - 1u);
 
   SET_SS(FP_SEG(user_stack));
   CPU_SP = FP_OFF(user_stack);
@@ -193,8 +191,8 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
 
   cpu_restore_regs(cpu, &work->saved_regs);
   SET_SS(saved_ss);
-  internal_data->ErrorMode = saved_error_mode;
-  internal_data->InDOS = saved_indos;
+  fdos_idata.error_mode() = saved_error_mode;
+  fdos_idata.indos() = saved_indos;
 
   /* Force disallowed responses through the same sequence as entry.asm. */
   if (action == CONTINUE && !(nFlag & EFLG_IGNORE))
@@ -212,14 +210,14 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
 
   if (action == ABORT)
   {
-    if (internal_data->abort_progress)
+    if ((UBYTE)fdos_idata.abort_progress())
       return FAIL;
     /*
      * Original entry.asm leaves ErrorMode set while the process-abort
      * path runs.  This prevents a second device error during handle/FCB/
      * memory cleanup from entering INT 24h recursively.
      */
-    internal_data->ErrorMode = 1;
+    fdos_idata.error_mode() = 1;
     request_terminate(0, 2);   /* critical-error abort */
     return FAIL;
   }
@@ -230,7 +228,7 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
 /* Abort, retry or fail for character devices                   */
 COUNT char_error(request * rq, dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
 {
-  internal_data->CritErrCode = (rq->r_status & S_MASK) + 0x13;
+  fdos_idata.crit_err_code() = (rq->r_status & S_MASK) + 0x13;
   return CriticalError(EFLG_CHAR | EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE,
                        0, rq->r_status & S_MASK, x86_lpDevice);
 }
@@ -254,8 +252,9 @@ COUNT block_error(request * rq, COUNT nDrive,
 /* common - call the clock driver */
 void ExecuteClockDriverRequest(BYTE command)
 {
-  BinaryCharIO(&LoL->clock, sizeof(struct ClockRecord),
-               x86_FAR_PTR(DOS_PSP, &internal_data->ClkRecord) /* -> struct ClockRecord */,
+  dos_far_ptr clock = fdos_lol.clock();
+  BinaryCharIO(&clock, sizeof(struct ClockRecord),
+               MK_FP(DOS_PSP, X86_INTERNAL_DATA_OFF + offsetof(dos_data, ClkRecord)),
                command);
 }
 
@@ -292,7 +291,7 @@ static unsigned char DosGetDateRegs(UWORD *out_year, UBYTE *out_month, UBYTE *ou
   if (CharReqHdr.r_status & S_ERROR)
     return 0;
 
-  for (Year = 1980, c = internal_data->ClkRecord.clkDays;;)
+  for (Year = 1980, c = fdos_idata.clock_days();;)
   {
     pdays = is_leap_year_monthdays(Year);
     if (c >= pdays[12])
@@ -319,7 +318,7 @@ static unsigned char DosGetDateRegs(UWORD *out_year, UBYTE *out_month, UBYTE *ou
   /* Day of week is simple. Take mod 7, add 2 (for Tuesday        */
   /* 1-1-80) and take mod again                                   */
 
-  return (internal_data->ClkRecord.clkDays + 2) % 7;
+  return (fdos_idata.clock_days() + 2) % 7;
 }
 
 unsigned char DosGetDate(CPU *cpu)
@@ -369,12 +368,12 @@ static int DosSetDateRegs(UWORD Year, UWORD Month, UWORD DayOfMonth)
 
   ExecuteClockDriverRequest(C_INPUT);
 
-  internal_data->ClkRecord.clkDays = DaysFromYearMonthDay(Year, Month, DayOfMonth);
+  fdos_idata.clock_days() = DaysFromYearMonthDay(Year, Month, DayOfMonth);
 
   ExecuteClockDriverRequest(C_OUTPUT);
 
   if (CharReqHdr.r_status & S_ERROR)
-    return char_error(&CharReqHdr, LoL->clock);
+    return char_error(&CharReqHdr, fdos_lol.clock());
   return SUCCESS;
 }
 
@@ -390,10 +389,10 @@ static void DosGetTimeRegs(UBYTE *out_hour, UBYTE *out_minute, UBYTE *out_second
   if (CharReqHdr.r_status & S_ERROR)
     return;
 
-  *out_hour = internal_data->ClkRecord.clkHours;
-  *out_minute = internal_data->ClkRecord.clkMinutes;
-  *out_second = internal_data->ClkRecord.clkSeconds;
-  *out_hundredth = internal_data->ClkRecord.clkHundredths;
+  *out_hour = fdos_idata.clock_hours();
+  *out_minute = fdos_idata.clock_minutes();
+  *out_second = fdos_idata.clock_seconds();
+  *out_hundredth = fdos_idata.clock_hundredths();
 }
 
 void DosGetTime(CPU *cpu)
@@ -422,15 +421,15 @@ static int DosSetTimeRegs(UBYTE hour, UBYTE minute, UBYTE second, UBYTE hundredt
   /* for ClkRecord.clkDays */
   ExecuteClockDriverRequest(C_INPUT);
 
-  internal_data->ClkRecord.clkHours = hour;
-  internal_data->ClkRecord.clkMinutes = minute;
-  internal_data->ClkRecord.clkSeconds = second;
-  internal_data->ClkRecord.clkHundredths = hundredth;
+  fdos_idata.clock_hours() = hour;
+  fdos_idata.clock_minutes() = minute;
+  fdos_idata.clock_seconds() = second;
+  fdos_idata.clock_hundredths() = hundredth;
 
   ExecuteClockDriverRequest(C_OUTPUT);
 
   if (CharReqHdr.r_status & S_ERROR)
-    return char_error(&CharReqHdr, LoL->clock);
+    return char_error(&CharReqHdr, fdos_lol.clock());
   return SUCCESS;
 }
 
@@ -449,10 +448,12 @@ int DosSetTime(CPU *cpu)
  */
 struct cds FAR *get_cds_unvalidated(unsigned drive)
 {
-  if (drive >= LoL->lastdrive || far_is_null(LoL->CDSp))
+  const UBYTE lastdrive = fdos_lol.lastdrive();
+  const dos_far_ptr cds_base = fdos_lol.cds();
+  if (drive >= lastdrive || far_is_null(cds_base))
     return NULL;
 
-  return (struct cds FAR *)ARM_PTR(LoL->CDSp) + drive;
+  return (struct cds FAR *)ARM_PTR(cds_base) + drive;
 }
 
 /* get current directory structure for drive
@@ -831,7 +832,7 @@ rebuild_dpb:
       if (R_CX != 0xffff || (R_SI & ~0x6001))
         return DE_INVLDPARM;
 
-      if (R_DL > LoL->lastdrive || R_DL == 0)
+      if (R_DL > (UBYTE)fdos_lol.lastdrive() || R_DL == 0)
         return -0x207;
 
       blkno =  (ULONG)SectorBlock[0]
@@ -1116,11 +1117,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         /* Get default drive                                           */
       case 0x19:
-        R_AL = internal_data->default_drive;
+        R_AL = fdos_idata.default_drive();
         break;
 
       case 0x1A: // set DTA
-        internal_data->dta = R_FP_DS_DX;
+        fdos_idata.dta(R_FP_DS_DX);
         break;
 
       case 0x29: /* DOS 1+ - PARSE FILENAME INTO FCB */
@@ -1177,26 +1178,29 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         break;
         // get DTA
       case 0x2f:
-        R_BX = FP_OFF(internal_data->dta);
-        R_ES = (FP_SEG(internal_data->dta));
+        {
+          const dos_far_ptr dta = fdos_idata.dta();
+          R_BX = FP_OFF(dta);
+          R_ES = FP_SEG(dta);
+        }
         break;
 
       /* Get (editable) DOS Version                                   */
       case 0x30:
       {
         if (R_AL == 1) /* from RBIL, if AL=1 then return version_flags */
-            R_BH = LoL->version_flags;
+            R_BH = fdos_lol.version_flags();
         else
             R_BH = OEM_ID;
-        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-        UWORD ver = p->ps_retdosver;
+        const psp_ref current_psp((seg)(UWORD)fdos_idata.cu_psp());
+        UWORD ver = current_psp.return_dos_version();
 
         /* PSP мог быть создан не через child_psp() (нативный загрузчик FreeCOM)
            — тогда поле нулевое. Фолбэк на реальную версию ядра. */
         if ((ver & 0x00FF) == 0)
-            ver = ((UWORD)LoL->os_setver_minor << 8) | LoL->os_setver_major;
+            ver = ((UWORD)fdos_lol.os_setver_minor() << 8) | fdos_lol.os_setver_major();
 
-        R_BH = (R_AL == 1) ? LoL->version_flags : OEM_ID;
+        R_BH = (R_AL == 1) ? (int)(UBYTE)fdos_lol.version_flags() : OEM_ID;
         R_AX = ver;
         R_BL = REVISION_SEQ;
         R_CX = 0; /* do not set this to a serial number!
@@ -1245,11 +1249,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x37: /* DOS 2+ - SWITCHAR - GET/SET SWITCH CHARACTER */
         switch (R_AL) {
         case 0x00:              /* get switch character */
-          R_DL = internal_data->switchar;
+          R_DL = fdos_idata.switchar();
           R_AL = 0x00;
           break;
         case 0x01:              /* set switch character */
-          internal_data->switchar = R_DL;
+          fdos_idata.switchar() = R_DL;
           R_AL = 0x00;
           break;
         default:
@@ -1479,7 +1483,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         {
           R_AX = -rc;
           if (rc != DE_DEVICE && rc != DE_ACCESS)
-            internal_data->CritErrCode = R_AX;
+            fdos_idata.crit_err_code() = R_AX;
           goto error_carry;
         }
         R_CF = 0;
@@ -1873,7 +1877,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         switch (R_AL)
         {
           case 0x00:            /* get allocation strategy */
-            R_AX = internal_data->mem_access_mode;
+            R_AX = fdos_idata.mem_access_mode();
             R_CF = 0;
             break;
           case 0x01:            /* set allocation strategy */
@@ -1892,18 +1896,18 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             }
             else
             {
-              internal_data->mem_access_mode = R_BL;
+              fdos_idata.mem_access_mode() = R_BL;
               R_CF = 0;
             }
             break;
           case 0x02:            /* get UMB link state */
-            R_AL = LoL->uppermem_link;
+            R_AL = fdos_lol.uppermem_link();
             R_CF = 0;
             break;
           case 0x03:            /* set UMB link state */
 #ifdef INT21_DIAG
             printf("LINK 5803 bx=%04x (was %u, root=%04x) by %04x:%04x\n",
-                   R_BX, LoL->uppermem_link & 1, LoL->uppermem_root,
+                   R_BX, fdos_lol.uppermem_link() & 1, fdos_lol.uppermem_root(),
                    readw86(stk_lin(CPU_SS, CPU_SP, 2)),
                    readw86(stk_lin(CPU_SS, CPU_SP, 0)));
 #endif
@@ -1911,7 +1915,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
              * FreeDOS accepts only BX=0 (unlink) and BX=1 (link).
              * Do not silently normalize every non-zero value to 1.
              */
-            if (R_BX > 1 || LoL->uppermem_root == 0xffff)
+            if (R_BX > 1 || fdos_lol.uppermem_root() == 0xffff)
             {
               R_AX = (UWORD)-DE_INVLDFUNC;
               R_CF = 1;
@@ -1922,7 +1926,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
               R_CF = 0;
             }
 #ifdef INT21_DIAG
-            printf("LINK done: link=%u\n", LoL->uppermem_link & 1);
+            printf("LINK done: link=%u\n", fdos_lol.uppermem_link() & 1);
             if (R_BX)
               mcb_dump_chain();
 #endif
@@ -2032,7 +2036,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* DOS 7.0+ FAT32 extended functions */
       case 0x73:
         R_CF = 0;
-        internal_data->CritErrCode = SUCCESS;
+        fdos_idata.crit_err_code() = SUCCESS;
         rc = int21_fat32_regs(regs_ref);
         goto short_check;
 #endif
@@ -2163,7 +2167,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
            what the parent's INT 21h AH=4Dh will report (original:
            return_code = AL | 0x300). Errors from DosMemChange() are
            deliberately ignored, exactly like the original. */
-        DosMemChange(internal_data->cu_psp,
+        DosMemChange(fdos_idata.cu_psp(),
                      (UWORD)R_DX < 6u ? (UWORD)6u : (UWORD)R_DX, NULL);
         request_terminate(R_AL, 3);
         R_CF = 0;
@@ -2209,13 +2213,10 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
                struct dos_data.                                       */
           case 0x06:
           {
-            char *sda_base = (char *)ARM_PTR(MK_FP(DOS_PSP, 0));
-            R_DS = ( DOS_PSP );
-            R_SI = (UWORD)((char *)&internal_data->ErrorMode - sda_base);
-            R_CX = (UWORD)((char *)(internal_data + 1) -
-                             (char *)&internal_data->ErrorMode);
-            R_DX = (UWORD)((char *)&internal_data->Int21AX -
-                             (char *)&internal_data->ErrorMode);
+            R_DS = DOS_PSP;
+            R_SI = (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, ErrorMode));
+            R_CX = (UWORD)(sizeof(dos_data) - offsetof(dos_data, ErrorMode));
+            R_DX = (UWORD)(offsetof(dos_data, Int21AX) - offsetof(dos_data, ErrorMode));
             R_CF = 0;
             break;
           }
@@ -2224,7 +2225,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x08:
           case 0x09:
             rc = (int)network_redirector_mx(REM_PRINTREDIR,
-                     NULL, (void *)(intptr_t)internal_data->Int21AX);
+                     NULL, (void *)(intptr_t)fdos_idata.int21ax());
             R_CF = 0;
             if (rc != SUCCESS)
               goto error_exit;
@@ -2235,18 +2236,17 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
           case 0x0a:
           {
             uint32_t er = (R_DS << 4) + R_DX;
-            internal_data->CritErrCode   = readw86(er + 0);
-            internal_data->CritErrDev    = MK_FP(readw86(er + 14),
-                                                 readw86(er + 10));
-            internal_data->CritErrLocus  = read86(er + 5);   /* CH */
-            internal_data->CritErrClass  = read86(er + 3);   /* BH */
-            internal_data->CritErrAction = read86(er + 2);   /* BL */
+            fdos_idata.crit_err_code()   = readw86(er + 0);
+            fdos_idata.crit_err_dev(MK_FP(readw86(er + 14), readw86(er + 10)));
+            fdos_idata.crit_err_locus() = read86(er + 5);   /* CH */
+            fdos_idata.crit_err_class() = read86(er + 3);   /* BH */
+            fdos_idata.crit_err_action() = read86(er + 2);  /* BL */
             R_CF = 0;
             break;
           }
 
           default:
-            internal_data->CritErrCode = SUCCESS;
+            fdos_idata.crit_err_code() = SUCCESS;
             goto error_invalid;
         }
         break;
@@ -2264,7 +2264,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
           default:
             rc = (int)network_redirector_mx(REM_PRINTSET, NULL,
-                     (void *)(intptr_t)internal_data->Int21AX);
+                     (void *)(intptr_t)fdos_idata.int21ax());
             goto short_check;
         }
         break;
@@ -2305,10 +2305,10 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
              otherwise untouched). With the permanent stub rc is always
              DE_INVLDFUNC; the register-frame side effects don't exist. */
           rc = (int)network_redirector_mx(REM_DOREDIRECT, NULL,
-                   (void *)(intptr_t)internal_data->Int21AX);
+                   (void *)(intptr_t)fdos_idata.int21ax());
           if (rc != SUCCESS)
           {
-            internal_data->CritErrCode = -rc;   /* Maybe set */
+            fdos_idata.crit_err_code() = -rc;   /* Maybe set */
             R_CF = 1;
           }
           R_AX = -rc;
@@ -2517,7 +2517,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
          in BL, which DosDevIOctl's 0Dh path reads directly.          */
       case 0x69:
       {
-        int drv = (R_BL == 0 ? internal_data->default_drive : R_BL - 1);
+        int drv = (R_BL == 0 ? (int)(UBYTE)fdos_idata.default_drive() : R_BL - 1);
         if (R_AL < 2)
         {
           if (far_is_null(get_cds(drv)))
@@ -2558,7 +2558,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
       /* Set Verify Flag                                              */
       case 0x2e:
-        internal_data->verify_ena = R_AL & 1;
+        fdos_idata.verify_ena() = R_AL & 1;
         break;
 
       /* DosVars - get/set dos variables (original: int21_syscall).
@@ -2570,30 +2570,30 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
              SDA byte at internal_data+17h - the single source of truth
              (guest programs peek it directly), see kernel.c.          */
           case 0x01:
-            internal_data->break_ena = R_DL & 1;
+            fdos_idata.break_ena() = R_DL & 1;
             /* fall through so DL only low bit (as in MS-DOS) */
             __attribute__((fallthrough));
           /* Get Ctrl-C flag                                          */
           case 0x00:
-            R_DL = internal_data->break_ena;
+            R_DL = fdos_idata.break_ena();
             break;
           case 0x02:            /* get/set extended control break     */
           {
-            UBYTE tmp = internal_data->break_ena;
-            internal_data->break_ena = R_DL & 1;
+            UBYTE tmp = fdos_idata.break_ena();
+            fdos_idata.break_ena() = R_DL & 1;
             R_DL = tmp;
             break;
           }
           /* Get Boot Drive                                           */
           case 0x05:
-            R_DL = LoL->BootDrive;
+            R_DL = fdos_lol.boot_drive();
             break;
           /* Get (real) DOS-C version                                 */
           case 0x06:
-            R_BL = LoL->os_major;
-            R_BH = LoL->os_minor;
+            R_BL = fdos_lol.os_major();
+            R_BH = fdos_lol.os_minor();
             R_DL = 0;                    /* revision, remaining 0   */
-            R_DH = LoL->version_flags;   /* bit3: ROM, bit4: HMA    */
+            R_DH = fdos_lol.version_flags();   /* bit3: ROM, bit4: HMA    */
             break;
           /* FreeDOS extension: CPU family. Both emulator cores are at
              least 286-class; keep the conservative answer.           */
@@ -2602,14 +2602,13 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             break;
           /* FreeDOS extension: set version returned by INT 21h/30h   */
           case 0xfc:
-            LoL->os_setver_major = R_BL;
-            LoL->os_setver_minor = R_BH;
+            fdos_lol.os_setver_major() = R_BL;
+            fdos_lol.os_setver_minor() = R_BH;
             break;
           /* FreeDOS extension: get release string pointer in DX:AX   */
           case 0xff:
             R_DX = DOS_PSP;
-            R_AX = (UWORD)((char *)LoL->os_release_str -
-                             (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
+            R_AX = (UWORD)(0x08F0u + offsetof(lol, os_release_str));
             break;
           default:              /* set AL=0xFF as error, NOT carry    */
             R_AL = 0xff;
@@ -2620,33 +2619,35 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* Get InDOS flag address                                       */
       case 0x34:
         R_ES = ( DOS_PSP );
-        R_BX = (UWORD)((char *)&internal_data->InDOS -
-                         (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
+        R_BX = (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, InDOS));
         break;
 
       /* Get Verify Flag                                              */
       case 0x54:
-        R_AL = internal_data->verify_ena;
+        R_AL = fdos_idata.verify_ena();
         break;
 
       /* UNDOCUMENTED: create child PSP at DX, memory top in SI       */
       case 0x55:
-        child_psp(R_DX, internal_data->cu_psp, R_SI);
+        child_psp(R_DX, fdos_idata.cu_psp(), R_SI);
         /* copy command line from the parent (required for some device
            loaders) */
-        fmemcpy(MK_FP(R_DX, 0x80), MK_FP(internal_data->cu_psp, 0x80), 128);
+        fmemcpy(MK_FP(R_DX, 0x80), MK_FP(fdos_idata.cu_psp(), 0x80), 128);
 
-        internal_data->cu_psp = R_DX;
+        fdos_idata.cu_psp() = R_DX;
         break;
 
       /* Get Extended Error information                               */
       case 0x59:
-        R_AX = internal_data->CritErrCode;
-        R_CH = internal_data->CritErrLocus;
-        R_BH = internal_data->CritErrClass;
-        R_BL = internal_data->CritErrAction;
-        R_DI = FP_OFF(internal_data->CritErrDev);
-        R_ES = ( FP_SEG(internal_data->CritErrDev) );
+        R_AX = fdos_idata.crit_err_code();
+        R_CH = fdos_idata.crit_err_locus();
+        R_BH = fdos_idata.crit_err_class();
+        R_BL = fdos_idata.crit_err_action();
+        {
+          const dos_far_ptr dev = fdos_idata.crit_err_dev();
+          R_DI = FP_OFF(dev);
+          R_ES = FP_SEG(dev);
+        }
         break;
 
       /* DOS 5+ internal (set driver lookahead): original rejects it  */
