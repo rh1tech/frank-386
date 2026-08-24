@@ -65,6 +65,7 @@ void dos_printf(const char *fmt, ...) {
 
 #include "hdrs.h"
 #include "native_devices.h"
+#include "kernel_guest_proxy.h"
 
 BYTE HaltCpuWhileIdle = 0;
 UWORD ram_top = 0;
@@ -1737,7 +1738,7 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
         of it; internal_data->current_ldt (a dos_far_ptr field, see
         lol.h) is what the original's bare "current_ldt = cdsEntry"
         assignments become.
-      - media_check()/TempCDS.cdsDpb: cdsDpb is a dos_far_ptr (see
+      - media_check()/CDS.dpb: cdsDpb is a dos_far_ptr (see
         cds.h), so media_check() (which takes a native struct dpb*)
         needs an ARM_PTR() first.
 */
@@ -1763,24 +1764,19 @@ static int dpb_chain_contains(dos_far_ptr needle)
 }
 
 static void panic_bad_cds_dpb(const char *tag, dos_far_ptr x86_cds,
-                              struct cds *cds, const struct cds *tmp)
+                              UWORD flags, const char *path, dos_far_ptr cds_dpb)
 {
-  if (far_is_null(tmp->cdsDpb) || dpb_chain_contains(tmp->cdsDpb))
+  if (far_is_null(cds_dpb) || dpb_chain_contains(cds_dpb))
     return;
 
   printf("BAD CDS DPB[%s]: cds=%04x:%04x flags=%04x path='%s' "
-         "tmp_dpb=%04x:%04x root_dpb=%04x:%04x nblk=%u lastdrv=%u\n",
+         "cdsDpb=%04x:%04x root_dpb=%04x:%04x nblk=%u lastdrv=%u\n",
          tag,
          FP_SEG(x86_cds), FP_OFF(x86_cds),
-         tmp->cdsFlags, tmp->cdsCurrentPath,
-         FP_SEG(tmp->cdsDpb), FP_OFF(tmp->cdsDpb),
+         flags, path,
+         FP_SEG(cds_dpb), FP_OFF(cds_dpb),
          FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp),
          LoL->nblkdev, LoL->lastdrive);
-
-  if (cds)
-    printf("BAD CDS DPB[%s]: real_cds flags=%04x path='%s' cdsDpb=%04x:%04x\n",
-           tag, cds->cdsFlags, cds->cdsCurrentPath,
-           FP_SEG(cds->cdsDpb), FP_OFF(cds->cdsDpb));
 
   {
     dos_far_ptr p = LoL->DPBp;
@@ -1804,7 +1800,7 @@ static void panic_bad_cds_dpb(const char *tag, dos_far_ptr x86_cds,
 }
 
 static COUNT truename_worker(dos_far_ptr x86_src, const char *src_snapshot,
-                             char *dest, COUNT mode, struct cds *TempCDS)
+                             char *dest, COUNT mode)
 {
   COUNT i;
   const char *froot;
@@ -1815,6 +1811,11 @@ static COUNT truename_worker(dos_far_ptr x86_src, const char *src_snapshot,
   char *rootPos;
   char src0;
   const char *src = src_snapshot;
+  char cds_path[MAX_CDSPATH];
+  UWORD cds_flags;
+  dos_far_ptr cds_dpb;
+  UWORD cds_backslash_offset;
+  UWORD cds_join_offset;
 
   TNDBG("TN00 enter x86_src=%04X:%04X mode=%04X snapshot='%s'",
         FP_SEG(x86_src), FP_OFF(x86_src), mode, src);
@@ -1837,7 +1838,7 @@ static COUNT truename_worker(dos_far_ptr x86_src, const char *src_snapshot,
       unc_src++;
     } while (src0);
 
-    fdos_guest_set_current_ldt(MK_FP(0xFFFF, 0xFFFF));
+    fdos_dos_set_current_ldt(MK_FP(0xFFFF, 0xFFFF));
     TNDBG("TN04 UNC return dest='%s'", dest);
     return IS_NETWORK;
   }
@@ -1845,10 +1846,10 @@ static COUNT truename_worker(dos_far_ptr x86_src, const char *src_snapshot,
   if (src[1] == ':')
     result = drLetterToNr(DosUpFChar(src0));
   else
-    result = fdos_guest_default_drive();
+    result = fdos_dos_default_drive();
 
   TNDBG("TN05 drive result=%u default=%u src='%s'",
-        result, fdos_guest_default_drive(), src);
+        result, fdos_dos_default_drive(), src);
 
   dos_far_ptr x86_dhp = IsDevice(src);
   TNDBG("TN06 IsDevice=%p src='%s'", EFFECTIVE(x86_dhp), src);
@@ -1857,12 +1858,12 @@ static COUNT truename_worker(dos_far_ptr x86_src, const char *src_snapshot,
 
   TNDBG("TN07 get_cds(%u)=%04X:%04X lastdrive=%u",
         result, FP_SEG(x86_cdsEntry), FP_OFF(x86_cdsEntry),
-        fdos_guest_lastdrive());
+        fdos_dos_lastdrive());
 
   if (far_is_null(x86_cdsEntry))
   {
     if (EFFECTIVE(x86_dhp) && (mode & CDS_MODE_CHECK_DEV_PATH) &&
-        (result >= fdos_guest_lastdrive()))
+        (result >= fdos_dos_lastdrive()))
     {
       const char *s = src + 2;
       char c = *s;
@@ -1903,7 +1904,7 @@ static COUNT truename_worker(dos_far_ptr x86_src, const char *src_snapshot,
           goto invalid_path;
       }
 
-      result = fdos_guest_default_drive();
+      result = fdos_dos_default_drive();
       x86_cdsEntry = get_cds(result);
 
       TNDBG("TN10 fallback default drive result=%u cds=%04X:%04X",
@@ -1920,16 +1921,20 @@ invalid_path:
     }
   }
 
-  fdos_guest_cds_load(x86_cdsEntry, TempCDS);
-  panic_bad_cds_dpb("after-load", x86_cdsEntry, NULL, TempCDS);
+  cds_flags = fdos_cds_flags(x86_cdsEntry);
+  cds_dpb = fdos_cds_dpb(x86_cdsEntry);
+  cds_backslash_offset = (UWORD)fdos_cds_backslash_offset(x86_cdsEntry);
+  cds_join_offset = (UWORD)fdos_cds_join_offset(x86_cdsEntry);
+  fdos_cds_copy_current_path(x86_cdsEntry, cds_path, sizeof(cds_path));
+  panic_bad_cds_dpb("after-load", x86_cdsEntry, cds_flags, cds_path, cds_dpb);
   TNDBG("TN12 CDS path='%s' flags=%04X dpb=%04X:%04X backslash=%u join=%u",
-        TempCDS->cdsCurrentPath, TempCDS->cdsFlags,
-        FP_SEG(TempCDS->cdsDpb), FP_OFF(TempCDS->cdsDpb),
-        TempCDS->cdsBackslashOffset, TempCDS->cdsJoinOffset);
+        cds_path, cds_flags,
+        FP_SEG(cds_dpb), FP_OFF(cds_dpb),
+        cds_backslash_offset, cds_join_offset);
 
-  fdos_guest_set_current_ldt(x86_cdsEntry);
+  fdos_dos_set_current_ldt(x86_cdsEntry);
 
-  if (TempCDS->cdsFlags & CDSNETWDRV)
+  if (cds_flags & CDSNETWDRV)
     result |= IS_NETWORK;
 
   if (EFFECTIVE(x86_dhp))
@@ -2006,14 +2011,14 @@ invalid_path:
   {
     BYTE *cp;
 
-    cp = TempCDS->cdsCurrentPath;
+    cp = cds_path;
     cp[MAX_CDSPATH - 1] = '\0';
 
-    TNDBG("TN23 CDS current cp='%s' flags=%04X", cp, TempCDS->cdsFlags);
+    TNDBG("TN23 CDS current cp='%s' flags=%04X", cp, cds_flags);
 
-    if ((TempCDS->cdsFlags & CDSNETWDRV) == 0)
+    if ((cds_flags & CDSNETWDRV) == 0)
     {
-      int mc = media_check_tagged(TempCDS->cdsDpb, "truename/TempCDS.cdsDpb");
+      int mc = media_check_tagged(cds_dpb, "truename/CDS.dpb");
       TNDBG("TN25 after media_check rc=%d", mc);
 
       if (mc < 0) {
@@ -2024,11 +2029,11 @@ invalid_path:
 
       if (dos_cd((char *)cp) != SUCCESS) {
         TNDBG("TN28 dos_cd failed cp='%s' backslash=%u",
-              cp, TempCDS->cdsBackslashOffset);
+              cp, cds_backslash_offset);
 
-        cp[TempCDS->cdsBackslashOffset + 1] = '\0';
-        fdos_guest_cds_current_path_byte(
-            x86_cdsEntry, TempCDS->cdsBackslashOffset + 1u, 0);
+        cp[cds_backslash_offset + 1] = '\0';
+        fdos_cds_current_path_byte(
+            x86_cdsEntry, cds_backslash_offset + 1u, 0);
 
         TNDBG("TN29 retry dos_cd cp='%s'", cp);
         dos_cd((char *)cp);
@@ -2044,7 +2049,7 @@ invalid_path:
       strcpy(dest, (char *)cp);
       TNDBG("TN32 after strcpy dest='%s'", dest);
 
-      if (TempCDS->cdsFlags & CDSSUBST)
+      if (cds_flags & CDSSUBST)
       {
         TNDBG("TN33 CDSSUBST dest='%s'", dest);
         if (dest[1] == ':')
@@ -2052,20 +2057,20 @@ invalid_path:
           unsigned ii = drLetterToNr(dest[0]);
 
           TNDBG("TN34 subst real drive ii=%u lastdrive=%u",
-                ii, fdos_guest_lastdrive());
-          if (ii < fdos_guest_lastdrive())
+                ii, fdos_dos_lastdrive());
+          if (ii < fdos_dos_lastdrive())
             result = (result & 0xffe0) | ii;
         }
       }
 
-      rootPos = p = dest + TempCDS->cdsBackslashOffset;
+      rootPos = p = dest + cds_backslash_offset;
 
       TNDBG("TN35 after root setup p=%u root=%u backslash=%u dest='%s'",
-            TNDPTR(p), TNDPTR(rootPos), TempCDS->cdsBackslashOffset, dest);
+            TNDPTR(p), TNDPTR(rootPos), cds_backslash_offset, dest);
     }
     else
     {
-      cp += TempCDS->cdsBackslashOffset;
+      cp += cds_backslash_offset;
 
       TNDBG("TN36 skip physical cp='%s'", cp);
 
@@ -2296,16 +2301,22 @@ invalid_path:
 COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 {
   /*
-   * Pageable guest RAM has no pinned pages.  Keep only stable native
-   * snapshots while pathname processing calls media/FAT helpers which may
-   * map arbitrary guest pages.  Guest reads themselves go through the C++
-   * accessors exported by fdos_21h.cpp; no ARM_PTR survives such a call.
+   * Pageable guest RAM has no pinned pages.  Snapshot only the caller's
+   * ASCIIZ pathname; live CDS metadata is read through field proxies, and
+   * only cdsCurrentPath is copied into a stable native path buffer.
    */
   char src_snapshot[FDOS_PATHLEN];
-  struct cds temp_cds;
+  const uint32_t src_linear = ((uint32_t)FP_SEG(x86_src) << 4) + FP_OFF(x86_src);
+  size_t i = 0;
 
-  fdos_guest_copy_cstr(x86_src, src_snapshot, sizeof(src_snapshot));
-  return truename_worker(x86_src, src_snapshot, dest, mode, &temp_cds);
+  for (; i + 1u < sizeof(src_snapshot); ++i)
+  {
+    src_snapshot[i] = (char)pload8(src_linear + (uint32_t)i);
+    if (src_snapshot[i] == '\0')
+      break;
+  }
+  src_snapshot[sizeof(src_snapshot) - 1u] = '\0';
+  return truename_worker(x86_src, src_snapshot, dest, mode);
 }
 
 /* FAT time notation in the form of hhhh hmmm mmmd dddd (d = double second)

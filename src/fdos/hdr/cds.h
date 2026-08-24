@@ -109,8 +109,9 @@ struct cds {
 /*
     The CDS array is handed to guests wholesale via the List of Lists
     (LoL+16h) and indexed there with this exact stride; the SDA also
-    reserves a fixed 88-byte TempCDS scratch slot for one entry
-    (see lol.h), which truename() memcpy()s into.
+    reserves a fixed 88-byte TempCDS-compatible slot, so the public
+    structure stride remains part of the DOS ABI even though native code
+    accesses live CDS entries through field proxies.
 */
 _Static_assert(sizeof(struct cds) == 88,
                "struct cds must stay 88 bytes: LoL CDS array stride and the SDA TempCDS slot both assume it");

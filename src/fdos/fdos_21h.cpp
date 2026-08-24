@@ -446,47 +446,6 @@ int DosSetTime(CPU *cpu)
  * services use it when they need the CDS slot itself, including disabled,
  * JOINed or not-yet-completely-initialized entries.
  */
-void fdos_guest_copy_cstr(dos_far_ptr src, char *dst, size_t dst_size)
-{
-  if (dst_size == 0)
-    return;
-
-  const uint32_t base = ((uint32_t)FP_SEG(src) << 4) + FP_OFF(src);
-  size_t i = 0;
-  for (; i + 1u < dst_size; ++i) {
-    const char c = (char)pload8(base + (uint32_t)i);
-    dst[i] = c;
-    if (c == '\0')
-      return;
-  }
-  dst[i] = '\0';
-}
-
-void fdos_guest_cds_load(dos_far_ptr src, struct cds *dst)
-{
-  cds_ref(src).read_struct(*dst);
-}
-
-void fdos_guest_cds_current_path_byte(dos_far_ptr cds_ptr, unsigned index, UBYTE value)
-{
-  cds_ref(cds_ptr).current_path_byte(index, value);
-}
-
-UBYTE fdos_guest_default_drive(void)
-{
-  return fdos_idata.default_drive();
-}
-
-UBYTE fdos_guest_lastdrive(void)
-{
-  return fdos_lol.lastdrive();
-}
-
-void fdos_guest_set_current_ldt(dos_far_ptr value)
-{
-  fdos_idata.current_ldt(value);
-}
-
 struct cds FAR *get_cds_unvalidated(unsigned drive)
 {
   if (drive >= LoL->lastdrive || far_is_null(LoL->CDSp))

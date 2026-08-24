@@ -281,25 +281,14 @@ public:
     __attribute__((always_inline)) scalar_proxy<UBYTE> os_setver_major() const { return {addr_ + offsetof(lol, os_setver_major)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> os_setver_minor() const { return {addr_ + offsetof(lol, os_setver_minor)}; }
 
-    dos_far_ptr far_value(std::size_t off) const {
-        dos_far_ptr v{};
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-        auto *d = reinterpret_cast<uint8_t *>(&v);
-        for (std::size_t i = 0; i < sizeof(v); ++i)
-            d[i] = pload8(addr_ + static_cast<uint32_t>(off + i));
-#else
-        __builtin_memcpy(&v, reinterpret_cast<const void *>(X86_RAM_BASE + addr_ + off), sizeof(v));
-#endif
-        return v;
+    __attribute__((always_inline)) dos_far_ptr far_value(std::size_t off) const {
+        const UWORD offset = scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off));
+        const UWORD segment = scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off + sizeof(UWORD)));
+        return MK_FP(segment, offset);
     }
-    void far_value(std::size_t off, dos_far_ptr v) const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-        const auto *d = reinterpret_cast<const uint8_t *>(&v);
-        for (std::size_t i = 0; i < sizeof(v); ++i)
-            pstore8(addr_ + static_cast<uint32_t>(off + i), d[i]);
-#else
-        __builtin_memcpy(reinterpret_cast<void *>(X86_RAM_BASE + addr_ + off), &v, sizeof(v));
-#endif
+    __attribute__((always_inline)) void far_value(std::size_t off, dos_far_ptr v) const {
+        scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off)) = FP_OFF(v);
+        scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off + sizeof(UWORD))) = FP_SEG(v);
     }
     __attribute__((always_inline)) dos_far_ptr sfthead() const { return far_value(offsetof(lol, sfthead)); }
     __attribute__((always_inline)) void sfthead(dos_far_ptr v) const { far_value(offsetof(lol, sfthead), v); }
@@ -328,20 +317,24 @@ public:
     __attribute__((always_inline)) dos_far_ptr far_ptr() const { return far_; }
     __attribute__((always_inline)) UWORD flags() const { return scalar_load<UWORD>(offsetof(cds, cdsFlags)); }
     __attribute__((always_inline)) dos_far_ptr dpb() const {
-        uint32_t x = scalar_load<uint32_t>(offsetof(cds, cdsDpb));
-        dos_far_ptr v;
-        __builtin_memcpy(&v, &x, sizeof(v));
-        return v;
+        const UWORD offset = scalar_load<UWORD>(offsetof(cds, cdsDpb));
+        const UWORD segment = scalar_load<UWORD>(offsetof(cds, cdsDpb) + sizeof(UWORD));
+        return MK_FP(segment, offset);
     }
-
-    void read_struct(cds &out) const {
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-        auto *d = reinterpret_cast<uint8_t *>(&out);
-        for (std::size_t i = 0; i < sizeof(out); ++i)
-            d[i] = pload8(addr_ + static_cast<uint32_t>(i));
-#else
-        __builtin_memcpy(&out, reinterpret_cast<const void *>(X86_RAM_BASE + addr_), sizeof(out));
-#endif
+    __attribute__((always_inline)) WORD backslash_offset() const {
+        return scalar_load<WORD>(offsetof(cds, cdsBackslashOffset));
+    }
+    __attribute__((always_inline)) WORD join_offset() const {
+        return backslash_offset();
+    }
+    __attribute__((always_inline)) void copy_current_path(char *dst, std::size_t dst_size) const {
+        if (dst_size == 0)
+            return;
+        std::size_t n = sizeof(((cds *)0)->cdsCurrentPath);
+        if (n > dst_size)
+            n = dst_size;
+        guest_read_block(addr_ + offsetof(cds, cdsCurrentPath), dst, n);
+        dst[n - 1] = '\0';
     }
 
     __attribute__((always_inline)) void current_path_byte(std::size_t index, UBYTE value) const {
@@ -614,8 +607,15 @@ public:
     __attribute__((always_inline)) void user_r(dos_far_ptr v) const { far_store(offsetof(dos_data,user_r),v); }
     __attribute__((always_inline)) void prev_user_r(dos_far_ptr v) const { far_store(offsetof(dos_data,prev_user_r),v); }
 private:
-    dos_far_ptr far_load(size_t off) const { uint32_t x=scalar_proxy<uint32_t>(addr_+(uint32_t)off); dos_far_ptr v; __builtin_memcpy(&v,&x,sizeof(v)); return v; }
-    void far_store(size_t off,dos_far_ptr v) const { uint32_t x; __builtin_memcpy(&x,&v,sizeof(x)); scalar_proxy<uint32_t>(addr_+(uint32_t)off)=x; }
+    __attribute__((always_inline)) dos_far_ptr far_load(size_t off) const {
+        const UWORD offset = scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off));
+        const UWORD segment = scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off + sizeof(UWORD)));
+        return MK_FP(segment, offset);
+    }
+    __attribute__((always_inline)) void far_store(size_t off, dos_far_ptr v) const {
+        scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off)) = FP_OFF(v);
+        scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off + sizeof(UWORD))) = FP_SEG(v);
+    }
     linear_t addr_;
 };
 
