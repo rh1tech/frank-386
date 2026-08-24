@@ -160,6 +160,9 @@ public:
         return unaligned_load<V>(ptr_);
 #endif
     }
+    __attribute__((always_inline)) scalar_proxy &operator=(const scalar_proxy &other) {
+        return *this = static_cast<V>(other);
+    }
     __attribute__((always_inline)) scalar_proxy &operator=(V v) {
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
         if constexpr (sizeof(V) == 1) pstore8(addr_, static_cast<uint8_t>(v));
@@ -268,6 +271,16 @@ public:
         const UWORD segment = scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_filetab) + sizeof(UWORD));
         return MK_FP(segment, offset);
     }
+    __attribute__((always_inline)) UBYTE file_handle(UWORD index) const {
+        const dos_far_ptr table = file_table();
+        const linear_t base = (static_cast<linear_t>(FP_SEG(table)) << 4) + FP_OFF(table);
+        return pload8(base + index);
+    }
+    __attribute__((always_inline)) void file_handle(UWORD index, UBYTE value) const {
+        const dos_far_ptr table = file_table();
+        const linear_t base = (static_cast<linear_t>(FP_SEG(table)) << 4) + FP_OFF(table);
+        pstore8(base + index, value);
+    }
 private: linear_t addr_;
 };
 
@@ -322,6 +335,7 @@ public:
 
     __attribute__((always_inline)) dos_far_ptr far_ptr() const { return far_; }
     __attribute__((always_inline)) UWORD flags() const { return scalar_load<UWORD>(offsetof(cds, cdsFlags)); }
+    __attribute__((always_inline)) void flags(UWORD v) const { scalar_store<UWORD>(offsetof(cds, cdsFlags), v); }
     __attribute__((always_inline)) dos_far_ptr dpb() const {
         const UWORD offset = scalar_load<UWORD>(offsetof(cds, cdsDpb));
         const UWORD segment = scalar_load<UWORD>(offsetof(cds, cdsDpb) + sizeof(UWORD));
@@ -488,6 +502,7 @@ public:
     __attribute__((always_inline)) UWORD data_start() const { return dpb_data(); }
     FDOS_GUEST_RW16(dpb_size)
     FDOS_GUEST_RW16(dpb_fatsize)
+    __attribute__((always_inline)) bool is_fat32() const { return dpb_fatsize() == 0; }
     FDOS_GUEST_RW16(dpb_dirstrt)
     FDOS_GUEST_RW8(dpb_mdb)
 

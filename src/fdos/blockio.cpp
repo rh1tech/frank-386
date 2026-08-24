@@ -80,8 +80,17 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
   if (far_is_null(_dpbp)) {
     return 0x0201;              /* illegal command */
   }
-  struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp); 
-  struct dhdr* dpb_device = (struct dhdr *)ARM_PTR(dpbp->dpb_device);
+  using fdos_guest::dhdr_ref;
+  using fdos_guest::dpb_ref;
+  using fdos_guest::lol_ref;
+  const lol_ref dsk_lol((static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + 0x08F0u);
+  const dpb_ref dpbp(_dpbp);
+  const dos_far_ptr dpb_device = dpbp.device();
+  const UBYTE dpb_unit = dpbp.dpb_unit();
+  const UBYTE dpb_subunit = dpbp.dpb_subunit();
+  const UWORD dpb_secsize = dpbp.dpb_secsize();
+  const UBYTE dpb_mdb = dpbp.dpb_mdb();
+  const UWORD device_attr = dhdr_ref(dpb_device).attr();
 
   /*
    * The current native block backend transfers 512-byte sectors only.
@@ -91,13 +100,13 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
    * same request-status value used above for an unusable drive instead
    * of halting the whole DOS kernel.
    */
-  if (dpbp->dpb_secsize != 512)
+  if (dpb_secsize != 512)
     return 0x0201;              /* error + illegal command */
 
   for (;;)
   {
     IoReqHdrD.r_length = sizeof(request);
-    IoReqHdrD.r_unit = dpbp->dpb_subunit;
+    IoReqHdrD.r_unit = dpb_subunit;
 
     switch (mode)
     {
@@ -121,9 +130,9 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     }
 
     IoReqHdrD.r_status = 0;
-    IoReqHdrD.r_meddesc = dpbp->dpb_mdb;
+    IoReqHdrD.r_meddesc = dpb_mdb;
     IoReqHdrD.r_count = numblocks;
-    if ((dpb_device->dh_attr & ATTR_HUGE) || blkno >= MAXSHORT)
+    if ((device_attr & ATTR_HUGE) || blkno >= MAXSHORT)
     {
       IoReqHdrD.r_start = HUGECOUNT;
       IoReqHdrD.r_huge = blkno;
@@ -136,21 +145,21 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
      * Then transfer block through deblock_buf (DiskTransferBuffer doesn't work!)
      * (But this won't work for multi-block HMA transfers... are there any?)
      */
-    if (FP_SEG(buf) >= 0xa000 && numblocks == 1 && LoL->bufloc != LOC_CONV)
+    if (FP_SEG(buf) >= 0xa000 && numblocks == 1 && (UBYTE)dsk_lol.bufloc() != LOC_CONV)
     {
-      IoReqHdrD.r_trans = LoL->deblock_buf;
+      IoReqHdrD.r_trans = dsk_lol.deblock_buf();
       if (mode == DSKWRITE || mode == DSKWRITEINT26)
-        fmemcpy(LoL->deblock_buf, buf, dpbp->dpb_secsize);
+        fmemcpy(dsk_lol.deblock_buf(), buf, dpb_secsize);
 
-      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpbp->dpb_device);
+      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpb_device);
 
       if (mode == DSKREAD || mode == DSKREADINT25)
-        fmemcpy(buf, LoL->deblock_buf, dpbp->dpb_secsize);
+        fmemcpy(buf, dsk_lol.deblock_buf(), dpb_secsize);
     }
     else
     {
       IoReqHdrD.r_trans = buf;
-      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpbp->dpb_device);
+      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpb_device);
     }
     if ((IoReqHdrD.r_status & (S_ERROR | S_DONE)) == S_DONE)
       break;
@@ -177,7 +186,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
       return (IoReqHdrD.r_status);
 
   loop:
-    switch (block_error(&IoReqHdrD, dpbp->dpb_unit, dpbp->dpb_device, mode))
+    switch (block_error(&IoReqHdrD, dpb_unit, dpb_device, mode))
     {
       case ABORT:
       case FAIL:
@@ -210,21 +219,11 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     "near" offsets within that one segment, and b_next(bp)/b_prev(bp)
     there are plain far-pointer reconstructions: MK_FP(FP_SEG(bp), ...).
 
-    bp here is a native ARM pointer (FAR expands to nothing on this
-    "linear architecture"), so FP_SEG()/FP_OFF() - which only operate
-    on dos_far_ptr - cannot be applied to it directly. buf_seg_off(bp)
-    below recovers the offset bp would have *as a guest far pointer in
-    LoL->firstbuf's segment* (every buffer lives in that one segment),
-    and bufptr(off) is the inverse: turn such an offset back into a
-    native pointer. b_next()/b_prev() are then just bufptr() applied to
-    the stored b_next/b_prev field.
+    The cache walk now keeps only guest far pointers and accesses buffer
+    metadata through buffer_ref.  A native pointer is produced only at
+    the public getblk() API boundary, for legacy callers that still expect
+    struct buffer *.
 */
-#define bufptr(_bp, off) ((struct buffer *)ARM_PTR(MK_FP(FP_SEG(_bp), off)))
-#define b_next_fp(_bp, bp) MK_FP(FP_SEG(_bp), (bp)->b_next)
-#define b_prev_fp(_bp, bp) MK_FP(FP_SEG(_bp), (bp)->b_prev)
-#define b_next(_bp, bp) bufptr(_bp, (bp)->b_next)
-#define b_prev(_bp, bp) bufptr(_bp, (bp)->b_prev)
-#define b_buffer_fp(_bp) MK_FP(FP_SEG(_bp), FP_OFF(_bp) + offsetof(struct buffer, b_buffer))
 
 namespace {
 constexpr fdos_guest::linear_t blockio_lol_linear =
@@ -400,69 +399,70 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 
 /*      Mark all buffers for a disk as not valid                        */
 VOID setinvld(REG COUNT dsk) {
-  dos_far_ptr _bp = LoL->firstbuf;
-  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
-  UWORD firstbp = FP_OFF(LoL->firstbuf);
+  using fdos_guest::buffer_ref;
+  dos_far_ptr bp = blockio_lol.firstbuf();
+  const UWORD firstbp = FP_OFF(bp);
   do
   {
-    if (bp->b_unit == dsk)
-      bp->b_flag = 0;
-    _bp = b_next_fp(_bp, bp);
-    bp = (struct buffer*)ARM_PTR(_bp);
+    const buffer_ref b(bp);
+    if (b.unit() == dsk)
+      b.flag(0);
+    bp = MK_FP(FP_SEG(bp), b.next());
   }
-  while (FP_OFF(_bp) != firstbp);
+  while (FP_OFF(bp) != firstbp);
 }
 
 /*      Check if there is at least one dirty buffer                     */
 BOOL dirty_buffers(REG COUNT dsk) {
-  dos_far_ptr _bp = LoL->firstbuf;
-  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
-  UWORD firstbp = FP_OFF(LoL->firstbuf);
+  using fdos_guest::buffer_ref;
+  dos_far_ptr bp = blockio_lol.firstbuf();
+  const UWORD firstbp = FP_OFF(bp);
   do
   {
-    if (bp->b_unit == dsk &&
-        (bp->b_flag & (BFR_VALID | BFR_DIRTY)) == (BFR_VALID | BFR_DIRTY))
+    const buffer_ref b(bp);
+    const BYTE flag = b.flag();
+    if (b.unit() == dsk &&
+        (flag & (BFR_VALID | BFR_DIRTY)) == (BFR_VALID | BFR_DIRTY))
       return TRUE;
-    _bp = b_next_fp(_bp, bp);
-    bp = (struct buffer*)ARM_PTR(_bp);
+    bp = MK_FP(FP_SEG(bp), b.next());
   }
-  while (FP_OFF(_bp) != firstbp);
+  while (FP_OFF(bp) != firstbp);
   return FALSE;
 }
 
 /*      Write all disk buffers for one drive                            */
 BOOL flush_buffers(REG COUNT dsk) {
-  dos_far_ptr _bp = LoL->firstbuf;
-  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
-  UWORD firstbp = FP_OFF(LoL->firstbuf);
+  using fdos_guest::buffer_ref;
+  dos_far_ptr bp = blockio_lol.firstbuf();
+  const UWORD firstbp = FP_OFF(bp);
   REG BOOL ok = TRUE;
   do
   {
-    if (bp->b_unit == dsk)
-      if (!flush1(_bp))
-        ok = FALSE;
-    _bp = b_next_fp(_bp, bp);
-    bp = (struct buffer*)ARM_PTR(_bp);
+    const buffer_ref b(bp);
+    const UWORD next = b.next();
+    if (b.unit() == dsk && !flush1(bp))
+      ok = FALSE;
+    bp = MK_FP(FP_SEG(bp), next);
   }
-  while (FP_OFF(_bp) != firstbp);
+  while (FP_OFF(bp) != firstbp);
   return ok;
 }
 
 /*      Write all disk buffers                                          */
 BOOL flush(void) {
-  dos_far_ptr _bp = LoL->firstbuf;
-  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
-  UWORD firstbp = FP_OFF(LoL->firstbuf);
+  using fdos_guest::buffer_ref;
+  dos_far_ptr bp = blockio_lol.firstbuf();
+  const UWORD firstbp = FP_OFF(bp);
   REG BOOL ok = TRUE;
   do
   {
-    if (!flush1(_bp))
+    const UWORD next = buffer_ref(bp).next();
+    if (!flush1(bp))
       ok = FALSE;
-    bp->b_flag &= ~BFR_VALID;
-    _bp = b_next_fp(_bp, bp);
-    bp = (struct buffer*)ARM_PTR(_bp);
+    buffer_ref(bp).flag(static_cast<BYTE>(buffer_ref(bp).flag() & ~BFR_VALID));
+    bp = MK_FP(FP_SEG(bp), next);
   }
-  while (FP_OFF(_bp) != firstbp);
+  while (FP_OFF(bp) != firstbp);
 
   /* No redirector is loaded, so this always reports "not supported"
      (-DE_INVLDFUNC) - the original ignores the return value too. */
@@ -482,21 +482,23 @@ BOOL flush(void) {
 */
 BOOL DeleteBlockInBufferCache(ULONG blknolow, ULONG blknohigh, COUNT dsk, int mode)
 {
-  dos_far_ptr _bp = LoL->firstbuf;
-  struct buffer* bp = (struct buffer*)ARM_PTR(_bp);
-  UWORD firstbp = FP_OFF(LoL->firstbuf);
-  /* Search through buffers to see if the required block  */
-  /* is already in a buffer                               */
+  using fdos_guest::buffer_ref;
+  dos_far_ptr bp = blockio_lol.firstbuf();
+  const UWORD firstbp = FP_OFF(bp);
   do {
-    if (blknolow <= bp->b_blkno && bp->b_blkno <= blknohigh && (bp->b_flag & BFR_VALID) && (bp->b_unit == dsk)) {
+    const buffer_ref b(bp);
+    const UWORD next = b.next();
+    const ULONG blkno = b.blkno();
+    const BYTE flag = b.flag();
+    if (blknolow <= blkno && blkno <= blknohigh &&
+        (flag & BFR_VALID) && b.unit() == dsk) {
       if (mode == XFR_READ)
-        flush1(_bp);
+        flush1(bp);
       else
-        bp->b_flag = 0;
+        b.flag(0);
     }
-    _bp = b_next_fp(_bp, bp);
-    bp = (struct buffer*)ARM_PTR(_bp);
+    bp = MK_FP(FP_SEG(bp), next);
   }
-  while (FP_OFF(_bp) != firstbp);
+  while (FP_OFF(bp) != firstbp);
   return FALSE;
 }

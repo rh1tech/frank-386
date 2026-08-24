@@ -1493,44 +1493,53 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
       case 0x45: /* DOS 2+ - DUP - DUPLICATE FILE HANDLE */
       {
-        unsigned old_hndl = R_BX;
-        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-        UBYTE *filetab = jft_of(p);   /* NULL => guest broke its own ps_filetab */
+        const unsigned old_hndl = R_BX;
+        const psp_ref process(fdos_idata.cu_psp());
+        const UWORD max_files = process.max_files();
+        const dos_far_ptr filetab = process.file_table();
         dos_far_ptr old_sft;
+        UBYTE old_idx;
         unsigned new_hndl;
 
-        if (filetab == NULL || old_hndl >= p->ps_maxfiles ||
-            filetab[old_hndl] == 0xff)
+        if (far_is_null(filetab) || far_is_end(filetab) || old_hndl >= max_files)
         {
           R_CF = 1;
           R_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
 
-        old_sft = idx_to_sft(filetab[old_hndl]);
-        if (far_is_end(old_sft) ||
-            (((sft *)ARM_PTR(old_sft))->sft_mode & O_NOINHERIT))
+        old_idx = process.file_handle((UWORD)old_hndl);
+        if (old_idx == 0xff)
         {
-          cf = 1;
-          CPU_AX = (UWORD)(-DE_INVLDHNDL);
+          R_CF = 1;
+          R_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
 
-        for (new_hndl = 0; new_hndl < p->ps_maxfiles; new_hndl++)
+        old_sft = idx_to_sft(old_idx);
+        if (far_is_end(old_sft) || (sft_ref(old_sft).mode() & O_NOINHERIT))
         {
-          if (filetab[new_hndl] == 0xff)
-            break;
+          R_CF = 1;
+          R_AX = (UWORD)(-DE_INVLDHNDL);
+          break;
         }
 
-        if (new_hndl >= p->ps_maxfiles)
+        for (new_hndl = 0; new_hndl < max_files; ++new_hndl)
+          if (process.file_handle((UWORD)new_hndl) == 0xff)
+            break;
+
+        if (new_hndl >= max_files)
         {
           R_CF = 1;
           R_AX = (UWORD)(-DE_TOOMANY);
           break;
         }
 
-        filetab[new_hndl] = filetab[old_hndl];
-        ((sft *)ARM_PTR(old_sft))->sft_count++;
+        process.file_handle((UWORD)new_hndl, old_idx);
+        {
+          const sft_ref entry(old_sft);
+          entry.count((UWORD)(entry.count() + 1u));
+        }
 
         R_AX = (UWORD)new_hndl;
         R_CF = 0;
@@ -1540,49 +1549,55 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x46: // DOS 2+ - DUP2, FORCEDUP - FORCE DUPLICATE FILE HANDLE
       // BX = existing handle (old), CX = handle to redirect (new)
       {
-        unsigned old_hndl = R_BX;
-        unsigned new_hndl = R_CX;
-        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
-        UBYTE *filetab = jft_of(p);   /* NULL => guest broke its own ps_filetab */
+        const unsigned old_hndl = R_BX;
+        const unsigned new_hndl = R_CX;
+        const psp_ref process(fdos_idata.cu_psp());
+        const UWORD max_files = process.max_files();
+        const dos_far_ptr filetab = process.file_table();
+        UBYTE old_idx;
 
-        if (filetab == NULL || old_hndl >= p->ps_maxfiles ||
-            filetab[old_hndl] == 0xff)
+        if (far_is_null(filetab) || far_is_end(filetab) ||
+            old_hndl >= max_files || new_hndl >= max_files)
         {
           R_CF = 1;
           R_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
-        if (new_hndl >= p->ps_maxfiles)
+
+        old_idx = process.file_handle((UWORD)old_hndl);
+        if (old_idx == 0xff)
         {
           R_CF = 1;
           R_AX = (UWORD)(-DE_INVLDHNDL);
           break;
         }
+
         if (new_hndl != old_hndl)
         {
-          /* close new handle if open */
-          if (filetab[new_hndl] != 0xff)
+          /* DosClose() may remap guest RAM; psp_ref keeps only the PSP
+             guest address and re-reads ps_filetab for every access. */
+          if (process.file_handle((UWORD)new_hndl) != 0xff)
           {
             COUNT close_rc = DosClose(new_hndl);
             if (close_rc < SUCCESS)
             {
-              cf = 1;
-              CPU_AX = (UWORD)(-close_rc);
+              R_CF = 1;
+              R_AX = (UWORD)(-close_rc);
               break;
             }
           }
-          /* copy SFT index and bump ref count */
-          filetab[new_hndl] = filetab[old_hndl];
+
+          const dos_far_ptr old_sft = idx_to_sft(old_idx);
+          if (far_is_end(old_sft))
           {
-            dos_far_ptr old_sft = idx_to_sft(filetab[old_hndl]);
-            if (far_is_end(old_sft))
-            {
-              cf = 1;
-              CPU_AX = (UWORD)(-DE_INVLDHNDL);
-              break;
-            }
-            ((sft *)ARM_PTR(old_sft))->sft_count++;
+            R_CF = 1;
+            R_AX = (UWORD)(-DE_INVLDHNDL);
+            break;
           }
+
+          process.file_handle((UWORD)new_hndl, old_idx);
+          const sft_ref entry(old_sft);
+          entry.count((UWORD)(entry.count() + 1u));
         }
         R_CF = 0;
       }
@@ -1594,7 +1609,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
 
         /* Set PSP                                                      */
       case 0x50:
-        internal_data->cu_psp = R_BX;
+        fdos_idata.cu_psp() = R_BX;
         break;
 
       case 0x52: { // DOS 2+ internal - SYSVARS - GET LIST OF LISTS -> ES:BX -> DOS list of lists (see #01627)
@@ -1616,7 +1631,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
         /* Get PSP                                                      */
       case 0x51: // DOS 2+ internal - GET CURRENT PROCESS ID (GET PSP ADDRESS)
       case 0x62: // DOS 3.0+ - GET CURRENT PSP ADDRESS
-        R_BX = internal_data->cu_psp;
+        R_BX = fdos_idata.cu_psp();
         break;
 
       case 0x60: /* DOS 3+ - TRUENAME - canonicalize filename/path */
@@ -2262,19 +2277,26 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x5f:
         if (R_AL == 7 || R_AL == 8)
         {
-          if (R_DL < LoL->lastdrive)
+          if (R_DL < fdos_lol.lastdrive())
           {
-            struct cds *cdsp =
-                (struct cds *)ARM_PTR(LoL->CDSp) + R_DL;
-            /* Upstream tests the whole far pointer ("if (cdsp->cdsDpb)");
-               an offset-only test misreads a DPB that sits at offset 0 of
-               its segment as "absent". */
-            if (!far_is_null(cdsp->cdsDpb))  /* letter of physical drive?  */
+            const dos_far_ptr cds_base = fdos_lol.cds();
+            if (!far_is_null(cds_base) && !far_is_end(cds_base))
             {
-              cdsp->cdsFlags &= ~CDSPHYSDRV;
-              if (R_AL == 7)
-                cdsp->cdsFlags |= CDSPHYSDRV;
-              break;
+              const dos_far_ptr cds_ptr =
+                  MK_FP(FP_SEG(cds_base),
+                        (UWORD)(FP_OFF(cds_base) + (UWORD)R_DL * sizeof(cds)));
+              const cds_ref cdsp(cds_ptr);
+              /* Upstream tests the whole far pointer ("if (cdsp->cdsDpb)");
+                 an offset-only test misreads a DPB that sits at offset 0 of
+                 its segment as "absent". */
+              if (!far_is_null(cdsp.dpb()))  /* letter of physical drive? */
+              {
+                UWORD flags = (UWORD)(cdsp.flags() & ~CDSPHYSDRV);
+                if (R_AL == 7)
+                  flags |= CDSPHYSDRV;
+                cdsp.flags(flags);
+                break;
+              }
             }
           }
           rc = DE_INVLDDRV;
@@ -2436,29 +2458,29 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* INT21/32 is documented to reread the DPB */
       {
         int drv = (R_DL == 0 || R_AH == 0x1f)
-                    ? internal_data->default_drive : R_DL - 1;
-        dos_far_ptr dpbp_x86 = get_dpb(drv);
-        struct dpb *dpbp;
+                    ? (int)(UBYTE)fdos_idata.default_drive() : R_DL - 1;
+        const dos_far_ptr dpbp_x86 = get_dpb(drv);
 
         if (far_is_null(dpbp_x86))
         {
-          internal_data->CritErrCode = -DE_INVLDDRV;
+          fdos_idata.crit_err_code() = (UWORD)(-DE_INVLDDRV);
           R_AL = 0xFF;
           break;
         }
-        dpbp = (struct dpb *) ARM_PTR (dpbp_x86);
+
+        const dpb_ref dpbp(dpbp_x86);
         /* hazard: no error checking! */
-        flush_buffers(dpbp->dpb_unit);
-        dpbp->dpb_flags = M_CHANGED;  /* force flush and reread of drive BPB/DPB */
+        flush_buffers(dpbp.dpb_unit());
+        dpbp.flags(M_CHANGED);  /* force flush and reread of drive BPB/DPB */
 
 #ifdef WITHFAT32
-        if (media_check(dpbp_x86) < 0 || ISFAT32(dpbp))
+        if (media_check(dpbp_x86) < 0 || dpbp.is_fat32())
 #else
         if (media_check(dpbp_x86) < 0)
 #endif
         {
           R_AL = 0xff;
-          internal_data->CritErrCode = -DE_INVLDDRV;
+          fdos_idata.crit_err_code() = (UWORD)(-DE_INVLDDRV);
           break;
         }
         R_DS = ( FP_SEG(dpbp_x86) );
