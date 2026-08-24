@@ -30,6 +30,7 @@
 #include "fdos.h"
 #include "globals.h"
 #include "proto.h"
+#include "kernel_guest_proxy.h"
 
 #define FCB_SUCCESS     0
 #define FCB_ERR_NODATA  1
@@ -47,12 +48,63 @@ STATIC void FcbCalcRec(dos_far_ptr lpXfcb);
 #define TestCmnSeps(lpFileName) (*lpFileName && strchr(":;,=+ \t", *lpFileName) != NULL)
 #define TestFieldSeps(lpFileName) ((unsigned char)*lpFileName <= ' ' || strchr("/\\\"[]<>|.:;,=+\t", *lpFileName) != NULL)
 
-/* original: static dmatch Dmatch (DGROUP); port: guest-resident SDA
-   appendix, so that internal_data->dta can point at it */
-#define Dmatch (internal_data->fcb_dmatch)
-#define Dmatch_x86 (x86_FAR_PTR(DOS_PSP, (void *)&internal_data->fcb_dmatch))
-#define DmatchTmp (internal_data->fcb_dmatch_tmp)
-#define DmatchTmp_x86 (x86_FAR_PTR(DOS_PSP, (void *)&internal_data->fcb_dmatch_tmp))
+/* Guest-resident SDA scratch used as temporary DTA. */
+#define FCB_SDA_LINEAR (((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF)
+#define DMATCH_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, fcb_dmatch))
+#define DMATCH_TMP_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, fcb_dmatch_tmp))
+#define FCB_REN_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, fcb_ren_name))
+#define Dmatch_x86 MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, fcb_dmatch)))
+#define DmatchTmp_x86 MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, fcb_dmatch_tmp)))
+
+static uint32_t fcb_far_linear(dos_far_ptr p)
+{
+  return ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p);
+}
+
+static dos_far_ptr fcb_dta(void)
+{
+  const uint32_t a = FCB_SDA_LINEAR + offsetof(struct dos_data, dta);
+  return MK_FP(pload16(a + 2u), pload16(a));
+}
+
+static void fcb_set_dta(dos_far_ptr p)
+{
+  const uint32_t a = FCB_SDA_LINEAR + offsetof(struct dos_data, dta);
+  pstore16(a, FP_OFF(p));
+  pstore16(a + 2u, FP_SEG(p));
+}
+
+static void fcb_set_crit(UWORD v)
+{
+  pstore16(FCB_SDA_LINEAR + offsetof(struct dos_data, CritErrCode), v);
+}
+
+static void fcb_set_lp_fcb(dos_far_ptr p)
+{
+  const uint32_t a = FCB_SDA_LINEAR + offsetof(struct dos_data, sda_lpFcb);
+  pstore16(a, FP_OFF(p));
+  pstore16(a + 2u, FP_SEG(p));
+}
+
+static void fcb_load(dos_far_ptr p, fcb *out)
+{
+  guest_read_block(fcb_far_linear(p), out, sizeof(*out));
+}
+
+static void fcb_store(dos_far_ptr p, const fcb *in)
+{
+  guest_write_block(fcb_far_linear(p), in, sizeof(*in));
+}
+
+static void dmatch_load(uint32_t addr, dmatch *out)
+{
+  guest_read_block(addr, out, sizeof(*out));
+}
+
+static void dmatch_store(uint32_t addr, const dmatch *in)
+{
+  guest_write_block(addr, in, sizeof(*in));
+}
 
 /* original: extern UWORD wAttr (DGROUP global, used only by this
    module - kernel-private, never peeked by guest software) */
@@ -79,7 +131,7 @@ dos_far_ptr FatGetDrvData(UBYTE drive, UBYTE * pspc, UWORD * bps, UWORD * nc)
   if (spc != 0xffff)
   {
     dos_far_ptr dpbp_x86 =
-        get_dpb(drive == 0 ? internal_data->default_drive : drive - 1);
+        get_dpb(drive == 0 ? fdos_dos_default_drive() : drive - 1);
     /* Point to the media descriptor for this drive                */
     *pspc = (UBYTE) spc;
     if (far_is_null(dpbp_x86))
@@ -160,160 +212,139 @@ STATIC ULONG FcbRec(fcb * lpFcb)
 
 UBYTE FcbReadWrite(dos_far_ptr lpXfcb, UCOUNT recno, int mode)
 {
+  const dos_far_ptr fcbp = ExtFcbToFcb(lpXfcb);
+  fcb local;
   ULONG lPosit;
   long nTransfer;
-  fcb *lpFcb;
   unsigned size;
   unsigned long bigsize;
   unsigned recsiz;
+  dos_far_ptr dta;
 
-  /* Convert to fcb if necessary                                  */
-  lpFcb = (fcb *) ARM_PTR (ExtFcbToFcb(lpXfcb));
-
-  recsiz = lpFcb->fcb_recsiz;
-  bigsize = (ULONG) recsiz * recno;
+  fcb_load(fcbp, &local);
+  recsiz = local.fcb_recsiz;
+  bigsize = (ULONG)recsiz * recno;
   if (bigsize > 0xffff)
     return FCB_ERR_SEGMENT_WRAP;
-  size = (unsigned) bigsize;
-
-  if ((UWORD)(FP_OFF(internal_data->dta) + size) < FP_OFF(internal_data->dta))
+  size = (unsigned)bigsize;
+  dta = fcb_dta();
+  if ((UWORD)(FP_OFF(dta) + size) < FP_OFF(dta))
     return FCB_ERR_SEGMENT_WRAP;
 
-  /* Now update the fcb and compute where we need to position     */
-  /* to.                                                          */
-  lPosit = FcbRec(lpFcb) * recsiz;
-  if ((internal_data->CritErrCode =
-       -SftSeek(lpFcb->fcb_sftno, lPosit, 0)) != SUCCESS)
-    return FCB_ERR_NODATA;
+  lPosit = FcbRec(&local) * recsiz;
+  {
+    long rc = SftSeek(local.fcb_sftno, lPosit, 0);
+    fcb_set_crit((UWORD)-rc);
+    if (rc != SUCCESS)
+      return FCB_ERR_NODATA;
+  }
 
-  /* Do the read                                                  */
-  nTransfer = DosRWSft(lpFcb->fcb_sftno, size, internal_data->dta,
-                       mode & ~XFR_FCB_RANDOM);
+  nTransfer = DosRWSft(local.fcb_sftno, size, dta, mode & ~XFR_FCB_RANDOM);
   if (nTransfer < 0)
-    internal_data->CritErrCode = -(int)nTransfer;
-
-  /* Now find out how we will return and do it.                   */
+    fcb_set_crit((UWORD)(-(int)nTransfer));
   if (mode & XFR_WRITE)
-    lpFcb->fcb_fsize = SftGetFsize(lpFcb->fcb_sftno);
-
-  /* if end-of-file, then partial read should count last record */
+    local.fcb_fsize = SftGetFsize(local.fcb_sftno);
   if (mode & XFR_FCB_RANDOM && recsiz > 0)
-    lpFcb->fcb_rndm += ((unsigned)nTransfer + recsiz - 1) / recsiz;
+    local.fcb_rndm += ((unsigned)nTransfer + recsiz - 1) / recsiz;
+
   size -= (unsigned)nTransfer;
   if (size == 0)
   {
-    FcbNextRecord(lpFcb);
+    FcbNextRecord(&local);
+    fcb_store(fcbp, &local);
     return FCB_SUCCESS;
   }
-  size %= lpFcb->fcb_recsiz;
+  size %= local.fcb_recsiz;
   if (mode & XFR_READ && size > 0)
   {
-    fmemset(MK_FP(FP_SEG(internal_data->dta),
-                  FP_OFF(internal_data->dta) + (unsigned)nTransfer),
-            0, size);
-    FcbNextRecord(lpFcb);
+    fmemset(MK_FP(FP_SEG(dta), FP_OFF(dta) + (unsigned)nTransfer), 0, size);
+    FcbNextRecord(&local);
+    fcb_store(fcbp, &local);
     return FCB_ERR_EOF;
   }
+  fcb_store(fcbp, &local);
   return FCB_ERR_NODATA;
 }
 
 UBYTE FcbGetFileSize(dos_far_ptr lpXfcb)
 {
   int FcbDrive, sft_idx;
+  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  fcb local;
   unsigned recsiz;
-
-  /* Build a traditional DOS file name                            */
-  fcb *lpFcb = (fcb *) ARM_PTR (CommonFcbInit(lpXfcb, SecPathName, &FcbDrive));
-  recsiz = lpFcb->fcb_recsiz;
-
-  /* check for a device                                           */
-  if (!lpFcb || !far_is_null(IsDevice(SecPathName)) || (recsiz == 0))
+  fcb_load(fcbp, &local);
+  recsiz = local.fcb_recsiz;
+  if (!far_is_null(IsDevice(SecPathName)) || recsiz == 0)
     return FCB_ERROR;
-
   sft_idx = (short)DosOpenSft(x86_FAR_PTR(DOS_PSP, (void *)SecPathName),
                               O_LEGACY | O_RDONLY | O_OPEN, 0);
   if (sft_idx >= 0)
   {
-    ULONG fsize;
-
-    /* Get the size                                         */
-    fsize = SftGetFsize(sft_idx);
-
-    /* compute the size and update the fcb                  */
-    lpFcb->fcb_rndm = (fsize + (recsiz - 1)) / recsiz;
-
-    /* close the file and leave                             */
-    if ((internal_data->CritErrCode = -DosCloseSft(sft_idx, FALSE)) == SUCCESS)
+    long rc;
+    local.fcb_rndm = (SftGetFsize(sft_idx) + (recsiz - 1)) / recsiz;
+    fcb_store(fcbp, &local);
+    rc = DosCloseSft(sft_idx, FALSE);
+    fcb_set_crit((UWORD)-rc);
+    if (rc == SUCCESS)
       return FCB_SUCCESS;
   }
   else
-    internal_data->CritErrCode = -sft_idx;
+    fcb_set_crit((UWORD)-sft_idx);
   return FCB_ERROR;
 }
 
 void FcbSetRandom(dos_far_ptr lpXfcb)
 {
-  /* Convert to fcb if necessary                                  */
-  fcb *lpFcb = (fcb *) ARM_PTR (ExtFcbToFcb(lpXfcb));
-
-  /* Now update the fcb and compute where we need to position     */
-  /* to. */
-  lpFcb->fcb_rndm = FcbRec(lpFcb);
+  const dos_far_ptr fcbp = ExtFcbToFcb(lpXfcb);
+  fcb local;
+  fcb_load(fcbp, &local);
+  local.fcb_rndm = FcbRec(&local);
+  fcb_store(fcbp, &local);
 }
 
 STATIC void FcbCalcRec(dos_far_ptr lpXfcb)
 {
-
-  /* Convert to fcb if necessary                                  */
-  fcb *lpFcb = (fcb *) ARM_PTR (ExtFcbToFcb(lpXfcb));
-
-  /* Now update the fcb and compute where we need to position     */
-  /* to.                                                          */
-  lpFcb->fcb_cublock = (UWORD)(lpFcb->fcb_rndm / 128);
-  lpFcb->fcb_curec = (UBYTE)lpFcb->fcb_rndm & 127;
+  const dos_far_ptr fcbp = ExtFcbToFcb(lpXfcb);
+  fcb local;
+  fcb_load(fcbp, &local);
+  local.fcb_cublock = (UWORD)(local.fcb_rndm / 128);
+  local.fcb_curec = (UBYTE)local.fcb_rndm & 127;
+  fcb_store(fcbp, &local);
 }
 
 UBYTE FcbRandomBlockIO(dos_far_ptr lpXfcb, UWORD *nRecords, int mode)
 {
-  UBYTE nErrorCode;
-  fcb *lpFcb;
-  unsigned long old;
-
+  UBYTE rc;
+  const dos_far_ptr fcbp = ExtFcbToFcb(lpXfcb);
+  fcb local;
+  ULONG old;
   FcbCalcRec(lpXfcb);
-
-  /* Convert to fcb if necessary                                  */
-  lpFcb = (fcb *) ARM_PTR (ExtFcbToFcb(lpXfcb));
-
-  old = lpFcb->fcb_rndm;
-  nErrorCode = FcbReadWrite(lpXfcb, *nRecords, mode);
-  *nRecords = (UWORD)(lpFcb->fcb_rndm - old);
-
-  /* Now update the fcb                                           */
+  fcb_load(fcbp, &local);
+  old = local.fcb_rndm;
+  rc = FcbReadWrite(lpXfcb, *nRecords, mode);
+  fcb_load(fcbp, &local);
+  *nRecords = (UWORD)(local.fcb_rndm - old);
   FcbCalcRec(lpXfcb);
-
-  return nErrorCode;
+  return rc;
 }
 
 UBYTE FcbRandomIO(dos_far_ptr lpXfcb, int mode)
 {
-  UWORD uwCurrentBlock;
-  UBYTE ucCurrentRecord;
-  UBYTE nErrorCode;
-  fcb *lpFcb;
-
+  UWORD block;
+  UBYTE record;
+  UBYTE rc;
+  const dos_far_ptr fcbp = ExtFcbToFcb(lpXfcb);
+  fcb local;
   FcbCalcRec(lpXfcb);
-
-  /* Convert to fcb if necessary                                  */
-  lpFcb = (fcb *) ARM_PTR (ExtFcbToFcb(lpXfcb));
-
-  uwCurrentBlock = lpFcb->fcb_cublock;
-  ucCurrentRecord = lpFcb->fcb_curec;
-
-  nErrorCode = FcbReadWrite(lpXfcb, 1, mode);
-
-  lpFcb->fcb_cublock = uwCurrentBlock;
-  lpFcb->fcb_curec = ucCurrentRecord;
-  return nErrorCode;
+  fcb_load(fcbp, &local);
+  block = local.fcb_cublock;
+  record = local.fcb_curec;
+  rc = FcbReadWrite(lpXfcb, 1, mode);
+  fcb_load(fcbp, &local);
+  local.fcb_cublock = block;
+  local.fcb_curec = record;
+  fcb_store(fcbp, &local);
+  return rc;
 }
 
 /* FcbOpen and FcbCreate
@@ -332,70 +363,61 @@ UBYTE FcbRandomIO(dos_far_ptr lpXfcb, int mode)
 */
 UBYTE FcbOpen(dos_far_ptr lpXfcb, unsigned flags)
 {
-  sft *sftp;
-  dos_far_ptr _sftp;
+  const uint32_t xbase = fcb_far_linear(lpXfcb);
   COUNT sft_idx, FcbDrive;
   unsigned attr = 0;
-  xfcb *lpExt = (xfcb *) ARM_PTR (lpXfcb);
+  dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  fcb local;
 
-  /* Build a traditional DOS file name                            */
-  fcb *lpFcb = (fcb *) ARM_PTR (CommonFcbInit(lpXfcb, SecPathName, &FcbDrive));
-  if ((flags & O_CREAT) && lpExt->xfcb_flag == 0xff)
-    /* pass attribute without constraints (dangerous for directories) */
-    attr = lpExt->xfcb_attrib;
+  fcb_load(fcbp, &local);
+  if ((flags & O_CREAT) && pload8(xbase + offsetof(xfcb, xfcb_flag)) == 0xff)
+    attr = pload8(xbase + offsetof(xfcb, xfcb_attrib));
 
   sft_idx = (short)DosOpenSft(x86_FAR_PTR(DOS_PSP, (void *)SecPathName),
                               flags, attr);
   if (sft_idx < 0)
   {
-    internal_data->CritErrCode = -sft_idx;
+    fcb_set_crit((UWORD)-sft_idx);
     return FCB_ERROR;
   }
 
-  _sftp = idx_to_sft(sft_idx);
-  sftp = (sft *) ARM_PTR (_sftp);
-  sftp->sft_mode |= O_FCB;
-
-  lpFcb->fcb_sftno = sft_idx;
-  lpFcb->fcb_cublock = 0;
-  /* should not be cleared, programs e.g. GEM depend on these values remaining unchanged
-  lpFcb->fcb_curec = 0;
-  lpFcb->fcb_rndm = 0;
-  */
-
-  lpFcb->fcb_recsiz = 0;      /* true for devices   */
-  if (!(sftp->sft_flags & SFT_FDEVICE)) /* check for a device */
   {
-    lpFcb->fcb_drive = FcbDrive;
-    lpFcb->fcb_recsiz = 128;
+    dos_far_ptr sftp = idx_to_sft(sft_idx);
+    UWORD entry_flags = fdos_sft_flags_raw(sftp);
+    fdos_sft_or_mode(sftp, O_FCB);
+    local.fcb_sftno = (BYTE)sft_idx;
+    local.fcb_cublock = 0;
+    local.fcb_recsiz = 0;
+    if (!(entry_flags & SFT_FDEVICE))
+    {
+      local.fcb_drive = FcbDrive;
+      local.fcb_recsiz = 128;
+    }
+    local.fcb_fsize = fdos_sft_size(sftp);
+    local.fcb_date = fdos_sft_date(sftp);
+    local.fcb_time = fdos_sft_time(sftp);
+    fcb_store(fcbp, &local);
   }
-  lpFcb->fcb_fsize = sftp->sft_size;
-  lpFcb->fcb_date = sftp->sft_date;
-  lpFcb->fcb_time = sftp->sft_time;
   return FCB_SUCCESS;
 }
 
 STATIC dos_far_ptr ExtFcbToFcb(dos_far_ptr lpExtFcb)
 {
   dos_far_ptr res = lpExtFcb;
-  if (*(UBYTE *) ARM_PTR (lpExtFcb) == 0xff)
+  if (pload8(fcb_far_linear(lpExtFcb)) == 0xff)
     res = MK_FP(FP_SEG(lpExtFcb),
                 (UWORD)(FP_OFF(lpExtFcb) + offsetof(xfcb, xfcb_fcb)));
-  internal_data->sda_lpFcb = res;   /* guest pointer, as real DOS keeps it */
+  fcb_set_lp_fcb(res);
   return res;
 }
 
 STATIC dos_far_ptr CommonFcbInit(dos_far_ptr lpExtFcb, BYTE * pszBuffer,
                                  COUNT * pCurDrive)
 {
-  dos_far_ptr lpFcb;
-
-  /* convert to fcb if needed first (also latches sda_lpFcb)      */
-  lpFcb = ExtFcbToFcb(lpExtFcb);
-
-  /* Build a traditional DOS file name                            */
-  FcbNameInit((fcb *) ARM_PTR (lpFcb), pszBuffer, pCurDrive);
-  /* and return the fcb pointer                                   */
+  dos_far_ptr lpFcb = ExtFcbToFcb(lpExtFcb);
+  fcb local;
+  fcb_load(lpFcb, &local);
+  FcbNameInit(&local, pszBuffer, pCurDrive);
   return lpFcb;
 }
 
@@ -404,7 +426,7 @@ STATIC void FcbNameInit(fcb * lpFcb, BYTE * szBuffer, COUNT * pCurDrive)
   BYTE *pszBuffer = szBuffer;
 
   /* Build a traditional DOS file name                            */
-  *pCurDrive = internal_data->default_drive + 1;
+  *pCurDrive = fdos_dos_default_drive() + 1;
   if (lpFcb->fcb_drive != 0)
   {
     *pCurDrive = lpFcb->fcb_drive;
@@ -419,45 +441,40 @@ UBYTE FcbDelete(dos_far_ptr lpXfcb)
 {
   COUNT FcbDrive;
   UBYTE result = FCB_SUCCESS;
-  dos_far_ptr lpOldDta = internal_data->dta;
-  xfcb *lpExt = (xfcb *) ARM_PTR (lpXfcb);
+  dos_far_ptr lpOldDta = fcb_dta();
+  const uint32_t xbase = fcb_far_linear(lpXfcb);
 
-  /* Build a traditional DOS file name                            */
   CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
-  /* check for a device                                           */
   if (!far_is_null(IsDevice(SecPathName)))
-  {
     result = FCB_ERROR;
-  }
   else
   {
-    int attr = (lpExt->xfcb_flag == 0xff ? lpExt->xfcb_attrib : D_ALL);
-
-    /* original: local dmatch on the stack; port: transient guest
-       scratch (dta must be a guest pointer) */
-    internal_data->dta = DmatchTmp_x86;
-    if ((internal_data->CritErrCode =
-         -DosFindFirst(attr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName)))
-        != SUCCESS)
-    {
+    const int attr = (pload8(xbase + offsetof(xfcb, xfcb_flag)) == 0xff)
+                     ? pload8(xbase + offsetof(xfcb, xfcb_attrib)) : D_ALL;
+    long rc;
+    fcb_set_dta(DmatchTmp_x86);
+    rc = DosFindFirst(attr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName));
+    fcb_set_crit((UWORD)-rc);
+    if (rc != SUCCESS)
       result = FCB_ERROR;
-    }
     else do
     {
+      dmatch dm;
+      dmatch_load(DMATCH_TMP_LINEAR, &dm);
       SecPathName[0] = 'A' + FcbDrive - 1;
       SecPathName[1] = ':';
-      strcpy(&SecPathName[2], DmatchTmp.dm_name);
-      if (DosDelete(x86_FAR_PTR(DOS_PSP, (void *)SecPathName), attr)
-          != SUCCESS)
+      strcpy(&SecPathName[2], dm.dm_name);
+      if (DosDelete(x86_FAR_PTR(DOS_PSP, (void *)SecPathName), attr) != SUCCESS)
       {
         result = FCB_ERROR;
         break;
       }
-      internal_data->dta = DmatchTmp_x86;
-    }
-    while ((internal_data->CritErrCode = -DosFindNext()) == SUCCESS);
+      fcb_set_dta(DmatchTmp_x86);
+      rc = DosFindNext();
+      fcb_set_crit((UWORD)-rc);
+    } while (rc == SUCCESS);
   }
-  internal_data->dta = lpOldDta;
+  fcb_set_dta(lpOldDta);
   return result;
 }
 
@@ -465,51 +482,40 @@ UBYTE FcbRename(dos_far_ptr lpXfcb)
 {
   BYTE buf[FNAME_SIZE + FEXT_SIZE];
   BOOL bWildCard;
-  rfcb *lpRenameFcb;
   COUNT FcbDrive;
   UBYTE result = FCB_SUCCESS;
-  dos_far_ptr lpOldDta = internal_data->dta;
-  xfcb *lpExt = (xfcb *) ARM_PTR (lpXfcb);
+  dos_far_ptr lpOldDta = fcb_dta();
+  const uint32_t xbase = fcb_far_linear(lpXfcb);
+  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  rfcb rename_fcb;
 
-  /* Build a traditional DOS file name                            */
-  lpRenameFcb = (rfcb *) ARM_PTR (CommonFcbInit(lpXfcb, SecPathName, &FcbDrive));
-  /* expand wildcards in dest                                     */
-  GetNameField(lpRenameFcb->renNewName, buf, FNAME_SIZE, &bWildCard);
-  GetNameField(lpRenameFcb->renNewExtent, buf + FNAME_SIZE, FEXT_SIZE,
-               &bWildCard);
+  guest_read_block(fcb_far_linear(fcbp), &rename_fcb, sizeof(rename_fcb));
+  GetNameField(rename_fcb.renNewName, buf, FNAME_SIZE, &bWildCard);
+  GetNameField(rename_fcb.renNewExtent, buf + FNAME_SIZE, FEXT_SIZE, &bWildCard);
 
-  /* check for a device                                           */
   if (!far_is_null(IsDevice(SecPathName)))
-  {
     result = FCB_ERROR;
-  }
   else
   {
     COUNT rc;
-
-    wAttr = (lpExt->xfcb_flag == 0xff ? lpExt->xfcb_attrib : D_ALL);
-    /* original: local dmatch on the stack; port: transient guest
-       scratch (dta must be a guest pointer) */
-    internal_data->dta = DmatchTmp_x86;
-    if ((internal_data->CritErrCode =
-         -DosFindFirst(wAttr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName)))
-        != SUCCESS)
-    {
+    wAttr = (pload8(xbase + offsetof(xfcb, xfcb_flag)) == 0xff)
+            ? pload8(xbase + offsetof(xfcb, xfcb_attrib)) : D_ALL;
+    fcb_set_dta(DmatchTmp_x86);
+    rc = DosFindFirst(wAttr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName));
+    fcb_set_crit((UWORD)-rc);
+    if (rc != SUCCESS)
       result = FCB_ERROR;
-    }
     else do
     {
+      dmatch dm;
       fcb LocalFcb;
       BYTE *pToName;
-      const char *pToPattern = buf;
+      const char *pToPattern = (const char *)buf;
+      BYTE ren_name[sizeof(((struct dos_data *)0)->fcb_ren_name)];
       int i;
 
-      /* original: FcbParseFname(&mode, Dmatch.dm_name, &LocalFcb);
-         see FcbNameFromSZ() above for why the port differs */
-      FcbNameFromSZ(&LocalFcb, (const BYTE *)DmatchTmp.dm_name);
-      /* Overlay the pattern, skipping '?'            */
-      /* I'm cheating because this assumes that the   */
-      /* struct alignments are on byte boundaries     */
+      dmatch_load(DMATCH_TMP_LINEAR, &dm);
+      FcbNameFromSZ(&LocalFcb, (const BYTE *)dm.dm_name);
       pToName = LocalFcb.fcb_fname;
       for (i = 0; i < FNAME_SIZE + FEXT_SIZE; i++)
       {
@@ -521,32 +527,33 @@ UBYTE FcbRename(dos_far_ptr lpXfcb)
 
       SecPathName[0] = 'A' + FcbDrive - 1;
       SecPathName[1] = ':';
-      strcpy(&SecPathName[2], DmatchTmp.dm_name);
-      rc = truename(x86_FAR_PTR(DOS_PSP, (void *)SecPathName),
-                    PriPathName, 0);
-
+      strcpy(&SecPathName[2], dm.dm_name);
+      rc = truename(x86_FAR_PTR(DOS_PSP, (void *)SecPathName), PriPathName, 0);
       if (rc < SUCCESS || (rc & IS_DEVICE))
       {
         result = FCB_ERROR;
         break;
       }
-      /* now to build a dos name again                */
+
       LocalFcb.fcb_drive = FcbDrive;
-      FcbNameInit(&LocalFcb, (BYTE *)internal_data->fcb_ren_name, &FcbDrive);
-      rc = truename(x86_FAR_PTR(DOS_PSP,
-                                (void *)internal_data->fcb_ren_name),
+      memset(ren_name, 0, sizeof(ren_name));
+      FcbNameInit(&LocalFcb, ren_name, &FcbDrive);
+      guest_write_block(FCB_REN_LINEAR, ren_name, sizeof(ren_name));
+      rc = truename(MK_FP(DOS_PSP,
+                          (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, fcb_ren_name))),
                     SecPathName, 0);
-      if (rc < SUCCESS || (rc & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE
-          || DosRenameTrue(PriPathName, SecPathName, wAttr) != SUCCESS)
+      if (rc < SUCCESS || (rc & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE ||
+          DosRenameTrue(PriPathName, SecPathName, wAttr) != SUCCESS)
       {
         result = FCB_ERROR;
         break;
       }
-      internal_data->dta = DmatchTmp_x86;
-    }
-    while ((internal_data->CritErrCode = -DosFindNext()) == SUCCESS);
+      fcb_set_dta(DmatchTmp_x86);
+      rc = DosFindNext();
+      fcb_set_crit((UWORD)-rc);
+    } while (rc == SUCCESS);
   }
-  internal_data->dta = lpOldDta;
+  fcb_set_dta(lpOldDta);
   return result;
 }
 
@@ -557,56 +564,49 @@ UBYTE FcbRename(dos_far_ptr lpXfcb)
 
 UBYTE FcbClose(dos_far_ptr lpXfcb)
 {
-  sft *s;
-  dos_far_ptr _s;
+  const dos_far_ptr fcbp = ExtFcbToFcb(lpXfcb);
+  fcb local;
+  dos_far_ptr sftp;
+  long rc;
 
-  /* Convert to fcb if necessary                                  */
-  fcb *lpFcb = (fcb *) ARM_PTR (ExtFcbToFcb(lpXfcb));
-
-  /* An already closed FCB can be closed again without error */
-  if (lpFcb->fcb_sftno == (BYTE) 0xff)
+  fcb_load(fcbp, &local);
+  if (local.fcb_sftno == (BYTE)0xff)
     return FCB_SUCCESS;
 
-  /* Get the SFT block that contains the SFT      */
-  _s = idx_to_sft(lpFcb->fcb_sftno);
-  if (far_is_end(_s))
+  sftp = idx_to_sft(local.fcb_sftno);
+  if (far_is_end(sftp))
     return FCB_ERROR;
-  s = (sft *) ARM_PTR (_s);
 
-  /* change time and set file size                */
-  s->sft_size = lpFcb->fcb_fsize;
-  if (!(s->sft_flags & SFT_FSHARED))
-    dos_merge_file_changes(lpFcb->fcb_sftno);
-  DosSetFtimeSft(lpFcb->fcb_sftno, lpFcb->fcb_date, lpFcb->fcb_time);
-  if ((internal_data->CritErrCode =
-       -DosCloseSft(lpFcb->fcb_sftno, FALSE)) == SUCCESS)
+  fdos_sft_set_size(sftp, local.fcb_fsize);
+  if (!(fdos_sft_flags_raw(sftp) & SFT_FSHARED))
+    dos_merge_file_changes(local.fcb_sftno);
+  DosSetFtimeSft(local.fcb_sftno, local.fcb_date, local.fcb_time);
+  rc = DosCloseSft(local.fcb_sftno, FALSE);
+  fcb_set_crit((UWORD)-rc);
+  if (rc == SUCCESS)
   {
-    lpFcb->fcb_sftno = (BYTE) 0xff;
+    local.fcb_sftno = (BYTE)0xff;
+    fcb_store(fcbp, &local);
     return FCB_SUCCESS;
   }
   return FCB_ERROR;
 }
 
-/* close all files the current process opened by FCBs */
 VOID FcbCloseAll(void)
 {
 #if DIAG
   extern volatile uint32_t dos_diag_kernel_code;
 #endif
-  dos_far_ptr block = LoL->sfthead;
+  dos_far_ptr block = fdos_lol_sfthead();
   COUNT idx = 0;
   unsigned blocks = 0;
+  const UWORD owner = fdos_dos_cu_psp();
 
-  /*
-   * Walk the SFT chain once.  The old implementation called idx_to_sft()
-   * for idx=0,1,...; each call restarted at LoL->sfthead, so a corrupt
-   * cyclic sftt_next chain could trap process teardown forever.
-   */
   while (!far_is_end(block))
   {
-    sfttbl *sp;
+    const UWORD count = fdos_sfttbl_count(block);
     dos_far_ptr next;
-    COUNT j;
+    UWORD j;
 
     if (++blocks > 64u)
     {
@@ -616,12 +616,10 @@ VOID FcbCloseAll(void)
       return;
     }
 
-    sp = (sfttbl *)ARM_PTR(block);
-    if (sp->sftt_count < 0 || sp->sftt_count > SFTMAX)
+    if (count > SFTMAX)
     {
 #if DIAG
-      dos_diag_kernel_code =
-          0x63fd0000u | ((unsigned)sp->sftt_count & 0xffffu);
+      dos_diag_kernel_code = 0x63fd0000u | (count & 0xffffu);
 #endif
       return;
     }
@@ -630,10 +628,10 @@ VOID FcbCloseAll(void)
     dos_diag_kernel_code =
         0x63000000u | ((blocks & 0xffu) << 16) | ((unsigned)idx & 0xffffu);
 #endif
-    for (j = 0; j < sp->sftt_count; ++j, ++idx)
+    for (j = 0; j < count; ++j, ++idx)
     {
-      sft *sftp = &sp->sftt_table[j];
-      if ((sftp->sft_mode & O_FCB) && sftp->sft_psp == internal_data->cu_psp)
+      const dos_far_ptr sftp = fdos_sfttbl_entry(block, j);
+      if ((fdos_sft_mode_raw(sftp) & O_FCB) && fdos_sft_psp(sftp) == owner)
       {
 #if DIAG
         dos_diag_kernel_code = 0x63100000u | ((unsigned)idx & 0xffffu);
@@ -645,7 +643,7 @@ VOID FcbCloseAll(void)
       }
     }
 
-    next = sp->sftt_next;
+    next = fdos_sfttbl_next(block);
     if (!far_is_end(next) &&
         FP_SEG(next) == FP_SEG(block) && FP_OFF(next) == FP_OFF(block))
     {
@@ -664,73 +662,53 @@ VOID FcbCloseAll(void)
 
 UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)
 {
-  dos_far_ptr orig_dta = internal_data->dta;
-  UBYTE *lpDir;
+  dos_far_ptr orig_dta = fcb_dta();
+  uint32_t out = fcb_far_linear(orig_dta);
   COUNT FcbDrive;
-  fcb *lpFcb;
-  dos_far_ptr lpFcb_x86;
+  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  fcb local;
+  dmatch dm;
+  long rc;
 
-  /* First, move the dta to a local and change it around to match */
-  /* our functions.                                               */
-  /* (port: lpDir walks the CALLER's DTA - a guest buffer)        */
-  lpDir = (UBYTE *) ARM_PTR (orig_dta);
-  internal_data->dta = Dmatch_x86;
-
-  /* Next initialze local variables by moving them from the fcb   */
-  lpFcb_x86 = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
-  lpFcb = (fcb *) ARM_PTR (lpFcb_x86);
+  fcb_set_dta(Dmatch_x86);
+  fcb_load(fcbp, &local);
   if (First)
   {
-    /* Reconstruct the dirmatch structure from the fcb */
-    Dmatch.dm_drive = lpFcb->fcb_sftno;
-
-    memcpy(Dmatch.dm_name_pat, lpFcb->fcb_fname, FNAME_SIZE + FEXT_SIZE);
-    DosUpFMem((BYTE FAR *) Dmatch.dm_name_pat, FNAME_SIZE + FEXT_SIZE);
-
-    Dmatch.dm_attr_srch = wAttr;
-    Dmatch.dm_entry = lpFcb->fcb_strtclst;
-    Dmatch.dm_dircluster = lpFcb->fcb_dirclst;
-
+    memset(&dm, 0, sizeof(dm));
+    dm.dm_drive = local.fcb_sftno;
+    memcpy(dm.dm_name_pat, local.fcb_fname, FNAME_SIZE + FEXT_SIZE);
+    DosUpFMem((BYTE FAR *)dm.dm_name_pat, FNAME_SIZE + FEXT_SIZE);
+    dm.dm_attr_srch = wAttr;
+    dm.dm_entry = local.fcb_strtclst;
+    dm.dm_dircluster = local.fcb_dirclst;
+    dmatch_store(DMATCH_LINEAR, &dm);
     wAttr = D_ALL;
   }
 
-  /* original: `if ((xfcb FAR *)lpFcb != lpXfcb)` - i.e. "is this an
-     extended FCB" (ExtFcbToFcb() returned a shifted pointer). The
-     port's dos_far_ptr is a struct and cannot be compared with !=;
-     the equivalent test is the extended-FCB signature byte itself. */
-  if (((xfcb *) ARM_PTR (lpXfcb))->xfcb_flag == 0xff)
+  if (pload8(fcb_far_linear(lpXfcb) + offsetof(xfcb, xfcb_flag)) == 0xff)
   {
-    wAttr = ((xfcb *) ARM_PTR (lpXfcb))->xfcb_attrib;
-    guest_read_block(((uint32_t)FP_SEG(lpXfcb) << 4) + FP_OFF(lpXfcb), lpDir, 7);
-    lpDir += 7;
+    wAttr = pload8(fcb_far_linear(lpXfcb) + offsetof(xfcb, xfcb_attrib));
+    guest_move_block(out, fcb_far_linear(lpXfcb), 7);
+    out += 7;
   }
 
-  internal_data->CritErrCode =
-      -(First ? DosFindFirst(wAttr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName))
-              : DosFindNext());
-  if (internal_data->CritErrCode != SUCCESS)
+  rc = First ? DosFindFirst(wAttr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName))
+             : DosFindNext();
+  fcb_set_crit((UWORD)-rc);
+  if (rc != SUCCESS)
   {
-    internal_data->dta = orig_dta;
+    fcb_set_dta(orig_dta);
     return FCB_ERROR;
   }
 
-  *lpDir++ = FcbDrive;
-  memcpy(lpDir, &SearchDirD, sizeof(struct dirent));
+  dmatch_load(DMATCH_LINEAR, &dm);
+  pstore8(out++, (UBYTE)FcbDrive);
+  guest_write_block(out, &SearchDirD, sizeof(struct dirent));
 
-  lpFcb->fcb_dirclst = (UWORD) Dmatch.dm_dircluster;
-  lpFcb->fcb_strtclst = Dmatch.dm_entry;
-
-/*
-  This is undocumented and seen using Pcwatch and Ramview.
-  The First byte is the current directory count and the second seems
-  to be the attribute byte.
- */
-  lpFcb->fcb_sftno = Dmatch.dm_drive;   /* MSD seems to save this @ fcb_date. */
-#if 0
-  lpFcb->fcb_cublock = Dmatch.dm_entry;
-  lpFcb->fcb_cublock *= 0x100;
-  lpFcb->fcb_cublock += wAttr;
-#endif
-  internal_data->dta = orig_dta;
+  local.fcb_dirclst = (UWORD)dm.dm_dircluster;
+  local.fcb_strtclst = dm.dm_entry;
+  local.fcb_sftno = dm.dm_drive;
+  fcb_store(fcbp, &local);
+  fcb_set_dta(orig_dta);
   return FCB_SUCCESS;
 }

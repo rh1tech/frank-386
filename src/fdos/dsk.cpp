@@ -511,7 +511,8 @@ STATIC int ddt_LBA_to_CHS(ULONG LBA_address, struct CHS *chs,
 STATIC unsigned DMA_max_transfer(dos_far_ptr buffer, unsigned count)
 {
   unsigned dma_off = (UWORD)(((ULONG)FP_SEG(buffer) << 4) + FP_OFF(buffer));
-  unsigned maxsecsize = LoL->maxsecsize;
+  const fdos_guest::lol_ref dsk_lol((static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + 0x08F0u);
+  unsigned maxsecsize = dsk_lol.maxsecsize();
   unsigned sectors_to_dma_boundary;
 
   /* same ARM-vs-8086 division trap difference as in ddt_LBA_to_CHS() */

@@ -59,20 +59,20 @@ void handle_break(dos_far_ptr *pdev, int sft_out);
 #endif
 
 /* chario.c */
-dos_far_ptr/*struct dhdr*/ sft_to_dev(sft *s);
+dos_far_ptr sft_to_dev(dos_far_ptr sft_ptr);
 long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, dos_far_ptr bp, unsigned command);
 int ndread(dos_far_ptr *pdev);
 int StdinBusy(void);
 void con_flush(dos_far_ptr *pdev);
 unsigned char read_char(int sft_in, int sft_out, BOOL check_break);
 unsigned char read_char_stdin(BOOL check_break);
-long cooked_read(dos_far_ptr/*struct dhdr*/ *pdev, size_t n, char *bp);
-void read_line(int sft_in, int sft_out, keyboard FAR * kp);
-size_t read_line_handle(int sft_idx, size_t n, char FAR * bp);
+long cooked_read(dos_far_ptr *pdev, size_t n, dos_far_ptr bp);
+void read_line(int sft_in, int sft_out, dos_far_ptr kp);
+size_t read_line_handle(int sft_idx, size_t n, dos_far_ptr bp);
 void write_char(int c, int sft_idx);
 void write_char_stdout(int c);
 void update_scr_pos(unsigned char c, unsigned char count);
-long cooked_write(dos_far_ptr/*struct dhdr*/ *pdev, size_t n, const char *bp);
+long cooked_write(dos_far_ptr *pdev, size_t n, dos_far_ptr bp);
 
 dos_far_ptr /*sft*/ get_sft(UCOUNT);
 
@@ -128,9 +128,7 @@ void guest_lin_write(uint32_t lin, const void *src, size_t n);
 void guest_lin_read(void *dst, uint32_t lin, size_t n);
 void guest_read(void *dst, dos_far_ptr s, size_t n);
 void guest_strcpy(dos_far_ptr d, const char *s);
-struct cds FAR *get_cds_unvalidated(unsigned dsk);
 /*struct cds*/ dos_far_ptr get_cds(unsigned drive);
-struct cds FAR *get_cds1(unsigned dsk);
 dos_far_ptr /*struct dpb*/ GetDriveDPB(UBYTE drive, COUNT *rc);
 COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest);
 

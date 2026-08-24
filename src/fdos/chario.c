@@ -35,22 +35,10 @@
  * shared with the clock driver path there). They are declared here via
  * proto.h.
  *
- * FAR pointers to struct dhdr:
- *   Original: struct dhdr FAR ** pdev
- *   Port:     dos_far_ptr *pdev  (same pattern as fdos_21h.c)
- *   Callers always dereference via ARM_PTR(*pdev) or pass directly.
- *
- * SDA / LoL field access:
- *   scr_pos      -> internal_data->scr_pos
- *   PrinterEcho  -> internal_data->PrinterEcho
- *   local_buffer -> internal_data->local_buffer
- *   kb_buf       -> internal_data->kb_buf
- *   user_r->AH   -> CPU_AH  (cpu is the current INT 21h context,
- *                             extern'd from fdos_21h.c)
- *   inputptr     -> LoL->inputptr  (dos_short_ptr, offset within
- *                   DOS_PSP segment; NULL == 0; dereference via
- *                   ARM_PTR(MK_FP(DOS_PSP, LoL->inputptr)))
- *   syscon       -> LoL->syscon  (dos_far_ptr)
+ * Guest-memory rule:
+ *   device/SFT/console state is kept as dos_far_ptr or linear guest offsets;
+ *   buffered console I/O uses pload/pstore/guest_move_block so no page-cache
+ *   pointer survives a DOS/device call.
  *
  * fast_put_char():
  *   Original: inline asm "int 29h"
@@ -61,13 +49,6 @@
  * the only architectural adaptation is using bios_intcall()/
  * request_terminate() instead of the real-mode spawn_int23() trampoline.
  *
- * DosWrite(STDPRN, 1, &c) in PrinterEcho path:
- *   DosWrite is a macro -> DosRWSft(..., XFR_WRITE).
- *   'c' is a local unsigned char; we pass its address as a native
- *   pointer cast to dos_far_ptr via the NATIVE_TO_FAR() pattern used
- *   elsewhere (treat the native address as a linear address, which is
- *   valid because dosfns.c/DosRWSft uses ARM_PTR(bp) to dereference it
- *   for device writes).
  */
 
 #include "hdrs.h"
@@ -89,6 +70,84 @@ STATIC int CharIO(dos_far_ptr *pdev, unsigned char ch, unsigned command)
   if (err < 0)
     return err;
   return ch;
+}
+
+
+#define CHARIO_SDA_LINEAR (((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF)
+#define CHARIO_LOL_LINEAR (((uint32_t)DOS_PSP << 4) + 0x08f0u)
+#define CHARIO_LOCAL_LINEAR (CHARIO_SDA_LINEAR + offsetof(struct dos_data, local_buffer))
+#define CHARIO_KB_LINEAR (CHARIO_SDA_LINEAR + offsetof(struct dos_data, kb_buf))
+
+static uint32_t chario_far_linear(dos_far_ptr p)
+{
+  return ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p);
+}
+
+static inline uint32_t __attribute__((always_inline)) chario_sft_linear(dos_far_ptr p)
+{
+  return ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p);
+}
+
+static inline UWORD __attribute__((always_inline)) chario_sft_flags(dos_far_ptr p)
+{
+  return pload16(chario_sft_linear(p) + offsetof(sft, sft_flags));
+}
+
+static inline dos_far_ptr __attribute__((always_inline)) chario_sft_dev(dos_far_ptr p)
+{
+  const uint32_t a = chario_sft_linear(p) + offsetof(sft, sft_dev);
+  return MK_FP(pload16(a + 2u), pload16(a));
+}
+
+static inline ULONG __attribute__((always_inline)) chario_sft_position(dos_far_ptr p)
+{
+  return pload32(chario_sft_linear(p) + offsetof(sft, sft_posit));
+}
+
+static inline ULONG __attribute__((always_inline)) chario_sft_size(dos_far_ptr p)
+{
+  return pload32(chario_sft_linear(p) + offsetof(sft, sft_size));
+}
+
+static inline UWORD __attribute__((always_inline)) chario_dhdr_attr(dos_far_ptr p)
+{
+  return pload16(chario_far_linear(p) + offsetof(struct dhdr, dh_attr));
+}
+
+static dos_far_ptr chario_syscon(void)
+{
+  const uint32_t a = CHARIO_LOL_LINEAR + offsetof(struct lol, syscon);
+  return MK_FP(pload16(a + 2u), pload16(a));
+}
+
+static UBYTE chario_scr_pos(void)
+{
+  return pload8(CHARIO_SDA_LINEAR + offsetof(struct dos_data, scr_pos));
+}
+
+static void chario_set_scr_pos(UBYTE v)
+{
+  pstore8(CHARIO_SDA_LINEAR + offsetof(struct dos_data, scr_pos), v);
+}
+
+static UBYTE chario_printer_echo(void)
+{
+  return pload8(CHARIO_SDA_LINEAR + offsetof(struct dos_data, PrinterEcho));
+}
+
+static dos_short_ptr chario_inputptr(void)
+{
+  return pload16(CHARIO_LOL_LINEAR + offsetof(struct lol, inputptr));
+}
+
+static void chario_set_inputptr(dos_short_ptr v)
+{
+  pstore16(CHARIO_LOL_LINEAR + offsetof(struct lol, inputptr), v);
+}
+
+static dos_far_ptr chario_internal_kb(void)
+{
+  return MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, kb_buf)));
 }
 
 STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
@@ -150,25 +209,24 @@ void con_flush(dos_far_ptr *pdev)
 }
 
 /* if the sft is invalid, then we just monitor syscon */
-dos_far_ptr sft_to_dev(sft *s)
+dos_far_ptr sft_to_dev(dos_far_ptr sft_ptr)
 {
-  if (s == NULL)
-    return LoL->syscon;
-  if (s->sft_flags & SFT_FDEVICE)
-    return s->sft_dev;
-  return MK_FP(0, 0); /* NULL far ptr */
+  if (far_is_null(sft_ptr) || far_is_end(sft_ptr))
+    return chario_syscon();
+  if (chario_sft_flags(sft_ptr) & SFT_FDEVICE)
+    return chario_sft_dev(sft_ptr);
+  return MK_FP(0, 0);
 }
 
 int StdinBusy(void)
 {
-  dos_far_ptr _s = get_sft(STDIN);
-  sft* s = (sft*) ARM_PTR ( _s );
-  dos_far_ptr dev = sft_to_dev(s);
+  dos_far_ptr sft_ptr = get_sft(STDIN);
+  dos_far_ptr dev = sft_to_dev(sft_ptr);
 
-  if (FP_SEG(dev) || FP_OFF(dev))
+  if (!far_is_null(dev))
     return Busy(&dev);
 
-  return s->sft_posit >= s->sft_size;
+  return chario_sft_position(sft_ptr) >= chario_sft_size(sft_ptr);
 }
 
 /* get character from the console - this is how DOS gets
@@ -202,7 +260,7 @@ STATIC void fast_put_char(unsigned char chr)
 
 void update_scr_pos(unsigned char c, unsigned char count)
 {
-  unsigned char scrpos = internal_data->scr_pos;
+  unsigned char scrpos = chario_scr_pos();
 
   if (c == CR)
     scrpos = 0;
@@ -212,49 +270,42 @@ void update_scr_pos(unsigned char c, unsigned char count)
   } else if (c != LF && c != BELL) {
     scrpos += count;
   }
-  internal_data->scr_pos = scrpos;
+  chario_set_scr_pos(scrpos);
 }
 
 STATIC int raw_get_char(dos_far_ptr *pdev, BOOL check_break);
 
-long cooked_write(dos_far_ptr *pdev, size_t n, const char *bp)
+long cooked_write(dos_far_ptr *pdev, size_t n, dos_far_ptr bp)
 {
   size_t xfer;
+  uint32_t src = chario_far_linear(bp);
 
   /* bit 7 means fastcon; low 5 bits count number of characters */
-  struct dhdr *dev = (struct dhdr *)ARM_PTR(*pdev);
-  unsigned char fast_counter = (dev->dh_attr & ATTR_FASTCON) << 3;
+  unsigned char fast_counter = (chario_dhdr_attr(*pdev) & ATTR_FASTCON) << 3;
 
   for (xfer = 0; xfer < n; xfer++)
   {
     int err;
-    unsigned char count = 1, c = *bp++;
+    unsigned char count = 1, c = pload8(src++);
 
     if (c == CTL_Z)
       break;
-
-    /* write a character in cooked mode; maybe with printer echo;
-       handles TAB expansion */
     if (c == HT) {
-      count = 8 - (internal_data->scr_pos & 7);
+      count = 8 - (chario_scr_pos() & 7);
       c = ' ';
     }
     update_scr_pos(c, count);
     do {
-      /* if not fast then < 0x80; always check
-         otherwise check every 32 characters */
       if (fast_counter <= 0x80 && check_handle_break(pdev) == CTL_S)
-        raw_get_char(pdev, TRUE); /* Test for hold char and ctl_c */
+        raw_get_char(pdev, TRUE);
       if (terminate_requested())
-        return xfer;  /* upstream: spawn_int23() never returns on terminate */
+        return xfer;
       fast_counter++;
       fast_counter &= 0x9f;
-      if (internal_data->PrinterEcho)
+      if (chario_printer_echo())
       {
-        char *ch = (char *)ARM_PTR(x86_szLine);
-        *ch = (char)c;
-        dos_far_ptr x86_ch = x86_szLine;
-        DosWrite(STDPRN, 1, x86_ch);
+        pstore8(chario_far_linear(x86_szLine), (UBYTE)c);
+        DosWrite(STDPRN, 1, x86_szLine);
       }
       if (fast_counter & 0x80)
         fast_put_char(c);
@@ -272,8 +323,7 @@ long cooked_write(dos_far_ptr *pdev, size_t n, const char *bp)
 /* writes character for disk file or device */
 void write_char(int c, int sft_idx)
 {
-  char *ch = (char *)ARM_PTR(x86_DATA);
-  *ch = (char)c;
+  pstore8(chario_far_linear(x86_DATA), (UBYTE)c);
   dos_far_ptr x86_ch = x86_DATA;
   DosRWSft(sft_idx, 1, x86_ch, XFR_FORCE_WRITE);
 }
@@ -281,13 +331,13 @@ void write_char(int c, int sft_idx)
 void write_char_stdout(int c)
 {
   unsigned char count = 1;
-  unsigned flags = ((sft*)ARM_PTR(get_sft(STDOUT)))->sft_flags;
+  unsigned flags = chario_sft_flags(get_sft(STDOUT));
 
   /* ah=2, ah=9 should expand tabs even for raw devices and disk files */
   if ((flags & (SFT_FDEVICE|SFT_FBINARY)) != SFT_FDEVICE)
   {
     if (c == HT) {
-      count = 8 - (internal_data->scr_pos & 7);
+      count = 8 - (chario_scr_pos() & 7);
       c = ' ';
     }
     /* for raw CONOUT devices already updated in dosfns.c */
@@ -324,9 +374,10 @@ STATIC void destr_bs(int sft_idx)
 
 /* READ FUNCTIONS */
 
-long cooked_read(dos_far_ptr *pdev, size_t n, char *bp)
+long cooked_read(dos_far_ptr *pdev, size_t n, dos_far_ptr bp)
 {
   unsigned xfer = 0;
+  uint32_t dst = chario_far_linear(bp);
   int c;
   while(n--)
   {
@@ -335,7 +386,7 @@ long cooked_read(dos_far_ptr *pdev, size_t n, char *bp)
       return c;
     if (c == 256)
       break;
-    *bp++ = c;
+    pstore8(dst++, (UBYTE)c);
     xfer++;
     if ((unsigned char)c == CTL_Z)
       break;
@@ -358,10 +409,12 @@ unsigned char check_handle_break(dos_far_ptr *pdev)
 {
   unsigned char c = CTL_C;
 
-  if (!ctrl_break_pressed())
-    c = (unsigned char)ndread(&LoL->syscon);
+  dos_far_ptr syscon = chario_syscon();
 
-  if (c != CTL_C && EFFECTIVE(*pdev) != EFFECTIVE(LoL->syscon))
+  if (!ctrl_break_pressed())
+    c = (unsigned char)ndread(&syscon);
+
+  if (c != CTL_C && EFFECTIVE(*pdev) != EFFECTIVE(syscon))
     c = (unsigned char)ndread(pdev);
 
   if (c == CTL_C)
@@ -381,20 +434,15 @@ void handle_break(dos_far_ptr *pdev, int sft_out)
   /* Match upstream: discard pending console input and echo ^C either
      to the supplied output SFT or to the current input device. */
   con_flush(pdev);
-  if (sft_out == -1)
-    cooked_write(pdev, sizeof(ctrl_c_text) - 1, ctrl_c_text);
-  else
-    {
-      /* ctrl_c_text is a native (ARM) string constant, so it has no guest
-         seg:off at all - linear_to_far() on it produced a bogus guest
-         pointer. Stage the few bytes into guest stack scratch, which the
-         device write path can address. */
-      dos_far_ptr /* -> char[] */ x86_cc =
-          guest_stack_alloc(cpu, sizeof(ctrl_c_text) - 1);
-      guest_write(x86_cc, ctrl_c_text, sizeof(ctrl_c_text) - 1);
+  {
+    dos_far_ptr x86_cc = guest_stack_alloc(cpu, sizeof(ctrl_c_text) - 1);
+    guest_write(x86_cc, ctrl_c_text, sizeof(ctrl_c_text) - 1);
+    if (sft_out == -1)
+      cooked_write(pdev, sizeof(ctrl_c_text) - 1, x86_cc);
+    else
       DosRWSft(sft_out, sizeof(ctrl_c_text) - 1, x86_cc, XFR_FORCE_WRITE);
-      CPU_SP = (uint16_t)(CPU_SP + (sizeof(ctrl_c_text) - 1));
-    }
+    CPU_SP = (uint16_t)(CPU_SP + (sizeof(ctrl_c_text) - 1));
+  }
 
   /* Upstream spawn_int23() (procsupt.asm) switches to the user stack,
      does CLC (default action: resume), invokes the process' INT 23h
@@ -480,8 +528,11 @@ STATIC unsigned read_char_sft_dev(int sft_in, int sft_out,
         c = CharIO(pdev, 0, C_INPUT);
         break;
       }
-      if (check_break && ARM_PTR(*pdev) != ARM_PTR(LoL->syscon))
-        check_handle_break(&LoL->syscon);
+      if (check_break && EFFECTIVE(*pdev) != EFFECTIVE(chario_syscon()))
+      {
+        dos_far_ptr syscon = chario_syscon();
+        check_handle_break(&syscon);
+      }
       /* the idle int is only safe if we're using the character stack */
       /* Original: user_r->AH < 0xd
          Port: CPU_AH gives the current INT 21h function number */
@@ -491,11 +542,10 @@ STATIC unsigned read_char_sft_dev(int sft_in, int sft_out,
   }
   else
   {
-    char *ch = (char *)ARM_PTR(x86_DATA);
-    *ch = 0;
     dos_far_ptr x86_ch = x86_DATA;
+    pstore8(chario_far_linear(x86_ch), 0);
     DosRWSft(sft_in, 1, x86_ch, XFR_READ);
-    c = *ch;
+    c = pload8(chario_far_linear(x86_ch));
   }
 
   /* check for break or stop on sft_in, echo to sft_out */
@@ -520,8 +570,7 @@ STATIC int raw_get_char(dos_far_ptr *pdev, BOOL check_break)
 
 unsigned char read_char(int sft_in, int sft_out, BOOL check_break)
 {
-  sft* s = (sft*) ARM_PTR( idx_to_sft(sft_in) );
-  dos_far_ptr dev = sft_to_dev(s);
+  dos_far_ptr dev = sft_to_dev(idx_to_sft(sft_in));
   return read_char_sft_dev(sft_in, sft_out, &dev, check_break);
 }
 
@@ -536,19 +585,21 @@ unsigned char read_char_stdin(BOOL check_break)
 }
 
 /* reads a line (buffered, called by int21/ah=0ah, 3fh) */
-void read_line(int sft_in, int sft_out, keyboard *kp)
+void read_line(int sft_in, int sft_out, dos_far_ptr x86_kp)
 {
+  const uint32_t kbase = chario_far_linear(x86_kp);
+  const uint32_t kbuf = kbase + offsetof(keyboard, kb_buf);
   unsigned c;
-  unsigned cu_pos = internal_data->scr_pos;
+  unsigned cu_pos = chario_scr_pos();
   unsigned count = 0, stored_pos = 0;
-  unsigned size = kp->kb_size, stored_size = kp->kb_count;
+  unsigned size = pload8(kbase + offsetof(keyboard, kb_size));
+  unsigned stored_size = pload8(kbase + offsetof(keyboard, kb_count));
   BOOL insert = FALSE, first = TRUE;
 
   if (size == 0)
     return;
 
-  /* the stored line is invalid unless it ends with a CR */
-  if (kp->kb_buf[stored_size] != CR)
+  if (pload8(kbuf + stored_size) != CR)
     stored_size = 0;
 
   do
@@ -561,7 +612,6 @@ void read_line(int sft_in, int sft_out, keyboard *kp)
     switch (c)
     {
       case LF:
-        /* show LF if it's not the first character. Never store it */
         if (!first)
         {
           write_char(CR, sft_out);
@@ -575,13 +625,12 @@ void read_line(int sft_in, int sft_out, keyboard *kp)
       case RIGHT:
       case F1:
         if (stored_pos < stored_size && count < size - 1)
-          internal_data->local_buffer[count++] =
-            echo_char(kp->kb_buf[stored_pos++], sft_out);
+          pstore8(CHARIO_LOCAL_LINEAR + count++,
+                  (UBYTE)echo_char(pload8(kbuf + stored_pos++), sft_out));
         break;
 
       case F2:
       case F4:
-        /* insert/delete up to character c */
         {
           unsigned char c2 = read_char_check_break(sft_in, sft_out);
           new_pos = stored_pos;
@@ -591,24 +640,28 @@ void read_line(int sft_in, int sft_out, keyboard *kp)
           }
           else
           {
-            char *sp = (char *)memchr(&kp->kb_buf[stored_pos], c2, stored_size - stored_pos);
-            if (sp != NULL)
-              new_pos = (sp - &kp->kb_buf[stored_pos]) + 1;
+            unsigned pos;
+            for (pos = stored_pos; pos < stored_size; ++pos)
+              if (pload8(kbuf + pos) == c2)
+              {
+                new_pos = pos + 1;
+                break;
+              }
           }
         }
         /* fall through */
       case F3:
-        if (c != F4) /* not delete */
+        if (c != F4)
         {
           while (stored_pos < new_pos && count < size - 1)
-            internal_data->local_buffer[count++] =
-              echo_char(kp->kb_buf[stored_pos++], sft_out);
+            pstore8(CHARIO_LOCAL_LINEAR + count++,
+                    (UBYTE)echo_char(pload8(kbuf + stored_pos++), sft_out));
         }
         stored_pos = new_pos;
         break;
 
       case F5:
-        memcpy(kp->kb_buf, internal_data->local_buffer, count);
+        guest_move_block(kbuf, CHARIO_LOCAL_LINEAR, count);
         stored_size = count;
         write_char('@', sft_out);
         goto start_new_line;
@@ -627,23 +680,24 @@ void read_line(int sft_in, int sft_out, keyboard *kp)
         if (count > 0)
         {
           unsigned new_pos2;
-          char c2 = internal_data->local_buffer[--count];
+          char c2 = (char)pload8(CHARIO_LOCAL_LINEAR + --count);
           if (c2 == HT)
           {
             unsigned i;
             new_pos2 = cu_pos;
             for (i = 0; i < count; i++)
             {
-              if (internal_data->local_buffer[i] == HT)
+              UBYTE lc = pload8(CHARIO_LOCAL_LINEAR + i);
+              if (lc == HT)
                 new_pos2 = (new_pos2 + 8) & ~7;
-              else if (iscntrl(internal_data->local_buffer[i]))
+              else if (iscntrl(lc))
                 new_pos2 += 2;
               else
                 new_pos2++;
             }
             do
               destr_bs(sft_out);
-            while (internal_data->scr_pos > new_pos2);
+            while (chario_scr_pos() > new_pos2);
           }
           else
           {
@@ -676,7 +730,7 @@ void read_line(int sft_in, int sft_out, keyboard *kp)
         if (c >= 256)
           break;
         if (count < size - 1 || c == CR)
-          internal_data->local_buffer[count++] = echo_char(c, sft_out);
+          pstore8(CHARIO_LOCAL_LINEAR + count++, (UBYTE)echo_char(c, sft_out));
         else
           write_char(BELL, sft_out);
         if (stored_pos < stored_size && !insert)
@@ -686,57 +740,59 @@ void read_line(int sft_in, int sft_out, keyboard *kp)
     first = FALSE;
   } while (c != CR);
 
-  memcpy(kp->kb_buf, internal_data->local_buffer, count);
-  /* if local_buffer overflows into the CON default buffer we
-     must invalidate it */
+  guest_move_block(kbuf, CHARIO_LOCAL_LINEAR, count);
   if (count > LINEBUFSIZECON)
-    internal_data->kb_buf.kb_size = 0;
-  /* kb_count does not include the final CR */
-  kp->kb_count = count - 1;
+    pstore8(CHARIO_KB_LINEAR + offsetof(keyboard, kb_size), 0);
+  pstore8(kbase + offsetof(keyboard, kb_count), (UBYTE)(count - 1));
 }
 
 /* called by handle func READ (int21/ah=3f) */
-size_t read_line_handle(int sft_idx, size_t n, char *bp)
+size_t read_line_handle(int sft_idx, size_t n, dos_far_ptr bp)
 {
+  const dos_far_ptr kbp = chario_internal_kb();
+  const uint32_t kbase = chario_far_linear(kbp);
+  const uint32_t kbuf = kbase + offsetof(keyboard, kb_buf);
   size_t chars_left;
-  keyboard *kbp = &internal_data->kb_buf;
-  char *inputptr;
+  uint32_t input_linear;
+  dos_short_ptr input_off = chario_inputptr();
 
-  if (LoL->inputptr == 0)
+  if (input_off == 0)
   {
-    /* can we reuse kb_buf or was it overwritten? */
-    if (kbp->kb_size != LINEBUFSIZECON)
+    if (pload8(kbase + offsetof(keyboard, kb_size)) != LINEBUFSIZECON)
     {
-      kbp->kb_count = 0;
-      kbp->kb_size = LINEBUFSIZECON;
+      pstore8(kbase + offsetof(keyboard, kb_count), 0);
+      pstore8(kbase + offsetof(keyboard, kb_size), LINEBUFSIZECON);
     }
     read_line(sft_idx, sft_idx, kbp);
-    kbp->kb_buf[kbp->kb_count + 1] = echo_char(LF, sft_idx);
-    /* inputptr = kb_buf.kb_buf (offset within DOS_PSP segment) */
-    LoL->inputptr = (dos_short_ptr)(
-      (char *)kbp->kb_buf - (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
-    inputptr = kbp->kb_buf;
-    if (*inputptr == CTL_Z)
     {
-      LoL->inputptr = 0;
+      UBYTE count = pload8(kbase + offsetof(keyboard, kb_count));
+      pstore8(kbuf + count + 1, (UBYTE)echo_char(LF, sft_idx));
+    }
+    input_off = (dos_short_ptr)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, kb_buf) +
+                                offsetof(keyboard, kb_buf));
+    chario_set_inputptr(input_off);
+    input_linear = ((uint32_t)DOS_PSP << 4) + input_off;
+    if (pload8(input_linear) == CTL_Z)
+    {
+      chario_set_inputptr(0);
       return 0;
     }
   }
   else
   {
-    inputptr = (char *)ARM_PTR(MK_FP(DOS_PSP, LoL->inputptr));
+    input_linear = ((uint32_t)DOS_PSP << 4) + input_off;
   }
 
-  chars_left = &kbp->kb_buf[kbp->kb_count + 2] - inputptr;
+  chars_left = (size_t)((kbuf + pload8(kbase + offsetof(keyboard, kb_count)) + 2u) -
+                        input_linear);
   if (n > chars_left)
     n = chars_left;
 
-  memcpy(bp, inputptr, n);
-  inputptr += n;
+  guest_move_block(chario_far_linear(bp), input_linear, n);
+  input_linear += (uint32_t)n;
   if (n == chars_left)
-    LoL->inputptr = 0;
+    chario_set_inputptr(0);
   else
-    LoL->inputptr = (dos_short_ptr)(
-      inputptr - (char *)ARM_PTR(MK_FP(DOS_PSP, 0)));
+    chario_set_inputptr((dos_short_ptr)(input_linear - ((uint32_t)DOS_PSP << 4)));
   return n;
 }

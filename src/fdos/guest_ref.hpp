@@ -315,6 +315,7 @@ public:
     __attribute__((always_inline)) scalar_proxy<UBYTE> os_major() const { return {addr_ + offsetof(lol, os_major)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> os_minor() const { return {addr_ + offsetof(lol, os_minor)}; }
     __attribute__((always_inline)) scalar_proxy<UBYTE> version_flags() const { return {addr_ + offsetof(lol, version_flags)}; }
+    __attribute__((always_inline)) scalar_proxy<UWORD> maxsecsize() const { return {addr_ + offsetof(lol, maxsecsize)}; }
 
     __attribute__((always_inline)) dos_far_ptr far_value(std::size_t off) const {
         const UWORD offset = scalar_proxy<UWORD>(addr_ + static_cast<uint32_t>(off));

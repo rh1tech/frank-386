@@ -63,6 +63,7 @@
         parameter is forced.
 */
 #include "hdrs.h"
+#include "kernel_guest_proxy.h"
 #include "bios/bios.h"
 #include "fdos/fdos.h"
 
@@ -224,7 +225,7 @@ int MoveKernelToHMA(void)
   InstallVDISK();
 
   /* report the fact we are running high through int 21, ax=3306 */
-  LoL->version_flags |= 0x10;
+  fdos_lol_or_version_flags(0x10);
 
   return TRUE;
 

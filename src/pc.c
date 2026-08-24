@@ -824,7 +824,6 @@ static void __not_in_flash_func(pc_service_impl)(PC *pc)
     PROF_T(t_dev);
     /* reset_request is handled in main.c via load_bios_and_reset() */
     int refresh = vga_step(pc->vga);
-    i8254_update_irq(pc->pit);
     cmos_update_irq(pc->cmos);
     if (pc->enable_serial)
         u8250_update(pc->serial);

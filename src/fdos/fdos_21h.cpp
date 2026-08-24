@@ -438,24 +438,6 @@ int DosSetTime(CPU *cpu)
   return DosSetTimeRegs(CPU_CH, CPU_CL, CPU_DH, CPU_DL);
 }
 
-/*
- * Return a CDS entry by zero-based drive index without validating its
- * flags or DPB.
- *
- * This mirrors upstream FreeDOS get_cds_unvalidated(): internal DOS
- * services use it when they need the CDS slot itself, including disabled,
- * JOINed or not-yet-completely-initialized entries.
- */
-struct cds FAR *get_cds_unvalidated(unsigned drive)
-{
-  const UBYTE lastdrive = fdos_lol.lastdrive();
-  const dos_far_ptr cds_base = fdos_lol.cds();
-  if (drive >= lastdrive || far_is_null(cds_base))
-    return NULL;
-
-  return (struct cds FAR *)ARM_PTR(cds_base) + drive;
-}
-
 /* get current directory structure for drive
    return NULL if the CDS is not valid or the
    drive is not within range */
@@ -1070,7 +1052,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* Buffered Keyboard Input                                      */
       case 0x0a:
       DOS_0A:
-        read_line(get_sft_idx(STDIN), get_sft_idx(STDOUT), (keyboard *)ARM_PTR(R_FP_DS_DX));
+        read_line(get_sft_idx(STDIN), get_sft_idx(STDOUT), R_FP_DS_DX);
         break;
 
       /* Check Stdin Status                                           */
@@ -1083,7 +1065,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       /* Flush Buffer, Read Keyboard                                  */
       case 0x0c:
       {
-        dos_far_ptr dev = sft_to_dev((sft*) ARM_PTR ( get_sft(STDIN) ) );
+        dos_far_ptr dev = sft_to_dev(get_sft(STDIN));
         if (FP_SEG(dev) || FP_OFF(dev))
           con_flush(&dev);
         switch (R_AL)
@@ -1102,9 +1084,9 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
       case 0x09:
         {
           unsigned char c;
-          unsigned char FAR *bp = ARM_PTR( R_FP_DS_DX );
+          uint32_t bp = ((uint32_t)R_DS << 4) + R_DX;
 
-          while ((c = *bp++) != '$')
+          while ((c = pload8(bp++)) != '$') // TODO: use massive block find
             write_char_stdout(c);
 
           R_AL = c;

@@ -5,6 +5,7 @@
 #include "mem.h"
 #include "board_config.h"
 #include "psram_init.h"
+#include "tsr_callback.h"
 #include <math.h>
 
 #define __in_systable(group) __attribute__((section(".dos_api" group)))
@@ -464,5 +465,7 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)arm_native_app_free, /* 114: application free */
     (unsigned long)arm_native_app_malloc_largest, /* 115: largest application block */
     (unsigned long)dos_video_get_buffer, /* 116: direct gfx_buffer pointer + size */
+    (unsigned long)set_tsr0_callback, /* 117: core0 timer callback chain */
+    (unsigned long)set_tsr1_callback, /* 118: core1 VGA scanline callback chain */
     0
 };

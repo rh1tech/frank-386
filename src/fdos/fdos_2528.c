@@ -1,6 +1,7 @@
 #include "hdrs.h"
 #include "bios/bios.h"
 #include "fdos.h"
+#include "kernel_guest_proxy.h"
 
 struct int2526_packet {
   ULONG blkno;
@@ -58,7 +59,7 @@ static bool fdos_2526h(CPU *cpu, COUNT mode)
 
   /* Match upstream: mask AH/high AL bit and reject invalid drives with
      DOS absolute-disk error 0201h. */
-  if (drive >= LoL->lastdrive || far_is_null(dpb_fp))
+  if (drive >= fdos_dos_lastdrive() || far_is_null(dpb_fp))
   {
     CPU_AX = 0x0201;
     return fdos_2526h_return(cpu, true);
@@ -66,10 +67,8 @@ static bool fdos_2526h(CPU *cpu, COUNT mode)
 
 #ifdef WITHFAT32
   {
-    struct dpb *dpb = (struct dpb *)ARM_PTR(dpb_fp);
-
     /* Legacy INT 25h/26h may access the FAT32 boot sector only. */
-    if (block != 0 && ISFAT32(dpb) && dpb->dpb_xfatsize != 0)
+    if (block != 0 && fdos_dpb_is_fat32(dpb_fp) && fdos_dpb_xfatsize(dpb_fp) != 0)
     {
       CPU_AX = 0x0207;
       return fdos_2526h_return(cpu, true);
@@ -79,22 +78,23 @@ static bool fdos_2526h(CPU *cpu, COUNT mode)
 
   if (count == 0xffff)
   {
-    struct int2526_packet *packet =
-        (struct int2526_packet *)ARM_PTR(buffer);
-
-    block = packet->blkno;
-    count = packet->nblks;
-    buffer = packet->buf;
+    const uint32_t packet = ((uint32_t)FP_SEG(buffer) << 4) + FP_OFF(buffer);
+    block = pload32(packet + offsetof(struct int2526_packet, blkno));
+    count = pload16(packet + offsetof(struct int2526_packet, nblks));
+    buffer = MK_FP(pload16(packet + offsetof(struct int2526_packet, buf) + 2u),
+                   pload16(packet + offsetof(struct int2526_packet, buf)));
   }
 
-  internal_data->InDOS++;
+  pstore8(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, InDOS),
+          (UBYTE)(pload8(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, InDOS)) + 1u));
 
   if (mode == DSKWRITEINT26)
     DeleteBlockInBufferCache(block, block, drive, XFR_WRITE);
 
   CPU_AX = dskxfer(drive, block, buffer, count, mode);
 
-  internal_data->InDOS--;
+  pstore8(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, InDOS),
+          (UBYTE)(pload8(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, InDOS)) - 1u));
 
   if (CPU_AX != 0)
   {
@@ -124,7 +124,7 @@ bool fdos_27h(CPU *cpu)
   if (paragraphs < 6)
     paragraphs = 6;
 
-  DosMemChange(internal_data->cu_psp, paragraphs, NULL);
+  DosMemChange(fdos_dos_cu_psp(), paragraphs, NULL);
   request_terminate(0, 3);
   return true;
 }

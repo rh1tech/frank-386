@@ -15,6 +15,7 @@
 #include "font8x16.h"
 #include "debug.h"
 #include "board_config.h"
+#include "tsr_callback.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1210,6 +1211,11 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     }
     // Accumulate ISR busy time (µs)
     isr_busy_us_acc += timer_hw->timerawl - t_enter;
+
+    /* Native TSR1 hook: called once per scanline on core1, after the
+       time-critical VGA DMA/render work is complete. Client callbacks run
+       in this IRQ context and must return quickly or video timing will fail. */
+    tsr1_dispatch();
 }
 
 // ============================================================================

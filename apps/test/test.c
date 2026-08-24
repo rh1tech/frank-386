@@ -5,8 +5,40 @@
 #include "dos_phys.h"
 #include "conio.h"
 #include "dos_yield.h"
+#include "dos_video.h"
+#include "tsr_callback.h"
 #include <stdio.h>
 #include <string.h>
+
+static volatile uint32_t tsr0_count;
+static volatile uint32_t tsr1_count;
+static volatile uint8_t *tsr_video;
+static tsr_callback_t previous_tsr0;
+static tsr_callback_t previous_tsr1;
+
+static inline uint8_t hex_digit(uint32_t value)
+{
+    value &= 0x0fu;
+    return (uint8_t)(value < 10u ? ('0' + value) : ('A' + value - 10u));
+}
+
+static void test_tsr0(void)
+{
+    uint32_t count = ++tsr0_count;
+
+    tsr_video[0] = hex_digit(count);
+    if (previous_tsr0 != 0)
+        previous_tsr0();
+}
+
+static void test_tsr1(void)
+{
+    uint32_t count = ++tsr1_count;
+
+    tsr_video[79u * 2u] = hex_digit(count);
+    if (previous_tsr1 != 0)
+        previous_tsr1();
+}
 
 static int is_resident_arg(const char *arg)
 {
@@ -198,8 +230,13 @@ static int stay_resident(void)
 {
     PC *machine = get_PC();
     CPU *cpu = machine->cpu;
+    uint32_t video_size = 0;
     uint16_t psp_seg;
     uint16_t end_seg;
+
+    tsr_video = dos_video_get_buffer(&video_size);
+    if (tsr_video == 0 || video_size < 80u * 25u * 2u)
+        return 4;
 
     /* Standard DOS: AH=51h returns the current PSP in BX. */
     cpu->gprx[regax].r16 = 0x5100;
@@ -259,6 +296,13 @@ static int stay_resident(void)
                main_mcb, main_paras, (unsigned long)main_paras * 16ul,
                stack_mcb, stack_paras, (unsigned long)stack_paras * 16ul);
     }
+
+    tsr0_count = 0;
+    tsr1_count = 0;
+    tsr_video[0] = '0';
+    tsr_video[79u * 2u] = '0';
+    previous_tsr0 = set_tsr0_callback(test_tsr0);
+    previous_tsr1 = set_tsr1_callback(test_tsr1);
 
     /* Standard DOS TSR service.  Keep the complete main process MCB.
        Startup-only DOS/ARM stacks are outside this block and are released

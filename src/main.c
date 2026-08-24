@@ -53,6 +53,7 @@
 #include "audio.h"
 
 #include "pc.h"
+#include "tsr_callback.h"
 #include "mem.h"
 #include "bulk_bounce.h"
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
@@ -1456,10 +1457,43 @@ static bool init_emulator(void) {
 
 bool timer_callback(repeating_timer_t *rt);
 void vga_hw_process_deferred(void);
+
+static void __not_in_flash_func(default_tsr0)(void)
+{
+    i8254_update_irq(pc->pit);
+}
+
+static void __not_in_flash_func(default_tsr1)(void)
+{
+}
+
+static tsr_callback_t tsr0_callback = default_tsr0;
+static tsr_callback_t tsr1_callback = default_tsr1;
+
+tsr_callback_t set_tsr0_callback(tsr_callback_t cb)
+{
+    return __atomic_exchange_n(&tsr0_callback, cb, __ATOMIC_ACQ_REL);
+}
+
+tsr_callback_t set_tsr1_callback(tsr_callback_t cb)
+{
+    return __atomic_exchange_n(&tsr1_callback, cb, __ATOMIC_ACQ_REL);
+}
+
 static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
     timer_callback(rt);
+    tsr_callback_t cb = __atomic_load_n(&tsr0_callback, __ATOMIC_ACQUIRE);
+    if (cb)
+        cb();
     vga_hw_process_deferred();
     return true;
+}
+
+void __not_in_flash_func(tsr1_dispatch)(void)
+{
+    tsr_callback_t cb = __atomic_load_n(&tsr1_callback, __ATOMIC_ACQUIRE);
+    if (cb)
+        cb();
 }
 // to call DMA wait not from ISR for timer
 bool repeat_me_often(void);
@@ -1500,6 +1534,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     static repeating_timer_t m_timer = { 0 };
     int hz = 44100;
 	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
+
     __dmb();
     audio_timer_ready = true;
     while(1) {

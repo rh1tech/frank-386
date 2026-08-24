@@ -293,7 +293,7 @@ static dos_far_ptr task_guest_is_device(dos_far_ptr name)
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define DOS_API_VERSION         19
+#define DOS_API_VERSION         20
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_MIN_DOS_STACK_SIZE        4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    ARM_ELF_MIN_DOS_STACK_SIZE
@@ -1927,7 +1927,7 @@ static int arm_elf_loader_progress(arm_elf_load_meta *meta,
   if (meta->is_long_running_job)
     dos_printf("%s", marker);
 
-  c = ndread(&LoL->syscon);
+  { dos_far_ptr syscon = fdos_lol_syscon(); c = ndread(&syscon); }
   if (c != CTL_C)
     return FALSE;
 
@@ -3989,21 +3989,12 @@ ULONG SftGetFsize(int sft_idx)
   return fdos_sft_size(s);
 }
 
-/* dsk: 0 = current default drive, 1 = A:, 2 = B:, ... (FCB drive-byte
-   convention). Returns NULL if invalid, exactly like get_cds(). */
-struct cds *get_cds1(unsigned dsk)
+/* dsk: 0 = current default drive, 1 = A:, 2 = B:, ... */
+static int cds_drive_valid(unsigned dsk)
 {
-  dos_far_ptr p;
-
   if (dsk == 0)
     dsk = fdos_dos_default_drive() + 1;
-  if (dsk == 0)
-    return NULL;
-
-  p = get_cds(dsk - 1);
-  if (far_is_null(p))
-    return NULL;
-  return (struct cds *) ARM_PTR(p);
+  return dsk != 0 && !far_is_null(get_cds(dsk - 1));
 }
 
 /*
@@ -4303,8 +4294,8 @@ STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg,
 
   task_guest_write(task_guest_seg_linear(pspseg), &p, sizeof(p));
 
-  return (get_cds1(p.ps_fcb1.fcb_drive) ? 0 : 0xff) |
-         (get_cds1(p.ps_fcb2.fcb_drive) ? 0 : 0xff00);
+  return (cds_drive_valid(p.ps_fcb1.fcb_drive) ? 0 : 0xff) |
+         (cds_drive_valid(p.ps_fcb2.fcb_drive) ? 0 : 0xff00);
 }
 
 /*

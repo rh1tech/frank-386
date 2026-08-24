@@ -8,6 +8,9 @@
 
 #include "hdrs.h"
 #include "fdos.h"
+#include "kernel_guest_proxy.h"
+
+void *malloc(size_t n);
 
 #ifndef WITHLFNAPI
 #error lfnapi.c must be compiled only when WITHLFNAPI is enabled
@@ -30,13 +33,11 @@
 #define lfn(fnp) ((struct lfn_entry *)&(fnp)->f_dir)
 
 /*
- * The original kernel keeps LFN helper handles in its resident DOS data.
- * Keep the same ownership model here: the slots are allocated from Dyn and
- * therefore live in guest conventional memory below the first MCB.  Only the
- * far pointer to the pool occupies native SRAM.
- *
- * Current f_node stores its directory cursor through f_dmp, so each persistent
- * helper fnode needs a private persistent dmatch as well.
+ * LFN helper f_nodes are persistent kernel-only state.  They must not live in
+ * pageable guest RAM because FAT/cache operations can remap that backing while
+ * a handle remains open.  Keep the slots in native BSS; their guest-facing
+ * pointers (f_dpb) remain dos_far_ptr values.  Each slot owns a native dmatch
+ * because f_dmp is likewise persistent across directory operations.
  */
 typedef struct lfn_fnode_slot {
   UBYTE used;
@@ -45,15 +46,13 @@ typedef struct lfn_fnode_slot {
   dmatch dm;
 } lfn_fnode_slot;
 
-static dos_far_ptr lfn_slots_x86;
+static lfn_fnode_slot *lfn_slots;
 
 static lfn_fnode_slot *lfn_slot(UWORD handle)
 {
-  if (far_is_null(lfn_slots_x86) || handle >= LFN_FNODE_COUNT)
-    return NULL;
-
-  return (lfn_fnode_slot *)ARM_PTR(
-      ADD_OFF(lfn_slots_x86, (ULONG)handle * sizeof(lfn_fnode_slot)));
+  return lfn_slots != NULL && handle < LFN_FNODE_COUNT
+             ? &lfn_slots[handle]
+             : NULL;
 }
 
 static f_node_ptr lfn_get_fnode(UWORD handle)
@@ -65,8 +64,6 @@ static f_node_ptr lfn_get_fnode(UWORD handle)
 static void lfn_init_dir_fnode(lfn_fnode_slot *slot, CLUSTER dirstart)
 {
   f_node_ptr fnp = &slot->fnode;
-  struct dpb *dpb = (struct dpb *)ARM_PTR(fnp->f_dpb);
-
   memset(&slot->dm, 0, sizeof(slot->dm));
   fnp->f_sft_idx = 0xff;
   fnp->f_dmp = &slot->dm;
@@ -74,8 +71,8 @@ static void lfn_init_dir_fnode(lfn_fnode_slot *slot, CLUSTER dirstart)
   fnp->f_cluster_offset = 0;
 
 #ifdef WITHFAT32
-  if (dirstart == 0 && ISFAT32(dpb))
-    dirstart = dpb->dpb_xrootclst;
+  if (dirstart == 0 && fdos_dpb_is_fat32(fnp->f_dpb))
+    dirstart = (CLUSTER)fdos_dpb_root_cluster(fnp->f_dpb);
 #endif
 
   fnp->f_cluster = dirstart;
@@ -84,19 +81,27 @@ static void lfn_init_dir_fnode(lfn_fnode_slot *slot, CLUSTER dirstart)
 
 void lfnapi_init(void)
 {
-  if (!far_is_null(lfn_slots_x86))
+  if (lfn_slots != NULL)
     return;
 
-  lfn_slots_x86 = DynAlloc("LFN fnodes", LFN_FNODE_COUNT,
-                           sizeof(lfn_fnode_slot));
+  /* Persistent LFN state must be native, but it does not need to move the
+   * native heap before PC/CPU allocation.  Allocate it lazily during DOS
+   * initialization, after the emulator core objects already have stable SRAM
+   * addresses. */
+  lfn_slots = (lfn_fnode_slot *)malloc(sizeof(*lfn_slots) * LFN_FNODE_COUNT);
+  if (lfn_slots != NULL)
+    memset(lfn_slots, 0, sizeof(*lfn_slots) * LFN_FNODE_COUNT);
 }
 
 COUNT lfn_allocate_inode(void)
 {
-  dos_far_ptr dpbp = get_dpb(internal_data->default_drive);
+  dos_far_ptr dpbp = get_dpb(fdos_dos_default_drive());
 
   if (far_is_null(dpbp) || media_check(dpbp) < 0)
     return LHE_INVLDDRV;
+
+  if (lfn_slots == NULL)
+    return LHE_NOFREEHNDL;
 
   for (UWORD handle = 0; handle < LFN_FNODE_COUNT; handle++)
   {

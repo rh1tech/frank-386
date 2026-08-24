@@ -385,7 +385,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   {
     const WORD shroff = (WORD)share_open_check(
         x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
-        internal_data->cu_psp, flags & 0x03, (flags >> 4) & 0x07);
+        (UWORD)dosfns_idata.cu_psp(), flags & 0x03, (flags >> 4) & 0x07);
     sft_ref(lpCurSft).shroff(shroff);
     if (shroff < 0)
       return shroff;
@@ -589,8 +589,8 @@ ULONG DosSeek(unsigned hndl, LONG new_pos, COUNT mode, int *rc)
     Migrated from dosfns.c. Differences from the original:
       - bp is a dos_far_ptr (it comes straight from the guest program
         via DS:DX, like rwblock()'s buffer above) - converted to a
-        native pointer only where BinaryCharIO()/cooked_read()/
-        cooked_write() (which all take native void* / char* - see their
+        guest far pointer through BinaryCharIO()/cooked_read()/
+        cooked_write() (all paging-aware - see their
         definitions above) need one; passed straight through
         (untranslated) to rwblock(), which itself expects a
         dos_far_ptr.
@@ -645,9 +645,9 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
       if (!(entry_flags & SFT_FEOF))
         return 0;
       if (entry_flags & SFT_FCONIN)
-        rc = read_line_handle(sft_idx, n, (char *)ARM_PTR(bp));
+        rc = read_line_handle(sft_idx, n, bp);
       else
-        rc = cooked_read(&dev, n, (char *)ARM_PTR(bp));
+        rc = cooked_read(&dev, n, bp);
       if (n != 0 && pload8(dosfns_far_linear(bp)) == CTL_Z)
       {
         const sft_ref current(x86_sft);
@@ -658,7 +658,7 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
     sft.flags((UWORD)(entry_flags | SFT_FEOF));
     if (entry_flags & SFT_FNUL)
       return n;
-    return cooked_write(&dev, n, (char *)ARM_PTR(bp));
+    return cooked_write(&dev, n, bp);
   }
   if (IsShareInstalled(FALSE))
   {
@@ -722,7 +722,7 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
   if ((*froot == '\0') ||
       ((*froot == '.') && ((froot[1] == '\0') || (froot[1] == '.' && froot[2] == '\0'))))
     return MK_FP(0, 0);
-  for (x86_dhp = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev); !far_is_end(x86_dhp); )
+  for (x86_dhp = MK_FP(DOS_PSP, (UWORD)(0x08F0u + offsetof(lol, nul_dev))); !far_is_end(x86_dhp); )
   {
     const dhdr_ref dhp(x86_dhp);
     const dos_far_ptr next = dhp.next();
@@ -1093,7 +1093,7 @@ long DosMkTmp(dos_far_ptr pathname, UWORD attr)
   int loop;
 
   ptmp = base + strlen(base);
-  if (LoL->os_major == 5) { /* clone some bad habit of MS DOS 5.0 only */
+  if ((UBYTE)dosfns_lol.os_major() == 5) { /* clone some bad habit of MS DOS 5.0 only */
     if (ptmp == base || (ptmp[-1] != '\\' && ptmp[-1] != '/'))
       *ptmp++ = '\\';
   }
@@ -1110,7 +1110,7 @@ long DosMkTmp(dos_far_ptr pathname, UWORD attr)
 
     /* DOS versions: > 5: characters A - P
        < 5: hex digits */
-    if (LoL->os_major < 5)
+    if ((UBYTE)dosfns_lol.os_major() < 5)
       for (i = 0; i < 8; i++)
         ptmp[i] -= (ptmp[i] < 'A' + 10) ? '0' - 'A' : 10;
 
@@ -1130,15 +1130,24 @@ long DosMkTmp(dos_far_ptr pathname, UWORD attr)
  */
 UWORD get_machine_name(dos_far_ptr /* -> char[16] */ netname)
 {
-  guest_write(netname, internal_data->net_name, 16);
-  return (LoL->NetBios);
+  BYTE name[16];
+  guest_read_block(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF +
+                       offsetof(dos_data, net_name),
+                   name, sizeof(name));
+  guest_write(netname, name, sizeof(name));
+  return pload16(((uint32_t)DOS_PSP << 4) + 0x08F0u + offsetof(lol, NetBios));
 }
 
 VOID set_machine_name(dos_far_ptr netname, UWORD name_num)
 {
-  LoL->NetBios = name_num;
-  guest_read(internal_data->net_name, netname, 15);
-  internal_data->net_set_count++;
+  BYTE name[15];
+  const uint32_t sda = ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
+  const uint32_t lol_addr = ((uint32_t)DOS_PSP << 4) + 0x08F0u;
+  pstore16(lol_addr + offsetof(lol, NetBios), name_num);
+  guest_read(name, netname, sizeof(name));
+  guest_write_block(sda + offsetof(dos_data, net_name), name, sizeof(name));
+  pstore8(sda + offsetof(dos_data, net_set_count),
+          (UBYTE)(pload8(sda + offsetof(dos_data, net_set_count)) + 1u));
 }
 
 COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock)
@@ -1228,7 +1237,7 @@ COUNT DosGetCuDir(UBYTE drive, dos_far_ptr dst)
    * Directly copying cdsCurrentPath is not equivalent for SUBST/JOIN.
    */
   if (drive-- == 0)
-    drive = internal_data->default_drive;
+    drive = (UBYTE)dosfns_idata.default_drive();
 
   SecPathName[0] = (BYTE)('A' + (drive & 0x1f));
   SecPathName[1] = ':';
@@ -1259,7 +1268,7 @@ COUNT DosChangeDir(dos_far_ptr s)
 
   set_fcbname(PriPathName);
 
-  if (CDS_WRITABLE(internal_data->current_ldt) && (strlen(PriPathName) >= MAX_CDSPATH))
+  if (CDS_WRITABLE(dosfns_idata.current_ldt()) && (strlen(PriPathName) >= MAX_CDSPATH))
     return DE_PATHNOTFND;
 
   /// TODO:
@@ -1362,7 +1371,7 @@ COUNT DosDelete(dos_far_ptr path, int attrib)
    in this port). */
 STATIC int pop_dmp(int rc, dos_far_ptr dta_far)
 {
-  internal_data->dta = dta_far;
+  dosfns_idata.dta(dta_far);
   if (rc == SUCCESS)
   {
     /* The DTA is whatever the guest set with AH=1Ah, and a dmatch is 43
@@ -1389,7 +1398,7 @@ STATIC int pop_dmp(int rc, dos_far_ptr dta_far)
 COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
 {
   int rc;
-  dos_far_ptr dta_far = internal_data->dta;
+  dos_far_ptr dta_far = dosfns_idata.dta();
 
   rc = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
   dpb_watch_check_chain("DosFindFirst");
@@ -1400,7 +1409,7 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
 
   SAttrD = (BYTE) attr;
 
-  internal_data->dta = x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD);
+  dosfns_idata.dta(x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD));
   memset(&sda_tmp_dmD, 0, sizeof(dmatch));
   memset(&SearchDirD, 0, sizeof(struct dirent));
 
@@ -1434,7 +1443,7 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
 COUNT DosFindNext(void)
 {
   COUNT rc;
-  dos_far_ptr dta_far = internal_data->dta;
+  dos_far_ptr dta_far = dosfns_idata.dta();
 
   /* DTA is guest-supplied; 21 bytes from it can cross the segment end. */
   guest_read(&sda_tmp_dmD, dta_far, 21);
@@ -1451,7 +1460,7 @@ COUNT DosFindNext(void)
     return DE_NFILES;
 
   memset(&SearchDirD, 0, sizeof(struct dirent));
-  internal_data->dta = x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD);
+  dosfns_idata.dta(x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD));
   rc = dos_findnext();
 
   return pop_dmp(rc, dta_far);

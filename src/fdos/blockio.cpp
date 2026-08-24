@@ -82,8 +82,10 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
   }
   using fdos_guest::dhdr_ref;
   using fdos_guest::dpb_ref;
+  using fdos_guest::dos_data_ref;
   using fdos_guest::lol_ref;
   const lol_ref dsk_lol((static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + 0x08F0u);
+  const dos_data_ref dsk_idata((static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + X86_INTERNAL_DATA_OFF);
   const dpb_ref dpbp(_dpbp);
   const dos_far_ptr dpb_device = dpbp.device();
   const UBYTE dpb_unit = dpbp.dpb_unit();
@@ -111,7 +113,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     switch (mode)
     {
       case DSKWRITE:
-        if (internal_data->verify_ena)
+        if ((UBYTE)dsk_idata.verify_ena())
         {
           IoReqHdrD.r_command = C_OUTVFY;
           break;

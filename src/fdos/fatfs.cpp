@@ -417,36 +417,22 @@ struct rwblock_workspace
   unsigned boff;
 };
 
+static inline uint32_t buffer_data_linear(dos_far_ptr x86_bp, std::size_t off)
+{
+  return ((uint32_t)FP_SEG(x86_bp) << 4) + FP_OFF(x86_bp) +
+         (uint32_t)offsetof(buffer, b_buffer) + (uint32_t)off;
+}
+
 static void buffer_from_guest_linear(dos_far_ptr x86_bp, std::size_t off,
                                      uint32_t src, std::size_t len)
 {
-  fdos_guest::buffer_ref b(x86_bp);
-  UBYTE scratch[16];
-  while (len != 0)
-  {
-    const std::size_t n = len < sizeof(scratch) ? len : sizeof(scratch);
-    guest_lin_read(scratch, src, n);
-    b.write_data(off, scratch, n);
-    off += n;
-    src += (uint32_t)n;
-    len -= n;
-  }
+  guest_move_block(buffer_data_linear(x86_bp, off), src, len);
 }
 
 static void buffer_to_guest_linear(dos_far_ptr x86_bp, std::size_t off,
                                    uint32_t dst, std::size_t len)
 {
-  fdos_guest::buffer_ref b(x86_bp);
-  UBYTE scratch[16];
-  while (len != 0)
-  {
-    const std::size_t n = len < sizeof(scratch) ? len : sizeof(scratch);
-    b.read_data(off, scratch, n);
-    guest_lin_write(dst, scratch, n);
-    off += n;
-    dst += (uint32_t)n;
-    len -= n;
-  }
+  guest_move_block(dst, buffer_data_linear(x86_bp, off), len);
 }
 
 static long rwblock_worker(COUNT fd, UCOUNT count, int mode,

@@ -19,6 +19,7 @@ using fdos_guest::cds_ref;
 using fdos_guest::dos_data_ref;
 using fdos_guest::lol_ref;
 using fdos_guest::sft_ref;
+using fdos_guest::sfttbl_ref;
 using fdos_guest::dpb_ref;
 using fdos_guest::dhdr_ref;
 
@@ -33,6 +34,7 @@ extern "C" void fdos_cds_copy_current_path(dos_far_ptr p, char *dst, size_t n) {
 extern "C" void fdos_cds_current_path_byte(dos_far_ptr p, unsigned i, UBYTE v) { cds_ref(p).current_path_byte(i, v); }
 extern "C" UBYTE fdos_dos_default_drive(void) { return idata.default_drive(); }
 extern "C" UBYTE fdos_dos_lastdrive(void) { return kernel_lol.lastdrive(); }
+extern "C" void fdos_lol_or_version_flags(UBYTE bits) { kernel_lol.version_flags() = (UBYTE)((UBYTE)kernel_lol.version_flags() | bits); }
 extern "C" void fdos_dos_set_current_ldt(dos_far_ptr v) { idata.current_ldt(v); }
 
 extern "C" UWORD fdos_dos_cu_psp(void) { return idata.cu_psp(); }
@@ -41,6 +43,7 @@ extern "C" void fdos_dos_set_mem_access_mode(UBYTE v) { idata.mem_access_mode() 
 extern "C" UBYTE fdos_lol_uppermem_link(void) { return kernel_lol.uppermem_link(); }
 extern "C" UWORD fdos_lol_uppermem_root(void) { return kernel_lol.uppermem_root(); }
 extern "C" UWORD fdos_lol_first_mcb(void) { return kernel_lol.first_mcb(); }
+extern "C" dos_far_ptr fdos_lol_sfthead(void) { return kernel_lol.sfthead(); }
 extern "C" ULONG fdos_sft_size(dos_far_ptr p) { return sft_ref(p).size(); }
 extern "C" UWORD fdos_sft_count(dos_far_ptr p) { return sft_ref(p).count(); }
 extern "C" dos_far_ptr fdos_dos_lp_cur_sft(void) { return idata.lp_cur_sft(); }
@@ -112,7 +115,7 @@ extern "C" void fdos_lol_set_setver(UBYTE major, UBYTE minor)
 
 extern "C" dos_far_ptr fdos_lol_syscon(void)
 {
-    return MK_FP(DOS_PSP, (UWORD)(0x08f0u + offsetof(lol, syscon)));
+    return fdos_proxy_far_load(fdos_fixed_lol_linear() + offsetof(lol, syscon));
 }
 
 extern "C" dos_far_ptr fdos_cds_slot(unsigned drive)
@@ -204,4 +207,31 @@ extern "C" void fdos_lol_set_network_retry(UWORD delay, UWORD retry)
 {
     pstore16(fdos_fixed_lol_linear() + offsetof(lol, NetDelay), delay);
     pstore16(fdos_fixed_lol_linear() + offsetof(lol, NetRetry), retry);
+}
+
+extern "C" ULONG fdos_sft_position(dos_far_ptr p) { return sft_ref(p).position(); }
+extern "C" void fdos_sft_set_size(dos_far_ptr p, ULONG v) { sft_ref(p).size(v); }
+extern "C" UWORD fdos_sft_date(dos_far_ptr p) { return sft_ref(p).date(); }
+extern "C" UWORD fdos_sft_time(dos_far_ptr p) { return sft_ref(p).time(); }
+extern "C" void fdos_sft_or_mode(dos_far_ptr p, UWORD bits) { const sft_ref r(p); r.mode((UWORD)(r.mode() | bits)); }
+extern "C" UWORD fdos_sft_psp(dos_far_ptr p) { return pload16(((uint32_t)FP_SEG(p) << 4) + FP_OFF(p) + offsetof(sft, sft_psp)); }
+extern "C" UWORD fdos_sfttbl_count(dos_far_ptr p) { return sfttbl_ref(p).count(); }
+extern "C" dos_far_ptr fdos_sfttbl_next(dos_far_ptr p) { return sfttbl_ref(p).next(); }
+extern "C" dos_far_ptr fdos_sfttbl_entry(dos_far_ptr p, UWORD index) { return sfttbl_ref(p).entry(index); }
+extern "C" BOOL fdos_dpb_is_fat32(dos_far_ptr p) { return dpb_ref(p).is_fat32() ? TRUE : FALSE; }
+extern "C" ULONG fdos_dpb_root_cluster(dos_far_ptr p) {
+#ifdef WITHFAT32
+    return dpb_ref(p).dpb_xrootclst();
+#else
+    (void)p;
+    return 0;
+#endif
+}
+extern "C" ULONG fdos_dpb_xfatsize(dos_far_ptr p) {
+#ifdef WITHFAT32
+    return dpb_ref(p).dpb_xfatsize();
+#else
+    (void)p;
+    return 0;
+#endif
 }

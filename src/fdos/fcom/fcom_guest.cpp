@@ -36,6 +36,50 @@ using fdos_guest::mcb_ref;
 using fdos_guest::dos_data_ref;
 using fdos_guest::lol_ref;
 
+static constexpr uint32_t fcom_idata_linear =
+    (static_cast<uint32_t>(DOS_PSP) << 4) + X86_INTERNAL_DATA_OFF;
+static constexpr uint32_t fcom_lol_linear =
+    (static_cast<uint32_t>(DOS_PSP) << 4) + 0x08F0u;
+
+
+namespace {
+constexpr unsigned FCOM_SHADOW_MAX_DEPTH = 8;
+struct shadow_state {
+    uint32_t base;
+    size_t size;
+};
+
+static uint8_t *shadow_storage;
+static uint32_t shadow_base;
+static size_t shadow_size;
+static unsigned shadow_depth;
+static shadow_state shadow_stack[FCOM_SHADOW_MAX_DEPTH];
+
+static bool shadow_range(uint32_t addr, size_t len, size_t *off)
+{
+    if (shadow_depth == 0 || shadow_storage == nullptr)
+        return false;
+    if (addr < shadow_base)
+        return false;
+    const uint64_t delta = static_cast<uint64_t>(addr) - shadow_base;
+    if (delta > shadow_size || len > shadow_size - static_cast<size_t>(delta))
+        return false;
+    if (off)
+        *off = static_cast<size_t>(delta);
+    return true;
+}
+
+static void raw_read(uint32_t addr, void *dst, size_t len)
+{
+    guest_read_block(addr, dst, len);
+}
+
+static void raw_write(uint32_t addr, const void *src, size_t len)
+{
+    guest_write_block(addr, src, len);
+}
+} // namespace
+
 extern "C" {
 
 uint32_t fcom_guest_linear(uint16_t segment, uint16_t offset)
@@ -45,43 +89,135 @@ uint32_t fcom_guest_linear(uint16_t segment, uint16_t offset)
 
 uint8_t fcom_guest_read8(uint32_t addr)
 {
+    size_t off;
+    if (shadow_range(addr, 1, &off))
+        return shadow_storage[off];
     return pload8(addr);
+}
+
+void fcom_guest_write8(uint32_t addr, uint8_t value)
+{
+    size_t off;
+    if (shadow_range(addr, 1, &off)) {
+        shadow_storage[off] = value;
+        return;
+    }
+    pstore8(addr, value);
 }
 
 uint16_t fcom_guest_read16(uint32_t addr)
 {
-    return pload16(addr);
+    return static_cast<uint16_t>(fcom_guest_read8(addr)) |
+           (static_cast<uint16_t>(fcom_guest_read8(addr + 1u)) << 8);
 }
 
 void fcom_guest_write16(uint32_t addr, uint16_t value)
 {
-    pstore16(addr, value);
+    fcom_guest_write8(addr, static_cast<uint8_t>(value));
+    fcom_guest_write8(addr + 1u, static_cast<uint8_t>(value >> 8));
 }
 
 void fcom_guest_read(uint32_t addr, void *dst, size_t len)
 {
-    guest_read_block(addr, dst, len);
+    size_t off;
+    if (shadow_range(addr, len, &off)) {
+        std::memcpy(dst, shadow_storage + off, len);
+        return;
+    }
+    raw_read(addr, dst, len);
 }
 
 void fcom_guest_write(uint32_t addr, const void *src, size_t len)
 {
-    guest_write_block(addr, src, len);
+    size_t off;
+    if (shadow_range(addr, len, &off)) {
+        std::memcpy(shadow_storage + off, src, len);
+        return;
+    }
+    raw_write(addr, src, len);
 }
 
 void fcom_guest_fill(uint32_t addr, uint8_t value, size_t len)
 {
+    size_t off;
+    if (shadow_range(addr, len, &off)) {
+        std::memset(shadow_storage + off, value, len);
+        return;
+    }
     guest_fill_block(addr, value, len);
 }
 
 void fcom_guest_copy(uint32_t dst, uint32_t src, size_t len)
 {
-    guest_move_block(dst, src, len);
+    if (dst == src || len == 0)
+        return;
+    if (dst < src || dst >= src + len) {
+        for (size_t i = 0; i < len; ++i)
+            fcom_guest_write8(dst + static_cast<uint32_t>(i),
+                              fcom_guest_read8(src + static_cast<uint32_t>(i)));
+    } else {
+        while (len-- != 0)
+            fcom_guest_write8(dst + static_cast<uint32_t>(len),
+                              fcom_guest_read8(src + static_cast<uint32_t>(len)));
+    }
+}
+
+int fcom_guest_shadow_enter(uint32_t base, void *storage, size_t size)
+{
+    if (storage == nullptr || size == 0 || shadow_depth >= FCOM_SHADOW_MAX_DEPTH)
+        return 0;
+    if (shadow_depth != 0) {
+        raw_write(shadow_base, shadow_storage, shadow_size);
+        shadow_stack[shadow_depth - 1] = {shadow_base, shadow_size};
+    }
+    shadow_storage = static_cast<uint8_t *>(storage);
+    shadow_base = base;
+    shadow_size = size;
+    ++shadow_depth;
+    raw_read(shadow_base, shadow_storage, shadow_size);
+    return 1;
+}
+
+void fcom_guest_shadow_leave(void)
+{
+    if (shadow_depth == 0)
+        return;
+    raw_write(shadow_base, shadow_storage, shadow_size);
+    --shadow_depth;
+    if (shadow_depth != 0) {
+        const shadow_state prev = shadow_stack[shadow_depth - 1];
+        shadow_base = prev.base;
+        shadow_size = prev.size;
+        raw_read(shadow_base, shadow_storage, shadow_size);
+    } else {
+        shadow_base = 0;
+        shadow_size = 0;
+        shadow_storage = nullptr;
+    }
+}
+
+void fcom_guest_shadow_sync_to_guest(void)
+{
+    if (shadow_depth != 0)
+        raw_write(shadow_base, shadow_storage, shadow_size);
+}
+
+void fcom_guest_shadow_sync_from_guest(void)
+{
+    if (shadow_depth != 0)
+        raw_read(shadow_base, shadow_storage, shadow_size);
+}
+
+void *fcom_guest_shadow_ptr(uint32_t addr, size_t len)
+{
+    size_t off;
+    return shadow_range(addr, len, &off) ? shadow_storage + off : nullptr;
 }
 
 size_t fcom_guest_strnlen(uint32_t addr, size_t maxlen)
 {
     size_t n = 0;
-    while (n < maxlen && pload8(addr + static_cast<uint32_t>(n)) != 0)
+    while (n < maxlen && fcom_guest_read8(addr + static_cast<uint32_t>(n)) != 0)
         ++n;
     return n;
 }
@@ -91,12 +227,12 @@ int fcom_guest_env_name_matches(uint32_t entry, size_t entry_len,
 {
     if (entry_len <= name_len)
         return 0;
-    if (pload8(entry + static_cast<uint32_t>(name_len)) != '=')
+    if (fcom_guest_read8(entry + static_cast<uint32_t>(name_len)) != '=')
         return 0;
 
     for (size_t i = 0; i < name_len; ++i) {
         const unsigned char a =
-            static_cast<unsigned char>(pload8(entry + static_cast<uint32_t>(i)));
+            static_cast<unsigned char>(fcom_guest_read8(entry + static_cast<uint32_t>(i)));
         const unsigned char b = static_cast<unsigned char>(name[i]);
 
         /* Environment variable names are ASCII case-insensitive. */
@@ -135,3 +271,18 @@ uint8_t fcom_guest_lol_uppermem_link(void)
 }
 
 } /* extern "C" */
+
+extern "C" uint16_t fcom_guest_lol_first_mcb(void)
+{
+    return lol_ref(fcom_lol_linear).first_mcb();
+}
+
+extern "C" uint8_t fcom_guest_mem_access_mode(void)
+{
+    return dos_data_ref(fcom_idata_linear).mem_access_mode();
+}
+
+extern "C" void fcom_guest_set_mem_access_mode(uint8_t value)
+{
+    dos_data_ref(fcom_idata_linear).mem_access_mode() = value;
+}
