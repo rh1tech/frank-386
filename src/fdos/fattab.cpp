@@ -101,13 +101,10 @@ STATIC dos_far_ptr getFATblock(dos_far_ptr /* -> struct dpb */ x86_dpbp,
   using fdos_guest::buffer_ref;
   using fdos_guest::dpb_ref;
   const dpb_ref d(x86_dpbp);
-  struct buffer *native_bp = getblock(clussec, d.dpb_unit());
+  const dos_far_ptr x86_bp = getblock(clussec, d.dpb_unit());
 
-  if (native_bp)
+  if (!far_is_null(x86_bp))
   {
-    /* Convert immediately: the guest address remains stable across paging
-       remaps, unlike the native pointer returned by getblock(). */
-    const dos_far_ptr x86_bp = linear_to_far(native_bp);
     const buffer_ref b(x86_bp);
     BYTE flag = b.flag();
     flag = static_cast<BYTE>((flag & ~(BFR_DATA | BFR_DIR)) |
@@ -483,11 +480,10 @@ void read_fsinfo(dos_far_ptr x86_dpbp)
   if (sec == 0xffff)
     return;
 
-  struct buffer *native_bp = getblock(sec, d.dpb_unit());
-  if (native_bp == NULL)
+  const dos_far_ptr x86_bp = getblock(sec, d.dpb_unit());
+  if (far_is_null(x86_bp))
     return;
 
-  const dos_far_ptr x86_bp = linear_to_far(native_bp);
   const fdos_guest::buffer_ref b(x86_bp);
   BYTE flag = b.flag();
   flag &= (BYTE)~(BFR_DATA | BFR_DIR | BFR_FAT | BFR_DIRTY);
@@ -513,13 +509,11 @@ void write_fsinfo(dos_far_ptr x86_dpbp)
   if (sec == 0xffff)
     return;
 
-  struct buffer *native_bp = getblock(sec, d.dpb_unit());
-  /* Same as read_fsinfo(): NULL here is a native null-pointer dereference.
-     FSInfo is a hint - skip the update rather than fault. */
-  if (native_bp == NULL)
+  const dos_far_ptr x86_bp = getblock(sec, d.dpb_unit());
+  /* FSInfo is a hint - skip the update when the sector cannot be cached. */
+  if (far_is_null(x86_bp))
     return;
 
-  const dos_far_ptr x86_bp = linear_to_far(native_bp);
   const fdos_guest::buffer_ref b(x86_bp);
   BYTE flag = b.flag();
   flag &= (BYTE)~(BFR_DATA | BFR_DIR | BFR_FAT);

@@ -21,6 +21,7 @@ using fdos_guest::cds_ref;
 using fdos_guest::sft_ref;
 using fdos_guest::sfttbl_ref;
 using fdos_guest::dpb_ref;
+using fdos_guest::buffer_ref;
 
 static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
@@ -798,22 +799,16 @@ rebuild_dpb:
 
           if (value != 0xFFFFFFFFUL)
           {
-            bpb FAR *bpbp;
-            struct buffer FAR *bp = getblock(1, dpb.dpb_unit());
-            /* getblk() returns NULL when the sector cannot be read (or a
-               buffer cannot be freed). Upstream dereferences it regardless -
-               harmless-ish there, where a NULL far pointer just writes low
-               memory, but here bp is a NATIVE pointer and this is a hard fault
-               that takes both cores down. Report a device error instead. */
-            if (bp == NULL)
+            const dos_far_ptr x86_bp = getblock(1, dpb.dpb_unit());
+            if (far_is_null(x86_bp))
               return DE_ACCESS;
-            bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT);
-            bp->b_flag |= BFR_VALID | BFR_DIRTY;
-            bpbp = (bpb FAR *)&bp->b_buffer[BT_BPB];
+            const buffer_ref b(x86_bp);
+            BYTE flag = static_cast<BYTE>(b.flag() & ~(BFR_DATA | BFR_DIR | BFR_FAT));
+            b.flag(static_cast<BYTE>(flag | BFR_VALID | BFR_DIRTY));
             if ((UWORD)xdffp->xdff_function == 0x03)
-              bpbp->bpb_xflags = (UWORD)value;
+              b.data16(BT_BPB + offsetof(bpb, bpb_xflags), (UWORD)value);
             else
-              bpbp->bpb_xrootclst = value;
+              b.data32(BT_BPB + offsetof(bpb, bpb_xrootclst), value);
           }
           goto rebuild_dpb;
         }

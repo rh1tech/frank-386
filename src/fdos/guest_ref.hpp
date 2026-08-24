@@ -719,6 +719,15 @@ public:
     __attribute__((always_inline)) void data16(std::size_t off, UWORD v) const { scalar_store<UWORD>(offsetof(buffer, b_buffer) + off, v); }
     __attribute__((always_inline)) ULONG data32(std::size_t off) const { return scalar_load<ULONG>(offsetof(buffer, b_buffer) + off); }
     __attribute__((always_inline)) void data32(std::size_t off, ULONG v) const { scalar_store<ULONG>(offsetof(buffer, b_buffer) + off, v); }
+    __attribute__((always_inline)) void read_data(std::size_t off, void *dst, std::size_t len) const {
+        guest_read_block(addr_ + offsetof(buffer, b_buffer) + static_cast<uint32_t>(off), dst, len);
+    }
+    __attribute__((always_inline)) void write_data(std::size_t off, const void *src, std::size_t len) const {
+        guest_write_block(addr_ + offsetof(buffer, b_buffer) + static_cast<uint32_t>(off), src, len);
+    }
+    __attribute__((always_inline)) void fill_data(std::size_t off, UBYTE value, std::size_t len) const {
+        guest_fill_block(addr_ + offsetof(buffer, b_buffer) + static_cast<uint32_t>(off), value, len);
+    }
 
 private:
     __attribute__((always_inline)) dos_far_ptr far_load(std::size_t off) const {

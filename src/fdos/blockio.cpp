@@ -219,10 +219,8 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     "near" offsets within that one segment, and b_next(bp)/b_prev(bp)
     there are plain far-pointer reconstructions: MK_FP(FP_SEG(bp), ...).
 
-    The cache walk now keeps only guest far pointers and accesses buffer
-    metadata through buffer_ref.  A native pointer is produced only at
-    the public getblk() API boundary, for legacy callers that still expect
-    struct buffer *.
+    The cache walk and public getblk() API keep only guest far pointers;
+    buffer metadata/data are accessed through buffer_ref.
 */
 
 namespace {
@@ -357,11 +355,11 @@ static BOOL flush1(dos_far_ptr p)
 } // namespace
 
 /*
-    getblk(blkno, dsk, overwrite) - return a pointer to a buffer
-    holding the requested disk block, reading it first unless
+    getblk(blkno, dsk, overwrite) - return the guest far address of a
+    buffer holding the requested disk block, reading it first unless
     "overwrite" says the caller will fill the whole block itself.
 */
-struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
+dos_far_ptr getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
 {
   using fdos_guest::buffer_ref;
   const dos_far_ptr p = searchblock(blkno, dsk);
@@ -380,21 +378,21 @@ struct buffer *getblk(ULONG blkno, COUNT dsk, BOOL overwrite)
         || dsk != FDOS_BUFFER_NOCACHE_UNIT
 #endif
        )
-      return (struct buffer *)ARM_PTR(p);
+      return p;
 #else
-    return (struct buffer *)ARM_PTR(p);
+    return p;
 #endif
   }
 
   if (!flush1(p))
-    return NULL;
+    return MK_FP(0, 0);
   if (!overwrite && dskxfer(dsk, blkno, buffer_data_far(p), 1, DSKREAD))
-    return NULL;
+    return MK_FP(0, 0);
 
   b.flag(BFR_VALID | BFR_DATA);
   b.unit(static_cast<BYTE>(dsk));
   b.blkno(blkno);
-  return (struct buffer *)ARM_PTR(p);
+  return p;
 }
 
 /*      Mark all buffers for a disk as not valid                        */

@@ -34,7 +34,8 @@ static BYTE *Proto_hRcsId =
 #endif
 
 /* blockio.c */
-struct buffer FAR *getblk(ULONG blkno, COUNT dsk, BOOL overwrite);
+struct buffer;
+dos_far_ptr getblk(ULONG blkno, COUNT dsk, BOOL overwrite);
 #define getblock(blkno, dsk) getblk(blkno, dsk, FALSE)
 #define getblockOver(blkno, dsk) getblk(blkno, dsk, TRUE)
 VOID setinvld(REG COUNT dsk);

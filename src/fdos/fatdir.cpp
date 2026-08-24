@@ -58,6 +58,7 @@ extern "C" {
 
 #include "guest_ref.hpp"
 using fdos_guest::dpb_ref;
+using fdos_guest::buffer_ref;
 
 extern "C" {
 #define printf(...) dos_printf(__VA_ARGS__)
@@ -121,7 +122,7 @@ STATIC void swap_deleted(char *name)
 */
 COUNT dir_read(REG f_node_ptr fnp)
 {
-  struct buffer *bp;
+  dos_far_ptr x86_bp;
   const dpb_ref d(fnp->f_dpb);
   const UWORD secsize = d.dpb_secsize();
   unsigned sector;
@@ -171,19 +172,20 @@ COUNT dir_read(REG f_node_ptr fnp)
     /* Get the block we need from cache             */
   }
 
-  bp = getblock(fnp->f_dirsector, d.dpb_unit());
+  x86_bp = getblock(fnp->f_dirsector, d.dpb_unit());
 
   /* Now that we have the block for our entry, get the    */
   /* directory entry.                                     */
-  if (bp == NULL)
+  if (far_is_null(x86_bp))
     return DE_BLKINVLD;
 
-  bp->b_flag &= ~(BFR_DATA | BFR_FAT);
-  bp->b_flag |= BFR_DIR | BFR_VALID;
+  const buffer_ref b(x86_bp);
+  BYTE flag = static_cast<BYTE>(b.flag() & ~(BFR_DATA | BFR_FAT));
+  b.flag(static_cast<BYTE>(flag | BFR_DIR | BFR_VALID));
 
   fnp->f_diridx = entry % (secsize / DIRENT_SIZE);
-  memcpy(&fnp->f_dir, &bp->b_buffer[fnp->f_diridx * DIRENT_SIZE],
-         sizeof(struct dirent));
+  b.read_data(fnp->f_diridx * DIRENT_SIZE, &fnp->f_dir,
+              sizeof(struct dirent));
 
   swap_deleted(fnp->f_dir.dir_name);
 
@@ -293,54 +295,51 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
  *  TRUE  - all OK.
  *  FALSE - error occured (fnode is released).
 
-    Migrated from fatdir.c. fputbyte()/putdirent() (dos_far_ptr-based
-    macros, see proto.h) become plain *(UBYTE*)=.../memcpy(): bp->b_buffer
-    and fnp->f_dir are both native ARM memory here (see fnode.h's note
-    on f_node not being guest-visible), so there is no far pointer to
-    translate, the same reasoning as dir_read()'s memcpy() above.
+    Migrated from fatdir.c. The directory cache buffer is guest-visible
+    pageable memory, so its fields/data are accessed through buffer_ref;
+    fnp->f_dir remains native scratch state.
 */
 BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
 {
-  struct buffer *bp;
-  UBYTE *vp;
+  dos_far_ptr x86_bp;
 
   /* Update the entry if it was modified by a write or create...  */
   if (!update || (fnp->f_flags & (SFT_FCLEAN|SFT_FDATE)) != SFT_FCLEAN)
   {
-    bp = getblock(fnp->f_dirsector, dpb_ref(fnp->f_dpb).dpb_unit());
+    x86_bp = getblock(fnp->f_dirsector, dpb_ref(fnp->f_dpb).dpb_unit());
 
     /* Now that we have a block, transfer the directory      */
     /* entry into the block.                                */
-    if (bp == NULL)
+    if (far_is_null(x86_bp))
       return FALSE;
 
     swap_deleted(fnp->f_dir.dir_name);
 
-    vp = &bp->b_buffer[fnp->f_diridx * DIRENT_SIZE];
-
+    const buffer_ref b(x86_bp);
+    const std::size_t base = fnp->f_diridx * DIRENT_SIZE;
     if (update)
     {
       /* only update fields that are also in the SFT, for dos_close/commit */
-      memcpy(&vp[DIR_NAME], fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE);
-      vp[DIR_ATTRIB] = fnp->f_dir.dir_attrib;
-      fputword(&vp[DIR_TIME], fnp->f_dir.dir_time);
-      fputword(&vp[DIR_DATE], fnp->f_dir.dir_date);
-      fputword(&vp[DIR_START], fnp->f_dir.dir_start);
+      b.write_data(base + DIR_NAME, fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE);
+      b.data8(base + DIR_ATTRIB, fnp->f_dir.dir_attrib);
+      b.data16(base + DIR_TIME, fnp->f_dir.dir_time);
+      b.data16(base + DIR_DATE, fnp->f_dir.dir_date);
+      b.data16(base + DIR_START, fnp->f_dir.dir_start);
 #ifdef WITHFAT32
-      if ((dpb_ref(fnp->f_dpb).dpb_fatsize() == 0))
-        fputword(&vp[DIR_START_HIGH], fnp->f_dir.dir_start_high);
+      if (dpb_ref(fnp->f_dpb).is_fat32())
+        b.data16(base + DIR_START_HIGH, fnp->f_dir.dir_start_high);
 #endif
-      fputlong(&vp[DIR_SIZE], fnp->f_dir.dir_size);
+      b.data32(base + DIR_SIZE, fnp->f_dir.dir_size);
     }
     else
     {
-      memcpy(vp, &fnp->f_dir, sizeof(struct dirent));
+      b.write_data(base, &fnp->f_dir, sizeof(struct dirent));
     }
 
     swap_deleted(fnp->f_dir.dir_name);
 
-    bp->b_flag &= ~(BFR_DATA | BFR_FAT);
-    bp->b_flag |= BFR_DIR | BFR_DIRTY | BFR_VALID;
+    BYTE flag = static_cast<BYTE>(b.flag() & ~(BFR_DATA | BFR_FAT));
+    b.flag(static_cast<BYTE>(flag | BFR_DIR | BFR_DIRTY | BFR_VALID));
   }
   /* Clear buffers after directory write or DOS close                     */
   return flush_buffers(dpb_ref(fnp->f_dpb).dpb_unit());

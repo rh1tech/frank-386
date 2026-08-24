@@ -395,7 +395,7 @@ done:
 struct rwblock_workspace
 {
   f_node_ptr fnp;
-  struct buffer *bp;
+  dos_far_ptr x86_bp;
   dos_far_ptr x86_dpb;
   UBYTE dpb_unit;
   UBYTE dpb_clsmask;
@@ -417,11 +417,43 @@ struct rwblock_workspace
   unsigned boff;
 };
 
+static void buffer_from_guest_linear(dos_far_ptr x86_bp, std::size_t off,
+                                     uint32_t src, std::size_t len)
+{
+  fdos_guest::buffer_ref b(x86_bp);
+  UBYTE scratch[16];
+  while (len != 0)
+  {
+    const std::size_t n = len < sizeof(scratch) ? len : sizeof(scratch);
+    guest_lin_read(scratch, src, n);
+    b.write_data(off, scratch, n);
+    off += n;
+    src += (uint32_t)n;
+    len -= n;
+  }
+}
+
+static void buffer_to_guest_linear(dos_far_ptr x86_bp, std::size_t off,
+                                   uint32_t dst, std::size_t len)
+{
+  fdos_guest::buffer_ref b(x86_bp);
+  UBYTE scratch[16];
+  while (len != 0)
+  {
+    const std::size_t n = len < sizeof(scratch) ? len : sizeof(scratch);
+    b.read_data(off, scratch, n);
+    guest_lin_write(dst, scratch, n);
+    off += n;
+    dst += (uint32_t)n;
+    len -= n;
+  }
+}
+
 static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
                            struct rwblock_workspace *work)
 {
 #define fnp             (work->fnp)
-#define bp              (work->bp)
+#define x86_bp          (work->x86_bp)
 #define x86_dpb         (work->x86_dpb)
 #define dpb_unit        (work->dpb_unit)
 #define dpb_clsmask     (work->dpb_clsmask)
@@ -446,7 +478,7 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
      live across FAT, cache and device-driver calls.  Keep it on the current
      guest stack instead of the tiny native ARM stack. */
   fnp = sft_to_fnode(fd);
-  bp = NULL;
+  x86_bp = MK_FP(0, 0);
   xfr_cnt = 0;
   ret_cnt = 0;
   to_xfer = count;
@@ -654,9 +686,9 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
   normal_xfer:
 
     /* Get the block we need from cache                     */
-    bp = getblock(currentblock, dpb_unit);
+    x86_bp = getblock(currentblock, dpb_unit);
 
-    if (bp == NULL)             /* (struct buffer *)0 --> DS:0 !! */
+    if (far_is_null(x86_bp))
     {
       fnode_to_sft(fnp);
       return ret_cnt;
@@ -676,23 +708,24 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
        попасть в АКТИВНУЮ страницу, а не в сырую линейную память (mem.h).
        Полносекторный путь ниже (dskxfer -> INT 13h -> write86) банкуется
        сам по себе. */
-    if (mode == XFR_WRITE)
     {
-      guest_lin_read(&bp->b_buffer[boff], EFFECTIVE(x86_buffer), xfr_cnt);
-      bp->b_flag |= BFR_DIRTY | BFR_VALID;
-    }
-    else
-    {
-      guest_lin_write(EFFECTIVE(x86_buffer), &bp->b_buffer[boff], xfr_cnt);
-    }
+      const fdos_guest::buffer_ref b(x86_bp);
+      BYTE flag = b.flag();
+      if (mode == XFR_WRITE)
+      {
+        buffer_from_guest_linear(x86_bp, boff, EFFECTIVE(x86_buffer), xfr_cnt);
+        flag |= BFR_DIRTY | BFR_VALID;
+      }
+      else
+      {
+        buffer_to_guest_linear(x86_bp, boff, EFFECTIVE(x86_buffer), xfr_cnt);
+      }
 
-    /* complete buffer transferred ? 
-       probably not reused later
-     */
-    if (xfr_cnt == sizeof(bp->b_buffer) ||
-        (mode == XFR_READ && fnp->f_offset + xfr_cnt == fnp->f_dir.dir_size))
-    {
-      bp->b_flag |= BFR_UNCACHE;
+      /* complete buffer transferred ? probably not reused later */
+      if (xfr_cnt == BUFFERSIZE ||
+          (mode == XFR_READ && fnp->f_offset + xfr_cnt == fnp->f_dir.dir_size))
+        flag |= BFR_UNCACHE;
+      b.flag(flag);
     }
 
     /* update pointers and counters                         */
@@ -715,7 +748,7 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
   {
     long result = ret_cnt;
 #undef fnp
-#undef bp
+#undef x86_bp
 #undef x86_dpb
 #undef dpb_unit
 #undef dpb_clsmask
@@ -1645,17 +1678,18 @@ STATIC int clear_dir(f_node_ptr fnp, CLUSTER cluster)
   for (int idx = 0; idx <= clsmask; idx++)
   {
     /* as we are overwriting it completely, don't read first */
-    struct buffer* bp = getblockOver(first_sector + idx, unit);
+    const dos_far_ptr x86_bp = getblockOver(first_sector + idx, unit);
 #ifdef DISPLAY_GETBLOCK
     printf("DIR (clear_dir)\n");
 #endif
-    if (bp == NULL)
+    if (far_is_null(x86_bp))
       return DE_ACCESS;
-    memset(bp->b_buffer, 0, BUFFERSIZE);
-    bp->b_flag |= BFR_DIRTY | BFR_VALID;
-
+    const fdos_guest::buffer_ref b(x86_bp);
+    b.fill_data(0, 0, BUFFERSIZE);
+    BYTE flag = static_cast<BYTE>(b.flag() | BFR_DIRTY | BFR_VALID);
     if (idx != 0)
-      bp->b_flag |= BFR_UNCACHE;        /* needs not be cached */
+      flag |= BFR_UNCACHE;              /* needs not be cached */
+    b.flag(flag);
   }
   return SUCCESS;
 }
