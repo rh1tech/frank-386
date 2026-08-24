@@ -28,8 +28,6 @@ int fcom_guest_env_name_matches(uint32_t entry, size_t entry_len,
 uint16_t fcom_guest_psp_environment(uint16_t psp_seg);
 void fcom_guest_psp_set_environment(uint16_t psp_seg, uint16_t env_seg);
 
-uint16_t fcom_guest_mcb_owner(uint16_t mcb_seg);
-uint16_t fcom_guest_mcb_size(uint16_t mcb_seg);
 uint16_t fcom_guest_current_psp(void);
 uint8_t fcom_guest_lol_uppermem_link(void);
 

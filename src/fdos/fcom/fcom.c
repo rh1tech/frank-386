@@ -11,6 +11,7 @@ int snprintf(char *s, size_t n, const char *fmt, ...);
 #include "bios/bios.h"
 #include "fdos/fcom/fcom.h"
 #include "fdos/fcom/fcom_guest.h"
+#include "fdos/mcb_proxy.h"
 #include "fcom_help.inc"
 
 #define FCOM_LINE_MAX          126u
@@ -1699,11 +1700,11 @@ static int fcom_initialize_environment(CPU *cpu, UWORD command_psp)
   size_t n;
 
   if (env_seg != 0 &&
-      fcom_guest_mcb_owner((UWORD)(env_seg - 1u)) == command_psp) {
+      fdos_mcb_owner((seg)(env_seg - 1u)) == command_psp) {
     fcom_guest_write16(gbase + (uint32_t)offsetof(struct fcom_guest, owned_env_seg),
                        env_seg);
     fcom_guest_write16(gbase + (uint32_t)offsetof(struct fcom_guest, owned_env_bytes),
-                       (UWORD)(fcom_guest_mcb_size((UWORD)(env_seg - 1u)) << 4));
+                       (UWORD)(fdos_mcb_size((seg)(env_seg - 1u)) << 4));
   }
 
   if (environment_layout(command_psp, &variables_bytes, &trailer_bytes,
@@ -7159,18 +7160,28 @@ static char  lh_optL[64];
 static int   lh_optL_present;
 static char  lh_fnam[128];
 
-static void lh_mcb_load(UWORD mseg, mcb *out)
+static BYTE lh_mcb_type(UWORD mseg)
 {
-  /* MCBs are paragraph-aligned and 16 bytes long, so they never cross the
-     2-KiB EGA128 paging boundary.  Copy immediately: keeping ARM_PTR()'s
-     cache-slot pointer across another DOS memory operation is not safe. */
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-  if (guest_ram_base == ram_pages) {
-    mcb_guest_load(mseg, out);    
-    return;
-  }
-#endif
-  memcpy(out, ARM_PTR(MK_FP(mseg, 0)), sizeof(*out));
+  return fdos_mcb_type((seg)mseg);
+}
+
+static UWORD lh_mcb_owner(UWORD mseg)
+{
+  return fdos_mcb_owner((seg)mseg);
+}
+
+static UWORD lh_mcb_size(UWORD mseg)
+{
+  return fdos_mcb_size((seg)mseg);
+}
+
+static int lh_mcb_name_eq(UWORD mseg, const char *name, unsigned len)
+{
+  unsigned i;
+  for (i = 0; i < len; ++i)
+    if (fdos_mcb_name_byte((seg)mseg, i) != (BYTE)name[i])
+      return 0;
+  return 1;
 }
 
 /* suppl DosAlloc(): INT 21h/48h - returns the DATA segment (MCB+1) or 0 */
@@ -7225,7 +7236,6 @@ static int lh_findUMBRegions(void)
 {
   struct lh_umbregion *region = lh_umbRegion;
   UWORD mseg = LoL->first_mcb;          /* GetFirstMCB() */
-  mcb m;
   char sig;
   int i;
 
@@ -7236,14 +7246,11 @@ static int lh_findUMBRegions(void)
    * Turn UMB link off, and track the MCB chain to the end. */
 
   DosUmbLink(0);
-  lh_mcb_load(mseg, &m);
 
-  while (m.m_type == 'M') {
-    mseg = (UWORD)(mseg + m.m_size + 1);       /* mcbNext */
-    lh_mcb_load(mseg, &m);
-  }
+  while (lh_mcb_type(mseg) == 'M')
+    mseg = (UWORD)(mseg + lh_mcb_size(mseg) + 1);
 
-  if (m.m_type != 'Z')
+  if (lh_mcb_type(mseg) != 'Z')
     return LH_ERR_MCB_CHAIN;
 
   /* If the last memory block in conventional memory is "reserved",
@@ -7251,10 +7258,10 @@ static int lh_findUMBRegions(void)
    * the last block is an ordinary one, conventional memory ends at
    * the last paragraph of the block. */
 
-  if (m.m_psp == 8 && !memcmp(m.m_name, "SC", 2))
+  if (lh_mcb_owner(mseg) == 8 && lh_mcb_name_eq(mseg, "SC", 2))
     region->end = (UWORD)(mseg - 1);
   else
-    region->end = (UWORD)(mseg + m.m_size);
+    region->end = (UWORD)(mseg + lh_mcb_size(mseg));
 
   region++;
   region->start = 0;
@@ -7263,25 +7270,28 @@ static int lh_findUMBRegions(void)
    * the last conventional memory block will change from 'Z' to 'M'. */
 
   DosUmbLink(1);
-  lh_mcb_load(mseg, &m);
 
-  if (m.m_type == 'M')
+  if (lh_mcb_type(mseg) == 'M')
   {                             /* UMBs are available */
-    mseg = (UWORD)(mseg + m.m_size + 1);       /* go to next block */
-    lh_mcb_load(mseg, &m);
+    mseg = (UWORD)(mseg + lh_mcb_size(mseg) + 1);
 
     /* This loop searches for the regions, by searching either for
      * special MCBs or 'reserved' memory regions. */
 
     do
     {
+      UWORD size;
+      UWORD owner;
+
       /* port safety net: the original trusted its 64-entry array */
       if (region - lh_umbRegion >= LH_MAX_REGIONS - 1)
         return LH_ERR_MCB_CHAIN;
 
-      sig = (char)m.m_type;
+      sig = (char)lh_mcb_type(mseg);
+      size = lh_mcb_size(mseg);
+      owner = lh_mcb_owner(mseg);
 
-      if (m.m_psp == 8 && !memcmp(m.m_name, "SC", 2))
+      if (owner == 8 && lh_mcb_name_eq(mseg, "SC", 2))
       {
         /* this is a 'hole' in memory */
         if (region->start)
@@ -7296,40 +7306,39 @@ static int lh_findUMBRegions(void)
         /* In MS-DOS 6.x, each UMB region starts with a 'major' mcb
          * that is outside the ordinary MCB chain. This mcb defines
          * the size of the whole region. */
+        const UWORD umb_seg = (UWORD)(mseg - 1);
+        const BYTE umb_type = lh_mcb_type(umb_seg);
 
-        mcb umb_mcb;
-        lh_mcb_load((UWORD)(mseg - 1), &umb_mcb);
+        if ((umb_type == 'Z' || umb_type == 'M') &&
+            lh_mcb_name_eq(umb_seg, "UMB     ", 8))
+        {
+          const UWORD umb_owner = lh_mcb_owner(umb_seg);
+          const UWORD umb_size = lh_mcb_size(umb_seg);
 
-        if ((umb_mcb.m_type == 'Z' || umb_mcb.m_type == 'M')
-         && !memcmp(umb_mcb.m_name, "UMB     ", 8))
-          {
-            /* This is the signature of the special MS-DOS MCBs */
-
-            region->start = umb_mcb.m_psp;
-            region->end = (UWORD)(umb_mcb.m_psp + umb_mcb.m_size - 1);
-            if ((sig = (char)umb_mcb.m_type) == 'M')
-              region->end--;
-            region++;
-            region->start = 0;
-            mseg = (UWORD)((mseg - 1) + umb_mcb.m_size);
-            lh_mcb_load(mseg, &m);
-            if (sig == 'Z')
-              break;
-            continue;
-          }
+          /* This is the signature of the special MS-DOS MCBs */
+          region->start = umb_owner;
+          region->end = (UWORD)(umb_owner + umb_size - 1);
+          if ((sig = (char)umb_type) == 'M')
+            region->end--;
+          region++;
+          region->start = 0;
+          mseg = (UWORD)(umb_seg + umb_size);
+          if (sig == 'Z')
+            break;
+          continue;
+        }
         if (!region->start)
           region->start = mseg;
       }
 
       if (sig == 'Z')
       {
-        region->end = (UWORD)(mseg + m.m_size);
+        region->end = (UWORD)(mseg + size);
         region++;
         break;
       }
 
-      mseg = (UWORD)(mseg + m.m_size + 1);     /* mcbNext */
-      lh_mcb_load(mseg, &m);
+      mseg = (UWORD)(mseg + size + 1);
     }
     while (sig == 'M');
 
@@ -7367,10 +7376,6 @@ static int lh_loadhigh_prepare(void)
   /* Call to force DOS to catenate any successive free memory blocks */
   (void)lh_DosAlloc(0xffff);
 
-  /* See the original's long comment: when the loop finishes, lh_block[]
-   * holds every free block the program must NOT use, availBlock[] every
-   * free block it may use. */
-
   for (i = 0; i < lh_umbRegions; i++, region++)
   {
     UWORD mseg = region->start;
@@ -7379,51 +7384,41 @@ static int lh_loadhigh_prepare(void)
 
     while (mseg < region->end)
     {
-      mcb m;
-      lh_mcb_load(mseg, &m);
-      if (m.m_type != 'M' || m.m_size == 0)
+      UWORD size = lh_mcb_size(mseg);
+      BYTE type = lh_mcb_type(mseg);
+      UWORD owner = lh_mcb_owner(mseg);
+
+      if (type != 'M' || size == 0)
         break;
 
-      if (!m.m_psp)
+      if (!owner)
       {
-        /* Found a free memory block: allocate it.  Do not keep a host
-           pointer to its MCB across DosMemAlloc()/DosMemChange(): either
-           operation may map/evict other EGA128 cache pages. */
-        UWORD bl = lh_DosAlloc(m.m_size);
+        /* Found a free memory block: allocate it. */
+        UWORD bl = lh_DosAlloc(size);
 
-        if (bl != (UWORD)(mseg + 1))  /* Did we get the block we wanted? */
+        if (bl != (UWORD)(mseg + 1))
           return LH_ERR_MCB_CHAIN;
 
         if (lh_allocatedBlocks >= LH_MAX_BLOCKS ||
             availBlocks >= LH_MAX_BLOCKS)
-          return LH_ERR_OUT_OF_MEMORY;  /* port safety net */
+          return LH_ERR_OUT_OF_MEMORY;
 
-        if (region->access)     /* /L option allows access to this region */
+        if (region->access)
         {
-          if (region->minSize == 0xffff ||      /* no minimum size set
-                                                   --> use it */
-              (!lh_optS && found_one) ||  /* a found previous block means to
-                                make this region available regardless
-                                of the size of this block; with an active
-                                /S option only one block per region is
-                                allowed. */
-              (!(lh_optS && found_one) &&
-               m.m_size >= region->minSize))
+          if (region->minSize == 0xffff ||
+              (!lh_optS && found_one) ||
+              (!(lh_optS && found_one) && size >= region->minSize))
           {
-
             availBlock[availBlocks++] = bl;
 
             if (lh_optS)
               lh_DOSresize(bl, region->minSize);
             else if (lh_allocatedBlocks > startBlock)
             {
-              /* These _previously_ found blocks had been found
-                 too small, but must be made available now as this
-                 region is available */
-              memcpy(availBlock + availBlocks
-               , lh_block + startBlock
-               , (size_t)(lh_allocatedBlocks - startBlock)
-                   * sizeof(*lh_block));
+              memcpy(availBlock + availBlocks,
+                     lh_block + startBlock,
+                     (size_t)(lh_allocatedBlocks - startBlock) *
+                         sizeof(*lh_block));
               availBlocks = (UWORD)(availBlocks +
                   (lh_allocatedBlocks - startBlock));
               lh_allocatedBlocks = startBlock;
@@ -7431,32 +7426,21 @@ static int lh_loadhigh_prepare(void)
             found_one = 1;
           }
           else
-          {
-            lh_block[lh_allocatedBlocks++] = bl;  /* no access to this block */
-          }
+            lh_block[lh_allocatedBlocks++] = bl;
         }
         else
-        {
-          lh_block[lh_allocatedBlocks++] = bl;  /* no access to this block */
-        }
+          lh_block[lh_allocatedBlocks++] = bl;
 
-        /* Allocation/resize may have changed this MCB's size.  Reload it
-           before advancing to the next block, matching the old live-pointer
-           semantics without retaining an eviction-prone cache pointer. */
-        lh_mcb_load(mseg, &m);
+        /* Allocation/resize may have changed this MCB's size. */
+        size = lh_mcb_size(mseg);
       }
 
-      mseg = (UWORD)(mseg + m.m_size + 1);
+      mseg = (UWORD)(mseg + size + 1);
     }
   }
 
-  /* Blocks the program may use are released again. */
-
   for (i = 0; i < (int)availBlocks; i++)
     lh_DOSfree(availBlock[i]);
-
-  /* If the program is to be loaded in upper memory, set the malloc
-   * strategy to 'first fit high', otherwise to 'first fit low'. */
 
   internal_data->mem_access_mode = lh_upper_flag ? FIRST_FIT_U : FIRST_FIT;
   return LH_OK;
@@ -9710,7 +9694,6 @@ static UWORD fcom_create_process_common(const char *init_tail,
   seg mcb_seg;
   UWORD largest = 0;
   UWORD command_psp;
-  mcb block;
   size_t n = 0;
 
   /*
@@ -9769,10 +9752,8 @@ static UWORD fcom_create_process_common(const char *init_tail,
   }
 
   command_psp = mcb_seg + 1;
-  mcb_guest_load(mcb_seg, &block);
-  block.m_psp = command_psp;
-  memcpy(block.m_name, "COMMAND ", sizeof(block.m_name));
-  mcb_guest_store(mcb_seg, &block);
+  fdos_mcb_set_owner(mcb_seg, command_psp);
+  fdos_mcb_set_name8(mcb_seg, "COMMAND ");
 
   child_psp(command_psp, parent_psp, command_psp + FCOM_PROCESS_PARAS);
   {
@@ -10126,12 +10107,8 @@ void fcom_run(CPU *cpu, const char *init_tail, UBYTE start_mode,
     return;
   }
 
-  if (own_environment && environment_seg != 0) {
-    mcb env_mcb;
-    mcb_guest_load((seg)(environment_seg - 1u), &env_mcb);
-    env_mcb.m_psp = command_psp;
-    mcb_guest_store((seg)(environment_seg - 1u), &env_mcb);
-  }
+  if (own_environment && environment_seg != 0)
+    fdos_mcb_set_owner((seg)(environment_seg - 1u), command_psp);
 
   /*
    * Process 0 now uses the same enter/run/leave path as a nested native

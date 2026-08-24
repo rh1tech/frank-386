@@ -383,6 +383,7 @@ set(EMU_CORE_SOURCES
     src/fdos/chario.c
     src/fdos/kernel.c
     src/fdos/native_devices.cpp
+    src/fdos/mcb_proxy.cpp
     src/fdos/task.c
     src/fdos/fcom/fcom.c
     src/fdos/fcom/fcom_guest.cpp
@@ -730,6 +731,7 @@ set(FDOS_WARN_SOURCES
     src/fdos/chario.c
     src/fdos/kernel.c
     src/fdos/native_devices.cpp
+    src/fdos/mcb_proxy.cpp
     src/fdos/task.c
     src/fdos/fcom/fcom.c
     src/fdos/fcom/fcom_guest.cpp

@@ -651,43 +651,11 @@ STATIC VOID Dosmem(BYTE * pLine)
   }
 }
 
-static BYTE cfg_mcb_type(seg s)
-{
-  mcb v;
-  mcb_guest_load(s, &v);
-  return v.m_type;
-}
-
-static UWORD cfg_mcb_size(seg s)
-{
-  mcb v;
-  mcb_guest_load(s, &v);
-  return v.m_size;
-}
-
-static void cfg_mcb_set_type(seg s, BYTE type)
-{
-  mcb v;
-  mcb_guest_load(s, &v);
-  v.m_type = type;
-  mcb_guest_store(s, &v);
-}
-
-static void cfg_mcb_set_size(seg s, UWORD size)
-{
-  mcb v;
-  mcb_guest_load(s, &v);
-  v.m_size = size;
-  mcb_guest_store(s, &v);
-}
-
-static void cfg_mcb_add_size(seg s, UWORD add)
-{
-  mcb v;
-  mcb_guest_load(s, &v);
-  v.m_size = (UWORD)(v.m_size + add);
-  mcb_guest_store(s, &v);
-}
+static BYTE cfg_mcb_type(seg s) { return fdos_mcb_type(s); }
+static UWORD cfg_mcb_size(seg s) { return fdos_mcb_size(s); }
+static void cfg_mcb_set_type(seg s, BYTE type) { fdos_mcb_set_type(s, type); }
+static void cfg_mcb_set_size(seg s, UWORD size) { fdos_mcb_set_size(s, size); }
+static void cfg_mcb_add_size(seg s, UWORD add) { fdos_mcb_add_size(s, add); }
 
 STATIC seg prev_mcb(seg cur_mcb, seg start)
 {
@@ -735,13 +703,8 @@ STATIC void umb_init(void)
            umb_seg, umb_size);
 #endif
     /* create link mcb (below) */
-    {
-      mcb v;
-      mcb_guest_load(base_seg, &v);
-      v.m_type = MCB_NORMAL;
-      v.m_size--;
-      mcb_guest_store(base_seg, &v);
-    }
+    fdos_mcb_set_type(base_seg, MCB_NORMAL);
+    fdos_mcb_set_size(base_seg, (UWORD)(fdos_mcb_size(base_seg) - 1u));
     mumcb_init(config_lol.uppermem_root(), umb_seg - config_lol.uppermem_root() - 1);
 
     /* setup the real mcb for the devicehigh block */
@@ -801,13 +764,8 @@ STATIC void umb_init(void)
       if (umb_seg > umb_max)
         umb_max = umb_seg;
     }
-    {
-      mcb v;
-      mcb_guest_load(umb_max, &v);
-      v.m_size++;
-      v.m_type = MCB_LAST;
-      mcb_guest_store(umb_max, &v);
-    }
+    fdos_mcb_set_size(umb_max, (UWORD)(fdos_mcb_size(umb_max) + 1u));
+    fdos_mcb_set_type(umb_max, MCB_LAST);
     CfgDbgPrintf(("UMB Allocation completed: start at 0x%x\n", umb_base_seg));
   }
 }
@@ -2321,28 +2279,26 @@ STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)
   return MK_FP(uSegVal, 0);
 }
 
-STATIC VOID mcb_init_copy(UCOUNT seg, UWORD size, mcb *near_mcb)
-{
-  near_mcb->m_size = size;
-  mcb_guest_store(seg, near_mcb);
-}
-
 STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type)
 {
-  static mcb near_mcb BSS_INIT({0}); /// TODO: _BSS
-  near_mcb.m_type = type;
-  mcb_init_copy(seg, size, &near_mcb);
+  unsigned i;
+  fdos_mcb_set_type((seg)seg, type);
+  fdos_mcb_set_owner((seg)seg, 0);
+  fdos_mcb_set_size((seg)seg, size);
+  for (i = 0; i < 8; ++i)
+    fdos_mcb_set_name_byte((seg)seg, i, 0);
 }
 
 STATIC VOID mumcb_init(UCOUNT seg, UWORD size)
 {
-  static mcb near_mcb = {
-    MCB_NORMAL,
-    8, 0,
-    {0,0,0},
-    {"SC"}
-  };
-  mcb_init_copy(seg, size, &near_mcb);
+  unsigned i;
+  fdos_mcb_set_type((seg)seg, MCB_NORMAL);
+  fdos_mcb_set_owner((seg)seg, 8);
+  fdos_mcb_set_size((seg)seg, size);
+  for (i = 0; i < 8; ++i)
+    fdos_mcb_set_name_byte((seg)seg, i, 0);
+  fdos_mcb_set_name_byte((seg)seg, 0, 'S');
+  fdos_mcb_set_name_byte((seg)seg, 1, 'C');
 }
 
 /*
@@ -2421,21 +2377,19 @@ dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
 
   if (base == start)
   {
-    mcb first;
-    mcb_guest_load(base, &first);
+    UWORD first_size = fdos_mcb_size(base);
+    BYTE first_type = fdos_mcb_type(base);
     base++;
-    mcb_init(base, first.m_size - 1, first.m_type);
+    mcb_init(base, first_size - 1, first_type);
     mumcb_init(start, 0);
-    mcb_guest_load(start, &first);
-    first.m_name[1] = 'D';
-    mcb_guest_store(start, &first);
+    fdos_mcb_set_name_byte(start, 1, 'D');
   }
 
   nPara++;
   {
-    mcb cur;
-    mcb_guest_load(base, &cur);
-    mcb_init(base + nPara, cur.m_size - nPara, cur.m_type);
+    UWORD cur_size = fdos_mcb_size(base);
+    BYTE cur_type = fdos_mcb_type(base);
+    mcb_init(base + nPara, cur_size - nPara, cur_type);
   }
   cfg_mcb_add_size(start, (UWORD)nPara);
 

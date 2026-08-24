@@ -120,16 +120,6 @@ void fcom_guest_psp_set_environment(uint16_t psp_seg, uint16_t env_seg)
     pstore16(base + static_cast<uint32_t>(offsetof(psp, ps_environ)), env_seg);
 }
 
-uint16_t fcom_guest_mcb_owner(uint16_t mcb_seg)
-{
-    return mcb_ref(static_cast<seg>(mcb_seg)).psp();
-}
-
-uint16_t fcom_guest_mcb_size(uint16_t mcb_seg)
-{
-    return mcb_ref(static_cast<seg>(mcb_seg)).size();
-}
-
 uint16_t fcom_guest_current_psp(void)
 {
     constexpr uint32_t idata_linear =

@@ -27,6 +27,7 @@ extern "C" {
 extern "C" char *strchr(const char *, int);
 
 using fdos_guest::lol_ref;
+using fdos_guest::mcb_ref;
 using fdos_guest::dos_data_ref;
 static constexpr uint32_t config_fixed_data_linear = ((uint32_t)DOS_PSP << 4) + 0x08F0u;
 static constexpr uint32_t config_internal_data_linear = ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
@@ -730,40 +731,28 @@ STATIC VOID Dosmem(BYTE * pLine)
 
 static BYTE cfg_mcb_type(seg s)
 {
-  mcb v;
-  mcb_guest_load(s, &v);
-  return v.m_type;
+  return mcb_ref(s).type();
 }
 
 static UWORD cfg_mcb_size(seg s)
 {
-  mcb v;
-  mcb_guest_load(s, &v);
-  return v.m_size;
+  return mcb_ref(s).size();
 }
 
 static void cfg_mcb_set_type(seg s, BYTE type)
 {
-  mcb v;
-  mcb_guest_load(s, &v);
-  v.m_type = type;
-  mcb_guest_store(s, &v);
+  mcb_ref(s).type(type);
 }
 
 static void cfg_mcb_set_size(seg s, UWORD size)
 {
-  mcb v;
-  mcb_guest_load(s, &v);
-  v.m_size = size;
-  mcb_guest_store(s, &v);
+  mcb_ref(s).size(size);
 }
 
 static void cfg_mcb_add_size(seg s, UWORD add)
 {
-  mcb v;
-  mcb_guest_load(s, &v);
-  v.m_size = (UWORD)(v.m_size + add);
-  mcb_guest_store(s, &v);
+  const mcb_ref r(s);
+  r.size((UWORD)(r.size() + add));
 }
 
 STATIC seg prev_mcb(seg cur_mcb, seg start)
@@ -813,11 +802,9 @@ STATIC void umb_init(void)
 #endif
     /* create link mcb (below) */
     {
-      mcb v;
-      mcb_guest_load(base_seg, &v);
-      v.m_type = MCB_NORMAL;
-      v.m_size--;
-      mcb_guest_store(base_seg, &v);
+      const mcb_ref r(base_seg);
+      r.type(MCB_NORMAL);
+      r.size((UWORD)(r.size() - 1u));
     }
     mumcb_init(config_lol.uppermem_root(), umb_seg - config_lol.uppermem_root() - 1);
 
@@ -879,11 +866,9 @@ STATIC void umb_init(void)
         umb_max = umb_seg;
     }
     {
-      mcb v;
-      mcb_guest_load(umb_max, &v);
-      v.m_size++;
-      v.m_type = MCB_LAST;
-      mcb_guest_store(umb_max, &v);
+      const mcb_ref r(umb_max);
+      r.size((UWORD)(r.size() + 1u));
+      r.type(MCB_LAST);
     }
     CfgDbgPrintf(("UMB Allocation completed: start at 0x%x\n", umb_base_seg));
   }
@@ -2436,28 +2421,24 @@ STATIC dos_far_ptr AlignParagraph(dos_far_ptr lpPtr)
   return MK_FP(uSegVal, 0);
 }
 
-STATIC VOID mcb_init_copy(UCOUNT seg, UWORD size, mcb *near_mcb)
-{
-  near_mcb->m_size = size;
-  mcb_guest_store(seg, near_mcb);
-}
-
 STATIC VOID mcb_init(UCOUNT seg, UWORD size, BYTE type)
 {
-  static mcb near_mcb BSS_INIT({}); /// TODO: _BSS
-  near_mcb.m_type = type;
-  mcb_init_copy(seg, size, &near_mcb);
+  const mcb_ref r(static_cast<::seg>(seg));
+  r.type(type);
+  r.psp(0);
+  r.size(size);
+  r.clear_name();
 }
 
 STATIC VOID mumcb_init(UCOUNT seg, UWORD size)
 {
-  static mcb near_mcb = {
-    MCB_NORMAL,
-    8, 0,
-    {0,0,0},
-    {"SC"}
-  };
-  mcb_init_copy(seg, size, &near_mcb);
+  const mcb_ref r(static_cast<::seg>(seg));
+  r.type(MCB_NORMAL);
+  r.psp(8);
+  r.size(size);
+  r.clear_name();
+  r.name(0, 'S');
+  r.name(1, 'C');
 }
 
 /*
@@ -2537,21 +2518,19 @@ dos_far_ptr KernelAllocPara(size_t nPara, char type, char *name, int mode)
 
   if (base == start)
   {
-    mcb first;
-    mcb_guest_load(base, &first);
+    const mcb_ref first(base);
+    const UWORD first_size = first.size();
+    const BYTE first_type = first.type();
     base++;
-    mcb_init(base, first.m_size - 1, first.m_type);
+    mcb_init(base, first_size - 1, first_type);
     mumcb_init(start, 0);
-    mcb_guest_load(start, &first);
-    first.m_name[1] = 'D';
-    mcb_guest_store(start, &first);
+    mcb_ref(start).name(1, 'D');
   }
 
   nPara++;
   {
-    mcb cur;
-    mcb_guest_load(base, &cur);
-    mcb_init(base + nPara, cur.m_size - nPara, cur.m_type);
+    const mcb_ref cur(base);
+    mcb_init(base + nPara, cur.size() - nPara, cur.type());
   }
   cfg_mcb_add_size(start, (UWORD)nPara);
 

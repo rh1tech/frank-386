@@ -79,34 +79,3 @@ _Static_assert(sizeof(mcb) == 16, "mcb must stay exactly one paragraph (16 bytes
 _Static_assert(offsetof(mcb, m_name) == 8, "mcb owner name must stay at +8 (documented MCB ABI)");
 
 
-/*
- * MCB access must not retain a pageable host pointer.  An MCB is exactly one
- * paragraph and paragraph-aligned, so it always fits in one 2-KiB cache page.
- * In normal/QSPI builds this collapses to the old direct struct access; in
- * EGA128 paging it snapshots the mapped page immediately.
- */
-static inline void mcb_guest_load(seg s, mcb *out)
-{
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-  const BYTE *src = (const BYTE *)ega128_guest_ptr((ULONG)s << 4, false);
-  BYTE *dst = (BYTE *)out;
-  unsigned i;
-  for (i = 0; i < sizeof(*out); ++i)
-    dst[i] = src[i];
-#else
-  *out = *para2far(s);
-#endif
-}
-
-static inline void mcb_guest_store(seg s, const mcb *in)
-{
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-  BYTE *dst = (BYTE *)ega128_guest_ptr((ULONG)s << 4, true);
-  const BYTE *src = (const BYTE *)in;
-  unsigned i;
-  for (i = 0; i < sizeof(*in); ++i)
-    dst[i] = src[i];
-#else
-  *para2far(s) = *in;
-#endif
-}
