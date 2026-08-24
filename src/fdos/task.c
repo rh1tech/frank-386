@@ -104,16 +104,12 @@ static inline uint32_t task_guest_seg_linear(UWORD seg)
 
 static inline void task_guest_read(uint32_t addr, void *dst, size_t len)
 {
-  UBYTE *d = (UBYTE *)dst;
-  while (len--)
-    *d++ = pload8(addr++);
+  guest_read_block(addr, dst, len);
 }
 
 static inline void task_guest_write(uint32_t addr, const void *src, size_t len)
 {
-  const UBYTE *s = (const UBYTE *)src;
-  while (len--)
-    pstore8(addr++, *s++);
+  guest_write_block(addr, src, len);
 }
 
 static inline dos_far_ptr task_guest_read_far(uint32_t addr)

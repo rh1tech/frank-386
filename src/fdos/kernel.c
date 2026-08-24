@@ -130,8 +130,7 @@ static void kernel_guest_read(uint32_t addr, void *dst, size_t len)
 
 static void kernel_guest_fill(uint32_t addr, UBYTE value, size_t len)
 {
-  while (len--)
-    pstore8(addr++, value);
+  guest_fill_block(addr, value, len);
 }
 
 #define KERNEL_LOL_LINEAR \

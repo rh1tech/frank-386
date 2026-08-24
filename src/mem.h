@@ -292,6 +292,26 @@ static inline void __attribute__((always_inline)) pstore32(uint32_t addr, uint32
 	*(uint32_t*)(PC_RAM + addr) = val;
 }
 
+/* Bulk fill belongs to the paging API for the same reason as block copies:
+ * resolve the current guest backing once per contiguous span instead of
+ * open-coding byte-at-a-time pstore8 loops at each caller. */
+static inline void guest_fill_block(uint32_t dst, uint8_t value, size_t len)
+{
+    while (len) {
+        if (unlikely(VGA_WINDOW(dst))) {
+            pstore8(dst++, value);
+            --len;
+            continue;
+        }
+        uint32_t span;
+        uint8_t *p = guest_span_ptr(dst, &span);
+        size_t n = len < span ? len : span;
+        memset(p, value, n);
+        dst += (uint32_t)n;
+        len -= n;
+    }
+}
+
 static inline bool __attribute__((always_inline))
 pstore_block(uint32_t dst, uint32_t src, int len)
 {
@@ -350,6 +370,57 @@ pstore_block(uint32_t dst, uint32_t src, int len)
 
     /* RAM → VGA */
     return iomem_write_string(g_pc, dst, src, len);
+}
+
+/* Guest memmove.  Forward non-overlapping copies use the optimized paging
+ * block primitive above.  Only the genuinely overlapping case walks
+ * backwards byte-wise; keeping that fallback here preserves memmove
+ * semantics without exposing a host pointer that a page remap could stale. */
+static inline void guest_move_block(uint32_t dst, uint32_t src, size_t len)
+{
+    if (dst == src || len == 0)
+        return;
+
+    if (dst > src && dst - src < len) {
+        dst += (uint32_t)len;
+        src += (uint32_t)len;
+        while (len--)
+            pstore8(--dst, pload8(--src));
+        return;
+    }
+
+    if (src > dst && src - dst < len) {
+        while (len--)
+            pstore8(dst++, pload8(src++));
+        return;
+    }
+
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    if (unlikely(ega128_paging_active())) {
+        while (len--)
+            pstore8(dst++, pload8(src++));
+        return;
+    }
+#endif
+
+    while (len) {
+        if (unlikely(VGA_WINDOW(src) || VGA_WINDOW(dst))) {
+            pstore8(dst++, pload8(src++));
+            --len;
+            continue;
+        }
+
+        uint32_t src_span, dst_span;
+        const uint8_t *s = guest_span_ptr_read(src, &src_span);
+        uint8_t *d = guest_span_ptr(dst, &dst_span);
+        size_t n = len;
+        if (n > src_span) n = src_span;
+        if (n > dst_span) n = dst_span;
+        memcpy(d, s, n);
+        src += (uint32_t)n;
+        dst += (uint32_t)n;
+        len -= n;
+    }
 }
 
 #endif // CPU_MEM_H

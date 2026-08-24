@@ -60,47 +60,22 @@ void fcom_guest_write16(uint32_t addr, uint16_t value)
 
 void fcom_guest_read(uint32_t addr, void *dst, size_t len)
 {
-    auto *out = static_cast<uint8_t *>(dst);
-    while (len--) {
-        *out++ = pload8(addr++);
-    }
+    guest_read_block(addr, dst, len);
 }
 
 void fcom_guest_write(uint32_t addr, const void *src, size_t len)
 {
-    const auto *in = static_cast<const uint8_t *>(src);
-    while (len--) {
-        pstore8(addr++, *in++);
-    }
+    guest_write_block(addr, src, len);
 }
 
 void fcom_guest_fill(uint32_t addr, uint8_t value, size_t len)
 {
-    while (len--)
-        pstore8(addr++, value);
+    guest_fill_block(addr, value, len);
 }
 
 void fcom_guest_copy(uint32_t dst, uint32_t src, size_t len)
 {
-    /*
-     * memmove semantics.  Environment replacement normally copies between
-     * distinct allocations, but keeping overlap correct makes this a general
-     * guest-memory primitive and avoids ever materialising a host pointer.
-     */
-    if (dst == src || len == 0)
-        return;
-
-    if (dst < src || dst >= src + len) {
-        while (len--) {
-            pstore8(dst++, pload8(src++));
-        }
-    } else {
-        dst += static_cast<uint32_t>(len);
-        src += static_cast<uint32_t>(len);
-        while (len--) {
-            pstore8(--dst, pload8(--src));
-        }
-    }
+    guest_move_block(dst, src, len);
 }
 
 size_t fcom_guest_strnlen(uint32_t addr, size_t maxlen)

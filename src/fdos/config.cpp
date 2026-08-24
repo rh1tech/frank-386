@@ -39,22 +39,17 @@ static inline uint32_t cfg_guest_linear(dos_far_ptr p)
 
 static inline void cfg_guest_read(uint32_t addr, void *dst, size_t len)
 {
-  UBYTE *d = (UBYTE *)dst;
-  while (len--)
-    *d++ = pload8(addr++);
+  guest_read_block(addr, dst, len);
 }
 
 static inline void cfg_guest_write(uint32_t addr, const void *src, size_t len)
 {
-  const UBYTE *s = (const UBYTE *)src;
-  while (len--)
-    pstore8(addr++, *s++);
+  guest_write_block(addr, src, len);
 }
 
 static inline void cfg_guest_fill(uint32_t addr, UBYTE value, size_t len)
 {
-  while (len--)
-    pstore8(addr++, value);
+  guest_fill_block(addr, value, len);
 }
 
 static inline dos_far_ptr cfg_guest_read_far(uint32_t addr)
