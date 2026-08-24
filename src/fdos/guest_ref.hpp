@@ -699,7 +699,9 @@ public:
     __attribute__((always_inline)) dos_far_ptr dpbp() const { return far_load(offsetof(buffer, b_dpbp)); }
     __attribute__((always_inline)) void dpbp(dos_far_ptr v) const { far_store(offsetof(buffer, b_dpbp), v); }
     __attribute__((always_inline)) UBYTE data8(std::size_t off) const { return scalar_load<UBYTE>(offsetof(buffer, b_buffer) + off); }
+    __attribute__((always_inline)) void data8(std::size_t off, UBYTE v) const { scalar_store<UBYTE>(offsetof(buffer, b_buffer) + off, v); }
     __attribute__((always_inline)) UWORD data16(std::size_t off) const { return scalar_load<UWORD>(offsetof(buffer, b_buffer) + off); }
+    __attribute__((always_inline)) void data16(std::size_t off, UWORD v) const { scalar_store<UWORD>(offsetof(buffer, b_buffer) + off, v); }
     __attribute__((always_inline)) ULONG data32(std::size_t off) const { return scalar_load<ULONG>(offsetof(buffer, b_buffer) + off); }
     __attribute__((always_inline)) void data32(std::size_t off, ULONG v) const { scalar_store<ULONG>(offsetof(buffer, b_buffer) + off, v); }
 
