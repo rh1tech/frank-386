@@ -26,7 +26,6 @@ static const lol_ref kernel_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 extern "C" UWORD fdos_cds_flags(dos_far_ptr p) { return cds_ref(p).flags(); }
 extern "C" dos_far_ptr fdos_cds_dpb(dos_far_ptr p) { return cds_ref(p).dpb(); }
 extern "C" WORD fdos_cds_backslash_offset(dos_far_ptr p) { return cds_ref(p).backslash_offset(); }
-extern "C" WORD fdos_cds_join_offset(dos_far_ptr p) { return cds_ref(p).join_offset(); }
 extern "C" void fdos_cds_copy_current_path(dos_far_ptr p, char *dst, size_t n) { cds_ref(p).copy_current_path(dst, n); }
 extern "C" void fdos_cds_current_path_byte(dos_far_ptr p, unsigned i, UBYTE v) { cds_ref(p).current_path_byte(i, v); }
 extern "C" UBYTE fdos_dos_default_drive(void) { return idata.default_drive(); }

@@ -330,9 +330,6 @@ public:
     __attribute__((always_inline)) WORD backslash_offset() const {
         return scalar_load<WORD>(offsetof(cds, cdsBackslashOffset));
     }
-    __attribute__((always_inline)) WORD join_offset() const {
-        return backslash_offset();
-    }
     __attribute__((always_inline)) void copy_current_path(char *dst, std::size_t dst_size) const {
         if (dst_size == 0)
             return;

@@ -701,7 +701,7 @@ UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)
   if (((xfcb *) ARM_PTR (lpXfcb))->xfcb_flag == 0xff)
   {
     wAttr = ((xfcb *) ARM_PTR (lpXfcb))->xfcb_attrib;
-    memcpy(lpDir, ARM_PTR (lpXfcb), 7);
+    guest_read_block(((uint32_t)FP_SEG(lpXfcb) << 4) + FP_OFF(lpXfcb), lpDir, 7);
     lpDir += 7;
   }
 

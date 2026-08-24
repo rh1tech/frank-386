@@ -492,15 +492,15 @@ static int dos_get_cwd(CPU *cpu, UWORD command_psp,
 
 static const char *fcom_env_value(UWORD command_psp, const char *name)
 {
-  const psp *process = (const psp *)ARM_PTR(MK_FP(command_psp, 0));
+  const UWORD env_seg = fcom_guest_psp_environment(command_psp);
   const char *env;
   size_t name_len = strlen(name);
   unsigned left = 0x8000u;
 
-  if (process->ps_environ == 0)
+  if (env_seg == 0)
     return NULL;
 
-  env = (const char *)ARM_PTR(MK_FP(process->ps_environ, 0));
+  env = (const char *)ARM_PTR(MK_FP(env_seg, 0));
   while (left && *env) {
     size_t n = strnlen(env, left);
 
@@ -1812,14 +1812,12 @@ static int fcom_set_bool_option(const char *arg,
 
 static unsigned fcom_environment_bytes(UWORD command_psp)
 {
-  const psp *process = (const psp *)ARM_PTR(MK_FP(command_psp, 0));
-  const UBYTE *mcb;
+  const UWORD env_seg = fcom_guest_psp_environment(command_psp);
 
-  if (process->ps_environ == 0)
+  if (env_seg == 0)
     return 0;
 
-  mcb = (const UBYTE *)ARM_PTR(MK_FP(process->ps_environ - 1u, 0));
-  return (unsigned)(mcb[3] | ((UWORD)mcb[4] << 8)) << 4;
+  return (unsigned)fdos_mcb_size((seg)(env_seg - 1u)) << 4;
 }
 
 static unsigned fcom_environment_used(UWORD command_psp)
@@ -4562,14 +4560,14 @@ static int path_is_explicit(const char *name)
 
 static const char *find_path_value(UWORD command_psp)
 {
-  const psp *p = (const psp *)ARM_PTR(MK_FP(command_psp, 0));
+  const UWORD env_seg = fcom_guest_psp_environment(command_psp);
   const char *env;
   unsigned left = 0x8000u;
 
-  if (p->ps_environ == 0)
+  if (env_seg == 0)
     return NULL;
 
-  env = (const char *)ARM_PTR(MK_FP(p->ps_environ, 0));
+  env = (const char *)ARM_PTR(MK_FP(env_seg, 0));
   while (left && *env) {
     size_t n = strnlen(env, left);
     if (n == left)
@@ -6380,8 +6378,6 @@ static void builtin_doskey(CPU *cpu, UWORD command_psp,
 static void builtin_memory(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, char *args)
 {
-  const psp *process =
-      (const psp *)ARM_PTR(MK_FP(command_psp, 0));
   unsigned env_max = fcom_environment_bytes(command_psp);
   unsigned env_used = fcom_environment_used(command_psp);
   unsigned alias_count =
@@ -6397,7 +6393,6 @@ static void builtin_memory(CPU *cpu, UWORD command_psp,
   int n;
 
   (void)args;
-  (void)process;
 
   n = snprintf(g->text, sizeof(g->text),
                "Environment segment    : max %5u bytes; free %5u bytes\r\n",

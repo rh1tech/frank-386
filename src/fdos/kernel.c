@@ -658,7 +658,7 @@ static void dpb_watch_capture(const char *tag, dos_far_ptr _dpb)
   dpb_watch_t *w = &dpb_watch[dpb_watch_count++];
   w->dpb = _dpb;
   w->tag = tag;
-  memcpy(w->bytes, ARM_PTR(_dpb), sizeof(w->bytes));
+  kernel_guest_read(kernel_guest_linear(_dpb), w->bytes, sizeof(w->bytes));
 }
 
 static void dpb_watch_capture_chain(const char *tag)
@@ -1815,7 +1815,6 @@ static COUNT truename_worker(dos_far_ptr x86_src, const char *src_snapshot,
   UWORD cds_flags;
   dos_far_ptr cds_dpb;
   UWORD cds_backslash_offset;
-  UWORD cds_join_offset;
 
   TNDBG("TN00 enter x86_src=%04X:%04X mode=%04X snapshot='%s'",
         FP_SEG(x86_src), FP_OFF(x86_src), mode, src);
@@ -1924,13 +1923,12 @@ invalid_path:
   cds_flags = fdos_cds_flags(x86_cdsEntry);
   cds_dpb = fdos_cds_dpb(x86_cdsEntry);
   cds_backslash_offset = (UWORD)fdos_cds_backslash_offset(x86_cdsEntry);
-  cds_join_offset = (UWORD)fdos_cds_join_offset(x86_cdsEntry);
   fdos_cds_copy_current_path(x86_cdsEntry, cds_path, sizeof(cds_path));
   panic_bad_cds_dpb("after-load", x86_cdsEntry, cds_flags, cds_path, cds_dpb);
-  TNDBG("TN12 CDS path='%s' flags=%04X dpb=%04X:%04X backslash=%u join=%u",
+  TNDBG("TN12 CDS path='%s' flags=%04X dpb=%04X:%04X backslash=%u",
         cds_path, cds_flags,
         FP_SEG(cds_dpb), FP_OFF(cds_dpb),
-        cds_backslash_offset, cds_join_offset);
+        cds_backslash_offset);
 
   fdos_dos_set_current_ldt(x86_cdsEntry);
 

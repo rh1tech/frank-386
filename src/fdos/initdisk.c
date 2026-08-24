@@ -157,7 +157,7 @@ static COUNT init_readdasd(CPU* cpu, UBYTE drive)
 STATIC void push_ddt(ddt *pddt)
 {
   dos_far_ptr fddt = DynAlloc("ddt", 1, sizeof(ddt));
-  memcpy(ARM_PTR(fddt), pddt, sizeof(ddt));
+  guest_write_block(((uint32_t)FP_SEG(fddt) << 4) + FP_OFF(fddt), pddt, sizeof(ddt));
   if (pddt->ddt_logdriveno != 0) {
     ((ddt*)ARM_PTR(fddt) - 1)->ddt_next = fddt;
     if (pddt->ddt_driveno == 0 && pddt->ddt_logdriveno == 1)
