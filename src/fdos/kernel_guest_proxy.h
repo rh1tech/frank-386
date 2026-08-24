@@ -15,6 +15,14 @@ UBYTE fdos_dos_default_drive(void);
 UBYTE fdos_dos_lastdrive(void);
 void fdos_dos_set_current_ldt(dos_far_ptr value);
 
+UWORD fdos_dos_cu_psp(void);
+UBYTE fdos_dos_mem_access_mode(void);
+void fdos_dos_set_mem_access_mode(UBYTE value);
+UBYTE fdos_lol_uppermem_link(void);
+UWORD fdos_lol_uppermem_root(void);
+UWORD fdos_lol_first_mcb(void);
+ULONG fdos_sft_size(dos_far_ptr sft_ptr);
+
 #ifdef __cplusplus
 }
 #endif

@@ -27,6 +27,7 @@
 #include "../../apps/api/ez.h"
 #include "../mem.h"
 #include "mcb_proxy.h"
+#include "kernel_guest_proxy.h"
 
 #if DIAG
 extern volatile uint32_t dos_diag_kernel_code;
@@ -751,7 +752,7 @@ static ULONG arm_app_dos_block_size(UWORD segment)
   mseg = (seg)(segment - 1);
   type = fdos_mcb_type(mseg);
   if ((type != MCB_NORMAL && type != MCB_LAST) ||
-      fdos_mcb_owner(mseg) != internal_data->cu_psp)
+      fdos_mcb_owner(mseg) != fdos_dos_cu_psp())
     return 0;
   return (ULONG)fdos_mcb_size(mseg) << 4;
 }
@@ -771,7 +772,7 @@ static void *arm_app_dos_malloc(size_t size)
   if (paras_long == 0 || paras_long > 0xffffu)
     return NULL;
 
-  if (DosMemAlloc((UWORD)paras_long, internal_data->mem_access_mode,
+  if (DosMemAlloc((UWORD)paras_long, fdos_dos_mem_access_mode(),
                   &mcb_seg, &largest) != SUCCESS)
     return NULL;
   return ARM_PTR(MK_FP((UWORD)(mcb_seg + 1), 0));
@@ -1225,50 +1226,50 @@ static int arm_elf_section_name(COUNT fd, const arm_elf_load_meta *meta,
 static int arm_elf_alloc_largest_pool(UBYTE use_umb,
                                       UWORD *mcb_seg, UWORD *paras)
 {
-  UBYTE umb_state = LoL->uppermem_link;
-  UBYTE mem_access = internal_data->mem_access_mode;
+  UBYTE umb_state = fdos_lol_uppermem_link();
+  UBYTE mem_access = fdos_dos_mem_access_mode();
   int rc;
 
   if (use_umb) {
     DosUmbLink(1);
-    internal_data->mem_access_mode &= ~0x80;
-    internal_data->mem_access_mode |= 0x40; /* UMB-only, as in ExecMemLargest */
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() & (UBYTE)~0x80u));
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() | 0x40u)); /* UMB-only, as in ExecMemLargest */
   } else {
     DosUmbLink(0);
-    internal_data->mem_access_mode &= ~0xc0; /* conventional memory only */
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() & (UBYTE)~0xc0u)); /* conventional memory only */
   }
 
   rc = DosMemLargest(paras);
   if (rc == SUCCESS && *paras != 0)
-    rc = DosMemAlloc(*paras, internal_data->mem_access_mode, mcb_seg, paras);
+    rc = DosMemAlloc(*paras, fdos_dos_mem_access_mode(), mcb_seg, paras);
   else if (rc == SUCCESS)
     rc = DE_NOMEM;
 
   DosUmbLink(umb_state);
-  internal_data->mem_access_mode = mem_access;
+  fdos_dos_set_mem_access_mode(mem_access);
   return rc;
 }
 
 static void arm_elf_pool_free_stats(UBYTE use_umb,
                                     ULONG *total_bytes, ULONG *largest_bytes)
 {
-  UBYTE umb_state = LoL->uppermem_link;
+  UBYTE umb_state = fdos_lol_uppermem_link();
   seg pseg;
   ULONG total = 0;
   ULONG largest = 0;
   ULONG guard = 0;
 
   if (use_umb) {
-    if (LoL->uppermem_root == 0xffffu) {
+    if (fdos_lol_uppermem_root() == 0xffffu) {
       *total_bytes = 0;
       *largest_bytes = 0;
       return;
     }
     DosUmbLink(1);
-    pseg = LoL->uppermem_root;
+    pseg = fdos_lol_uppermem_root();
   } else {
     DosUmbLink(0);
-    pseg = LoL->first_mcb;
+    pseg = fdos_lol_first_mcb();
   }
 
   for (;;) {
@@ -2815,14 +2816,14 @@ static void arm_elf_native_stack_release(uintptr_t bottom,
 static int arm_native_alloc_low_exact(UWORD paras,
                                       UWORD *mcb_seg, UWORD *actual)
 {
-  UBYTE saved_umb_link = LoL->uppermem_link;
-  UBYTE saved_mode = internal_data->mem_access_mode;
+  UBYTE saved_umb_link = fdos_lol_uppermem_link();
+  UBYTE saved_mode = fdos_dos_mem_access_mode();
   int rc;
 
   DosUmbLink(0);
-  internal_data->mem_access_mode &= (UBYTE)~0xc0u;
-  rc = DosMemAlloc(paras, internal_data->mem_access_mode, mcb_seg, actual);
-  internal_data->mem_access_mode = saved_mode;
+  fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() & (UBYTE)~0xc0u));
+  rc = DosMemAlloc(paras, fdos_dos_mem_access_mode(), mcb_seg, actual);
+  fdos_dos_set_mem_access_mode(saved_mode);
   DosUmbLink(saved_umb_link);
 
   if (rc == SUCCESS)
@@ -2856,7 +2857,7 @@ static int arm_native_reserve_dos_stack_low(ULONG stack_size,
     memset(ARM_PTR(MK_FP(*out_seg, 0)),
            DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
-  fdos_mcb_set_owner(mcb_seg, internal_data->cu_psp);
+  fdos_mcb_set_owner(mcb_seg, fdos_dos_cu_psp());
   fdos_mcb_set_name8(mcb_seg, "ARMSTK  ");
 
   return SUCCESS;
@@ -2877,7 +2878,7 @@ static int arm_native_reserve_dos_stack(ULONG stack_size,
   paras = (UWORD)((stack_size + 15u) >> 4);
   UWORD mcb_seg = 0;
   UWORD largest = 0;
-  UBYTE old_umb_link = LoL->uppermem_link;
+  UBYTE old_umb_link = fdos_lol_uppermem_link();
   int rc;
 
   if (paras == 0)
@@ -2900,7 +2901,7 @@ static int arm_native_reserve_dos_stack(ULONG stack_size,
            DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   /* Temporary owner until the child PSP exists. */
-  fdos_mcb_set_owner(mcb_seg, internal_data->cu_psp);
+  fdos_mcb_set_owner(mcb_seg, fdos_dos_cu_psp());
   fdos_mcb_set_name8(mcb_seg, "ARMSTK  ");
 
   return SUCCESS;
@@ -3234,12 +3235,12 @@ static int arm_ez_apply_reloc(BYTE *base,
 /* Allocate an exact low-memory DOS block without changing the caller's mode. */
 static int arm_ez_alloc_low(UWORD paras, UWORD *mcb_seg, UWORD *actual)
 {
-  UBYTE saved_mode = internal_data->mem_access_mode;
+  UBYTE saved_mode = fdos_dos_mem_access_mode();
   int rc;
 
-  internal_data->mem_access_mode &= (UBYTE)~0xc0u;
-  rc = DosMemAlloc(paras, internal_data->mem_access_mode, mcb_seg, actual);
-  internal_data->mem_access_mode = saved_mode;
+  fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() & (UBYTE)~0xc0u));
+  rc = DosMemAlloc(paras, fdos_dos_mem_access_mode(), mcb_seg, actual);
+  fdos_dos_set_mem_access_mode(saved_mode);
   if (rc == SUCCESS)
     *actual = paras;
   return rc;
@@ -3428,11 +3429,11 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
    * caller having preconfigured the global UMB link/allocation strategy:
    * handle AX=4B80h here exactly like the ordinary COM/MZ loaders.
    */
-  umb_state = LoL->uppermem_link;
-  orig_mem_access = internal_data->mem_access_mode;
+  umb_state = fdos_lol_uppermem_link();
+  orig_mem_access = fdos_dos_mem_access_mode();
   if (mode & LOAD_HIGH) {
     DosUmbLink(1);
-    internal_data->mem_access_mode |= 0x80;
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() | 0x80u));
   }
 
   /*
@@ -3489,7 +3490,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 
   if (mode & LOAD_HIGH) {
     DosUmbLink(umb_state);
-    internal_data->mem_access_mode = orig_mem_access;
+    fdos_dos_set_mem_access_mode(orig_mem_access);
     mode &= 0x7f;
   }
 
@@ -3609,7 +3610,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 
   DosCloseSft(fd, FALSE);
   setvec(0x22, exec_caller_return_addr());
-  child_psp(load_seg, internal_data->cu_psp, load_seg + final_paras);
+  child_psp(load_seg, fdos_dos_cu_psp(), load_seg + final_paras);
   fcbcode = patchPSPGuest(alloc_mcb, env_mcb, exp, linear_to_far(namep));
   (void)fcbcode;
 
@@ -3711,11 +3712,11 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   if (paras_long == 0 || paras_long > 0xffffu)
     return arm_elf_reject(DE_NOMEM, "ELF metadata does not fit DOS guest memory");
 
-  umb_state = LoL->uppermem_link;
-  orig_mem_access = internal_data->mem_access_mode;
+  umb_state = fdos_lol_uppermem_link();
+  orig_mem_access = fdos_dos_mem_access_mode();
   if (mode & LOAD_HIGH) {
     DosUmbLink(1);
-    internal_data->mem_access_mode |= 0x80;
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() | 0x80u));
   }
 
   rc = ChildEnvGuest(exp, &env_mcb, linear_to_far((const BYTE *)namep));
@@ -3747,7 +3748,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 
   if (mode & LOAD_HIGH) {
     DosUmbLink(umb_state);
-    internal_data->mem_access_mode = orig_mem_access;
+    fdos_dos_set_mem_access_mode(orig_mem_access);
     mode &= 0x7f;
   }
 
@@ -3941,7 +3942,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
      The first 256 bytes are its PSP; ELF metadata/sections/argv/stacks live
      after it in the same MCB and are therefore released by FreeProcessMem(). */
   setvec(0x22, exec_caller_return_addr());
-  child_psp(load_seg, internal_data->cu_psp, load_seg + final_paras);
+  child_psp(load_seg, fdos_dos_cu_psp(), load_seg + final_paras);
   fcbcode = patchPSPGuest(alloc_mcb, env_mcb, exp, linear_to_far(namep));
   (void)fcbcode;
 
@@ -3985,7 +3986,7 @@ ULONG SftGetFsize(int sft_idx)
   dos_far_ptr s = idx_to_sft(sft_idx);
   if (far_is_end(s))
     return DE_INVLDHNDL;
-  return ((sft*)ARM_PTR(s))->sft_size;
+  return fdos_sft_size(s);
 }
 
 /* dsk: 0 = current default drive, 1 = A:, 2 = B:, ... (FCB drive-byte
@@ -3995,7 +3996,7 @@ struct cds *get_cds1(unsigned dsk)
   dos_far_ptr p;
 
   if (dsk == 0)
-    dsk = internal_data->default_drive + 1;
+    dsk = fdos_dos_default_drive() + 1;
   if (dsk == 0)
     return NULL;
 
@@ -5191,8 +5192,8 @@ STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
 {
   psp *p = (psp *) ARM_PTR(MK_FP(ds, 0));
 
-  p->ps_parent = internal_data->cu_psp;
-  p->ps_prevpsp = MK_FP(internal_data->cu_psp, 0);
+  p->ps_parent = fdos_dos_cu_psp();
+  p->ps_prevpsp = MK_FP(fdos_dos_cu_psp(), 0);
 
   if (mode == EXEC_LOADNGO) {
     CfgDbgPrintf(("LOAD psp=%04x entry=%04x:%04x stack=%04x:%04x ds=%04x ax=%04x\n",
@@ -5217,15 +5218,15 @@ STATIC int ExecMemLargest(UWORD * asize, UWORD threshold)
 {
   int rc;
 
-  if (internal_data->mem_access_mode & 0x80)
+  if (fdos_dos_mem_access_mode() & 0x80)
   {
-    internal_data->mem_access_mode &= ~0x80;
-    internal_data->mem_access_mode |= 0x40;
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() & (UBYTE)~0x80u));
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() | 0x40u));
     rc = DosMemLargest(asize);
-    internal_data->mem_access_mode &= ~0x40;
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() & (UBYTE)~0x40u));
     if (rc != SUCCESS || *asize < threshold)
       rc = DosMemLargest(asize);
-    internal_data->mem_access_mode |= 0x80;
+    fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() | 0x80u));
   }
   else
     rc = DosMemLargest(asize);
@@ -5235,18 +5236,18 @@ STATIC int ExecMemLargest(UWORD * asize, UWORD threshold)
 
 STATIC int ExecMemAlloc(UWORD size, seg * para, UWORD * asize)
 {
-  int rc = DosMemAlloc(size, internal_data->mem_access_mode, para, asize);
+  int rc = DosMemAlloc(size, fdos_dos_mem_access_mode(), para, asize);
 
   if (rc != SUCCESS)
   {
     if (rc == DE_NOMEM)
     {
       rc = DosMemAlloc(0, LARGEST, para, asize);
-      if ((internal_data->mem_access_mode & 0x80) && (rc != SUCCESS))
+      if ((fdos_dos_mem_access_mode() & 0x80) && (rc != SUCCESS))
       {
-        internal_data->mem_access_mode &= ~0x80;
+        fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() & (UBYTE)~0x80u));
         rc = DosMemAlloc(0, LARGEST, para, asize);
-        internal_data->mem_access_mode |= 0x80;
+        fdos_dos_set_mem_access_mode((UBYTE)(fdos_dos_mem_access_mode() | 0x80u));
       }
     }
   }

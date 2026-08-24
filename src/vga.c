@@ -1298,6 +1298,10 @@ uint32_t __not_in_flash_func(vga_ioport_read)(VGAState *s, uint32_t addr)
      * Some games (like Goblins) poll 0x3BA for vertical retrace even in color mode.
      * Update retrace status on each read so tight polling loops see changes. */
     if (addr == 0x3ba || addr == 0x3da) {
+#ifdef MCGA
+        // W/A for [M]CGA "snow suppress" way (TODO: may be required to make it smarter)
+        s->st01 ^= ST01_DISP_ENABLE;
+#endif
         /* st01 is updated by the VGA ISR on every scanline — just return it.
          * Wolf3D polling this port sees exact hardware vblank timing. */
         val = s->st01;

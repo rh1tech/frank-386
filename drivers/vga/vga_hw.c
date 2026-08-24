@@ -1147,15 +1147,13 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     
     // Update VGA status register 1 (port 0x3DA) from ISR — this is the
     // authoritative source. Core0 reads it as-is without any logic.
-    // Bit 0 (DISP_ENABLE): 1 = active display, 0 = blanking interval
+    // Bit 0 (DISP_ENABLE): 0 = active display, 1 = blanking interval
     // Bit 3 (V_RETRACE):   1 = vertical retrace, 0 = active display
     if (vga_state) {
         if (line >= N_LINES_VISIBLE) {
-            vga_state->st01 |=  ST01_V_RETRACE;
-            vga_state->st01 &= ~ST01_DISP_ENABLE;
+            vga_state->st01 |= ST01_V_RETRACE | ST01_DISP_ENABLE;
         } else {
-            vga_state->st01 &= ~ST01_V_RETRACE;
-            vga_state->st01 |=  ST01_DISP_ENABLE;
+            vga_state->st01 &= ~(ST01_V_RETRACE | ST01_DISP_ENABLE);
         }
     }
 

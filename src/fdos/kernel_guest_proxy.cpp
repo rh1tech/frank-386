@@ -18,6 +18,7 @@ namespace {
 using fdos_guest::cds_ref;
 using fdos_guest::dos_data_ref;
 using fdos_guest::lol_ref;
+using fdos_guest::sft_ref;
 
 static const dos_data_ref idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
 static const lol_ref kernel_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
@@ -31,3 +32,11 @@ extern "C" void fdos_cds_current_path_byte(dos_far_ptr p, unsigned i, UBYTE v) {
 extern "C" UBYTE fdos_dos_default_drive(void) { return idata.default_drive(); }
 extern "C" UBYTE fdos_dos_lastdrive(void) { return kernel_lol.lastdrive(); }
 extern "C" void fdos_dos_set_current_ldt(dos_far_ptr v) { idata.current_ldt(v); }
+
+extern "C" UWORD fdos_dos_cu_psp(void) { return idata.cu_psp(); }
+extern "C" UBYTE fdos_dos_mem_access_mode(void) { return idata.mem_access_mode(); }
+extern "C" void fdos_dos_set_mem_access_mode(UBYTE v) { idata.mem_access_mode() = v; }
+extern "C" UBYTE fdos_lol_uppermem_link(void) { return kernel_lol.uppermem_link(); }
+extern "C" UWORD fdos_lol_uppermem_root(void) { return kernel_lol.uppermem_root(); }
+extern "C" UWORD fdos_lol_first_mcb(void) { return kernel_lol.first_mcb(); }
+extern "C" ULONG fdos_sft_size(dos_far_ptr p) { return sft_ref(p).size(); }

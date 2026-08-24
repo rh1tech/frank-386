@@ -3831,10 +3831,10 @@ bool bios_10h(CPU* cpu) {
                 break;
             case 0x33: bios_10h_1233h(cpu); // GRAYSCALE SUMMING
                 break;
+            case 0x35: bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
+                break;
 #ifndef MCGA
             case 0x34: bios_10h_1234h(cpu); // CURSOR EMULATION
-                break;
-            case 0x35: bios_10h_1235h(cpu); // DISPLAY SWITCH INTERFACE
                 break;
             case 0x36: bios_10h_1236h(cpu); // VIDEO REFRESH CONTROL
                 break;
