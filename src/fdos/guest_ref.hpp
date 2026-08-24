@@ -266,10 +266,17 @@ public:
     __attribute__((always_inline)) UWORD max_files() const {
         return scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_maxfiles));
     }
+    __attribute__((always_inline)) void max_files(UWORD v) const {
+        scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_maxfiles)) = v;
+    }
     __attribute__((always_inline)) dos_far_ptr file_table() const {
         const UWORD offset = scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_filetab));
         const UWORD segment = scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_filetab) + sizeof(UWORD));
         return MK_FP(segment, offset);
+    }
+    __attribute__((always_inline)) void file_table(dos_far_ptr v) const {
+        scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_filetab)) = FP_OFF(v);
+        scalar_proxy<UWORD>(addr_ + offsetof(psp, ps_filetab) + sizeof(UWORD)) = FP_SEG(v);
     }
     __attribute__((always_inline)) UBYTE file_handle(UWORD index) const {
         const dos_far_ptr table = file_table();
@@ -357,6 +364,13 @@ public:
     __attribute__((always_inline)) void current_path_byte(std::size_t index, UBYTE value) const {
         if (index < sizeof(((cds *)0)->cdsCurrentPath))
             store_byte(offsetof(cds, cdsCurrentPath) + index, value);
+    }
+    __attribute__((always_inline)) void write_current_path(const char *src) const {
+        std::size_t n = 0;
+        while (n + 1u < sizeof(((cds *)0)->cdsCurrentPath) && src[n] != '\0')
+            ++n;
+        guest_write_block(addr_ + offsetof(cds, cdsCurrentPath), src, n);
+        store_byte(offsetof(cds, cdsCurrentPath) + n, 0);
     }
     __attribute__((always_inline)) void start_cluster(UWORD value) const {
         scalar_store<UWORD>(offsetof(cds, cdsStrtClst), value);
@@ -643,8 +657,16 @@ public:
     __attribute__((always_inline)) explicit dhdr_ref(dos_far_ptr p)
         : ref_base<dhdr>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
 
+    __attribute__((always_inline)) dos_far_ptr next() const {
+        const UWORD offset = scalar_load<UWORD>(offsetof(dhdr, dh_next));
+        const UWORD segment = scalar_load<UWORD>(offsetof(dhdr, dh_next) + sizeof(UWORD));
+        return MK_FP(segment, offset);
+    }
     __attribute__((always_inline)) UWORD attr() const {
         return scalar_load<UWORD>(offsetof(dhdr, dh_attr));
+    }
+    __attribute__((always_inline)) void read_name(BYTE *dst) const {
+        guest_read_block(addr_ + offsetof(dhdr, dh_name), dst, sizeof(((dhdr *)0)->dh_name));
     }
     __attribute__((always_inline)) UWORD strategy() const {
         return scalar_load<UWORD>(offsetof(dhdr, x86.dh_strategy));

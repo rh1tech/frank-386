@@ -9,7 +9,10 @@ extern "C" {
 #endif
 #include "guest_ref.hpp"
 
+using fdos_guest::cds_ref;
+using fdos_guest::dhdr_ref;
 using fdos_guest::dos_data_ref;
+using fdos_guest::dpb_ref;
 using fdos_guest::lol_ref;
 using fdos_guest::psp_ref;
 using fdos_guest::sft_ref;
@@ -180,33 +183,31 @@ STATIC dos_far_ptr/*sft*/ get_free_sft(COUNT *sft_idx)
     data-buffer argument for C_OPEN (no data transferred); that becomes
     a plain NULL native pointer here.
 */
-STATIC int DeviceOpenSft(dos_far_ptr /*struct dhdr*/ x86_dhp, sft *sftp)
+STATIC int DeviceOpenSft(dos_far_ptr x86_dhp, dos_far_ptr x86_sftp)
 {
+  BYTE name[FNAME_SIZE + FEXT_SIZE];
+  const dhdr_ref devhdr(x86_dhp);
+  const sft_ref sftp(x86_sftp);
+  const UWORD dev_attr = devhdr.attr();
   int i;
-  struct dhdr* dhp = (struct dhdr*)ARM_PTR(x86_dhp);
-  sftp->sft_shroff = -1;      /* /// Added for SHARE - Ron Cemer */
-  sftp->sft_count += 1;
-  sftp->sft_flags =
-    (dhp->dh_attr & ~(SFT_MASK | SFT_FSHARED)) | SFT_FDEVICE | SFT_FEOF;
-  memcpy(sftp->sft_name, dhp->dh_name, FNAME_SIZE);
 
-  /* pad with spaces */
-  for (i = FNAME_SIZE + FEXT_SIZE - 1; sftp->sft_name[i] == '\0'; i--)
-    sftp->sft_name[i] = ' ';
-  /* and uppercase */
-  DosUpFMem(sftp->sft_name, FNAME_SIZE + FEXT_SIZE);
+  sftp.shroff(-1);
+  sftp.count((UWORD)(sftp.count() + 1u));
+  sftp.flags((UWORD)((dev_attr & ~(SFT_MASK | SFT_FSHARED)) | SFT_FDEVICE | SFT_FEOF));
+  memset(name, 0, sizeof(name));
+  devhdr.read_name(name);
+  for (i = FNAME_SIZE + FEXT_SIZE - 1; name[i] == '\0'; i--)
+    name[i] = ' ';
+  DosUpFMem(name, FNAME_SIZE + FEXT_SIZE);
+  sftp.write_name(name);
+  sftp.dcb(x86_dhp);
+  sftp.date(dos_getdate());
+  sftp.time(dos_gettime());
+  sftp.attrib(D_DEVICE);
 
-  sftp->sft_dev = x86_dhp;
-  sftp->sft_date = dos_getdate();
-  sftp->sft_time = dos_gettime();
-  sftp->sft_attrib = D_DEVICE;
-
-  if (dhp->dh_attr & SFT_FOCRM)
+  if (dev_attr & SFT_FOCRM)
   {
-    /* if Open/Close/RM bit in driver's attribute is set
-     * then issue an Open request to the driver
-     */
-    dos_far_ptr dev = sftp->sft_dev;
+    dos_far_ptr dev = x86_dhp;
     if (BinaryCharIO(&dev, 0, MK_FP(0,0), C_OPEN) != SUCCESS)
       return DE_ACCESS;
   }
@@ -317,13 +318,10 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   dpb_watch_check_chain("DosOpenSft 5");
   /* check for a (local) device */
   if ((path_kind & IS_DEVICE) && !(path_kind & IS_NETWORK)) {
-      dos_far_ptr dhp = IsDevice((const char *)ARM_PTR(fname));
+      dos_far_ptr dhp = IsDevice(open_path);
       dpb_watch_check_chain("DosOpenSft 6");
       if (EFFECTIVE(dhp) != 0) {
-        /* DeviceOpenSft() is a legacy leaf path.  Map the SFT only now,
-           after IsDevice() has finished touching guest memory. */
-        sft *sftp = (sft *)ARM_PTR(lpCurSft);
-        int rc = DeviceOpenSft(dhp, sftp);
+        int rc = DeviceOpenSft(dhp, lpCurSft);
         dpb_watch_check_chain("DosOpenSft 7");
         /* check the status code returned by the
         * driver when we tried to open it
@@ -476,30 +474,6 @@ int idx_to_sft_(int SftIndex)
 
     Migrated from dosfns.c.
 */
-/*
-    jft_of(p) - native view of process p's job file table.
-
-    ps_filetab lives in the PSP, so it is entirely under guest control: a
-    program is free to point it anywhere, including at the 0000:0000
-    sentinel. In this port that is NOT an unmapped far pointer the way it
-    is upstream - ARM_PTR(0000:0000) resolves to X86_RAM_BASE + 0, i.e.
-    the guest's own interrupt vector table. Writing a handle through an
-    unchecked ps_filetab (DosOpen()/DosClose()/AH=45h/46h all do) would
-    therefore not break just the offending process, the way it does
-    upstream - it would silently corrupt the IVT and take the whole
-    system down with it.
-
-    Every ps_filetab dereference goes through here. Returns NULL for both
-    sentinels; callers turn that into the ordinary "bad handle"/"no free
-    handle" error the guest already knows how to handle.
-*/
-UBYTE *jft_of(psp *p)
-{
-  if (far_is_null(p->ps_filetab) || far_is_end(p->ps_filetab))
-    return NULL;
-  return (UBYTE *)ARM_PTR(p->ps_filetab);
-}
-
 int get_sft_idx(unsigned hndl)
 {
   const psp_ref process(dosfns_idata.cu_psp());
@@ -574,23 +548,16 @@ STATIC COUNT SftSeek2(int sft_idx, LONG new_pos, unsigned mode, UDWORD *p_result
   if (mode > SEEK_END)
     return DE_INVLDFUNC;
 
-  internal_data->lpCurSft = _s;
-  sft* s = (sft*) ARM_PTR(_s);
-  /* Do special return for character devices      */
-  if (s->sft_flags & SFT_FDEVICE)
-  {
+  dosfns_idata.lp_cur_sft(_s);
+  const sft_ref sft(_s);
+  if (sft.flags() & SFT_FDEVICE)
     new_pos = 0;
-  }
   else if (mode == SEEK_CUR)
-  {
-    new_pos += s->sft_posit;
-  }
-  else if (mode == SEEK_END)      /* seek from end of file */
-  {
-    new_pos += s->sft_size;
-  }
+    new_pos += sft.position();
+  else if (mode == SEEK_END)
+    new_pos += sft.size();
 
-  s->sft_posit = new_pos;
+  sft.position((ULONG)new_pos);
 
   *p_result = (UDWORD)new_pos;
   return SUCCESS;
@@ -638,125 +605,73 @@ ULONG DosSeek(unsigned hndl, LONG new_pos, COUNT mode, int *rc)
 */
 long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
 {
-  /* Get the SFT block that contains the SFT      */
-  dos_far_ptr _s = idx_to_sft(sft_idx);
-  if (far_is_end(_s))
+  const dos_far_ptr x86_sft = idx_to_sft(sft_idx);
+  if (far_is_end(x86_sft))
   {
 #if DIAG
     dos_diag_kernel_code = 0x44000000u | ((unsigned)sft_idx & 0xffffu);
 #endif
     return DE_INVLDHNDL;
   }
-  sft* s = (sft*)ARM_PTR(_s);
-
+  const sft_ref sft(x86_sft);
+  const UWORD sft_mode = sft.mode();
+  const UWORD entry_flags = sft.flags();
 #if DIAG
-  /*
-   * 45IIMMMM:
-   *   II   = resolved SFT index
-   *   MMMM = sft_mode
-   */
-  dos_diag_kernel_code = 0x45000000u
-                | (((unsigned)sft_idx & 0xffu) << 16)
-                | ((unsigned)s->sft_mode & 0xffffu);
+  dos_diag_kernel_code = 0x45000000u | (((unsigned)sft_idx & 0xffu) << 16) | ((unsigned)sft_mode & 0xffffu);
 #endif
-
-/* If for read and write-only or for write and read-only then exit */
-  if((mode == XFR_READ && (s->sft_mode & O_WRONLY)) ||
-     (mode == XFR_WRITE && (s->sft_mode & O_ACCMODE) == O_RDONLY))
-  {
-#if DIAG
-    dos_diag_kernel_code = 0x46u << 24
-                  | (((unsigned)sft_idx & 0xffu) << 16)
-                  | ((unsigned)s->sft_mode & 0xffffu);
-#endif
+  if ((mode == XFR_READ && (sft_mode & O_WRONLY)) ||
+      (mode == XFR_WRITE && (sft_mode & O_ACCMODE) == O_RDONLY))
     return DE_ACCESS;
-  }
   if (mode == XFR_FORCE_WRITE)
     mode = XFR_WRITE;
-    
-/*
- *   Do remote first or return error.
- *   must have been opened from remote.
- */
-/* /// TODO:
-  if (s->sft_flags & SFT_FSHARED)
-  {
-    /// unreachable: see the function-level comment above.
-    long XferCount;
-    dos_far_ptr save_dta;
 
-    save_dta = internal_data->dta;
-    internal_data->lpCurSft = _s;  // _s is already the SFT's dos_far_ptr 
-    internal_data->current_filepos = s->sft_posit;     // needed for MSCDEX
-    internal_data->dta = bp;
-    XferCount = remote_rw(mode == XFR_READ ? REM_READ : REM_WRITE, s, n);
-    internal_data->dta = save_dta;
-    return XferCount;
-  }
-*/
-  /* Do a device transfer if device                   */
-  if (s->sft_flags & SFT_FDEVICE)
+  if (entry_flags & SFT_FDEVICE)
   {
-    dos_far_ptr dev = s->sft_dev;
-
-    /* Now handle raw and cooked modes      */
-    if (s->sft_flags & SFT_FBINARY)
+    dos_far_ptr dev = sft.dev();
+    if (entry_flags & SFT_FBINARY)
     {
-      long rc = BinaryCharIO(&dev, n, bp,
-                             mode == XFR_READ ? C_INPUT : C_OUTPUT);
-      if (mode == XFR_WRITE && rc > 0 && (s->sft_flags & SFT_FCONOUT))
+      const long rc = BinaryCharIO(&dev, n, bp, mode == XFR_READ ? C_INPUT : C_OUTPUT);
+      if (mode == XFR_WRITE && rc > 0 && (sft_ref(x86_sft).flags() & SFT_FCONOUT))
       {
-        size_t cnt = (size_t)rc;
-        const char *p = (const char *)ARM_PTR(bp);
-        while (cnt--)
-          update_scr_pos(*p++, 1);
+        const uint32_t base = dosfns_far_linear(bp);
+        for (size_t i = 0; i < (size_t)rc; ++i)
+          update_scr_pos((char)pload8(base + (uint32_t)i), 1);
       }
       return rc;
     }
-
-    /* cooked mode */
-    if (mode==XFR_READ)
+    if (mode == XFR_READ)
     {
       long rc;
-      /* Test for eof and exit                */
-      /* immediately if it is                 */
-      if (!(s->sft_flags & SFT_FEOF))
+      if (!(entry_flags & SFT_FEOF))
         return 0;
-
-      if (s->sft_flags & SFT_FCONIN)
+      if (entry_flags & SFT_FCONIN)
         rc = read_line_handle(sft_idx, n, (char *)ARM_PTR(bp));
       else
         rc = cooked_read(&dev, n, (char *)ARM_PTR(bp));
-      if (*(char *)ARM_PTR(bp) == CTL_Z)
-        s->sft_flags &= ~SFT_FEOF;
+      if (n != 0 && pload8(dosfns_far_linear(bp)) == CTL_Z)
+      {
+        const sft_ref current(x86_sft);
+        current.flags((UWORD)(current.flags() & ~SFT_FEOF));
+      }
       return rc;
     }
-    else
-    {
-      /* reset EOF state (set to no EOF)      */
-      s->sft_flags |= SFT_FEOF;
-
-      /* if null just report full transfer    */
-      if (s->sft_flags & SFT_FNUL)
-        return n;
-      return cooked_write(&dev, n, (char *)ARM_PTR(bp));
-    }
+    sft.flags((UWORD)(entry_flags | SFT_FEOF));
+    if (entry_flags & SFT_FNUL)
+      return n;
+    return cooked_write(&dev, n, (char *)ARM_PTR(bp));
   }
-
-  /* a block transfer                           */
-  /* /// Added for SHARE - Ron Cemer */
-  if (IsShareInstalled(FALSE) && (s->sft_shroff >= 0))
+  if (IsShareInstalled(FALSE))
   {
-    /* sft_shroff is file_table index in share */
-    int rc = share_access_check(internal_data->cu_psp, s->sft_shroff,
-                                s->sft_posit, (unsigned long)n, 1);
-    if (rc != SUCCESS)
-      return rc;
+    const WORD shroff = sft.shroff();
+    if (shroff >= 0)
+    {
+      const int rc = share_access_check((UWORD)dosfns_idata.cu_psp(), shroff, sft.position(), (unsigned long)n, 1);
+      if (rc != SUCCESS)
+        return rc;
+    }
   }
-  /* /// End of additions for SHARE - Ron Cemer */
   return rwblock(sft_idx, bp, n, mode);
 }
-
 
 /*
     get_root(fname) - return a pointer to the last path component
@@ -770,17 +685,16 @@ long DosRWSft(int sft_idx, size_t n, dos_far_ptr bp, int mode)
 */
 const char *get_root(const char *fname)
 {
-  /* find the end                                 */
   unsigned length = strlen(fname);
   char c;
 
-  /* now back up to first path seperator or start */
   fname += length;
   while (length)
   {
     length--;
     c = *--fname;
-    if (c == '/' || c == '\\' || c == ':') {
+    if (c == '/' || c == '\\' || c == ':')
+    {
       fname++;
       break;
     }
@@ -805,68 +719,38 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
   dos_far_ptr x86_dhp;
   const char *froot = get_root(fname);
   int i;
-
-/* /// BUG!!! This is absolutely wrong.  A filename of "NUL.LST" must be
-       treated EXACTLY the same as a filename of "NUL".  The existence or
-       content of the extension is irrelevent in determining whether a
-       filename refers to a device.
-       - Ron Cemer
-  // if we have an extension, can't be a device <--- WRONG.
-  if (*froot != '.')
-  {
-*/
-
-/*  BUGFIX: MSCD000<00> should be handled like MSCD000<20> TE 
-    ie the 8 character device name may be padded with spaces ' ' or NULs '\0'
-
-    Note: fname is assumed an ASCIIZ string (ie not padded, unknown length)
-    but the name in the device header is assumed FNAME_SIZE and padded.  KJD
-*/
-
-
-  /* check for names that will never be devices to avoid checking all device headers.
-     only the file name (not path nor extension) need be checked, "" == root or empty name
-   */
-  if ( (*froot == '\0') ||
-       ((*froot=='.') && ((*(froot+1)=='\0') || (*(froot+2)=='\0' && *(froot+1)=='.')))
-     )
-  {
+  if ((*froot == '\0') ||
+      ((*froot == '.') && ((froot[1] == '\0') || (froot[1] == '.' && froot[2] == '\0'))))
     return MK_FP(0, 0);
-  }
-
-  /* cycle through all device headers checking for match */
-  struct dhdr* dhp;
-  for (x86_dhp = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev); !far_is_end(x86_dhp); x86_dhp = dhp->dh_next)
+  for (x86_dhp = x86_FAR_PTR(DOS_PSP, &LoL->nul_dev); !far_is_end(x86_dhp); )
   {
-    dhp = (struct dhdr*)ARM_PTR(x86_dhp);
-
-    if (!(dhp->dh_attr & ATTR_CHAR))  /* if this is block device, skip */
-      continue;
-
-    for (i = 0; i < FNAME_SIZE; i++)
+    const dhdr_ref dhp(x86_dhp);
+    const dos_far_ptr next = dhp.next();
+    BYTE name[FNAME_SIZE];
+    if (dhp.attr() & ATTR_CHAR)
     {
-      unsigned char c1 = (unsigned char)froot[i];
-      /* ignore extensions and handle filenames shorter than FNAME_SIZE */
-      if (c1 == '.' || c1 == '\0')
+      dhp.read_name(name);
+      for (i = 0; i < FNAME_SIZE; i++)
       {
-        /* check if remainder of device name consists of spaces or nulls */
-        for (; i < FNAME_SIZE; i++)
+        unsigned char c1 = (unsigned char)froot[i];
+        if (c1 == '.' || c1 == '\0')
         {
-          unsigned char c2 = dhp->dh_name[i];
-          if (c2 != ' ' && c2 != '\0')
-            break;
+          for (; i < FNAME_SIZE; i++)
+          {
+            const unsigned char c2 = name[i];
+            if (c2 != ' ' && c2 != '\0')
+              break;
+          }
+          break;
         }
-        break;
+        if (DosUpFChar(c1) != DosUpFChar(name[i]))
+          break;
       }
-      if (DosUpFChar(c1) != DosUpFChar(dhp->dh_name[i]))
-        break;
+      if (i == FNAME_SIZE)
+        return x86_dhp;
     }
-
-    /* if found a match then return device header */
-    if (i == FNAME_SIZE)
-      return x86_dhp;
+    x86_dhp = next;
   }
-
   return MK_FP(0, 0);
 }
 
@@ -1096,83 +980,53 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
     navc==NULL means: called from FatGetDrvData, fcbfns.c */
 UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc)
 {
-  struct dpb FAR *dpbp;
-  struct cds FAR *cdsp;
-  dos_far_ptr cdsp_x86, dpbp_x86;
-  UWORD spc;
-
-  /* first check for valid drive          */
-  spc = (UWORD)-1;
-  cdsp_x86 = get_cds(drive == 0 ? internal_data->default_drive : drive - 1);
+  UWORD spc = (UWORD)-1;
+  const UBYTE drive_index = drive == 0 ? (UBYTE)dosfns_idata.default_drive() : (UBYTE)(drive - 1);
+  const dos_far_ptr cdsp_x86 = get_cds(drive_index);
   if (far_is_null(cdsp_x86))
     return spc;
-  cdsp = (struct cds FAR *)ARM_PTR(cdsp_x86);
-
-  internal_data->current_ldt = cdsp_x86;
-  if (cdsp->cdsFlags & CDSNETWDRV)
-  {
-    /* network redirector permanently stubbed on this platform */
+  const cds_ref cdsp(cdsp_x86);
+  dosfns_idata.current_ldt(cdsp_x86);
+  if (cdsp.flags() & CDSNETWDRV)
     return spc;
-  }
-
-  dpbp_x86 = cdsp->cdsDpb;
+  const dos_far_ptr dpbp_x86 = cdsp.dpb();
   if (far_is_null(dpbp_x86))
     return spc;
-  dpbp = (struct dpb FAR *)ARM_PTR(dpbp_x86);
-
+  const dpb_ref before(dpbp_x86);
   if (navc == NULL)
   {
-    /* hazard: no error checking! */
-    flush_buffers(dpbp->dpb_unit);
-    dpbp->dpb_flags = M_CHANGED;
+    flush_buffers(before.unit());
+    dpb_ref(dpbp_x86).flags(M_CHANGED);
   }
-
   if (media_check(dpbp_x86) < 0)
     return spc;
-  /* get the data available from dpb      */
-  spc = (dpbp->dpb_clsmask + 1);
-  *bps = dpbp->dpb_secsize;
-
-  /* now tell fs to give us free cluster count */
+  const dpb_ref dpbp(dpbp_x86);
+  spc = (UWORD)(dpbp.cluster_mask() + 1u);
+  *bps = dpbp.dpb_secsize();
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp))
+  if (dpbp.is_fat32())
   {
-    ULONG cluster_size, ntotal, nfree = 0;
-
-    /* we shift ntotal until it is equal to or below 0xfff6 */
-    cluster_size = (ULONG) dpbp->dpb_secsize << dpbp->dpb_shftcnt;
-    ntotal = dpbp->dpb_xsize - 1;
-    if (navc != NULL)
-      nfree = dos_free(dpbp_x86);
+    ULONG cluster_size = (ULONG)dpbp.dpb_secsize() << dpbp.dpb_shftcnt();
+    ULONG ntotal = dpbp.dpb_xsize() - 1;
+    ULONG nfree = navc != NULL ? dos_free(dpbp_x86) : 0;
     while (ntotal > FAT_MAGIC16 && cluster_size < 0x8000)
     {
-      cluster_size <<= 1;
-      spc <<= 1;
-      ntotal >>= 1;
-      nfree >>= 1;
+      cluster_size <<= 1; spc <<= 1; ntotal >>= 1; nfree >>= 1;
     }
-    /* get the data available from dpb      */
-    *nc = ntotal > FAT_MAGIC16 ? FAT_MAGIC16 : (UCOUNT) ntotal;
-
-    /* now tell fs to give us free cluster count */
+    *nc = ntotal > FAT_MAGIC16 ? FAT_MAGIC16 : (UCOUNT)ntotal;
     if (navc != NULL)
-      *navc = nfree > FAT_MAGIC16 ? FAT_MAGIC16 : (UCOUNT) nfree;
+      *navc = nfree > FAT_MAGIC16 ? FAT_MAGIC16 : (UCOUNT)nfree;
     return spc;
   }
 #endif
-  /* a passed navc of NULL means: skip free; see FatGetDrvData
-     fcbfns.c */
   if (navc != NULL)
-    *navc = (UWORD) dos_free(dpbp_x86);
-  *nc = dpbp->dpb_size - 1;
+    *navc = (UWORD)dos_free(dpbp_x86);
+  *nc = dpbp.dpb_size() - 1;
   if (spc > 64)
   {
-    /* fake for 64k clusters do confuse some DOS programs, but let
-       others work without overflowing */
     spc >>= 1;
     if (navc != NULL)
-      *navc = ((unsigned)*navc < FAT_MAGIC16 / 2) ?
-        ((unsigned)*navc << 1) : FAT_MAGIC16;
+      *navc = ((unsigned)*navc < FAT_MAGIC16 / 2) ? ((unsigned)*navc << 1) : FAT_MAGIC16;
     *nc = ((unsigned)*nc < FAT_MAGIC16 / 2) ? ((unsigned)*nc << 1) : FAT_MAGIC16;
   }
   return spc;
@@ -1193,36 +1047,36 @@ UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc)
 int SetJFTSize(UWORD nHandles)
 {
   UWORD block, maxBlock, i;
-  psp *ppsp = (psp *) ARM_PTR (MK_FP(internal_data->cu_psp, 0));
+  const psp_ref process((seg)(UWORD)dosfns_idata.cu_psp());
   dos_far_ptr newtab;
 
-  if (nHandles <= ppsp->ps_maxfiles)
+  if (nHandles <= process.max_files())
   {
-    ppsp->ps_maxfiles = nHandles;
+    process.max_files(nHandles);
     return SUCCESS;
   }
 
-  if ((DosMemAlloc((nHandles + 0xf) >> 4, internal_data->mem_access_mode,
+  if ((DosMemAlloc((nHandles + 0xf) >> 4, (UBYTE)dosfns_idata.mem_access_mode(),
                    &block, &maxBlock)) < 0)
     return DE_NOMEM;
 
   ++block;
   newtab = MK_FP(block, 0);
 
-  i = ppsp->ps_maxfiles;
+  i = process.max_files();
   /* Copy the existing part, then fill the rest with "no open file".
      If the guest left ps_filetab pointing at a sentinel, there is nothing
      to carry over: copying would seed the new table with bytes read out of
      the IVT and hand them back as SFT indices. Inherit nothing instead -
-     the fmemset() below then marks every handle closed. See jft_of(). */
-  if (far_is_null(ppsp->ps_filetab) || far_is_end(ppsp->ps_filetab))
+     the fmemset() below then marks every handle closed. The new table then marks every remaining handle closed. */
+  if (far_is_null(process.file_table()) || far_is_end(process.file_table()))
     i = 0;
   else
-    fmemcpy(newtab, ppsp->ps_filetab, i);
+    fmemcpy(newtab, process.file_table(), i);
   fmemset(MK_FP(block, i), 0xff, nHandles - i);
 
-  ppsp->ps_maxfiles = nHandles;
-  ppsp->ps_filetab = newtab;
+  process.max_files(nHandles);
+  process.file_table(newtab);
 
   return SUCCESS;
 }
@@ -1289,140 +1143,75 @@ VOID set_machine_name(dos_far_ptr netname, UWORD name_num)
 
 COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock)
 {
-  sft *s;
-  dos_far_ptr _s;
-
-  /* Get the SFT block that contains the SFT      */
-  _s = get_sft(hndl);
-  if (far_is_end(_s))
+  const dos_far_ptr x86_sft = get_sft(hndl);
+  if (far_is_end(x86_sft))
     return DE_INVLDHNDL;
-  s = (sft *) ARM_PTR (_s);
-
-  if (s->sft_flags & SFT_FSHARED)
-    /* original: remote_lock_unlock(s, pos, len, unlock). The network
-       redirector is permanently stubbed on this platform, and without
-       it no SFT can carry SFT_FSHARED in the first place. */
+  const sft_ref sft(x86_sft);
+  if (sft.flags() & SFT_FSHARED)
     return DE_INVLDFUNC;
-
-  /* Invalid function unless SHARE is installed or remote. */
   if (!IsShareInstalled(FALSE))
     return DE_INVLDFUNC;
-
-  /* Lock violation if this SFT entry does not support locking. */
-  if (s->sft_shroff < 0)
+  const WORD shroff = sft.shroff();
+  if (shroff < 0)
     return DE_LOCK;
-
-  /* Let SHARE do the work. */
-  return share_lock_unlock(internal_data->cu_psp, s->sft_shroff, pos, len, unlock);
+  return share_lock_unlock((UWORD)dosfns_idata.cu_psp(), shroff, pos, len, unlock);
 }
 
 #ifdef WITHFAT32
 /* same convention as get_cds1(): drive is 0 for default, 1=A, 2=B, ... */
 dos_far_ptr /*struct dpb*/ GetDriveDPB(UBYTE drive, COUNT *rc)
 {
-  struct cds FAR *cdsp = get_cds1(drive);
-
-  if (cdsp == NULL || far_is_null(cdsp->cdsDpb) || (cdsp->cdsFlags & CDSNETWDRV))
+  const dos_far_ptr cdsp_x86 = drive == 0 ? get_cds((UBYTE)dosfns_idata.default_drive()) : get_cds((UBYTE)(drive - 1));
+  if (far_is_null(cdsp_x86))
   {
     *rc = DE_INVLDDRV;
     return MK_FP(0, 0);
   }
-
+  const cds_ref cdsp(cdsp_x86);
+  const dos_far_ptr dpb = cdsp.dpb();
+  if (far_is_null(dpb) || (cdsp.flags() & CDSNETWDRV))
+  {
+    *rc = DE_INVLDDRV;
+    return MK_FP(0, 0);
+  }
   *rc = SUCCESS;
-  return cdsp->cdsDpb;
+  return dpb;
 }
 
 #define IS_SLASH(ch) ((ch) == '\\' || (ch) == '/')
 COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
 {
-  struct dpb FAR *dpbp;
-  struct cds FAR *cdsp;
-  dos_far_ptr cdsp_x86;
-
+  dos_far_ptr cdsp_x86 = MK_FP(0, 0);
   memset(xfsp, 0, sizeof(struct xfreespace));
   xfsp->xfs_datasize = sizeof(struct xfreespace);
-
-  cdsp = NULL;
   if (!*DriveString || (*DriveString == '.') || (IS_SLASH(DriveString[0]) && !IS_SLASH(DriveString[1])))
-  {
-    cdsp_x86 = get_cds(internal_data->default_drive);
-    if (!far_is_null(cdsp_x86))
-      cdsp = (struct cds FAR *)ARM_PTR(cdsp_x86);
-  }
+    cdsp_x86 = get_cds((UBYTE)dosfns_idata.default_drive());
   else if (DriveString[1] == ':')
-  {
     cdsp_x86 = get_cds(DosUpFChar(*DriveString) - 'A');
-    if (!far_is_null(cdsp_x86))
-      cdsp = (struct cds FAR *)ARM_PTR(cdsp_x86);
-  }
-
-  if (cdsp == NULL)
+  if (far_is_null(cdsp_x86))
     return DE_INVLDDRV;
-
-  if (cdsp->cdsFlags & CDSNETWDRV)
-  {
+  const cds_ref cdsp(cdsp_x86);
+  if (cdsp.flags() & CDSNETWDRV)
     return DE_INVLDDRV;
-    #if 0
-    if (remote_getfree_11a3(cdsp, rg) != SUCCESS)
-    {
-      if (remote_getfree(cdsp, rg) != SUCCESS)
-        return DE_INVLDDRV;
-
-      xfsp->xfs_clussize = rg[0];
-      xfsp->xfs_totalclusters = rg[1];
-      xfsp->xfs_secsize = rg[2];
-      xfsp->xfs_freeclusters = rg[3];
-    }
-    else
-    {
-      UDWORD total, avail;
-      UDWORD bps, spc;
-
-      bps = rg[4];
-      spc = 1;
-      total = (((UDWORD)rg[0] << 16UL) | rg[1]);
-      avail = (((UDWORD)rg[2] << 16UL) | rg[3]);
-
-      while (total > 0x00ffffffUL && spc < 128) {
-        spc *= 2;
-        avail /= 2;
-        total /= 2;
-      }
-      while (total > 0x00ffffffUL && bps < 32768UL) {
-        bps *= 2;
-        avail /= 2;
-        total /= 2;
-      }
-
-      xfsp->xfs_secsize = bps;
-      xfsp->xfs_clussize = spc;
-      xfsp->xfs_totalclusters = total;
-      xfsp->xfs_freeclusters = avail;
-    }
-    #endif
-  }
-  else
-  {
-    if (far_is_null(cdsp->cdsDpb))
-      return DE_INVLDDRV;
-    if (media_check_tagged(cdsp->cdsDpb, "DosGetExtFree/cdsDpb") < 0)
-      return DE_INVLDDRV;
-
-    dpbp = (struct dpb FAR *)ARM_PTR(cdsp->cdsDpb);
-    xfsp->xfs_secsize = dpbp->dpb_secsize;
-    xfsp->xfs_totalclusters = (ISFAT32(dpbp) ? dpbp->dpb_xsize : dpbp->dpb_size) - 1;
-    xfsp->xfs_freeclusters = dos_free(cdsp->cdsDpb);
-    xfsp->xfs_clussize = dpbp->dpb_clsmask + 1;
-  }
-
+  const dos_far_ptr dpbp_x86 = cdsp.dpb();
+  if (far_is_null(dpbp_x86) || media_check_tagged(dpbp_x86, "DosGetExtFree/cdsDpb") < 0)
+    return DE_INVLDDRV;
+  const dpb_ref dpbp(dpbp_x86);
+  xfsp->xfs_secsize = dpbp.dpb_secsize();
+#ifdef WITHFAT32
+  xfsp->xfs_totalclusters = (dpbp.is_fat32() ? dpbp.dpb_xsize() : dpbp.dpb_size()) - 1;
+#else
+  xfsp->xfs_totalclusters = dpbp.dpb_size() - 1;
+#endif
+  xfsp->xfs_freeclusters = dos_free(dpbp_x86);
+  xfsp->xfs_clussize = dpbp.cluster_mask() + 1;
   xfsp->xfs_totalunits = xfsp->xfs_totalclusters;
   xfsp->xfs_freeunits = xfsp->xfs_freeclusters;
   xfsp->xfs_totalsectors = xfsp->xfs_totalclusters * xfsp->xfs_clussize;
   xfsp->xfs_freesectors = xfsp->xfs_freeclusters * xfsp->xfs_clussize;
-  xfsp->xfs_datasize = sizeof(struct xfreespace);
-
   return SUCCESS;
 }
+
 #undef IS_SLASH
 #endif
 
@@ -1484,12 +1273,13 @@ COUNT DosChangeDir(dos_far_ptr s)
   /* Copy the path to the current directory structure. Some redirectors
      do not write back to the CDS - not applicable here (no redirector),
      kept for parity with upstream. */
-  if (CDS_WRITABLE(internal_data->current_ldt))
+  const dos_far_ptr current_ldt = dosfns_idata.current_ldt();
+  if (CDS_WRITABLE(current_ldt))
   {
-    struct cds *cdsp = (struct cds *)ARM_PTR(internal_data->current_ldt);
-    fstrcpy(cdsp->cdsCurrentPath, PriPathName);
+    const cds_ref cdsp(current_ldt);
+    cdsp.write_current_path(PriPathName);
     if (PriPathName[7] == 0)
-      cdsp->cdsCurrentPath[8] = 0; /* Need two Zeros at the end */
+      cdsp.current_path_byte(8, 0);
   }
   return SUCCESS;
 }
@@ -1672,9 +1462,9 @@ COUNT DosGetFtime(COUNT hndl, ddate * dp, dtime * tp)
   dos_far_ptr _s = get_sft(hndl);
   if ( far_is_end (_s) )
     return DE_INVLDHNDL;
-  sft* s = (sft*) ARM_PTR (_s);
-  *dp = s->sft_date;
-  *tp = s->sft_time;
+  const sft_ref sft(_s);
+  *dp = sft.date();
+  *tp = sft.time();
   return SUCCESS;
 }
 
@@ -1689,15 +1479,12 @@ COUNT DosSetFtimeSft(int sft_idx, ddate dp, dtime tp)
   dos_far_ptr _s = idx_to_sft(sft_idx);
   if (far_is_end(_s))
     return DE_INVLDHNDL;
-  sft *s = (sft *)ARM_PTR(_s);
-
-  /* If SFT entry refers to a device, do nothing */
-  if (s->sft_flags & SFT_FDEVICE)
+  const sft_ref sft(_s);
+  if (sft.flags() & SFT_FDEVICE)
     return SUCCESS;
-
-  s->sft_flags |= SFT_FDATE;
-  s->sft_date = dp;
-  s->sft_time = tp;
+  sft.flags((UWORD)(sft.flags() | SFT_FDATE));
+  sft.date(dp);
+  sft.time(tp);
 
   return SUCCESS;
 }

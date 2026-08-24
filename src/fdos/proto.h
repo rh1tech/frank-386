@@ -120,7 +120,6 @@ dos_far_ptr /*sft*/ idx_to_sft(int SftIndex);
 int get_sft_idx(UCOUNT hndl);
 /* Native view of a process's job file table (the ps_maxfiles bytes that
    ps_filetab points at), or NULL if ps_filetab is unusable. See dosfns.c. */
-UBYTE *jft_of(psp *p);
 
 /* Guest-memory copies that wrap the 16-bit offset inside the segment, the
    way real-mode rep movsb/stosb do. See the long note in kernel.c. */
