@@ -344,6 +344,9 @@ public:
         if (index < sizeof(((cds *)0)->cdsCurrentPath))
             store_byte(offsetof(cds, cdsCurrentPath) + index, value);
     }
+    __attribute__((always_inline)) void start_cluster(UWORD value) const {
+        scalar_store<UWORD>(offsetof(cds, cdsStrtClst), value);
+    }
 
 private:
     dos_far_ptr far_;
@@ -364,12 +367,57 @@ public:
     __attribute__((always_inline)) void mode(UWORD v) const {
         scalar_store<UWORD>(offsetof(sft, sft_mode), v);
     }
+    __attribute__((always_inline)) UBYTE attrib() const {
+        return scalar_load<UBYTE>(offsetof(sft, sft_attrib));
+    }
     __attribute__((always_inline)) void attrib(UBYTE v) const {
         scalar_store<UBYTE>(offsetof(sft, sft_attrib), v);
+    }
+    __attribute__((always_inline)) UWORD mode() const {
+        return scalar_load<UWORD>(offsetof(sft, sft_mode));
+    }
+    __attribute__((always_inline)) UWORD flags() const {
+        return scalar_load<UWORD>(offsetof(sft, sft_flags));
     }
     __attribute__((always_inline)) void flags(UWORD v) const {
         scalar_store<UWORD>(offsetof(sft, sft_flags), v);
     }
+    __attribute__((always_inline)) dos_far_ptr dev() const {
+        return dcb();
+    }
+    __attribute__((always_inline)) dos_far_ptr dcb() const {
+        const UWORD offset = scalar_load<UWORD>(offsetof(sft, sft_dcb));
+        const UWORD segment = scalar_load<UWORD>(offsetof(sft, sft_dcb) + sizeof(UWORD));
+        return MK_FP(segment, offset);
+    }
+    __attribute__((always_inline)) void dcb(dos_far_ptr v) const {
+        scalar_store<UWORD>(offsetof(sft, sft_dcb), FP_OFF(v));
+        scalar_store<UWORD>(offsetof(sft, sft_dcb) + sizeof(UWORD), FP_SEG(v));
+    }
+    __attribute__((always_inline)) CLUSTER start_cluster() const { return scalar_load<CLUSTER>(offsetof(sft, sft_stclust)); }
+    __attribute__((always_inline)) void start_cluster(CLUSTER v) const { scalar_store<CLUSTER>(offsetof(sft, sft_stclust), v); }
+    __attribute__((always_inline)) dtime time() const { return scalar_load<dtime>(offsetof(sft, sft_time)); }
+    __attribute__((always_inline)) void time(dtime v) const { scalar_store<dtime>(offsetof(sft, sft_time), v); }
+    __attribute__((always_inline)) ddate date() const { return scalar_load<ddate>(offsetof(sft, sft_date)); }
+    __attribute__((always_inline)) void date(ddate v) const { scalar_store<ddate>(offsetof(sft, sft_date), v); }
+    __attribute__((always_inline)) ULONG size() const { return scalar_load<ULONG>(offsetof(sft, sft_size)); }
+    __attribute__((always_inline)) void size(ULONG v) const { scalar_store<ULONG>(offsetof(sft, sft_size), v); }
+    __attribute__((always_inline)) ULONG position() const { return scalar_load<ULONG>(offsetof(sft, sft_posit)); }
+    __attribute__((always_inline)) void position(ULONG v) const { scalar_store<ULONG>(offsetof(sft, sft_posit), v); }
+    __attribute__((always_inline)) UWORD rel_cluster() const { return scalar_load<UWORD>(offsetof(sft, sft_relclust)); }
+    __attribute__((always_inline)) void rel_cluster(UWORD v) const { scalar_store<UWORD>(offsetof(sft, sft_relclust), v); }
+#ifdef WITHFAT32
+    __attribute__((always_inline)) UWORD rel_cluster_high() const { return scalar_load<UWORD>(offsetof(sft, sft_relclust_high)); }
+    __attribute__((always_inline)) void rel_cluster_high(UWORD v) const { scalar_store<UWORD>(offsetof(sft, sft_relclust_high), v); }
+#endif
+    __attribute__((always_inline)) ULONG dir_sector() const { return scalar_load<ULONG>(offsetof(sft, sft_dirsector)); }
+    __attribute__((always_inline)) void dir_sector(ULONG v) const { scalar_store<ULONG>(offsetof(sft, sft_dirsector), v); }
+    __attribute__((always_inline)) UBYTE dir_index() const { return scalar_load<UBYTE>(offsetof(sft, sft_diridx)); }
+    __attribute__((always_inline)) void dir_index(UBYTE v) const { scalar_store<UBYTE>(offsetof(sft, sft_diridx), v); }
+    __attribute__((always_inline)) CLUSTER current_cluster() const { return scalar_load<CLUSTER>(offsetof(sft, sft_cuclust)); }
+    __attribute__((always_inline)) void current_cluster(CLUSTER v) const { scalar_store<CLUSTER>(offsetof(sft, sft_cuclust), v); }
+    __attribute__((always_inline)) void read_name(BYTE *dst) const { guest_read_block(addr_ + offsetof(sft, sft_name), dst, sizeof(((sft *)0)->sft_name)); }
+    __attribute__((always_inline)) void write_name(const BYTE *src) const { guest_write_block(addr_ + offsetof(sft, sft_name), src, sizeof(((sft *)0)->sft_name)); }
     __attribute__((always_inline)) void psp(UWORD v) const {
         scalar_store<UWORD>(offsetof(sft, sft_psp), v);
     }
@@ -427,14 +475,17 @@ public:
     __attribute__((always_inline)) void name(ULONG v) const { scalar_store<ULONG>(offsetof(dpb, name), v); }
 
     FDOS_GUEST_RW8(dpb_unit)
+    __attribute__((always_inline)) UBYTE unit() const { return dpb_unit(); }
     FDOS_GUEST_RW8(dpb_subunit)
     FDOS_GUEST_RW16(dpb_secsize)
     FDOS_GUEST_RW8(dpb_clsmask)
+    __attribute__((always_inline)) UBYTE cluster_mask() const { return dpb_clsmask(); }
     FDOS_GUEST_RW8(dpb_shftcnt)
     FDOS_GUEST_RW16(dpb_fatstrt)
     FDOS_GUEST_RW8(dpb_fats)
     FDOS_GUEST_RW16(dpb_dirents)
     FDOS_GUEST_RW16(dpb_data)
+    __attribute__((always_inline)) UWORD data_start() const { return dpb_data(); }
     FDOS_GUEST_RW16(dpb_size)
     FDOS_GUEST_RW16(dpb_fatsize)
     FDOS_GUEST_RW16(dpb_dirstrt)
@@ -470,10 +521,12 @@ public:
     FDOS_GUEST_RW16(dpb_xfsinfosec)
     FDOS_GUEST_RW16(dpb_xbackupsec)
     FDOS_GUEST_RW32(dpb_xdata)
+    __attribute__((always_inline)) ULONG xdata_start() const { return dpb_xdata(); }
     FDOS_GUEST_RW32(dpb_xsize)
     FDOS_GUEST_RW32(dpb_xfatsize)
     FDOS_GUEST_RW32(dpb_xrootclst)
     FDOS_GUEST_RW32(dpb_xcluster)
+    __attribute__((always_inline)) ULONG xnfree() const { return scalar_load<ULONG>(offsetof(dpb, dpb_nfreeclst_un)); }
     __attribute__((always_inline)) void xnfree(ULONG v) const { scalar_store<ULONG>(offsetof(dpb, dpb_nfreeclst_un), v); }
 #endif
 
@@ -648,6 +701,7 @@ public:
     __attribute__((always_inline)) UBYTE data8(std::size_t off) const { return scalar_load<UBYTE>(offsetof(buffer, b_buffer) + off); }
     __attribute__((always_inline)) UWORD data16(std::size_t off) const { return scalar_load<UWORD>(offsetof(buffer, b_buffer) + off); }
     __attribute__((always_inline)) ULONG data32(std::size_t off) const { return scalar_load<ULONG>(offsetof(buffer, b_buffer) + off); }
+    __attribute__((always_inline)) void data32(std::size_t off, ULONG v) const { scalar_store<ULONG>(offsetof(buffer, b_buffer) + off, v); }
 
 private:
     __attribute__((always_inline)) dos_far_ptr far_load(std::size_t off) const {

@@ -142,8 +142,8 @@ _Static_assert(sizeof(struct lfn_entry) == 32,
 /*                                                                      */
 
 struct dpb;
-CLUSTER getdstart(struct dpb FAR *dpbp, struct dirent *dentry);
-void setdstart(struct dpb FAR *dpbp, struct dirent *dentry, CLUSTER value);
+CLUSTER getdstart(dos_far_ptr dpbp, struct dirent *dentry);
+void setdstart(dos_far_ptr dpbp, struct dirent *dentry, CLUSTER value);
 
 #define DIR_NAME        0
 #define DIR_EXT         FNAME_SIZE

@@ -277,7 +277,7 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
     {
       /* make certain we've moved off */
       /* root                         */
-      dir_init_fnode(fnp, getdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir));
+      dir_init_fnode(fnp, getdstart(fnp->f_dpb, &fnp->f_dir));
       fnp->f_dmp->dm_entry = 0;
     }
   }
@@ -307,7 +307,7 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
   /* Update the entry if it was modified by a write or create...  */
   if (!update || (fnp->f_flags & (SFT_FCLEAN|SFT_FDATE)) != SFT_FCLEAN)
   {
-    bp = getblock(fnp->f_dirsector, ((struct dpb*)ARM_PTR(fnp->f_dpb))->dpb_unit);
+    bp = getblock(fnp->f_dirsector, dpb_ref(fnp->f_dpb).dpb_unit());
 
     /* Now that we have a block, transfer the directory      */
     /* entry into the block.                                */
@@ -327,7 +327,7 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
       fputword(&vp[DIR_DATE], fnp->f_dir.dir_date);
       fputword(&vp[DIR_START], fnp->f_dir.dir_start);
 #ifdef WITHFAT32
-      if (ISFAT32((struct dpb*)ARM_PTR(fnp->f_dpb)))
+      if ((dpb_ref(fnp->f_dpb).dpb_fatsize() == 0))
         fputword(&vp[DIR_START_HIGH], fnp->f_dir.dir_start_high);
 #endif
       fputlong(&vp[DIR_SIZE], fnp->f_dir.dir_size);
@@ -343,7 +343,7 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
     bp->b_flag |= BFR_DIR | BFR_DIRTY | BFR_VALID;
   }
   /* Clear buffers after directory write or DOS close                     */
-  return flush_buffers(((struct dpb*)ARM_PTR(fnp->f_dpb))->dpb_unit);
+  return flush_buffers(dpb_ref(fnp->f_dpb).dpb_unit());
 }
 
 /*

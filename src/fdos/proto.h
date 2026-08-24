@@ -162,7 +162,7 @@ const char *ConvertNameSZToName83(char *destFCBName, const char *srcSZ);
 
 /* fatfs.c */
 dos_far_ptr/*struct dpb*/ get_dpb(COUNT dsk);
-ULONG clus2phys(CLUSTER cl_no, struct dpb FAR * dpbp);
+ULONG clus2phys(CLUSTER cl_no, dos_far_ptr dpbp);
 int dos_open(char * path, unsigned flag, unsigned attrib, int fd);
 BOOL fcbmatch(const char *fcbname1, const char *fcbname2);
 BOOL fcmp_wild(const char * s1, const char * s2, unsigned n);
@@ -202,7 +202,7 @@ void dos_merge_file_changes(int fd);
 
 /* fattab.c */
 void read_fsinfo(dos_far_ptr dpbp);
-void write_fsinfo(struct dpb FAR * dpbp);
+void write_fsinfo(dos_far_ptr dpbp);
 #ifdef WITHFAT32
 VOID bpb_to_dpb(dos_far_ptr bpbp, dos_far_ptr dpbp, BOOL extended);
 #else

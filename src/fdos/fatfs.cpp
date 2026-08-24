@@ -18,8 +18,15 @@ extern "C" {
 #include "guest_ref.hpp"
 
 using fdos_guest::bpb_ref;
+using fdos_guest::cds_ref;
+using fdos_guest::dhdr_ref;
+using fdos_guest::dos_data_ref;
 using fdos_guest::dpb_ref;
+using fdos_guest::lol_ref;
+using fdos_guest::psp_ref;
 using fdos_guest::request_ref;
+using fdos_guest::sft_ref;
+using fdos_guest::sfttbl_ref;
 
 extern "C" {
 
@@ -29,8 +36,21 @@ static constexpr fdos_guest::linear_t media_req_linear =
     (static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + X86_INTERNAL_DATA_OFF +
     offsetof(dos_data, MediaReqHdr);
 static const request_ref media_req(media_req_linear);
+static const dos_data_ref fatfs_idata(
+    (static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + X86_INTERNAL_DATA_OFF);
+static const lol_ref fatfs_lol(
+    (static_cast<fdos_guest::linear_t>(DOS_PSP) << 4) + 0x08F0u);
 static const dos_far_ptr media_req_far =
     MK_FP(DOS_PSP, X86_INTERNAL_DATA_OFF + offsetof(dos_data, MediaReqHdr));
+
+static int cds_current_path_equals(dos_far_ptr p, const char *path)
+{
+  if (far_is_null(p))
+    return 0;
+  char current[MAX_CDSPATH];
+  cds_ref(p).copy_current_path(current, sizeof(current));
+  return fstrcmp(path, current) == 0;
+}
 #if DIAG
 extern volatile unsigned int dos_diag_kernel_code;
 #endif
@@ -85,66 +105,65 @@ f_node_ptr fnode_slot(int i)
 */
 STATIC int merge_file_changes(f_node_ptr fnp, int collect)
 {
-  int i, j;
-  sft *sftp;
-  dos_far_ptr x86_sp;
-  dos_far_ptr fnp_dpb_far;
+  int i = 0;
+  const dos_far_ptr fnp_dpb_far = fnp->f_dpb;
 
   if (!IsShareInstalled(FALSE))
     return SUCCESS;
 
-  fnp_dpb_far = fnp->f_dpb;
-
-  i = 0;
-  for (x86_sp = LoL->sfthead; !far_is_end(x86_sp); )
+  for (dos_far_ptr block = fatfs_lol.sfthead(); !far_is_end(block); )
   {
-    sfttbl *sp = (sfttbl *)ARM_PTR(x86_sp);
+    const sfttbl_ref table(block);
+    const UWORD count = table.count();
 
-    for (j = sp->sftt_count, sftp = sp->sftt_table; --j >= 0; sftp++, i++)
+    for (UWORD j = 0; j < count; ++j, ++i)
     {
-      if (i != fnp->f_sft_idx && sftp->sft_count != 0
-          && FP_SEG(fnp_dpb_far) == FP_SEG(sftp->sft_dcb)
-          && FP_OFF(fnp_dpb_far) == FP_OFF(sftp->sft_dcb)
+      const sft_ref sftp(table.entry(j));
+      const dos_far_ptr entry_dcb = sftp.dcb();
+
+      if (i != fnp->f_sft_idx && sftp.count() != 0
+          && FP_SEG(fnp_dpb_far) == FP_SEG(entry_dcb)
+          && FP_OFF(fnp_dpb_far) == FP_OFF(entry_dcb)
           && (fnp->f_dir.dir_attrib & D_VOLID) == 0
-          && (sftp->sft_attrib & D_VOLID) == 0
-          && fnp->f_diridx == sftp->sft_diridx
-          && fnp->f_dirsector == sftp->sft_dirsector
-        ) /* same file, but different FD */
+          && (sftp.attrib() & D_VOLID) == 0
+          && fnp->f_diridx == sftp.dir_index()
+          && fnp->f_dirsector == sftp.dir_sector())
       {
         if (collect == -1)
         {
-          /* set attrib: close open files */
-          int rc = DosCloseSft(i, FALSE);
+          /* DosCloseSft() may remap guest RAM; only linear/far refs survive it. */
+          const int rc = DosCloseSft(i, FALSE);
           if (rc != SUCCESS)
             return rc;
         }
         else if (collect)
         {
-          /* We're collecting file changes from any other
-             SFT which refers to this file. */
-          if ((sftp->sft_mode & O_ACCMODE) != RDONLY)
+          if ((sftp.mode() & O_ACCMODE) != RDONLY)
           {
-            setdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir, sftp->sft_stclust);
-            fnp->f_dir.dir_size = sftp->sft_size;
-            fnp->f_dir.dir_date = sftp->sft_date;
-            fnp->f_dir.dir_time = sftp->sft_time;
+            const CLUSTER start = sftp.start_cluster();
+            const ULONG size = sftp.size();
+            const ddate date = sftp.date();
+            const dtime time = sftp.time();
+            setdstart(fnp->f_dpb, &fnp->f_dir, start);
+            fnp->f_dir.dir_size = size;
+            fnp->f_dir.dir_date = date;
+            fnp->f_dir.dir_time = time;
             return SUCCESS;
           }
         }
         else
         {
-          /* We just made changes to this file, so we are
-             distributing these changes to the other f_nodes
-             which refer to this file. */
-          sftp->sft_stclust = getdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir);
-          sftp->sft_size = fnp->f_dir.dir_size;
-          sftp->sft_date = fnp->f_dir.dir_date;
-          sftp->sft_time = fnp->f_dir.dir_time;
+          const CLUSTER start =
+              getdstart(fnp->f_dpb, &fnp->f_dir);
+          sftp.start_cluster(start);
+          sftp.size(fnp->f_dir.dir_size);
+          sftp.date(fnp->f_dir.dir_date);
+          sftp.time(fnp->f_dir.dir_time);
         }
       }
     }
 
-    x86_sp = sp->sftt_next;
+    block = table.next();
   }
   return SUCCESS;
 }
@@ -159,33 +178,32 @@ STATIC int merge_file_changes(f_node_ptr fnp, int collect)
 */
 STATIC f_node_ptr sft_to_fnode(int fd)
 {
-  sft* sftp = (sft*) ARM_PTR(idx_to_sft(fd));
+  const dos_far_ptr sft_far = idx_to_sft(fd);
+  const sft_ref sftp(sft_far);
   f_node_ptr fnp = fnode_slot(0);
   CLUSTER start_cluster;
 
-  /* Read every SFT field before mapping any other guest object. */
   fnp->f_sft_idx = (UBYTE)fd;
-  fnp->f_flags = sftp->sft_flags;
-  fnp->f_dir.dir_attrib = sftp->sft_attrib;
-  memcpy(fnp->f_dir.dir_name, sftp->sft_name, FNAME_SIZE + FEXT_SIZE);
-  fnp->f_dir.dir_time = sftp->sft_time;
-  fnp->f_dir.dir_date = sftp->sft_date;
-  fnp->f_dir.dir_size = sftp->sft_size;
-  fnp->f_dpb = sftp->sft_dcb;
-  start_cluster = sftp->sft_stclust;
-  fnp->f_diridx = sftp->sft_diridx;
-  fnp->f_dirsector = sftp->sft_dirsector;
-  fnp->f_offset = sftp->sft_posit;
-  fnp->f_cluster = sftp->sft_cuclust;
+  fnp->f_flags = sftp.flags();
+  fnp->f_dir.dir_attrib = sftp.attrib();
+  sftp.read_name(fnp->f_dir.dir_name);
+  fnp->f_dir.dir_time = sftp.time();
+  fnp->f_dir.dir_date = sftp.date();
+  fnp->f_dir.dir_size = sftp.size();
+  fnp->f_dpb = sftp.dcb();
+  start_cluster = sftp.start_cluster();
+  fnp->f_diridx = sftp.dir_index();
+  fnp->f_dirsector = sftp.dir_sector();
+  fnp->f_offset = sftp.position();
+  fnp->f_cluster = sftp.current_cluster();
 #ifdef WITHFAT32
-  fnp->f_cluster_offset = sftp->sft_relclust |
-    ((ULONG)sftp->sft_relclust_high << 16);
+  fnp->f_cluster_offset = sftp.rel_cluster() |
+    ((ULONG)sftp.rel_cluster_high() << 16);
 #else
-  fnp->f_cluster_offset = sftp->sft_relclust;
+  fnp->f_cluster_offset = sftp.rel_cluster();
 #endif
 
-  /* sftp is dead before this second guest mapping. */
-  setdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir, start_cluster);
+  setdstart(fnp->f_dpb, &fnp->f_dir, start_cluster);
   return fnp;
 }
 
@@ -246,8 +264,10 @@ STATIC COUNT dos_extend(f_node_ptr fnp, BOOL emptywrite)
 
   {
     BOOL special = 0;
-    struct dpb* f_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
-    if (emptywrite && ((fnp->f_offset & (((ULONG)f_dpb->dpb_secsize << f_dpb->dpb_shftcnt) - 1)) == 0)) {
+    const dpb_ref d(fnp->f_dpb);
+    const UWORD secsize = d.dpb_secsize();
+    const UBYTE shftcnt = d.dpb_shftcnt();
+    if (emptywrite && ((fnp->f_offset & (((ULONG)secsize << shftcnt) - 1)) == 0)) {
       special = 1;
       -- fnp->f_offset;
     }
@@ -256,7 +276,7 @@ STATIC COUNT dos_extend(f_node_ptr fnp, BOOL emptywrite)
       if (fnp->f_cluster != FREE) {
         /* write size if couldn't satisfy full request,
            but at least one cluster is allocated. */
-        fnp->f_dir.dir_size = (((ULONG)fnp->f_cluster_offset + 1) * (ULONG)f_dpb->dpb_secsize) << f_dpb->dpb_shftcnt;
+        fnp->f_dir.dir_size = (((ULONG)fnp->f_cluster_offset + 1) * (ULONG)secsize) << shftcnt;
         merge_file_changes(fnp, FALSE);
       }
       return DE_HNDLDSKFULL;
@@ -270,28 +290,26 @@ STATIC COUNT dos_extend(f_node_ptr fnp, BOOL emptywrite)
 
 STATIC void fnode_to_sft(f_node_ptr fnp)
 {
-  CLUSTER start_cluster =
-      getdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir);
-  dos_far_ptr _sftp = idx_to_sft(fnp->f_sft_idx);
-  sft *sftp = (sft*)ARM_PTR(_sftp);
+  const CLUSTER start_cluster =
+      getdstart(fnp->f_dpb, &fnp->f_dir);
+  const dos_far_ptr sft_far = idx_to_sft(fnp->f_sft_idx);
+  const sft_ref sftp(sft_far);
 
-  /* fnp is native kernel scratch, so the DPB mapping above cannot invalidate
-     it.  Once SFT is mapped, no further guest object is mapped here. */
-  sftp->sft_flags = fnp->f_flags;
-  sftp->sft_attrib = fnp->f_dir.dir_attrib;
-  memcpy(sftp->sft_name, fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE);
-  sftp->sft_time = fnp->f_dir.dir_time;
-  sftp->sft_date = fnp->f_dir.dir_date;
-  sftp->sft_size = fnp->f_dir.dir_size;
-  sftp->sft_stclust = start_cluster;
-  sftp->sft_diridx = fnp->f_diridx;
-  sftp->sft_dirsector = fnp->f_dirsector;
-  sftp->sft_dcb = fnp->f_dpb;
-  sftp->sft_posit = fnp->f_offset;
-  sftp->sft_cuclust = fnp->f_cluster;
-  sftp->sft_relclust = (UWORD)fnp->f_cluster_offset;
+  sftp.flags(fnp->f_flags);
+  sftp.attrib(fnp->f_dir.dir_attrib);
+  sftp.write_name(fnp->f_dir.dir_name);
+  sftp.time(fnp->f_dir.dir_time);
+  sftp.date(fnp->f_dir.dir_date);
+  sftp.size(fnp->f_dir.dir_size);
+  sftp.start_cluster(start_cluster);
+  sftp.dir_index(fnp->f_diridx);
+  sftp.dir_sector(fnp->f_dirsector);
+  sftp.dcb(fnp->f_dpb);
+  sftp.position(fnp->f_offset);
+  sftp.current_cluster(fnp->f_cluster);
+  sftp.rel_cluster((UWORD)fnp->f_cluster_offset);
 #ifdef WITHFAT32
-  sftp->sft_relclust_high = (UWORD)(fnp->f_cluster_offset >> 16);
+  sftp.rel_cluster_high((UWORD)(fnp->f_cluster_offset >> 16));
 #endif
 }
 
@@ -315,7 +333,7 @@ STATIC int shrink_file(f_node_ptr fnp)
 {
   ULONG lastoffset = fnp->f_offset;     /* has to be saved */
   CLUSTER last, next, st;
-  struct dpb* dpbp = (struct dpb*)ARM_PTR(fnp->f_dpb);
+  const UBYTE dpb_unit = dpb_ref(fnp->f_dpb).dpb_unit();
   int ret = DE_ACCESS;
 
   if (fnp->f_offset)
@@ -342,7 +360,7 @@ STATIC int shrink_file(f_node_ptr fnp)
   if (fnp->f_dir.dir_size == 0) /* file shrinks to size 0 */
   {
     fnp->f_cluster = FREE;
-    setdstart(dpbp, &fnp->f_dir, FREE); /* file no longer has start cluster */
+    setdstart(fnp->f_dpb, &fnp->f_dir, FREE); /* file no longer has start cluster */
     last = FREE;
   }
   else
@@ -356,7 +374,7 @@ STATIC int shrink_file(f_node_ptr fnp)
 
   wipe_out_clusters(fnp->f_dpb, next); /* free clusters after the end */
   /* flush buffers, make sure disk is updated */
-  if (!flush_buffers(dpbp->dpb_unit))
+  if (!flush_buffers(dpb_unit))
     goto done;
 
 done_success:
@@ -378,7 +396,14 @@ struct rwblock_workspace
 {
   f_node_ptr fnp;
   struct buffer *bp;
-  struct dpb *f_dpb;
+  dos_far_ptr x86_dpb;
+  UBYTE dpb_unit;
+  UBYTE dpb_clsmask;
+  UWORD dpb_data;
+#ifdef WITHFAT32
+  ULONG dpb_xdata;
+  BOOL dpb_is_fat32;
+#endif
   dos_far_ptr x86_buffer;
   ULONG currentblock;
   ULONG startoffset;
@@ -397,7 +422,14 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
 {
 #define fnp             (work->fnp)
 #define bp              (work->bp)
-#define wf_dpb          (work->f_dpb)
+#define x86_dpb         (work->x86_dpb)
+#define dpb_unit        (work->dpb_unit)
+#define dpb_clsmask     (work->dpb_clsmask)
+#define dpb_data        (work->dpb_data)
+#ifdef WITHFAT32
+#define dpb_xdata       (work->dpb_xdata)
+#define dpb_is_fat32    (work->dpb_is_fat32)
+#endif
 #define x86_buffer      (work->x86_buffer)
 #define currentblock    (work->currentblock)
 #define startoffset     (work->startoffset)
@@ -486,8 +518,18 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
   }               
 
   /* The variable secsize will be used later.                     */
-  wf_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
-  secsize = wf_dpb->dpb_secsize;
+  x86_dpb = fnp->f_dpb;
+  {
+    const dpb_ref d(x86_dpb);
+    secsize = d.dpb_secsize();
+    dpb_unit = d.unit();
+    dpb_clsmask = d.cluster_mask();
+    dpb_data = d.data_start();
+#ifdef WITHFAT32
+    dpb_is_fat32 = (d.dpb_fatsize() == 0);
+    dpb_xdata = d.xdata_start();
+#endif
+  }
 
   /* Do the data transfer. Use block transfer methods so that we  */
   /* can utilize memory management in future DOS-C versions.      */
@@ -527,10 +569,10 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
 
     /* Compute the block within the cluster and the offset  */
     /* within the block.                                    */
-    sector = (UBYTE)(fnp->f_offset / secsize) & wf_dpb->dpb_clsmask;
+    sector = (UBYTE)(fnp->f_offset / secsize) & dpb_clsmask;
     boff = (UWORD)(fnp->f_offset % secsize);
 
-    currentblock = clus2phys(fnp->f_cluster, wf_dpb) + sector;
+    currentblock = clus2phys(fnp->f_cluster, x86_dpb) + sector;
 
     /* see comments above */
 
@@ -548,7 +590,7 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
       if (sectors_wanted == 0)
         goto normal_xfer;
 
-      sectors_to_xfer = wf_dpb->dpb_clsmask + 1 - sector;
+      sectors_to_xfer = dpb_clsmask + 1 - sector;
 
       sectors_to_xfer = min(sectors_to_xfer, sectors_wanted);
 
@@ -560,7 +602,7 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
           break;
 
         {
-          ULONG nextblock = clus2phys(fnp->f_cluster, wf_dpb);
+          ULONG nextblock = clus2phys(fnp->f_cluster, x86_dpb);
           if (nextblock != currentblock + sectors_to_xfer)
           {
             #if 0
@@ -571,15 +613,15 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
                    (unsigned)sectors_to_xfer,
                    (unsigned long)currentblock,
                    (unsigned long)nextblock,
-                   ISFAT32(wf_dpb) ? 1u : 0u,
-                   (unsigned)wf_dpb->dpb_data,
-                   (unsigned long)wf_dpb->dpb_xdata);
+                   dpb_is_fat32 ? 1u : 0u,
+                   (unsigned)dpb_data,
+                   (unsigned long)dpb_xdata);
             #endif
             break;
           }
         }
 
-        sectors_to_xfer += wf_dpb->dpb_clsmask + 1;
+        sectors_to_xfer += dpb_clsmask + 1;
 
         sectors_to_xfer = min(sectors_to_xfer, sectors_wanted);
 
@@ -593,9 +635,9 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
 
       DeleteBlockInBufferCache(currentblock,
                                currentblock + sectors_to_xfer - 1,
-                               wf_dpb->dpb_unit, mode);
+                               dpb_unit, mode);
 
-      if (dskxfer(wf_dpb->dpb_unit,
+      if (dskxfer(dpb_unit,
                   currentblock,
                   x86_buffer, sectors_to_xfer,
                   mode == XFR_READ ? DSKREAD : DSKWRITE))
@@ -612,7 +654,7 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
   normal_xfer:
 
     /* Get the block we need from cache                     */
-    bp = getblock(currentblock, wf_dpb->dpb_unit);
+    bp = getblock(currentblock, dpb_unit);
 
     if (bp == NULL)             /* (struct buffer *)0 --> DS:0 !! */
     {
@@ -674,7 +716,14 @@ static long rwblock_worker(COUNT fd, UCOUNT count, int mode,
     long result = ret_cnt;
 #undef fnp
 #undef bp
-#undef wf_dpb
+#undef x86_dpb
+#undef dpb_unit
+#undef dpb_clsmask
+#undef dpb_data
+#ifdef WITHFAT32
+#undef dpb_xdata
+#undef dpb_is_fat32
+#endif
 #undef x86_buffer
 #undef currentblock
 #undef startoffset
@@ -831,7 +880,7 @@ int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
 
   merge_file_changes(fnp, status == S_OPENED); /* /// Added - Ron Cemer */
   /* /// Moved from above.  - Ron Cemer */
-  fnp->f_cluster = getdstart((struct dpb*)ARM_PTR(fnp->f_dpb), &fnp->f_dir);
+  fnp->f_cluster = getdstart(fnp->f_dpb, &fnp->f_dir);
 
   fnode_to_sft(fnp);
   return status;
@@ -872,60 +921,53 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
   if (far_is_end(_s))
     return DE_INVLDHNDL;
 
-  sft *sftp = (sft*) ARM_PTR ( _s );
-  internal_data->lpCurSft = _s;
-/*
-   remote sub sft_count.
-   /// TODO:
-  if (sftp->sft_flags & SFT_FSHARED)
-  {
-    /// unreachable: see the function-level comment above.
-    return network_redirector_fp(commitonly ? REM_FLUSH : REM_CLOSE, sftp);
-  }
- */
+  const sft_ref sftp(_s);
+  fatfs_idata.lp_cur_sft(_s);
 
-  if (sftp->sft_flags & SFT_FDEVICE)
+  const UWORD flags = sftp.flags();
+  if (flags & SFT_FDEVICE)
   {
-    struct dhdr *dev = (struct dhdr *)ARM_PTR(sftp->sft_dev);
-    if (dev->dh_attr & SFT_FOCRM)
+    const dos_far_ptr devp = sftp.dev();
+    if (dhdr_ref(devp).attr() & SFT_FOCRM)
     {
-      /* if Open/Close/RM bit in driver's attribute is set
-       * then issue a Close request to the driver
-       */
-      dos_far_ptr devp = sftp->sft_dev;
+      dos_far_ptr dev = devp;
 #if DIAG
       dos_diag_kernel_code = 0x43400000u
                            | (((unsigned)sft_idx & 0xffu) << 16)
-                           | ((unsigned)sftp->sft_count & 0xffffu);
+                           | ((unsigned)sftp.count() & 0xffffu);
 #endif
-      if (BinaryCharIO(&devp, 0, MK_FP(0,0), C_CLOSE) != SUCCESS)
+      if (BinaryCharIO(&dev, 0, MK_FP(0,0), C_CLOSE) != SUCCESS)
         return DE_INVLDHNDL;
 #if DIAG
       dos_diag_kernel_code = 0x43500000u
                            | (((unsigned)sft_idx & 0xffu) << 16)
-                           | ((unsigned)sftp->sft_count & 0xffffu);
+                           | ((unsigned)sftp.count() & 0xffffu);
 #endif
     }
-    /* now just drop the count if a device */
     if (!commitonly)
-      sftp->sft_count -= 1;
+    {
+      const UWORD count = sftp.count();
+      sftp.count((UWORD)(count - 1u));
+    }
     return SUCCESS;
   }
 
-  /* else call file system handler                     */
-  int result = dos_close(sft_idx);
+  const int result = dos_close(sft_idx);
   if (commitonly || result != SUCCESS)
     return result;
 
-/* /// Added for SHARE *** CURLY BRACES ADDED ALSO!!! ***.  - Ron Cemer */
-  if (sftp->sft_count == 1 && IsShareInstalled(TRUE))
+  if (sftp.count() == 1 && IsShareInstalled(TRUE))
   {
-    if (sftp->sft_shroff >= 0)
-      share_close_file(sftp->sft_shroff);
-    sftp->sft_shroff = -1;
+    const WORD shroff = sftp.shroff();
+    if (shroff >= 0)
+      share_close_file(shroff);
+    sftp.shroff(-1);
   }
-/* /// End of additions for SHARE.  - Ron Cemer */
-  sftp->sft_count -= 1;
+
+  {
+    const UWORD count = sftp.count();
+    sftp.count((UWORD)(count - 1u));
+  }
   return SUCCESS;
 }
 
@@ -933,13 +975,12 @@ COUNT DosCloseSft(int sft_idx, BOOL commitonly)
     DosClose(hndl) - INT 21h AH=3Eh: close a DOS file handle for the
     current process.
 
-    Migrated from dosfns.c. p is a native pointer here (see
-    get_free_hndl() above for the same "psp through
-    internal_data->cu_psp" pattern).
+    Migrated from dosfns.c. PSP/JFT state is accessed through psp_ref so
+    pageable guest RAM is never exposed as a native pointer here.
 */
 COUNT DosClose(COUNT hndl)
 {
-  psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+  const psp_ref process(fatfs_idata.cu_psp());
   int sft_idx = get_sft_idx(hndl);
 #if DIAG
   dos_diag_kernel_code = 0x43100000u
@@ -947,18 +988,15 @@ COUNT DosClose(COUNT hndl)
                        | ((unsigned)hndl & 0xffffu);
 #endif
   dos_far_ptr /* -> sft */ s = idx_to_sft(sft_idx);
-  UBYTE *jft;
   if (far_is_end(s))
     return DE_INVLDHNDL;
-  /* get_sft_idx() above already validated the JFT, so this cannot fail;
-     go through jft_of() anyway rather than re-deriving the pointer by
-     hand - an unchecked ps_filetab here writes 0xff into the guest IVT. */
-  if ((jft = jft_of(p)) == NULL)
+  const dos_far_ptr table = process.file_table();
+  if (far_is_null(table) || far_is_end(table) || hndl >= process.max_files())
     return DE_INVLDHNDL;
   /* We must close the (valid) file handle before any critical error */
   /* may occur, else e.g. ABORT will try to close the file twice,    */
   /* the second time after stdout is already closed */
-  jft[hndl] = 0xff;
+  pstore8(((uint32_t)FP_SEG(table) << 4) + FP_OFF(table) + (UWORD)hndl, 0xff);
 #if DIAG
   dos_diag_kernel_code = 0x43200000u
                        | (((unsigned)sft_idx & 0xffu) << 16)
@@ -980,10 +1018,8 @@ COUNT DosClose(COUNT hndl)
 /* split a path into it's component directory and file name             */
 /*                                                                      */
 /*
-    Migrated from fatfs.c verbatim. The #ifdef DEBUG block needs an
-    ARM_PTR() that the original doesn't: get_cds() here returns a
-    dos_far_ptr (see fdos_21h.c), not a directly-dereferenceable
-    pointer like the original's "struct cds FAR *".
+    Migrated from fatfs.c. The DEBUG-only redirected-drive check reads
+    CDS flags through cds_ref because get_cds() returns a guest far pointer.
 */
 f_node_ptr split_path(const char * path, f_node_ptr fnp)
 {
@@ -1003,7 +1039,7 @@ f_node_ptr split_path(const char * path, f_node_ptr fnp)
 
  */
 #ifdef DEBUG
-  if (((struct cds *)ARM_PTR(get_cds(path[0]-'A')))->cdsFlags & CDSNETWDRV)
+  if (cds_ref(get_cds(path[0]-'A')).flags() & CDSNETWDRV)
   {
     printf("split path called for redirected file: `%s'\n", path);
     return (f_node_ptr) 0;
@@ -1029,14 +1065,12 @@ BOOL dir_exists(char * path)
     CHDIR that updates the CDS once the new directory has been
     confirmed to exist).
 
-    Migrated from fatfs.c. cdsp is a dos_far_ptr here (get_cds()
-    returns one in this codebase, see fdos_21h.c), so the original's
-    direct "cdsp->cdsStrtClst = ..." needs an ARM_PTR() first.
+    Migrated from fatfs.c. get_cds() returns a guest far pointer here,
+    so the CDS start-cluster update goes through cds_ref.
 */
 int dos_cd(char *PathName)
 {
   f_node_ptr fnp;
-  struct cds *cdsp;
   /* now test for its existance. If it doesn't, return an error.  */
   if ((fnp = dir_open(PathName, FALSE, fnode_slot(0))) == NULL)
     return DE_PATHNOTFND;
@@ -1055,12 +1089,7 @@ int dos_cd(char *PathName)
        so this is belt-and-braces - but it is the difference between a
        broken precondition being harmless and it taking down the system. */
     if (!far_is_null(x86_cdsp))
-      cdsp = (struct cds *)ARM_PTR(x86_cdsp);
-    else
-      cdsp = NULL;
-
-    if (cdsp != NULL)
-      cdsp->cdsStrtClst = (UWORD)fnp->f_dmp->dm_dircluster;
+      cds_ref(x86_cdsp).start_cluster((UWORD)fnp->f_dmp->dm_dircluster);
   }
   return SUCCESS;
 }
@@ -1076,15 +1105,14 @@ int dos_cd(char *PathName)
 dos_far_ptr/*struct dpb*/ get_dpb(COUNT dsk)
 {
   dos_far_ptr x86_cdsp = get_cds(dsk);
-  struct cds *cdsp;
 
   if (far_is_null(x86_cdsp))
     return x86_cdsp;
 
-  cdsp = (struct cds*)ARM_PTR(x86_cdsp);
-  if (cdsp->cdsFlags & CDSNETWDRV)
+  const cds_ref cdsp(x86_cdsp);
+  if (cdsp.flags() & CDSNETWDRV)
     return MK_FP(0, 0);
-  return cdsp->cdsDpb;
+  return cdsp.dpb();
 }
 
 STATIC int rqblockio(unsigned char command, dos_far_ptr/*struct dpb*/ _dpbp)
@@ -1202,24 +1230,25 @@ VOID bpb_to_dpb(dos_far_ptr bp, dos_far_ptr dp)
 */
 CLUSTER dos_free(dos_far_ptr /* -> struct dpb */ x86_dpbp)
 {
-  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
+  const dpb_ref d(x86_dpbp);
   /* There's an unwritten rule here. All fs       */
   /* cluster start at 2 and run to max_cluster+2  */
   REG CLUSTER i;
   REG CLUSTER cnt;
-  CLUSTER max_cluster = dpbp->dpb_size;
-
+  CLUSTER max_cluster = d.dpb_size();
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp))
+  const BOOL is_fat32 = (d.dpb_fatsize() == 0);
+  if (is_fat32)
   {
-    if (dpbp->dpb_xnfreeclst != XUNKNCLSTFREE)
-      return dpbp->dpb_xnfreeclst;
-    max_cluster = dpbp->dpb_xsize;
+    const ULONG nfree = d.xnfree();
+    if (nfree != XUNKNCLSTFREE)
+      return nfree;
+    max_cluster = d.dpb_xsize();
   }
   else
 #endif
-  if (dpbp->dpb_nfreeclst != UNKNCLSTFREE)
-    return dpbp->dpb_nfreeclst;
+  if (d.nfree() != UNKNCLSTFREE)
+    return d.nfree();
 
   cnt = 0;
   for (i = 2; i <= max_cluster; i++)
@@ -1230,24 +1259,24 @@ CLUSTER dos_free(dos_far_ptr /* -> struct dpb */ x86_dpbp)
       {
         /* update first free cluster number */
 #ifdef WITHFAT32
-        if (ISFAT32(dpbp))
-          dpbp->dpb_xcluster = i;
+        if (is_fat32)
+          d.dpb_xcluster(i);
         else
 #endif
-          dpbp->dpb_cluster = (UWORD)i;
+          d.cluster((UWORD)i);
       }
       ++cnt;
     }
   }
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp))
+  if (is_fat32)
   {
-    dpbp->dpb_xnfreeclst = cnt;
-    write_fsinfo(dpbp);
+    d.xnfree(cnt);
+    write_fsinfo(x86_dpbp);
     return cnt;
   }
 #endif
-  dpbp->dpb_nfreeclst = (UWORD)cnt;
+  d.nfree((UWORD)cnt);
   return cnt;
 }
 
@@ -1312,17 +1341,18 @@ COUNT media_check(dos_far_ptr /*struct dpb*/ _dpbp)
 /*    clus2phys(cl_no, dpbp) - convert a cluster number into the absolute
     sector number of its first sector.
 
-    Migrated from fatfs.c verbatim (dpbp is already a native pointer
-    here, see get_dpb()/fnode.h above).
+    The DPB stays in guest memory; read only the scalar geometry fields
+    needed for the conversion.
 */
-ULONG clus2phys(CLUSTER cl_no, struct dpb *dpbp)
+ULONG clus2phys(CLUSTER cl_no, dos_far_ptr x86_dpbp)
 {
-  CLUSTER data =
+  const dpb_ref d(x86_dpbp);
+  ULONG data = d.dpb_data();
 #ifdef WITHFAT32
-      ISFAT32(dpbp) ? dpbp->dpb_xdata :
+  if (d.dpb_fatsize() == 0)
+    data = d.dpb_xdata();
 #endif
-      dpbp->dpb_data;
-  return ((ULONG)(cl_no - 2) << dpbp->dpb_shftcnt) + data;
+  return ((ULONG)(cl_no - 2) << d.dpb_shftcnt()) + data;
 }
 
 /*
@@ -1333,26 +1363,23 @@ ULONG clus2phys(CLUSTER cl_no, struct dpb *dpbp)
 
     Migrated from fatfs.c verbatim.
 */
-CLUSTER getdstart(struct dpb *dpbp, struct dirent *dentry)
+CLUSTER getdstart(dos_far_ptr x86_dpbp, struct dirent *dentry)
 {
+  const dpb_ref d(x86_dpbp);
 #ifdef WITHFAT32
-  if (!ISFAT32(dpbp))
-    return dentry->dir_start;
-  return (((CLUSTER)dentry->dir_start_high << 16) | dentry->dir_start);
-#else
-  UNREFERENCED_PARAMETER(dpbp);
-  return dentry->dir_start;
+  if (d.dpb_fatsize() == 0)
+    return (((CLUSTER)dentry->dir_start_high << 16) | dentry->dir_start);
 #endif
+  return dentry->dir_start;
 }
 
-void setdstart(struct dpb *dpbp, struct dirent *dentry, CLUSTER value)
+void setdstart(dos_far_ptr x86_dpbp, struct dirent *dentry, CLUSTER value)
 {
+  const dpb_ref d(x86_dpbp);
   dentry->dir_start = (UWORD)value;
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp))
+  if (d.dpb_fatsize() == 0)
     dentry->dir_start_high = (UWORD)(value >> 16);
-#else
-  UNREFERENCED_PARAMETER(dpbp);
 #endif
 }
 
@@ -1388,7 +1415,6 @@ STATIC CLUSTER extend(f_node_ptr fnp)
   if (free_fat == LONG_LAST_CLUSTER)
     return free_fat;
 
-  struct dpb* f_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
   /* if 1a or 1b works but 2 fails, we get a pointer into an wrong FAT entry */
   /* our new fattab.c checks should be able to trap the bad pointers for now */
   if (link_fat(fnp->f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* 2 */ /* free->last */
@@ -1398,7 +1424,7 @@ STATIC CLUSTER extend(f_node_ptr fnp)
   /* Now that we have found a free FAT entry, mark it as the last entry of */
   /* the chain and save (note: BUFFERS cause nondeterministic write order) */
   if (fnp->f_cluster == FREE) /* if the file leaves the empty state */
-    setdstart(f_dpb, &fnp->f_dir, free_fat); /* 1a */
+    setdstart(fnp->f_dpb, &fnp->f_dir, free_fat); /* 1a */
   else
   {
     /* let previously last chain element chain to newly allocated cluster! */
@@ -1459,8 +1485,10 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
     fnp->f_cluster = cluster;
   }
 
-  struct dpb* f_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
-  relcluster = (CLUSTER)((fnp->f_offset / f_dpb->dpb_secsize) >> f_dpb->dpb_shftcnt);
+  const dpb_ref dpb(fnp->f_dpb);
+  const UWORD dpb_secsize = dpb.dpb_secsize();
+  const UBYTE dpb_shftcnt = dpb.dpb_shftcnt();
+  relcluster = (CLUSTER)((fnp->f_offset / dpb_secsize) >> dpb_shftcnt);
 
   if (relcluster < fnp->f_cluster_offset)
   {
@@ -1468,7 +1496,7 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
     /* we have to follow chain from the beginning again...  */
     /* Set internal index and cluster size.                 */
     fnp->f_cluster = fnp->f_sft_idx == 0xff ? fnp->f_dmp->dm_dircluster :
-        getdstart(f_dpb, &fnp->f_dir);
+        getdstart(fnp->f_dpb, &fnp->f_dir);
     fnp->f_cluster_offset = 0;
   }
 
@@ -1603,11 +1631,21 @@ STATIC BOOL find_free(f_node_ptr fnp)
 /* clear out the blocks in the cluster for a directory */
 STATIC int clear_dir(f_node_ptr fnp, CLUSTER cluster)
 {
-  struct dpb* f_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
-  for (int idx = 0; idx <= f_dpb->dpb_clsmask; idx++)
+  const dpb_ref d(fnp->f_dpb);
+  const UBYTE clsmask = d.dpb_clsmask();
+  const UBYTE unit = d.dpb_unit();
+  const UBYTE shftcnt = d.dpb_shftcnt();
+  ULONG data = d.dpb_data();
+#ifdef WITHFAT32
+  if (d.dpb_fatsize() == 0)
+    data = d.dpb_xdata();
+#endif
+  const ULONG first_sector = ((ULONG)(cluster - 2) << shftcnt) + data;
+
+  for (int idx = 0; idx <= clsmask; idx++)
   {
     /* as we are overwriting it completely, don't read first */
-    struct buffer* bp = getblockOver(clus2phys(cluster, f_dpb) + idx, f_dpb->dpb_unit);
+    struct buffer* bp = getblockOver(first_sector + idx, unit);
 #ifdef DISPLAY_GETBLOCK
     printf("DIR (clear_dir)\n");
 #endif
@@ -1637,8 +1675,7 @@ COUNT extend_dir(f_node_ptr fnp)
     return DE_HNDLDSKFULL;
 
   /* flush the drive buffers so that all info is written          */
-  struct dpb* f_dpb = (struct dpb*)ARM_PTR(fnp->f_dpb);
-  if (!flush_buffers(f_dpb->dpb_unit))
+  if (!flush_buffers(dpb_ref(fnp->f_dpb).dpb_unit()))
     return DE_ACCESS;
 
   return SUCCESS;
@@ -1684,11 +1721,7 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
 
   /* prevent renaming of the current directory of that drive */
   dos_far_ptr /* -> struct cds */ _cds = get_cds(path1[0] - 'A');
-  /* No CDS (0000:0000) => ARM_PTR() would point cdsCurrentPath at the guest
-     IVT and we would compare the path against interrupt vectors. Skip the
-     "is this the current directory" test rather than test against garbage. */
-  if (!far_is_null(_cds) &&
-      !fstrcmp(path1, ((struct cds *)ARM_PTR(_cds))->cdsCurrentPath))
+  if (cds_current_path_equals(_cds, path1))
     return DE_RMVCUDIR;
 
   /* first check if the source file exists                        */
@@ -1793,7 +1826,10 @@ COUNT dos_setfattr(BYTE * name, UWORD attrp)
 STATIC CLUSTER find_fat_free(f_node_ptr fnp)
 {
   REG CLUSTER idx, size, cluster;
-  struct dpb* dpbp = (struct dpb*)ARM_PTR(fnp->f_dpb);
+  const dpb_ref d(fnp->f_dpb);
+#ifdef WITHFAT32
+  const BOOL is_fat32 = (d.dpb_fatsize() == 0);
+#endif
 
 #ifdef DISPLAY_GETBLOCK
   printf("[find_fat_free]\n");
@@ -1801,19 +1837,19 @@ STATIC CLUSTER find_fat_free(f_node_ptr fnp)
 
   /* Start from optimized lookup point for start of FAT   */
   idx = 2;
-  size = dpbp->dpb_size;
+  size = d.dpb_size();
 
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp))
+  if (is_fat32)
   {
-    if (dpbp->dpb_xcluster != UNKNCLUSTER)
-      idx = dpbp->dpb_xcluster;
-    size = dpbp->dpb_xsize;
+    if (d.dpb_xcluster() != UNKNCLUSTER)
+      idx = d.dpb_xcluster();
+    size = d.dpb_xsize();
   }
   else
 #endif
-  if (dpbp->dpb_cluster != UNKNCLUSTER)
-    idx = dpbp->dpb_cluster;
+  if (d.cluster() != UNKNCLUSTER)
+    idx = d.cluster();
 
   /* Search the FAT table looking for the first free      */
   /* entry.                                               */
@@ -1831,7 +1867,7 @@ STATIC CLUSTER find_fat_free(f_node_ptr fnp)
     }
     idx++;
     /* wrap the search just in case there are free clusters before */
-    /* dpbp->dpb_(x)cluster (the fsinfo entry is just a hint!)     */
+    /* dpb_(x)cluster (the fsinfo entry is just a hint!) */
     if (idx > size) idx = 2;
     if (idx == cluster) {
       /* No empty clusters, disk is FULL!                     */
@@ -1842,16 +1878,16 @@ STATIC CLUSTER find_fat_free(f_node_ptr fnp)
   }
 
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp))
+  if (is_fat32)
   {
-    dpbp->dpb_xcluster = cluster;
+    d.dpb_xcluster(cluster);
     /* return the free entry                                */
-    write_fsinfo(dpbp);
+    write_fsinfo(fnp->f_dpb);
     return idx;
   }
 #endif
 
-  dpbp->dpb_cluster = (UWORD)cluster;
+  d.cluster((UWORD)cluster);
   /* return the free entry                                */
   return idx;
 }
@@ -1919,7 +1955,6 @@ COUNT dos_mkdir(BYTE * dir)
 
   init_direntry(&fnp->f_dir, D_DIR, free_fat, fnp->f_dmp->dm_name_pat);
 
-  struct dpb* dpbp = (struct dpb*)ARM_PTR(fnp->f_dpb);
   /* Mark the cluster in the FAT as used and create new dir there */
   if (link_fat(fnp->f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* free->last */
     return DE_HNDLDSKFULL; /* should never happen */
@@ -1951,9 +1986,10 @@ COUNT dos_mkdir(BYTE * dir)
   if (!find_free(fnp) && ((ret = extend_dir(fnp)) != SUCCESS))
     return ret;
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp) && parent == dpbp->dpb_xrootclst)
   {
-    parent = 0;
+    const dpb_ref d(fnp->f_dpb);
+    if (d.dpb_fatsize() == 0 && parent == d.dpb_xrootclst())
+      parent = 0;
   }
 #endif
   /* use . to allow the compiler to merge duplicate strings */
@@ -1972,8 +2008,11 @@ COUNT dos_mkdir(BYTE * dir)
 /*                                                              */
 STATIC VOID wipe_out_clusters(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER st)
 {
-  struct dpb *dpbp = (struct dpb *)ARM_PTR(x86_dpbp);
+  const dpb_ref d(x86_dpbp);
   REG CLUSTER next;
+#ifdef WITHFAT32
+  const BOOL is_fat32 = (d.dpb_fatsize() == 0);
+#endif
 
   /* Loop from start until either a FREE entry is         */
   /* encountered (due to a fractured file system) of the  */
@@ -1993,22 +2032,26 @@ STATIC VOID wipe_out_clusters(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER 
 
     /* and the start of free space pointer          */
 #ifdef WITHFAT32
-    if (ISFAT32(dpbp))
+    if (is_fat32)
     {
-      if ((dpbp->dpb_xcluster == UNKNCLUSTER) || (dpbp->dpb_xcluster > st))
-        dpbp->dpb_xcluster = st;
+      const ULONG hint = d.dpb_xcluster();
+      if (hint == UNKNCLUSTER || hint > st)
+        d.dpb_xcluster(st);
     }
     else
 #endif
-    if ((dpbp->dpb_cluster == UNKNCLUSTER) || (dpbp->dpb_cluster > (UWORD)st))
-      dpbp->dpb_cluster = (UWORD)st;
+    {
+      const UWORD hint = d.cluster();
+      if (hint == UNKNCLUSTER || hint > (UWORD)st)
+        d.cluster((UWORD)st);
+    }
 
     /* and just follow the linked list              */
     st = next;
   }
 #ifdef WITHFAT32
-  if (ISFAT32(dpbp))
-    write_fsinfo(dpbp);
+  if (is_fat32)
+    write_fsinfo(x86_dpbp);
 #endif
 }
 
@@ -2017,8 +2060,7 @@ STATIC VOID wipe_out_clusters(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER 
 STATIC VOID wipe_out(f_node_ptr fnp)
 {
   /* if not already free and valid file, do it */
-  struct dpb* dpbp = (struct dpb*)ARM_PTR(fnp->f_dpb);
-  CLUSTER cluster = getdstart(dpbp, &fnp->f_dir);
+  CLUSTER cluster = getdstart(fnp->f_dpb, &fnp->f_dir);
   if (cluster != FREE)
     wipe_out_clusters(fnp->f_dpb, cluster);
   /* no flushing here: could get lost chain or "crosslink seed" but */
@@ -2082,9 +2124,7 @@ COUNT dos_rmdir(BYTE * path)
 
   /* prevent removal of the current directory of that drive */
   dos_far_ptr /* -> struct cds */ _cds = get_cds(path[0] - 'A');
-  /* Same as dos_rename() above: no CDS => do not compare against the IVT. */
-  if (!far_is_null(_cds) &&
-      !fstrcmp(path, ((struct cds *)ARM_PTR(_cds))->cdsCurrentPath))
+  if (cds_current_path_equals(_cds, path))
     return DE_RMVCUDIR;
 
   /* Check that we're not trying to remove the root!      */

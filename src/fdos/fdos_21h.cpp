@@ -730,30 +730,32 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
       xdffp->xdff_datasize = sizeof(struct xdpbforformat);
       xdffp->xdff_version.actual = 0;
 
-      struct dpb* dpb = (struct dpb*)ARM_PTR(_dpb);
+      const dpb_ref dpb(_dpb);
       switch ((UWORD)xdffp->xdff_function)
       {
         case 0x00:
         {
           ULONG nfreeclst = xdffp->xdff_f.setdpbcounts.nfreeclst;
           ULONG cluster = xdffp->xdff_f.setdpbcounts.cluster;
-          if (ISFAT32(dpb))
+          if (dpb.dpb_fatsize() == 0)
           {
-            if ((dpb->dpb_xfsinfosec == 0xffff && (nfreeclst != 0 || cluster != 0))
-                || nfreeclst == 1 || nfreeclst > dpb->dpb_xsize
-                || cluster == 1 || cluster > dpb->dpb_xsize)
+            const ULONG xsize = dpb.dpb_xsize();
+            if ((dpb.dpb_xfsinfosec() == 0xffff && (nfreeclst != 0 || cluster != 0))
+                || nfreeclst == 1 || nfreeclst > xsize
+                || cluster == 1 || cluster > xsize)
               return DE_INVLDPARM;
-            dpb->dpb_xnfreeclst = nfreeclst;
-            dpb->dpb_xcluster = cluster;
-            write_fsinfo(dpb);
+            dpb.xnfree(nfreeclst);
+            dpb.dpb_xcluster(cluster);
+            write_fsinfo(_dpb);
           }
           else
           {
-            if ((unsigned)nfreeclst == 1 || (unsigned)nfreeclst > dpb->dpb_size ||
-                (unsigned)cluster == 1 || (unsigned)cluster > dpb->dpb_size)
+            const UWORD size = dpb.dpb_size();
+            if ((unsigned)nfreeclst == 1 || (unsigned)nfreeclst > size ||
+                (unsigned)cluster == 1 || (unsigned)cluster > size)
               return DE_INVLDPARM;
-            dpb->dpb_nfreeclst = (UWORD)nfreeclst;
-            dpb->dpb_cluster = (UWORD)cluster;
+            dpb.nfree((UWORD)nfreeclst);
+            dpb.cluster((UWORD)cluster);
           }
           break;
         }
@@ -767,8 +769,8 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
         /* fall through */
         case 0x02:
 rebuild_dpb:
-          flush_buffers(dpb->dpb_unit);
-          dpb->dpb_flags = M_CHANGED;
+          flush_buffers(dpb.dpb_unit());
+          dpb.flags(M_CHANGED);
           if (media_check_tagged(_dpb, "INT21/7304/GetDriveDPB") < 0)
             return DE_INVLDDRV;
           break;
@@ -777,7 +779,7 @@ rebuild_dpb:
         case 0x04:
         {
           ULONG value;
-          if (!ISFAT32(dpb))
+          if (dpb.dpb_fatsize() != 0)
             return DE_INVLDPARM;
 
           value = xdffp->xdff_f.setget.fdos_new;
@@ -785,19 +787,19 @@ rebuild_dpb:
           {
             if (value != 0xFFFFFFFFUL && (value & ~(0xf | 0x80)))
               return DE_INVLDPARM;
-            xdffp->xdff_f.setget.old = dpb->dpb_xflags;
+            xdffp->xdff_f.setget.old = dpb.dpb_xflags();
           }
           else
           {
-            if (value != 0xFFFFFFFFUL && (value < 2 || value > dpb->dpb_xsize))
+            if (value != 0xFFFFFFFFUL && (value < 2 || value > dpb.dpb_xsize()))
               return DE_INVLDPARM;
-            xdffp->xdff_f.setget.old = dpb->dpb_xrootclst;
+            xdffp->xdff_f.setget.old = dpb.dpb_xrootclst();
           }
 
           if (value != 0xFFFFFFFFUL)
           {
             bpb FAR *bpbp;
-            struct buffer FAR *bp = getblock(1, dpb->dpb_unit);
+            struct buffer FAR *bp = getblock(1, dpb.dpb_unit());
             /* getblk() returns NULL when the sector cannot be read (or a
                buffer cannot be freed). Upstream dereferences it regardless -
                harmless-ish there, where a NULL far pointer just writes low

@@ -56,6 +56,8 @@ extern "C" {
 
 #include "guest_ref.hpp"
 
+using fdos_guest::dpb_ref;
+
 #define printf(...) dos_printf(__VA_ARGS__)
 
 /*
@@ -451,7 +453,7 @@ CLUSTER link_fat(dos_far_ptr /* -> struct dpb */ x86_dpbp, CLUSTER Cluster1,
       /* update the free space count for returned     */
       /* cluster                                      */
       dpbp->dpb_xnfreeclst += adjust;
-      write_fsinfo(dpbp);
+      write_fsinfo(x86_dpbp);
     }
     else
 #endif
@@ -534,29 +536,33 @@ void read_fsinfo(dos_far_ptr x86_dpbp)
   d.dpb_xcluster(cluster);
 }
 
-void write_fsinfo(struct dpb FAR * dpbp)
+void write_fsinfo(dos_far_ptr x86_dpbp)
 {
-  struct buffer FAR *bp;
-  struct fsinfo FAR *fip;
-
-  if (dpbp->dpb_xfsinfosec == 0xffff)
+  const dpb_ref d(x86_dpbp);
+  const UWORD sec = d.dpb_xfsinfosec();
+  if (sec == 0xffff)
     return;
 
-  bp = getblock(dpbp->dpb_xfsinfosec, dpbp->dpb_unit);
+  struct buffer *native_bp = getblock(sec, d.dpb_unit());
   /* Same as read_fsinfo(): NULL here is a native null-pointer dereference.
      FSInfo is a hint - skip the update rather than fault. */
-  if (bp == NULL)
+  if (native_bp == NULL)
     return;
-  bp->b_flag &= ~(BFR_DATA | BFR_DIR | BFR_FAT);
-  bp->b_flag |= BFR_VALID;
 
-  fip = (struct fsinfo FAR *)&bp->b_buffer[0x1e4];
+  const dos_far_ptr x86_bp = linear_to_far(native_bp);
+  const fdos_guest::buffer_ref b(x86_bp);
+  BYTE flag = b.flag();
+  flag &= (BYTE)~(BFR_DATA | BFR_DIR | BFR_FAT);
+  flag |= BFR_VALID;
 
-  if (fip->fi_nfreeclst != dpbp->dpb_xnfreeclst ||
-    fip->fi_cluster != dpbp->dpb_xcluster)
-    bp->b_flag |= BFR_DIRTY; /* only flag for update if we had real news */
-
-  fip->fi_nfreeclst = dpbp->dpb_xnfreeclst;
-  fip->fi_cluster = dpbp->dpb_xcluster;
+  const ULONG nfree = d.xnfree();
+  const ULONG cluster = d.dpb_xcluster();
+  const std::size_t off = 0x1e4u;
+  if (b.data32(off + offsetof(struct fsinfo, fi_nfreeclst)) != nfree ||
+      b.data32(off + offsetof(struct fsinfo, fi_cluster)) != cluster)
+    flag |= BFR_DIRTY;
+  b.flag(flag);
+  b.data32(off + offsetof(struct fsinfo, fi_nfreeclst), nfree);
+  b.data32(off + offsetof(struct fsinfo, fi_cluster), cluster);
 }
 #endif
