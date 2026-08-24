@@ -27,6 +27,7 @@
 /****************************************************************/
 
 #include "hdrs.h"
+#include "ioctl_guest_proxy.h"
 
 /*
  * WARNING:  this code is non-portable (8086 specific).
@@ -70,8 +71,8 @@ STATIC const UBYTE cmd [] = {
 
 int DosDevIOctl(lregs * r)
 {
-  struct dhdr* dev;
   dos_far_ptr x86_dev;
+  unsigned attr = 0;
 
   if (CPU_AL > 0x11)
     return DE_INVLDFUNC;
@@ -80,9 +81,7 @@ int DosDevIOctl(lregs * r)
   {
     case 0x0b:
       /* skip, it's a special case.                           */
-      LoL->NetDelay = CPU_CX;
-      if (CPU_DX)
-        LoL->NetRetry = CPU_DX;
+      fdos_ioctl_set_network_retry(CPU_CX, CPU_DX, CPU_DX != 0);
       return SUCCESS;
 
     case 0x00:
@@ -101,8 +100,7 @@ int DosDevIOctl(lregs * r)
       if ( far_is_end (_s) )
         return DE_INVLDHNDL;
 
-      sft* s = (sft*) ARM_PTR (_s);
-      unsigned flags = s->sft_flags;
+      unsigned flags = fdos_ioctl_sft_flags(_s);
 
       switch (CPU_AL)
       {
@@ -110,9 +108,8 @@ int DosDevIOctl(lregs * r)
           /* Get the flags from the SFT                           */
           CPU_AX = flags & 0xff;
           if (flags & SFT_FDEVICE) {
-            x86_dev = s->sft_dev;
-            dev = (struct dhdr*)ARM_PTR(x86_dev);
-            CPU_AX |= (dev->dh_attr & 0xff00);
+            x86_dev = fdos_ioctl_sft_dev(_s);
+            CPU_AX |= (fdos_ioctl_dhdr_attr(x86_dev) & 0xff00);
           }
           /* else: files/networks return 0 in AH/DH */
           /* Undocumented result, Ax = Dx seen using Pcwatch */
@@ -131,10 +128,10 @@ int DosDevIOctl(lregs * r)
             return DE_INVLDDATA;
 
           /* Undocumented: AL should get the old value            */
-          CPU_AL = s->sft_flags_lo;
+          CPU_AL = (UBYTE)flags;
           /* Set it to what we got in the DL register from the    */
           /* user.                                                */
-          s->sft_flags_lo = SFT_FDEVICE | CPU_DL;
+          fdos_ioctl_sft_set_flags_lo(_s, (UBYTE)(SFT_FDEVICE | CPU_DL));
           return SUCCESS;
 
         case 0x0a:
@@ -145,22 +142,21 @@ int DosDevIOctl(lregs * r)
       if (!(flags & SFT_FDEVICE))
       {
         if (CPU_AL == 0x06)
-          CPU_AL = s->sft_posit >= s->sft_size ? 0 : 0xFF;
+          CPU_AL = fdos_ioctl_sft_position(_s) >= fdos_ioctl_sft_size(_s) ? 0 : 0xFF;
         else if (CPU_AL == 0x07)
           CPU_AL = 0;
         else
           return DE_INVLDFUNC;
         return SUCCESS;
       }
-      x86_dev = s->sft_dev;
-      dev = (struct dhdr*)ARM_PTR(x86_dev);
+      x86_dev = fdos_ioctl_sft_dev(_s);
+      attr = fdos_ioctl_dhdr_attr(x86_dev);
       CharReqHdr.r_unit = 0;
       break;
     }
 
     default: /* block IOCTL: 4, 5, 8, 9, d, e, f, 11 */
     {
-      unsigned attr;
 /*
    This line previously returned the deviceheader at CPU_bl. But,
    DOS numbers its drives starting at 1, not 0. A=1, B=2, and so
@@ -172,20 +168,17 @@ int DosDevIOctl(lregs * r)
 /* JT Fixed it */
 
       /* NDN feeds the actual ASCII drive letter to this function */
-      dos_far_ptr _dpbp = get_dpb((CPU_BL & 0x1f) == 0 ? internal_data->default_drive : (CPU_BL & 0x1f) - 1);
+      dos_far_ptr _dpbp = get_dpb((CPU_BL & 0x1f) == 0 ? fdos_ioctl_default_drive() : (CPU_BL & 0x1f) - 1);
       if (! far_is_null(_dpbp))
       {
-        struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp);
-        CharReqHdr.r_unit = dpbp->dpb_subunit;
-        x86_dev = dpbp->dpb_device;
-        dev = (struct dhdr*)ARM_PTR(x86_dev);
-        attr = dev->dh_attr;
+        CharReqHdr.r_unit = fdos_ioctl_dpb_subunit(_dpbp);
+        x86_dev = fdos_ioctl_dpb_device(_dpbp);
+        attr = fdos_ioctl_dhdr_attr(x86_dev);
       }
       else
       {
         if (CPU_AL != 8 && CPU_AL != 9)
           return DE_INVLDDRV;
-        dev = NULL;
         x86_dev = MK_FP(0, 0);
         attr = ATTR_REMOTE;
       }
@@ -194,23 +187,22 @@ int DosDevIOctl(lregs * r)
       {
         case 0x08:
         {
-          struct cds FAR *cdsp = get_cds1(CPU_BL & 0x1f);
-          if (cdsp == NULL)
+          UWORD cds_flags;
+          if (!fdos_ioctl_cds_flags(CPU_BL & 0x1f, &cds_flags))
             return DE_INVLDDRV;
-          if (cdsp->cdsFlags & CDSNETWDRV)
+          if (cds_flags & CDSNETWDRV)
             return DE_INVLDFUNC;
-          struct dpb* dpbp = (struct dpb*)ARM_PTR(_dpbp);
-          CPU_AX = (dpbp->dpb_flags == M_DONT_KNOW);
+          CPU_AX = (fdos_ioctl_dpb_flags(_dpbp) == M_DONT_KNOW);
           return SUCCESS;
         }
         case 0x09:
         {
           /* note from get_dpb()                            */
           /* that if cdsp == NULL then dev must be NULL too */
-          struct cds FAR *cdsp = get_cds1(CPU_BL & 0x1f);
-          if (cdsp == NULL)
+          UWORD cds_flags;
+          if (!fdos_ioctl_cds_flags(CPU_BL & 0x1f, &cds_flags))
             return DE_INVLDDRV;
-          if (cdsp->cdsFlags & CDSSUBST)
+          if (cds_flags & CDSSUBST)
             attr |= ATTR_SUBST;
           CPU_AX = S_DONE | S_BUSY;
           CPU_DX = attr;
@@ -242,7 +234,7 @@ int DosDevIOctl(lregs * r)
     if (CPU_AL<=0x05)
       testattr = ATTR_IOCTL;
 
-    if (!(dev->dh_attr & testattr))
+    if (!(attr & testattr))
       return DE_INVLDFUNC;
   }
 
@@ -267,7 +259,7 @@ int DosDevIOctl(lregs * r)
 
   if (CharReqHdr.r_status & S_ERROR)
   {
-    internal_data->CritErrCode = (CharReqHdr.r_status & S_MASK) + 0x13;
+    fdos_ioctl_set_crit_err_code((UWORD)((CharReqHdr.r_status & S_MASK) + 0x13));
     return DE_ACCESS;
   }
 

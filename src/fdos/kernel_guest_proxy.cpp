@@ -19,6 +19,8 @@ using fdos_guest::cds_ref;
 using fdos_guest::dos_data_ref;
 using fdos_guest::lol_ref;
 using fdos_guest::sft_ref;
+using fdos_guest::dpb_ref;
+using fdos_guest::dhdr_ref;
 
 static const dos_data_ref idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
 static const lol_ref kernel_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
@@ -40,3 +42,166 @@ extern "C" UBYTE fdos_lol_uppermem_link(void) { return kernel_lol.uppermem_link(
 extern "C" UWORD fdos_lol_uppermem_root(void) { return kernel_lol.uppermem_root(); }
 extern "C" UWORD fdos_lol_first_mcb(void) { return kernel_lol.first_mcb(); }
 extern "C" ULONG fdos_sft_size(dos_far_ptr p) { return sft_ref(p).size(); }
+extern "C" UWORD fdos_sft_count(dos_far_ptr p) { return sft_ref(p).count(); }
+extern "C" dos_far_ptr fdos_dos_lp_cur_sft(void) { return idata.lp_cur_sft(); }
+extern "C" dos_far_ptr fdos_lol_dpb(void) { return kernel_lol.dpb(); }
+extern "C" UBYTE fdos_lol_nblkdev(void) { return kernel_lol.nblkdev(); }
+extern "C" dos_far_ptr fdos_dpb_next(dos_far_ptr p) { return dpb_ref(p).next(); }
+extern "C" dos_far_ptr fdos_dpb_device(dos_far_ptr p) { return dpb_ref(p).device(); }
+extern "C" UBYTE fdos_dpb_unit(dos_far_ptr p) { return dpb_ref(p).dpb_unit(); }
+extern "C" UBYTE fdos_dpb_subunit(dos_far_ptr p) { return dpb_ref(p).dpb_subunit(); }
+extern "C" BYTE fdos_dpb_flags(dos_far_ptr p) { return dpb_ref(p).flags(); }
+extern "C" UBYTE fdos_dpb_mdb(dos_far_ptr p) { return dpb_ref(p).dpb_mdb(); }
+extern "C" dos_far_ptr fdos_dhdr_next(dos_far_ptr p) { return dhdr_ref(p).next(); }
+extern "C" UWORD fdos_dhdr_attr(dos_far_ptr p) { return dhdr_ref(p).attr(); }
+extern "C" UWORD fdos_dhdr_strategy(dos_far_ptr p) { return dhdr_ref(p).strategy(); }
+extern "C" UWORD fdos_dhdr_interrupt(dos_far_ptr p) { return dhdr_ref(p).interrupt(); }
+extern "C" void fdos_dhdr_read_name(dos_far_ptr p, BYTE *dst) { dhdr_ref(p).read_name(dst); }
+
+static inline uint32_t fdos_fixed_lol_linear(void)
+{
+    return ((uint32_t)DOS_PSP << 4) + 0x08f0u;
+}
+
+static inline uint32_t fdos_sda_linear(void)
+{
+    return ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF;
+}
+
+static inline dos_far_ptr fdos_proxy_far_load(uint32_t addr)
+{
+    return MK_FP(pload16(addr + 2u), pload16(addr));
+}
+
+static inline void fdos_proxy_far_store(uint32_t addr, dos_far_ptr p)
+{
+    pstore16(addr, FP_OFF(p));
+    pstore16(addr + 2u, FP_SEG(p));
+}
+
+extern "C" UWORD fdos_dos_crit_err_code(void)
+{
+    return pload16(fdos_sda_linear() + offsetof(dos_data, CritErrCode));
+}
+
+extern "C" void fdos_dos_set_crit_err_code(UWORD value)
+{
+    pstore16(fdos_sda_linear() + offsetof(dos_data, CritErrCode), value);
+}
+
+extern "C" dos_far_ptr fdos_lol_nul_next(void)
+{
+    return fdos_proxy_far_load(fdos_fixed_lol_linear() + offsetof(lol, nul_dev) + offsetof(dhdr, dh_next));
+}
+
+extern "C" UBYTE fdos_lol_os_major(void)
+{
+    return pload8(fdos_fixed_lol_linear() + offsetof(lol, os_major));
+}
+
+extern "C" UBYTE fdos_lol_os_minor(void)
+{
+    return pload8(fdos_fixed_lol_linear() + offsetof(lol, os_minor));
+}
+
+extern "C" void fdos_lol_set_setver(UBYTE major, UBYTE minor)
+{
+    pstore8(fdos_fixed_lol_linear() + offsetof(lol, os_setver_major), major);
+    pstore8(fdos_fixed_lol_linear() + offsetof(lol, os_setver_minor), minor);
+}
+
+extern "C" dos_far_ptr fdos_lol_syscon(void)
+{
+    return MK_FP(DOS_PSP, (UWORD)(0x08f0u + offsetof(lol, syscon)));
+}
+
+extern "C" dos_far_ptr fdos_cds_slot(unsigned drive)
+{
+    const UBYTE last = pload8(fdos_fixed_lol_linear() + offsetof(lol, lastdrive));
+    const dos_far_ptr base = fdos_proxy_far_load(fdos_fixed_lol_linear() + offsetof(lol, CDSp));
+    if (drive >= last || far_is_null(base))
+        return MK_FP(0, 0);
+    return MK_FP(FP_SEG(base),
+                 (UWORD)(FP_OFF(base) + (UWORD)drive * sizeof(struct cds)));
+}
+
+extern "C" dos_far_ptr fdos_temp_cds_build(UBYTE drive_letter, unsigned drive)
+{
+    const dos_far_ptr source = fdos_cds_slot(drive);
+    const uint32_t temp = fdos_sda_linear() + offsetof(dos_data, TempCDS);
+    const dos_far_ptr temp_far = MK_FP(DOS_PSP,
+        (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, TempCDS)));
+    UWORD flags;
+    dos_far_ptr dpb;
+    unsigned i;
+
+    if (far_is_null(source))
+        return MK_FP(0, 0);
+
+    for (i = 0; i < sizeof(struct cds); ++i)
+        pstore8(temp + i, 0);
+    pstore8(temp + offsetof(cds, cdsCurrentPath) + 0u, drive_letter);
+    pstore8(temp + offsetof(cds, cdsCurrentPath) + 1u, ':');
+    pstore8(temp + offsetof(cds, cdsCurrentPath) + 2u, '\\');
+    pstore8(temp + offsetof(cds, cdsCurrentPath) + 3u, 0);
+    pstore16(temp + offsetof(cds, cdsBackslashOffset), 2);
+
+    flags = pload16(((uint32_t)FP_SEG(source) << 4) + FP_OFF(source) + offsetof(cds, cdsFlags));
+    if (flags) {
+        dpb = fdos_proxy_far_load(((uint32_t)FP_SEG(source) << 4) + FP_OFF(source) + offsetof(cds, cdsDpb));
+        fdos_proxy_far_store(temp + offsetof(cds, cdsDpb), dpb);
+        pstore16(temp + offsetof(cds, cdsFlags), CDSPHYSDRV);
+    }
+
+    pstore16(temp + offsetof(cds, cdsStrtClst), 0xffffu);
+    pstore16(temp + offsetof(cds, cdsParam), 0xffffu);
+    pstore16(temp + offsetof(cds, cdsStoreUData), 0xffffu);
+    return temp_far;
+}
+
+extern "C" UWORD fdos_sft_dec_ref_raw(dos_far_ptr p)
+{
+    const uint32_t a = ((uint32_t)FP_SEG(p) << 4) + FP_OFF(p) + offsetof(sft, sft_count);
+    const UWORD old = pload16(a);
+    UWORD next = (UWORD)(old - 1u);
+    if (next == 0)
+        next = 0xffffu;
+    pstore16(a, next);
+    return old;
+}
+
+extern "C" UWORD fdos_sft_mode_raw(dos_far_ptr p)
+{
+    return pload16(((uint32_t)FP_SEG(p) << 4) + FP_OFF(p) + offsetof(sft, sft_mode));
+}
+
+extern "C" UWORD fdos_sft_flags_raw(dos_far_ptr p)
+{
+    return pload16(((uint32_t)FP_SEG(p) << 4) + FP_OFF(p) + offsetof(sft, sft_flags_union));
+}
+
+extern "C" dos_far_ptr fdos_sft_dev_raw(dos_far_ptr p)
+{
+    return fdos_proxy_far_load(((uint32_t)FP_SEG(p) << 4) + FP_OFF(p) + offsetof(sft, sft_dcb_or_dev));
+}
+
+extern "C" void fdos_sft_set_psp_raw(dos_far_ptr p, UWORD psp)
+{
+    pstore16(((uint32_t)FP_SEG(p) << 4) + FP_OFF(p) + offsetof(sft, sft_psp), psp);
+}
+
+extern "C" UWORD fdos_psp_max_files(UWORD psp_seg)
+{
+    return pload16(((uint32_t)psp_seg << 4) + offsetof(psp, ps_maxfiles));
+}
+
+extern "C" dos_far_ptr fdos_psp_file_table(UWORD psp_seg)
+{
+    return fdos_proxy_far_load(((uint32_t)psp_seg << 4) + offsetof(psp, ps_filetab));
+}
+
+extern "C" void fdos_lol_set_network_retry(UWORD delay, UWORD retry)
+{
+    pstore16(fdos_fixed_lol_linear() + offsetof(lol, NetDelay), delay);
+    pstore16(fdos_fixed_lol_linear() + offsetof(lol, NetRetry), retry);
+}

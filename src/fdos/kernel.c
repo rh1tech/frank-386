@@ -663,13 +663,13 @@ static void dpb_watch_capture(const char *tag, dos_far_ptr _dpb)
 
 static void dpb_watch_capture_chain(const char *tag)
 {
-  dos_far_ptr _dpb = LoL->DPBp;
+  dos_far_ptr _dpb = fdos_lol_dpb();
   unsigned guard = 0;
+  const unsigned limit = (unsigned)fdos_lol_nblkdev() + 4u;
 
-  while (!far_is_null(_dpb) && !far_is_end(_dpb) && guard++ < LoL->nblkdev + 4) {
-    struct dpb *dpb = (struct dpb *)ARM_PTR(_dpb);
+  while (!far_is_null(_dpb) && !far_is_end(_dpb) && guard++ < limit) {
     dpb_watch_capture(tag, _dpb);
-    _dpb = dpb->dpb_next;
+    _dpb = fdos_dpb_next(_dpb);
   }
 }
 
@@ -680,9 +680,9 @@ void dpb_watch_check(const char *tag, dos_far_ptr _dpb)
         FP_OFF(dpb_watch[i].dpb) != FP_OFF(_dpb))
       continue;
 
-    const UBYTE *now = (const UBYTE *)ARM_PTR(_dpb);
+    UBYTE now[sizeof(dpb_watch[i].bytes)];
+    kernel_guest_read(kernel_guest_linear(_dpb), now, sizeof(now));
     if (memcmp(now, dpb_watch[i].bytes, sizeof(dpb_watch[i].bytes)) == 0) {
- //     memcpy(dpb_watch[i].bytes, now, sizeof(dpb_watch[i].bytes));
       dpb_watch[i].tag = tag;
       return;
     }
@@ -728,18 +728,18 @@ static void drv_watch_capture(const char *tag, dos_far_ptr dhp,
   if (drv_watch_count >= DRV_WATCH_MAX)
     return;
 
-  struct dhdr *d = (struct dhdr *)ARM_PTR(dhp);
-  if (d->dh_attr & ATTR_NATIVE)
+  const UWORD attr = fdos_dhdr_attr(dhp);
+  if (attr & ATTR_NATIVE)
     return;
   drv_watch_t *w = &drv_watch[drv_watch_count++];
 
   w->dhp = dhp;
-  w->next = d->dh_next;
-  w->attr = d->dh_attr;
-  w->strat = d->x86.dh_strategy;
-  w->intr = d->x86.dh_interrupt;
-  memcpy(w->first16, d, 16);
-  memcpy(w->name, d->dh_name, 8);
+  w->next = fdos_dhdr_next(dhp);
+  w->attr = attr;
+  w->strat = fdos_dhdr_strategy(dhp);
+  w->intr = fdos_dhdr_interrupt(dhp);
+  kernel_guest_read(kernel_guest_linear(dhp), w->first16, sizeof(w->first16));
+  fdos_dhdr_read_name(dhp, (BYTE *)w->name);
   w->name[8] = 0;
   w->tag = tag;
   w->init_cmd = 0xff;
@@ -860,12 +860,13 @@ static void drv_watch_print_dpb_context(void)
          drv_watch_last_cmd, drv_watch_last_unit, drv_watch_last_subunit);
 
   if (!far_is_null(drv_watch_last_dpb) && !far_is_end(drv_watch_last_dpb)) {
-    struct dpb *dpb = (struct dpb *)ARM_PTR(drv_watch_last_dpb);
+    const dos_far_ptr next = fdos_dpb_next(drv_watch_last_dpb);
+    const dos_far_ptr device = fdos_dpb_device(drv_watch_last_dpb);
     printf("DRVWATCH DPBCTX: dpb_next=%04x:%04x dpb_unit=%u dpb_subunit=%u dpb_device=%04x:%04x flags=%04x mdb=%02x\n",
-           FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next),
-           dpb->dpb_unit, dpb->dpb_subunit,
-           FP_SEG(dpb->dpb_device), FP_OFF(dpb->dpb_device),
-           dpb->dpb_flags, dpb->dpb_mdb);
+           FP_SEG(next), FP_OFF(next),
+           fdos_dpb_unit(drv_watch_last_dpb), fdos_dpb_subunit(drv_watch_last_dpb),
+           FP_SEG(device), FP_OFF(device),
+           (UWORD)(UBYTE)fdos_dpb_flags(drv_watch_last_dpb), fdos_dpb_mdb(drv_watch_last_dpb));
   }
 }
 
@@ -1596,8 +1597,8 @@ dos_far_ptr /*sft*/ idx_to_sft(int SftIndex)
   if (SftIndex == -1)
     return MK_FP(-1,-1);
 
-  result = internal_data->lpCurSft;
-  if (((sft*)ARM_PTR(result))->sft_count == 0)
+  result = fdos_dos_lp_cur_sft();
+  if (fdos_sft_count(result) == 0)
     return MK_FP(-1,-1);
   return result;
 }
@@ -1750,15 +1751,15 @@ STATIC const char _DirChars[] = "\"[]:|<>+=;,";
 
 static int dpb_chain_contains(dos_far_ptr needle)
 {
-  dos_far_ptr p = LoL->DPBp;
+  dos_far_ptr p = fdos_lol_dpb();
   unsigned guard = 0;
+  const unsigned limit = (unsigned)fdos_lol_nblkdev() + 4u;
 
-  while (!far_is_null(p) && !far_is_end(p) && guard++ < LoL->nblkdev + 4)
+  while (!far_is_null(p) && !far_is_end(p) && guard++ < limit)
   {
     if (FP_SEG(p) == FP_SEG(needle) && FP_OFF(p) == FP_OFF(needle))
       return 1;
-    struct dpb *dpb = (struct dpb *)ARM_PTR(p);
-    p = dpb->dpb_next;
+    p = fdos_dpb_next(p);
   }
   return 0;
 }
@@ -1769,30 +1770,35 @@ static void panic_bad_cds_dpb(const char *tag, dos_far_ptr x86_cds,
   if (far_is_null(cds_dpb) || dpb_chain_contains(cds_dpb))
     return;
 
-  printf("BAD CDS DPB[%s]: cds=%04x:%04x flags=%04x path='%s' "
-         "cdsDpb=%04x:%04x root_dpb=%04x:%04x nblk=%u lastdrv=%u\n",
-         tag,
-         FP_SEG(x86_cds), FP_OFF(x86_cds),
-         flags, path,
-         FP_SEG(cds_dpb), FP_OFF(cds_dpb),
-         FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp),
-         LoL->nblkdev, LoL->lastdrive);
-
   {
-    dos_far_ptr p = LoL->DPBp;
-    unsigned guard = 0;
-    while (!far_is_null(p) && !far_is_end(p) && guard++ < LoL->nblkdev + 4)
+    const dos_far_ptr root_dpb = fdos_lol_dpb();
+    printf("BAD CDS DPB[%s]: cds=%04x:%04x flags=%04x path='%s' "
+           "cdsDpb=%04x:%04x root_dpb=%04x:%04x nblk=%u lastdrv=%u\n",
+           tag,
+           FP_SEG(x86_cds), FP_OFF(x86_cds),
+           flags, path,
+           FP_SEG(cds_dpb), FP_OFF(cds_dpb),
+           FP_SEG(root_dpb), FP_OFF(root_dpb),
+           fdos_lol_nblkdev(), fdos_dos_lastdrive());
+
     {
-      struct dpb *dpb = (struct dpb *)ARM_PTR(p);
-      printf("BAD CDS DPB[%s]: chain dpb=%04x:%04x next=%04x:%04x "
-             "unit=%u sub=%u dev=%04x:%04x flags=%04x\n",
-             tag,
-             FP_SEG(p), FP_OFF(p),
-             FP_SEG(dpb->dpb_next), FP_OFF(dpb->dpb_next),
-             dpb->dpb_unit, dpb->dpb_subunit,
-             FP_SEG(dpb->dpb_device), FP_OFF(dpb->dpb_device),
-             dpb->dpb_flags);
-      p = dpb->dpb_next;
+      dos_far_ptr p = root_dpb;
+      unsigned guard = 0;
+      const unsigned limit = (unsigned)fdos_lol_nblkdev() + 4u;
+      while (!far_is_null(p) && !far_is_end(p) && guard++ < limit)
+      {
+        const dos_far_ptr next = fdos_dpb_next(p);
+        const dos_far_ptr device = fdos_dpb_device(p);
+        printf("BAD CDS DPB[%s]: chain dpb=%04x:%04x next=%04x:%04x "
+               "unit=%u sub=%u dev=%04x:%04x flags=%04x\n",
+               tag,
+               FP_SEG(p), FP_OFF(p),
+               FP_SEG(next), FP_OFF(next),
+               fdos_dpb_unit(p), fdos_dpb_subunit(p),
+               FP_SEG(device), FP_OFF(device),
+               (UWORD)(UBYTE)fdos_dpb_flags(p));
+        p = next;
+      }
     }
   }
 
@@ -2226,23 +2232,34 @@ invalid_path:
   DosUpFString(rootPos);
   TNDBG("TN58 after DosUpFString dest='%s'", dest);
 
-  if (dest[2] != '/' && (!(mode & CDS_MODE_SKIP_PHYSICAL)) && LoL->njoined)
+  if (dest[2] != '/' && (!(mode & CDS_MODE_SKIP_PHYSICAL)) &&
+      kernel_lol_read8(offsetof(struct lol, njoined)) != 0)
   {
-    dos_far_ptr x86_cdsp = LoL->CDSp;
-    struct cds *cdsp = (struct cds *)ARM_PTR(x86_cdsp);
+    const dos_far_ptr cds_base = kernel_lol_read_far(offsetof(struct lol, CDSp));
+    const UBYTE lastdrive = fdos_dos_lastdrive();
+    char join_path[MAX_CDSPATH];
 
-    TNDBG("TN59 JOIN scan njoined=%u cdsp=%04X:%04X native=%p",
-          LoL->njoined, FP_SEG(x86_cdsp), FP_OFF(x86_cdsp), cdsp);
+    TNDBG("TN59 JOIN scan njoined=%u cdsp=%04X:%04X",
+          kernel_lol_read8(offsetof(struct lol, njoined)),
+          FP_SEG(cds_base), FP_OFF(cds_base));
 
-    for (i = 0; i < LoL->lastdrive; ++i, ++cdsp)
+    for (i = 0; i < lastdrive; ++i)
     {
-      size_t j = strlen((char *)cdsp->cdsCurrentPath);
+      const dos_far_ptr entry =
+          MK_FP(FP_SEG(cds_base),
+                (UWORD)(FP_OFF(cds_base) + (UWORD)i * sizeof(struct cds)));
+      const UWORD flags = fdos_cds_flags(entry);
+      size_t j;
+
+      fdos_cds_copy_current_path(entry, join_path, sizeof(join_path));
+      join_path[MAX_CDSPATH - 1] = '\0';
+      j = strlen(join_path);
 
       TNDBG("TN60 JOIN i=%u j=%u flags=%04X path='%s'",
-            i, (unsigned)j, cdsp->cdsFlags, cdsp->cdsCurrentPath);
-      if ((cdsp->cdsFlags & CDSJOINED) &&
+            i, (unsigned)j, flags, join_path);
+      if ((flags & CDSJOINED) &&
           (dest[j] == '\\' || dest[j] == '\0') &&
-          memcmp(dest, cdsp->cdsCurrentPath, j) == 0)
+          memcmp(dest, join_path, j) == 0)
       {
         dest[0] = drNrToLetter(i);
         dest[1] = ':';
@@ -2258,10 +2275,10 @@ invalid_path:
         }
 
         result = (result & 0xffe0) | i;
-        internal_data->current_ldt = MK_FP(FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp) + i * sizeof(struct cds));
+        fdos_dos_set_current_ldt(entry);
         result &= ~IS_NETWORK;
 
-        if (cdsp->cdsFlags & CDSNETWDRV)
+        if (flags & CDSNETWDRV)
           result |= IS_NETWORK;
 
         TNDBG("TN61 JOIN return result=%04X dest='%s'", result, dest);

@@ -1,4 +1,5 @@
 #include "hdrs.h"
+#include "kernel_guest_proxy.h"
 #include "bios/bios.h"
 #include "fdos.h"
 
@@ -970,7 +971,7 @@ bool fdos_2fh(CPU* cpu) {
             if (rc < SUCCESS) {
                 CPU_AX = (UWORD)-rc;
                 if (rc != DE_DEVICE && rc != DE_ACCESS)
-                    internal_data->CritErrCode = CPU_AX;
+                    fdos_dos_set_crit_err_code(CPU_AX);
                 cf = 1;
             } else {
                 cf = 0;
@@ -980,14 +981,17 @@ bool fdos_2fh(CPU* cpu) {
     else
     if (CPU_AX == 0x122C) {
         /* Return the second device in the chain, skipping NUL. */
-        CPU_BX = FP_SEG(LoL->nul_dev.dh_next);
-        CPU_AX = FP_OFF(LoL->nul_dev.dh_next);
+        {
+            dos_far_ptr next = fdos_lol_nul_next();
+            CPU_BX = FP_SEG(next);
+            CPU_AX = FP_OFF(next);
+        }
         cf = 0;
     }
     else
     if (CPU_AX == 0x122D) {
         /* DOS internal: get the current extended error code. */
-        CPU_AX = internal_data->CritErrCode;
+        CPU_AX = fdos_dos_crit_err_code();
         cf = 0;
     }
     else
@@ -999,13 +1003,10 @@ bool fdos_2fh(CPU* cpu) {
     else
     if (CPU_AX == 0x122F) {
         /* Set/reset the DOS version returned by INT 21h/AH=30h. */
-        if (CPU_DX) {
-            LoL->os_setver_major = CPU_DL;
-            LoL->os_setver_minor = CPU_DH;
-        } else {
-            LoL->os_setver_major = LoL->os_major;
-            LoL->os_setver_minor = LoL->os_minor;
-        }
+        if (CPU_DX)
+            fdos_lol_set_setver(CPU_DL, CPU_DH);
+        else
+            fdos_lol_set_setver(fdos_lol_os_major(), fdos_lol_os_minor());
         cf = 0;
     }
     else
@@ -1053,44 +1054,17 @@ bool fdos_2fh(CPU* cpu) {
     }
     else
     if (CPU_AX == 0x121F) {
-        /*
-         * DOS internal: build a temporary CDS for the drive letter pushed
-         * by the caller before INT 2Fh.
-         *
-         * Input:  callerARG1 low byte = ASCII drive letter.
-         * Output: ES:DI -> SDA TempCDS, CX = sizeof(struct cds), CF clear.
-         */
-        const uint32_t caller_arg_addr =
-            stk_lin(CPU_SS, CPU_SP, 6);
+        /* Build SDA TempCDS without materialising source/destination CDS. */
+        const uint32_t caller_arg_addr = stk_lin(CPU_SS, CPU_SP, 6);
         const UBYTE drive_letter = (UBYTE)readw86(caller_arg_addr);
         const int drive = (drive_letter & 0x1f) - 1;
-        struct cds FAR *source = get_cds_unvalidated((unsigned)drive);
+        const dos_far_ptr tmp_fp =
+            drive < 0 ? MK_FP(0, 0) : fdos_temp_cds_build(drive_letter, (unsigned)drive);
 
-        if (drive < 0 || source == NULL) {
+        if (far_is_null(tmp_fp)) {
             cf = 1;
         } else {
-            struct cds *tmp = (struct cds *)internal_data->TempCDS;
-            const dos_far_ptr /* -> struct cds */ tmp_fp =
-                x86_FAR_PTR(DOS_PSP, tmp);
-
-            memset(tmp, 0, sizeof(*tmp));
-            strcpy(tmp->cdsCurrentPath, "?:\\");
-            tmp->cdsCurrentPath[0] = drive_letter;
-            tmp->cdsBackslashOffset = 2;
-
-            if (source->cdsFlags) {
-                tmp->cdsDpb = source->cdsDpb;
-                tmp->cdsFlags = CDSPHYSDRV;
-            } else {
-                tmp->cdsDpb = MK_FP(0, 0);
-                tmp->cdsFlags = 0;
-            }
-
-            tmp->cdsStrtClst = 0xffff;
-            tmp->cdsParam = 0xffff;
-            tmp->cdsStoreUData = 0xffff;
-
-            CPU_CX = sizeof(*tmp);
+            CPU_CX = sizeof(struct cds);
             SET_ES(FP_SEG(tmp_fp));
             CPU_DI = FP_OFF(tmp_fp);
             cf = 0;
@@ -1131,7 +1105,10 @@ bool fdos_2fh(CPU* cpu) {
         UBYTE ch = CPU_AL;
 
         cpu_save_regs(cpu, &saved);
-        check_handle_break(&LoL->syscon);
+        {
+            dos_far_ptr syscon = fdos_lol_syscon();
+            check_handle_break(&syscon);
+        }
         write_char_stdout(ch);
         cpu_restore_regs(cpu, &saved);
 
@@ -1155,11 +1132,7 @@ bool fdos_2fh(CPU* cpu) {
     else
     if (CPU_AX == 0x1208) {
         /* Raw SFT reference-count decrement, matching upstream 1208h. */
-        sft *entry = (sft *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
-
-        CPU_AX = entry->sft_count;
-        if (--entry->sft_count == 0)
-            --entry->sft_count;       /* 0xffff marks a free SFT */
+        CPU_AX = fdos_sft_dec_ref_raw(MK_FP(CPU_ES, CPU_DI));
         cf = 0;
     }
     else
@@ -1169,19 +1142,15 @@ bool fdos_2fh(CPU* cpu) {
          * callerARG1 is the DOS error code pushed before INT 2Fh.
          */
         UWORD error = readw86(stk_lin(CPU_SS, CPU_SP, 6));
-        struct cds *cdsp = get_cds1(internal_data->default_drive);
+        const UBYTE drive = fdos_dos_default_drive();
+        const dos_far_ptr cdsp = fdos_cds_slot(drive);
+        const dos_far_ptr dpbp = far_is_null(cdsp) ? MK_FP(0, 0) : fdos_cds_dpb(cdsp);
 
-        if (cdsp == NULL || far_is_null(cdsp->cdsDpb)) {
+        if (far_is_null(dpbp)) {
             CPU_AL = FAIL;
             cf = 1;
         } else {
-            struct dpb *dpbp = (struct dpb *)ARM_PTR(cdsp->cdsDpb);
-            /* dpb_device is already the guest dhdr pointer, and its 0000:0000
-               "none" sentinel is exactly what CriticalError() treats as
-               "no device" - so pass it through verbatim. */
-            CPU_AL = CriticalError(0x38, /* ignore/retry/fail */
-                                   internal_data->default_drive,
-                                   error, dpbp->dpb_device);
+            CPU_AL = CriticalError(0x38, drive, error, fdos_dpb_device(dpbp));
             cf = (CPU_AL == RETRY) ? 0 : 1;
         }
     }
@@ -1192,18 +1161,18 @@ bool fdos_2fh(CPU* cpu) {
          * but compatibility/FCB opens still receive the normal critical-
          * error opportunity before DE_SHARE is returned.
          */
-        sft *entry = (sft *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
+        const dos_far_ptr sftp = MK_FP(CPU_ES, CPU_DI);
+        const UWORD sft_mode = fdos_sft_mode_raw(sftp);
         UWORD error = readw86(stk_lin(CPU_SS, CPU_SP, 6));
         UBYTE retry = FALSE;
 
-        if ((entry->sft_mode & O_FCB) ||
-            !(entry->sft_mode & (O_SHAREMASK | O_NOINHERIT))) {
-            struct cds *cdsp = get_cds1(internal_data->default_drive);
-            if (cdsp != NULL && !far_is_null(cdsp->cdsDpb)) {
-                struct dpb *dpbp = (struct dpb *)ARM_PTR(cdsp->cdsDpb);
-                retry = CriticalError(0x38, /* ignore/retry/fail */
-                                      internal_data->default_drive,
-                                      error, dpbp->dpb_device) == RETRY;
+        if ((sft_mode & O_FCB) ||
+            !(sft_mode & (O_SHAREMASK | O_NOINHERIT))) {
+            const UBYTE drive = fdos_dos_default_drive();
+            const dos_far_ptr cdsp = fdos_cds_slot(drive);
+            const dos_far_ptr dpbp = far_is_null(cdsp) ? MK_FP(0, 0) : fdos_cds_dpb(cdsp);
+            if (!far_is_null(dpbp)) {
+                retry = CriticalError(0x38, drive, error, fdos_dpb_device(dpbp)) == RETRY;
             }
         }
         CPU_AX = DE_SHARE;
@@ -1212,11 +1181,10 @@ bool fdos_2fh(CPU* cpu) {
     else
     if (CPU_AX == 0x120c) {
         /* Notify a character device about OPEN and set SFT owner PSP. */
-        if (!far_is_null(internal_data->lpCurSft) &&
-            !far_is_end(internal_data->lpCurSft)) {
-            sft *entry = (sft *)ARM_PTR(internal_data->lpCurSft);
+        const dos_far_ptr entry = fdos_dos_lp_cur_sft();
 
-            if (entry->sft_flags & SFT_FDEVICE) {
+        if (!far_is_null(entry) && !far_is_end(entry)) {
+            if (fdos_sft_flags_raw(entry) & SFT_FDEVICE) {
                 /* The request packet is handed to the driver as a GUEST
                    ES:BX (see x86_execrh), so it must live in guest RAM. A
                    native "request rq;" local does not - linear_to_far() on it
@@ -1226,9 +1194,9 @@ bool fdos_2fh(CPU* cpu) {
                 memset(rq, 0, sizeof(*rq));
                 rq->r_length = sizeof(*rq);
                 rq->r_command = C_OPEN;
-                execrh(x86_FAR_PTR(DOS_PSP, rq) /* -> request */, entry->sft_dev);
+                execrh(x86_FAR_PTR(DOS_PSP, rq) /* -> request */, fdos_sft_dev_raw(entry));
             }
-            entry->sft_psp = internal_data->cu_psp;
+            fdos_sft_set_psp_raw(entry, fdos_dos_cu_psp());
         }
         cf = 0;
     }
@@ -1249,15 +1217,17 @@ bool fdos_2fh(CPU* cpu) {
          *         CF clear on success.
          *         AL = DOS error, CF set on an invalid handle.
          */
-        psp *p = (psp *)ARM_PTR(MK_FP(internal_data->cu_psp, 0));
+        const UWORD psp_seg = fdos_dos_cu_psp();
+        const UWORD maxfiles = fdos_psp_max_files(psp_seg);
+        const dos_far_ptr filetab = fdos_psp_file_table(psp_seg);
 
-        if (CPU_BX >= p->ps_maxfiles) {
+        if (CPU_BX >= maxfiles || far_is_null(filetab) || far_is_end(filetab)) {
             CPU_AL = (UBYTE)(-DE_INVLDHNDL);
             cf = 1;
         } else {
             dos_far_ptr jft_entry =
-                MK_FP(FP_SEG(p->ps_filetab),
-                      (UWORD)(FP_OFF(p->ps_filetab) + CPU_BX));
+                MK_FP(FP_SEG(filetab),
+                      (UWORD)(FP_OFF(filetab) + CPU_BX));
 
             SET_ES(FP_SEG(jft_entry));
             CPU_DI = FP_OFF(jft_entry);
@@ -1279,9 +1249,10 @@ bool fdos_2fh(CPU* cpu) {
         if (rel_idx < 0) {
             cf = 1;
         } else {
+            const dos_far_ptr cur = fdos_dos_lp_cur_sft();
             CPU_BX = (UWORD)rel_idx;
-            SET_ES(FP_SEG(internal_data->lpCurSft));
-            CPU_DI = FP_OFF(internal_data->lpCurSft);
+            SET_ES(FP_SEG(cur));
+            CPU_DI = FP_OFF(cur);
             cf = 0;
         }
     }
@@ -1368,15 +1339,11 @@ bool fdos_2fh(CPU* cpu) {
         const uint32_t caller_arg_addr =
             stk_lin(CPU_SS, CPU_SP, 6);
         const UBYTE drive = (UBYTE)readw86(caller_arg_addr);
-        struct cds FAR *cdsp = get_cds_unvalidated(drive);
+        const dos_far_ptr cds_ptr = fdos_cds_slot(drive);
 
-        if (cdsp == NULL || far_is_null(LoL->CDSp)) {
+        if (far_is_null(cds_ptr)) {
             cf = 1;
         } else {
-            const dos_far_ptr cds_ptr =
-                MK_FP(FP_SEG(LoL->CDSp),
-                      (UWORD)(FP_OFF(LoL->CDSp) +
-                              (UWORD)drive * sizeof(struct cds)));
 
             SET_DS(FP_SEG(cds_ptr));
             CPU_SI = FP_OFF(cds_ptr);
@@ -1388,7 +1355,7 @@ bool fdos_2fh(CPU* cpu) {
         /* DOS internal: set default drive, AL is zero-based (0=A:). */
         const UBYTE drv = CPU_AL;
 
-        if (drv >= LoL->lastdrive || get_cds_unvalidated(drv) == NULL) {
+        if (far_is_null(fdos_cds_slot(drv))) {
             CPU_AX = (UWORD)-DE_INVLDDRV;
             cf = 1;
         } else {
@@ -1460,8 +1427,7 @@ bool fdos_2fh(CPU* cpu) {
     if (CPU_AX == 0x1224) {
         /* DOS internal SHARE retry parameters.  SHARE itself is absent,
          * but these words are also exposed through IOCTL 440Bh. */
-        LoL->NetDelay = CPU_CX;
-        LoL->NetRetry = CPU_DX;
+        fdos_lol_set_network_retry(CPU_CX, CPU_DX);
         cf = 0;
     }
     else
@@ -1477,7 +1443,7 @@ bool fdos_2fh(CPU* cpu) {
         long result;
 
         cpu_save_regs(cpu, &saved);
-        internal_data->CritErrCode = SUCCESS;
+        fdos_dos_set_crit_err_code(SUCCESS);
         result = DosOpen(name, O_LEGACY | O_OPEN | mode, 0);
         cpu_restore_regs(cpu, &saved);
 
@@ -1497,7 +1463,7 @@ bool fdos_2fh(CPU* cpu) {
         COUNT result;
 
         cpu_save_regs(cpu, &saved);
-        internal_data->CritErrCode = SUCCESS;
+        fdos_dos_set_crit_err_code(SUCCESS);
         result = DosClose(handle);
         cpu_restore_regs(cpu, &saved);
 
@@ -1526,7 +1492,7 @@ bool fdos_2fh(CPU* cpu) {
             cf = 1;
         } else {
             cpu_save_regs(cpu, &saved);
-            internal_data->CritErrCode = SUCCESS;
+            fdos_dos_set_crit_err_code(SUCCESS);
             position = DosSeek(handle, offset, method & 0xff, &result);
             cpu_restore_regs(cpu, &saved);
 
@@ -1553,7 +1519,7 @@ bool fdos_2fh(CPU* cpu) {
         long result;
 
         cpu_save_regs(cpu, &saved);
-        internal_data->CritErrCode = SUCCESS;
+        fdos_dos_set_crit_err_code(SUCCESS);
         result = DosRead(handle, count, buffer);
         cpu_restore_regs(cpu, &saved);
 

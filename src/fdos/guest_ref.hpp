@@ -553,6 +553,7 @@ public:
         scalar_store<UWORD>(offsetof(dpb, dpb_nfreeclst_un) + sizeof(UWORD), v);
     }
 #endif
+    __attribute__((always_inline)) dos_far_ptr next() const { return far_load(offsetof(dpb, dpb_next)); }
     __attribute__((always_inline)) dos_far_ptr device() const { return far_load(offsetof(dpb, dpb_device)); }
 
 #ifdef WITHFAT32

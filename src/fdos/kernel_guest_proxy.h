@@ -22,6 +22,39 @@ UBYTE fdos_lol_uppermem_link(void);
 UWORD fdos_lol_uppermem_root(void);
 UWORD fdos_lol_first_mcb(void);
 ULONG fdos_sft_size(dos_far_ptr sft_ptr);
+UWORD fdos_sft_count(dos_far_ptr sft_ptr);
+dos_far_ptr fdos_dos_lp_cur_sft(void);
+dos_far_ptr fdos_lol_dpb(void);
+UBYTE fdos_lol_nblkdev(void);
+dos_far_ptr fdos_dpb_next(dos_far_ptr dpb_ptr);
+dos_far_ptr fdos_dpb_device(dos_far_ptr dpb_ptr);
+UBYTE fdos_dpb_unit(dos_far_ptr dpb_ptr);
+UBYTE fdos_dpb_subunit(dos_far_ptr dpb_ptr);
+BYTE fdos_dpb_flags(dos_far_ptr dpb_ptr);
+UBYTE fdos_dpb_mdb(dos_far_ptr dpb_ptr);
+dos_far_ptr fdos_dhdr_next(dos_far_ptr dhdr_ptr);
+UWORD fdos_dhdr_attr(dos_far_ptr dhdr_ptr);
+UWORD fdos_dhdr_strategy(dos_far_ptr dhdr_ptr);
+UWORD fdos_dhdr_interrupt(dos_far_ptr dhdr_ptr);
+void fdos_dhdr_read_name(dos_far_ptr dhdr_ptr, BYTE *dst);
+
+UWORD fdos_dos_crit_err_code(void);
+void fdos_dos_set_crit_err_code(UWORD value);
+dos_far_ptr fdos_lol_nul_next(void);
+UBYTE fdos_lol_os_major(void);
+UBYTE fdos_lol_os_minor(void);
+void fdos_lol_set_setver(UBYTE major, UBYTE minor);
+dos_far_ptr fdos_lol_syscon(void);
+dos_far_ptr fdos_cds_slot(unsigned drive);
+dos_far_ptr fdos_temp_cds_build(UBYTE drive_letter, unsigned drive);
+UWORD fdos_sft_dec_ref_raw(dos_far_ptr sft_ptr);
+UWORD fdos_sft_mode_raw(dos_far_ptr sft_ptr);
+UWORD fdos_sft_flags_raw(dos_far_ptr sft_ptr);
+dos_far_ptr fdos_sft_dev_raw(dos_far_ptr sft_ptr);
+void fdos_sft_set_psp_raw(dos_far_ptr sft_ptr, UWORD psp);
+UWORD fdos_psp_max_files(UWORD psp_seg);
+dos_far_ptr fdos_psp_file_table(UWORD psp_seg);
+void fdos_lol_set_network_retry(UWORD delay, UWORD retry);
 
 #ifdef __cplusplus
 }

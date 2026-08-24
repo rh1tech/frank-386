@@ -390,6 +390,7 @@ set(EMU_CORE_SOURCES
     src/fdos/fcom/fcom_guest.cpp
     src/fdos/nls.c
     src/fdos/ioctl.c
+    src/fdos/ioctl_guest_proxy.cpp
     src/fdos/fdos_21h.cpp
     src/fdos/fdos_2528.c
     src/fdos/fdos_29h.c
@@ -739,6 +740,7 @@ set(FDOS_WARN_SOURCES
     src/fdos/fcom/fcom_guest.cpp
     src/fdos/nls.c
     src/fdos/ioctl.c
+    src/fdos/ioctl_guest_proxy.cpp
     src/fdos/fdos_21h.cpp
     src/fdos/fdos_2528.c
     src/fdos/fdos_29h.c
