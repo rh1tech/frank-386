@@ -91,6 +91,114 @@ _Static_assert(sizeof(dmatch) == 43, "sizeof(dmatch) changed - re-check every fm
     so the macro doesn't expand recursively into itself wherever
     internal_data->sda_tmp_dm/sda_tmp_dm_ren is written.
 */
+
+
+/* A directory match can live either in guest SDA memory or in native
+ * kernel-only LFN state.  Keep that distinction explicit: a raw dmatch *
+ * must never be manufactured for guest memory when paging is active. */
+typedef struct dmatch_handle {
+  UBYTE is_native;
+  union {
+    dmatch *native_ptr;
+    dos_far_ptr guest_ptr;
+  } u;
+} dmatch_handle;
+
+static inline dmatch_handle dmatch_native(dmatch *p)
+{
+  dmatch_handle h;
+  h.is_native = TRUE;
+  h.u.native_ptr = p;
+  return h;
+}
+
+static inline dmatch_handle dmatch_guest(dos_far_ptr p)
+{
+  dmatch_handle h;
+  h.is_native = FALSE;
+  h.u.guest_ptr = p;
+  return h;
+}
+
+static inline uint32_t dmatch_guest_addr(dmatch_handle h, size_t off)
+{
+  return EFFECTIVE(h.u.guest_ptr) + (uint32_t)off;
+}
+
+static inline UBYTE dmatch_get8(dmatch_handle h, size_t off)
+{
+  return h.is_native ? *((UBYTE *)h.u.native_ptr + off)
+                     : pload8(dmatch_guest_addr(h, off));
+}
+
+static inline UWORD dmatch_get16(dmatch_handle h, size_t off)
+{
+  UWORD v;
+  if (!h.is_native)
+    return pload16(dmatch_guest_addr(h, off));
+  dos_api_memcpy(&v, (UBYTE *)h.u.native_ptr + off, sizeof(v));
+  return v;
+}
+
+static inline ULONG dmatch_get32(dmatch_handle h, size_t off)
+{
+  ULONG v;
+  if (!h.is_native)
+    return pload32(dmatch_guest_addr(h, off));
+  dos_api_memcpy(&v, (UBYTE *)h.u.native_ptr + off, sizeof(v));
+  return v;
+}
+
+static inline void dmatch_set8(dmatch_handle h, size_t off, UBYTE v)
+{
+  if (h.is_native)
+    *((UBYTE *)h.u.native_ptr + off) = v;
+  else
+    pstore8(dmatch_guest_addr(h, off), v);
+}
+
+static inline void dmatch_set16(dmatch_handle h, size_t off, UWORD v)
+{
+  if (h.is_native)
+    dos_api_memcpy((UBYTE *)h.u.native_ptr + off, &v, sizeof(v));
+  else
+    pstore16(dmatch_guest_addr(h, off), v);
+}
+
+static inline void dmatch_set32(dmatch_handle h, size_t off, ULONG v)
+{
+  if (h.is_native)
+    dos_api_memcpy((UBYTE *)h.u.native_ptr + off, &v, sizeof(v));
+  else
+    pstore32(dmatch_guest_addr(h, off), v);
+}
+
+#define DM_GET8(h, field) dmatch_get8((h), offsetof(dmatch, field))
+#define DM_GET16(h, field) dmatch_get16((h), offsetof(dmatch, field))
+#define DM_GET32(h, field) dmatch_get32((h), offsetof(dmatch, field))
+#define DM_SET8(h, field, v) dmatch_set8((h), offsetof(dmatch, field), (v))
+#define DM_SET16(h, field, v) dmatch_set16((h), offsetof(dmatch, field), (v))
+#define DM_SET32(h, field, v) dmatch_set32((h), offsetof(dmatch, field), (v))
+
+static inline void dmatch_read_name_pat(dmatch_handle h, BYTE out[FNAME_SIZE + FEXT_SIZE])
+{
+  const size_t off = offsetof(dmatch, dm_name_pat);
+  if (h.is_native)
+    dos_api_memcpy(out, (BYTE *)h.u.native_ptr + off, FNAME_SIZE + FEXT_SIZE);
+  else
+    guest_read_block(EFFECTIVE(h.u.guest_ptr) + (uint32_t)off, out, FNAME_SIZE + FEXT_SIZE);
+}
+
+static inline void dmatch_write_name_pat(dmatch_handle h, const BYTE in[FNAME_SIZE + FEXT_SIZE])
+{
+  const size_t off = offsetof(dmatch, dm_name_pat);
+  if (h.is_native)
+    dos_api_memcpy((BYTE *)h.u.native_ptr + off, in, FNAME_SIZE + FEXT_SIZE);
+  else
+    guest_write_block(EFFECTIVE(h.u.guest_ptr) + (uint32_t)off,
+                      in, FNAME_SIZE + FEXT_SIZE);
+}
+
 #define sda_tmp_dmD (*(dmatch *)&internal_data->sda_tmp_dm)
 #define sda_tmp_dm_renD (*(dmatch *)&internal_data->sda_tmp_dm_ren)
 

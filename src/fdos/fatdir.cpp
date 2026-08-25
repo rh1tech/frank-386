@@ -77,9 +77,13 @@ VOID dir_init_fnode(f_node_ptr fnp, CLUSTER dirstart)
 {
   /* reset the directory flags    */
   fnp->f_sft_idx = 0xff;
-  fnp->f_dmp = &sda_tmp_dmD;
+  fnp->f_dmp = dmatch_guest(MK_FP(
+      DOS_PSP,
+      (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, sda_tmp_dm))));
   if (fnp == fnode_slot(1))
-    fnp->f_dmp = &sda_tmp_dm_renD;
+    fnp->f_dmp = dmatch_guest(MK_FP(
+        DOS_PSP,
+        (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, sda_tmp_dm_ren))));
   fnp->f_offset = 0l;
   fnp->f_cluster_offset = 0;
 
@@ -88,7 +92,8 @@ VOID dir_init_fnode(f_node_ptr fnp, CLUSTER dirstart)
   if (dirstart == 0)
     { const dpb_ref d(fnp->f_dpb); dirstart = d.dpb_fatsize() == 0 ? d.dpb_xrootclst() : 0; }
 #endif
-  fnp->f_cluster = fnp->f_dmp->dm_dircluster = dirstart;
+  fnp->f_cluster = dirstart;
+  DM_SET32(fnp->f_dmp, dm_dircluster, dirstart);
 }
 
 /* swap internal and external delete flags */
@@ -126,7 +131,7 @@ COUNT dir_read(REG f_node_ptr fnp)
   const dpb_ref d(fnp->f_dpb);
   const UWORD secsize = d.dpb_secsize();
   unsigned sector;
-  unsigned entry = fnp->f_dmp->dm_entry;
+  unsigned entry = DM_GET16(fnp->f_dmp, dm_entry);
 
   /* can't have more than 65535 directory entries */
   if (entry >= 65535U)
@@ -137,7 +142,7 @@ COUNT dir_read(REG f_node_ptr fnp)
   /* dirent portion of the fnode, set the SFT_FCLEAN bit and leave,*/
   /* but only for root directories                                */
 
-  if (fnp->f_dmp->dm_dircluster == 0)
+  if (DM_GET32(fnp->f_dmp, dm_dircluster) == 0)
   {
     const UWORD dirents = d.dpb_dirents();
     if (entry >= dirents)
@@ -231,10 +236,12 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
            -- 2001/09/04 ska*/
 
   dir_init_fnode(fnp, 0);
-  fnp->f_dmp->dm_entry = 0;
+  DM_SET16(fnp->f_dmp, dm_entry, 0);
 
   dirname += 2;               /* Assume FAT style drive       */
-  fcbname = fnp->f_dmp->dm_name_pat;
+  BYTE fcbname_buf[FNAME_SIZE + FEXT_SIZE];
+  dmatch_read_name_pat(fnp->f_dmp, fcbname_buf);
+  fcbname = fcbname_buf;
   while(*dirname != '\0')
   {
     /* skip the path seperator                              */
@@ -250,6 +257,7 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
     /* comparison...                                        */
 
     dirname = ConvertNameSZToName83(fcbname, dirname);
+    dmatch_write_name_pat(fnp->f_dmp, fcbname);
 
     /* do not continue if we split the filename off and are */
     /* at the end                                           */
@@ -268,7 +276,7 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
         i = TRUE;
         break;
       }
-      fnp->f_dmp->dm_entry++;
+      DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
     }
 
     if (!i || !(fnp->f_dir.dir_attrib & D_DIR))
@@ -280,7 +288,7 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
       /* make certain we've moved off */
       /* root                         */
       dir_init_fnode(fnp, getdstart(fnp->f_dpb, &fnp->f_dir));
-      fnp->f_dmp->dm_entry = 0;
+      DM_SET16(fnp->f_dmp, dm_entry, 0);
     }
   }
   return fnp;

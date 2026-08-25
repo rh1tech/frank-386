@@ -67,7 +67,7 @@ static void lfn_init_dir_fnode(lfn_fnode_slot *slot, CLUSTER dirstart)
   f_node_ptr fnp = &slot->fnode;
   memset(&slot->dm, 0, sizeof(slot->dm));
   fnp->f_sft_idx = 0xff;
-  fnp->f_dmp = &slot->dm;
+  fnp->f_dmp = dmatch_native(&slot->dm);
   fnp->f_offset = 0;
   fnp->f_cluster_offset = 0;
 
@@ -77,7 +77,7 @@ static void lfn_init_dir_fnode(lfn_fnode_slot *slot, CLUSTER dirstart)
 #endif
 
   fnp->f_cluster = dirstart;
-  fnp->f_dmp->dm_dircluster = dirstart;
+  DM_SET32(fnp->f_dmp, dm_dircluster, dirstart);
 }
 
 void lfnapi_init(void)
@@ -112,7 +112,7 @@ COUNT lfn_allocate_inode(void)
       memset(slot, 0, sizeof(*slot));
       slot->used = TRUE;
       slot->fnode.f_dpb = dpbp;
-      slot->fnode.f_dmp = &slot->dm;
+      slot->fnode.f_dmp = dmatch_native(&slot->dm);
       slot->fnode.f_sft_idx = 0xff;
       return handle;
     }
@@ -211,7 +211,7 @@ COUNT lfn_create_entries(UWORD handle, dos_far_ptr lip)
   entries_needed = (fdos_lfn_name_length(lip) + CHARS_IN_LFN_ENTRY - 1)
                  / CHARS_IN_LFN_ENTRY + 1;
 
-  lfn_setup_inode(handle, fnp->f_dmp->dm_dircluster, 0);
+  lfn_setup_inode(handle, DM_GET32(fnp->f_dmp, dm_dircluster), 0);
   fnp = &slot->fnode;
 
   free_entries = 0;
@@ -235,23 +235,23 @@ COUNT lfn_create_entries(UWORD handle, dos_far_ptr lip)
         lfn_free_inode(handle);
         return LHE_NOSPACE;
       }
-      if (fnp->f_dmp->dm_entry != 0)
-        fnp->f_dmp->dm_entry--;
+      if (DM_GET16(fnp->f_dmp, dm_entry) != 0)
+        DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) - 1));
     }
     else
     {
       free_entries = 0;
     }
 
-    fnp->f_dmp->dm_entry++;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
   }
 
-  sfn_offset = fnp->f_dmp->dm_entry;
+  sfn_offset = DM_GET16(fnp->f_dmp, dm_entry);
   fdos_lfn_dir_to_native(lip, &fnp->f_dir);
   if (!dir_write(fnp))
     return LHE_IOERROR;
 
-  fnp->f_dmp->dm_entry--;
+  DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) - 1));
   for (COUNT i = 0; i < entries_needed - 1; i++, id++)
   {
     memset(&fnp->f_dir, 0, sizeof(fnp->f_dir));
@@ -266,11 +266,11 @@ COUNT lfn_create_entries(UWORD handle, dos_far_ptr lip)
     if (!dir_write(fnp))
       return LHE_IOERROR;
 
-    if (fnp->f_dmp->dm_entry != 0)
-      fnp->f_dmp->dm_entry--;
+    if (DM_GET16(fnp->f_dmp, dm_entry) != 0)
+      DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) - 1));
   }
 
-  fnp->f_dmp->dm_entry = sfn_offset;
+  DM_SET16(fnp->f_dmp, dm_entry, sfn_offset);
   fdos_lfn_set_diroff(lip, sfn_offset);
   return SUCCESS;
 }
@@ -297,18 +297,18 @@ COUNT lfn_dir_read(UWORD handle, dos_far_ptr lip)
         fnp->f_dir.dir_attrib != D_LFN)
    {
       fdos_lfn_dir_from_native(lip, &fnp->f_dir);
-      sfn_diroff = fnp->f_dmp->dm_entry;
+      sfn_diroff = DM_GET16(fnp->f_dmp, dm_entry);
       break;
     }
 
-    fnp->f_dmp->dm_entry++;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
   }
   for (;;)
   {
-    if (fnp->f_dmp->dm_entry == 0)
+    if (DM_GET16(fnp->f_dmp, dm_entry) == 0)
       break;
 
-    fnp->f_dmp->dm_entry--;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) - 1));
     rc = dir_read(fnp);
     if (rc == DE_BLKINVLD) return LHE_IOERROR;
     if (fnp->f_dir.dir_name[0] == DELETED ||
@@ -335,7 +335,7 @@ COUNT lfn_dir_read(UWORD handle, dos_far_ptr lip)
   }
 
   fdos_lfn_name_set(lip, lfn_name_index, 0);
-  fnp->f_dmp->dm_entry = sfn_diroff;
+  DM_SET16(fnp->f_dmp, dm_entry, sfn_diroff);
   fdos_lfn_set_diroff(lip, sfn_diroff);
   return SUCCESS;
 }

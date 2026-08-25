@@ -789,12 +789,14 @@ int find_fname(const char *path, int attr, f_node_ptr fnp)
 
   while (dir_read(fnp) == 1)
   {
-    if (fcbmatch(fnp->f_dir.dir_name, fnp->f_dmp->dm_name_pat)
+    BYTE dm_name_pat[FNAME_SIZE + FEXT_SIZE];
+    dmatch_read_name_pat(fnp->f_dmp, dm_name_pat);
+    if (fcbmatch(fnp->f_dir.dir_name, dm_name_pat)
         && (fnp->f_dir.dir_attrib & ~(D_RDONLY | D_ARCHIVE | attr)) == 0)
     {
       return SUCCESS;
     }
-    fnp->f_dmp->dm_entry++;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
   }
   return DE_FILENOTFND;
 }
@@ -892,7 +894,9 @@ int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
   fnp->f_flags |= SFT_FCLEAN;
   if (status != S_OPENED)
   {
-    init_direntry(&fnp->f_dir, attrib, FREE, fnp->f_dmp->dm_name_pat);
+    BYTE dm_name_pat[FNAME_SIZE + FEXT_SIZE];
+    dmatch_read_name_pat(fnp->f_dmp, dm_name_pat);
+    init_direntry(&fnp->f_dir, attrib, FREE, dm_name_pat);
     if (!dir_write(fnp))
       return DE_ACCESS;
   }
@@ -1108,7 +1112,7 @@ int dos_cd(char *PathName)
        so this is belt-and-braces - but it is the difference between a
        broken precondition being harmless and it taking down the system. */
     if (!far_is_null(x86_cdsp))
-      cds_ref(x86_cdsp).start_cluster((UWORD)fnp->f_dmp->dm_dircluster);
+      cds_ref(x86_cdsp).start_cluster((UWORD)DM_GET32(fnp->f_dmp, dm_dircluster));
   }
   return SUCCESS;
 }
@@ -1514,7 +1518,7 @@ COUNT map_cluster(REG f_node_ptr fnp, COUNT mode)
     /* If seek is to earlier in file than current position, */
     /* we have to follow chain from the beginning again...  */
     /* Set internal index and cluster size.                 */
-    fnp->f_cluster = fnp->f_sft_idx == 0xff ? fnp->f_dmp->dm_dircluster :
+    fnp->f_cluster = fnp->f_sft_idx == 0xff ? DM_GET32(fnp->f_dmp, dm_dircluster) :
         getdstart(fnp->f_dpb, &fnp->f_dir);
     fnp->f_cluster_offset = 0;
   }
@@ -1613,13 +1617,13 @@ BOOL fcbmatch(const char *fcbname1, const char *fcbname2)
  */
 COUNT remove_lfn_entries(f_node_ptr fnp)
 {
-  unsigned original_diroff = fnp->f_dmp->dm_entry;
+  unsigned original_diroff = DM_GET16(fnp->f_dmp, dm_entry);
 
   while (TRUE)
   {
-    if (fnp->f_dmp->dm_entry == 0)
+    if (DM_GET16(fnp->f_dmp, dm_entry) == 0)
       break;
-    fnp->f_dmp->dm_entry--;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) - 1));
     if (dir_read(fnp) <= 0)
       return DE_ACCESS;
     if (fnp->f_dir.dir_attrib != D_LFN)
@@ -1627,7 +1631,7 @@ COUNT remove_lfn_entries(f_node_ptr fnp)
     fnp->f_dir.dir_name[0] = DELETED;
     if (!dir_write(fnp)) return DE_ACCESS;
   }
-  fnp->f_dmp->dm_entry = original_diroff;
+  DM_SET16(fnp->f_dmp, dm_entry, (UWORD)original_diroff);
   if (dir_read(fnp) <= 0)
     return DE_ACCESS;
 
@@ -1642,7 +1646,7 @@ STATIC BOOL find_free(f_node_ptr fnp)
   {
     if (fnp->f_dir.dir_name[0] == DELETED)
       return TRUE;
-    fnp->f_dmp->dm_entry++;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
   }
   return rc >= 0;
 }
@@ -1715,7 +1719,7 @@ STATIC int alloc_find_free(f_node_ptr fnp, char *path)
   /* find an empty slot, we need to abort.        */
   if (find_free(fnp) == 0)
   {
-    if (fnp->f_dmp->dm_dircluster == 0)
+    if (DM_GET32(fnp->f_dmp, dm_dircluster) == 0)
     {
       return DE_TOOMANY;
     }
@@ -1757,8 +1761,10 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
   if (ret != DE_FILENOTFND)
     return ret == SUCCESS ? DE_ACCESS : ret;
 
-  fcbname = fnp2->f_dmp->dm_name_pat;
-  if (fnp1->f_dmp->dm_dircluster == fnp2->f_dmp->dm_dircluster)
+  BYTE fcbname_buf[FNAME_SIZE + FEXT_SIZE];
+  dmatch_read_name_pat(fnp2->f_dmp, fcbname_buf);
+  fcbname = fcbname_buf;
+  if (DM_GET32(fnp1->f_dmp, dm_dircluster) == DM_GET32(fnp2->f_dmp, dm_dircluster))
   {
     /* rename in the same directory: change the directory entry in-place */
     fnp2 = fnp1;
@@ -1956,7 +1962,7 @@ COUNT dos_mkdir(BYTE * dir)
   if (ret != DE_FILENOTFND)
     return ret == SUCCESS ? DE_ACCESS : ret;
 
-  parent = fnp->f_dmp->dm_dircluster;
+  parent = DM_GET32(fnp->f_dmp, dm_dircluster);
 
   ret = alloc_find_free(fnp, dir);
   if (ret != SUCCESS)
@@ -1973,7 +1979,9 @@ COUNT dos_mkdir(BYTE * dir)
   if (free_fat == LONG_LAST_CLUSTER)
     return DE_HNDLDSKFULL;
 
-  init_direntry(&fnp->f_dir, D_DIR, free_fat, fnp->f_dmp->dm_name_pat);
+  BYTE dm_name_pat[FNAME_SIZE + FEXT_SIZE];
+  dmatch_read_name_pat(fnp->f_dmp, dm_name_pat);
+  init_direntry(&fnp->f_dir, D_DIR, free_fat, dm_name_pat);
 
   /* Mark the cluster in the FAT as used and create new dir there */
   if (link_fat(fnp->f_dpb, free_fat, LONG_LAST_CLUSTER) != SUCCESS) /* free->last */
@@ -1992,7 +2000,7 @@ COUNT dos_mkdir(BYTE * dir)
   /* directory just under the root, ".." pointer is 0.     */
 
   dir_init_fnode(fnp, free_fat);
-  fnp->f_dmp->dm_entry = 0;
+  DM_SET16(fnp->f_dmp, dm_entry, 0);
   find_free(fnp);
 
   /* Create the "." entry                                 */
@@ -2168,7 +2176,7 @@ COUNT dos_rmdir(BYTE * path)
   if (fnp->f_dir.dir_name[0] != '.' || fnp->f_dir.dir_name[1] != ' ')
     return DE_ACCESS;
 
-  fnp->f_dmp->dm_entry++;
+  DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
   dir_read(fnp);
   /* second entry should be ".." */
   if (fnp->f_dir.dir_name[0] != '.' || fnp->f_dir.dir_name[1] != '.')
@@ -2176,13 +2184,13 @@ COUNT dos_rmdir(BYTE * path)
 
   /* Now search through the directory and make certain */
   /* that there are no entries                         */
-  fnp->f_dmp->dm_entry++;
+  DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
   while (dir_read(fnp) == 1)
   {
     /* If anything was found, exit with an error.   */
     if (fnp->f_dir.dir_name[0] != DELETED && fnp->f_dir.dir_attrib != D_LFN)
       return DE_ACCESS;
-    fnp->f_dmp->dm_entry++;
+    DM_SET16(fnp->f_dmp, dm_entry, (UWORD)(DM_GET16(fnp->f_dmp, dm_entry) + 1));
   }
 
   /* next, split the passed dir into components (i.e. -   */

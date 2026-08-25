@@ -38,7 +38,7 @@ static BYTE *fnode_hRcsId =
 struct f_node {
   UWORD f_flags;                /* file flags                   */
 
-  dmatch *f_dmp;                /* this file's dir match        */
+  dmatch_handle f_dmp;          /* guest SDA or native LFN dir match */
   struct dirent f_dir;          /* this file's dir entry image  */
 
   ULONG f_dirsector;            /* the sector containing dir entry*/
