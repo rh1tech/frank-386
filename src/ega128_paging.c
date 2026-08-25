@@ -19,6 +19,15 @@
 static uint16_t cache_page[CACHE_PAGE_COUNT];
 static uint8_t cache_dirty[CACHE_PAGE_COUNT];
 static uint8_t backing_valid[PAGE_COUNT / 8u];
+
+/* Tiny page->slot lookup for the CPU hot path.  Four entries are enough to
+ * cover the usual code/data/stack working set without spending kilobytes of
+ * scarce SRAM on a full PAGE_COUNT reverse map.  Entries are always validated
+ * against cache_page[] because the round-robin victim may reuse a slot. */
+#define HOT_PAGE_COUNT 4u
+static uint16_t hot_page[HOT_PAGE_COUNT];
+static uint8_t hot_slot[HOT_PAGE_COUNT];
+
 static uint16_t victim;
 static bool active;
 static bool use_spi_psram;
@@ -43,7 +52,7 @@ static bool pagefile_seek(uint32_t offset)
 static bool backing_read(uint32_t page, uint8_t *dst)
 {
     if (!backing_page_valid(page)) {
-        memset(dst, 0, EGA128_PAGE_SIZE);
+        nf_memset(dst, 0, EGA128_PAGE_SIZE);
         return true;
     }
 #ifdef BOARD_M1
@@ -101,11 +110,33 @@ static bool backing_write(uint32_t page, const uint8_t *src)
     return true;
 }
 
+static inline void __not_in_flash_func(hot_page_remember)(uint32_t page, uint32_t slot)
+{
+    for (uint32_t i = HOT_PAGE_COUNT - 1u; i != 0; --i) {
+        hot_page[i] = hot_page[i - 1u];
+        hot_slot[i] = hot_slot[i - 1u];
+    }
+    hot_page[0] = (uint16_t)page;
+    hot_slot[0] = (uint8_t)slot;
+}
+
 static uint32_t __not_in_flash_func(map_page)(uint32_t page, bool write_access)
 {
+    /* Instruction fetches and DOS data accesses normally stay on a handful
+     * of pages.  Avoid the 64/96-entry cache scan on those repeated hits. */
+    for (uint32_t i = 0; i < HOT_PAGE_COUNT; ++i) {
+        uint32_t slot = hot_slot[i];
+        if (hot_page[i] == page && slot < CACHE_PAGE_COUNT &&
+            cache_page[slot] == page) {
+            if (write_access) cache_dirty[slot] = 1;
+            return slot;
+        }
+    }
+
     for (uint32_t slot = 0; slot < CACHE_PAGE_COUNT; ++slot) {
         if (cache_page[slot] == page) {
             if (write_access) cache_dirty[slot] = 1;
+            hot_page_remember(page, slot);
             return slot;
         }
     }
@@ -119,11 +150,12 @@ static uint32_t __not_in_flash_func(map_page)(uint32_t page, bool write_access)
         }
     }
     if (!backing_read(page, ram_pages + slot * EGA128_PAGE_SIZE)) {
-        memset(ram_pages + slot * EGA128_PAGE_SIZE, 0, EGA128_PAGE_SIZE);
+        nf_memset(ram_pages + slot * EGA128_PAGE_SIZE, 0, EGA128_PAGE_SIZE);
         printf("guest-RAM paging: backing read failed for page %u\n", (unsigned)page);
     }
     cache_page[slot] = (uint16_t)page;
     cache_dirty[slot] = write_access ? 1 : 0;
+    hot_page_remember(page, slot);
     return slot;
 }
 
@@ -326,10 +358,12 @@ const char *ega128_paging_post_label(void)
 
 bool ega128_paging_init(void)
 {
-    memset(cache_page, 0xff, sizeof(cache_page));
-    memset(cache_dirty, 0, sizeof(cache_dirty));
-    memset(backing_valid, 0, sizeof(backing_valid));
-    memset(ram_pages, 0, RAM_PAGES_SIZE);
+    nf_memset(cache_page, 0xff, sizeof(cache_page));
+    nf_memset(cache_dirty, 0, sizeof(cache_dirty));
+    nf_memset(backing_valid, 0, sizeof(backing_valid));
+    nf_memset(hot_page, 0xff, sizeof(hot_page));
+    nf_memset(hot_slot, 0xff, sizeof(hot_slot));
+    nf_memset(ram_pages, 0, RAM_PAGES_SIZE);
     victim = 0;
 
 #ifdef BOARD_M1

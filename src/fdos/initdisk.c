@@ -1203,7 +1203,7 @@ static void ReadAllPartitionTables(CPU* cpu)
   }
   else
   {
-    UBYTE bootdrv = peekb(0,0x5e0);
+    UBYTE bootdrv = pload8(EFFECTIVE(MK_FP(0, 0x5e0)));
 
     if (InitKernelConfig.Verbose >= 1) printf("Drive Letter Assignment - sorted by drive\n");
 

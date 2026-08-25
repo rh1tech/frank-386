@@ -73,10 +73,7 @@ static BOOL arm_native_runtime_available(void)
    arm_native_runtime_available(); SPI/SWAP paging never reaches this helper.
    Keep the conversion centralized so generic FDOS code cannot accidentally
    reintroduce persistent ARM_PTR() aliases. */
-static __attribute__((always_inline)) void *arm_native_guest_ptr(dos_far_ptr p)
-{
-  return ARM_PTR(p);
-}
+#define arm_native_guest_ptr(p) ((void*)ARM_PTR(p))
 
 /* Native-yield IRQ trampoline uses the same callback trap mechanism as
    bios_intcall(), but deliberately does not execute the suspended parent

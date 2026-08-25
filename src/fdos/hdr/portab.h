@@ -358,8 +358,10 @@ static inline dos_far_ptr add_far_x86(dos_far_ptr p, uint32_t n) {
  * a host pointer.  Resolve it only when C code actually asks for direct
  * access.  The returned pointer addresses only the currently mapped 2-KiB
  * chunk and must never be retained across another guest-memory access: EGA128
- * deliberately has no pinned pages.  New code must keep guest addresses and
- * use guest_ref/accessors; ARM_PTR remains only for legacy leaf accesses.
+ * deliberately has no pinned pages.  New DOS code must keep guest addresses
+ * and use guest_ref/accessors.  ARM_PTR is a compatibility escape hatch; in
+ * the active tree its only intentional runtime use is the QSPI-only native
+ * ARM loader, after the physical-PSRAM guard has succeeded.
  * Mark the page dirty because C gives us no way to infer access direction
  * from a later -> or * operator.
  */
@@ -417,6 +419,9 @@ typedef dos_far_ptr mixed_ptr;
 #define FP_DS_DX (MK_FP(CPU_DS, CPU_DX))
 #define FP_ES_DI (MK_FP(CPU_ES, CPU_DI))
 
+/* Legacy source-compatibility helpers.  They expose a transient host pointer
+ * and therefore must not be introduced into pageable runtime code; use
+ * pload/pstore or a guest_ref there. */
 #define peekb(seg, ofs) (*((unsigned char far *)ARM_PTR(MK_FP(seg,ofs))))
 #define peekw(seg, ofs) (*((u16*)ARM_PTR(MK_FP(seg,ofs))))
 #define x86_para2far(seg) (MK_FP((seg), 0))

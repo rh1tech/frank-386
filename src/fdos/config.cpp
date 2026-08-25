@@ -1100,8 +1100,8 @@ STATIC void ClearScreen(unsigned char attr)
   CPU_AX = 0x0600;
   CPU_BH = attr;
   CPU_CX = 0;
-  CPU_DL = peekb(0x40, 0x4a) - 1; /* columns */
-  rows = peekb(0x40, 0x84);
+  CPU_DL = pload8(EFFECTIVE(MK_FP(0x40, 0x4a))) - 1; /* columns */
+  rows = pload8(EFFECTIVE(MK_FP(0x40, 0x84)));
   if (rows == 0) rows = 24;
   CPU_DH = rows;
   bios_intcall(cpu, 0x10, "CLS");
