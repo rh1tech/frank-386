@@ -89,9 +89,13 @@
 
 // PSRAM pin for RP2350A variants
 #ifdef BOARD_M1
-#define PSRAM_PIN_RP2350A 19
+    #define PSRAM_PIN_RP2350A 19
 #else
-#define PSRAM_PIN_RP2350A 8
+    #ifdef BOARD_Z2 // no RP2350A option, GP47 only
+        #define PSRAM_PIN_RP2350A 47
+    #else // M2 / C2
+        #define PSRAM_PIN_RP2350A 8
+    #endif
 #endif
 
 // PSRAM pin for RP2350B (always GPIO47)

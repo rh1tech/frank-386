@@ -268,10 +268,9 @@ static inline uint32_t fdos_arm_linear(const void *p)
     Going the other way is NOT generally possible: a native pointer has
     no unique seg:off pre-image (only a unique linear address), so
     reconstructing one silently picks a *different* seg:off pair with the
-    same linear address. Where a guest pointer is needed, build it from
-    the segment the caller already knows (x86_FAR_PTR(DOS_PSP, &x),
-    MK_FP(psp_seg, offsetof(psp, ps_files)), ...) - never by normalising
-    a native address.
+    same linear address. Where a guest pointer is needed, derive it from
+    another guest address (ADD_OFF(base, delta), MK_FP(psp_seg, ...), ...)
+    - never by normalising a native address.
 
     SENTINELS. Guest pointers carry two of them, and after ARM_PTR()
     NEITHER looks special any more - both become ordinary, *mapped*,
@@ -376,9 +375,7 @@ static inline uint8_t *fdos_guest_arm_ptr(dos_far_ptr p_x86)
 #else
 #define ARM_PTR(p_x86) ( X86_RAM_BASE + EFFECTIVE(p_x86) )
 #endif
-// N.B. use it only for addresses are stored in x86 RAM (PSRAM), M33 SRAM/FLASH is not mapped there
-#define x86_FAR_PTR(s, arm_addr) \
-    MK_FP((s), (uint16_t)(fdos_arm_linear((arm_addr)) - ((uint32_t)(s) << 4)))
+// N.B. use ARM_PTR only for addresses stored in x86 RAM; M33 SRAM/FLASH is not mapped there.
 
 /*
     Two documentary aliases of dos_far_ptr. They do NOT change layout or add
@@ -408,8 +405,8 @@ typedef dos_far_ptr mixed_ptr;
 
 /* Pack / unpack a native ARM pointer inside a (native_ptr) dos_far_ptr as
    high16:low16. This is NOT seg:off arithmetic - there is no <<4 - so it can
-   represent any 32-bit native address exactly, which x86_FAR_PTR/ARM_PTR
-   cannot. Use ONLY on native_ptr / the native arm of a mixed_ptr. */
+   represent any 32-bit native address exactly. Use ONLY on native_ptr / the
+   native arm of a mixed_ptr. */
 #define NATIVE_PTR(arm_addr) \
     MK_FP((uint16_t)(((uintptr_t)(arm_addr) >> 16) & 0xFFFF), \
           (uint16_t)((uintptr_t)(arm_addr) & 0xFFFF))

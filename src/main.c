@@ -683,9 +683,7 @@ static void poll_keyboard(void) {
     int is_down, keycode;
 
 #ifdef BOARD_HAS_PS2
-    // Poll PS/2 keyboard
-    ps2kbd_tick();
-
+    // Drain PS/2 events. Raw PS/2 input is serviced by the core0 timer.
     while (ps2kbd_get_key(&is_down, &keycode)) {
         if (process_keycode(is_down, keycode)) {
             if (pc && pc->kbd) {
@@ -1094,7 +1092,6 @@ static bool init_hardware(void) {
     // Initialize PSRAM first
     DBG_PRINT("Initializing PSRAM...\n");
     uint psram_pin = get_psram_pin();
-#ifndef EGA128  // TODO: remove it for test EGA128+QSPI
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
 
@@ -1102,13 +1099,10 @@ static bool init_hardware(void) {
      * can only be shown after the video core has completed initialization.
      * Full/cached capacity handling remains below, after clock configuration. */
     bool psram_missing = psram_detect_size() < (1u << 20);
-#else
-    bool psram_missing = true;
-#endif
     early_psram_missing = psram_missing;
     __dmb();
 
-#ifdef EGA128
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (psram_missing) {
         guest_ram_base = ram_pages;
         printf("PSRAM not detected; using %u KiB SRAM guest-RAM fallback\n", (unsigned)(RAM_PAGES_SIZE >> 10));
@@ -1481,8 +1475,19 @@ tsr_callback_t __not_in_flash_func(set_tsr1_callback)(tsr_callback_t cb)
     return __atomic_exchange_n(&tsr1_callback, cb, __ATOMIC_ACQ_REL);
 }
 
+#ifdef BOARD_HAS_PS2
+#define PS2_TIMER_POLL_DIV 46u  /* 46 * 22 us ~= 1.0 ms */
+static uint8_t ps2_timer_poll_div;
+#endif
+
 static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
     timer_callback(rt);
+#ifdef BOARD_HAS_PS2
+    if (++ps2_timer_poll_div >= PS2_TIMER_POLL_DIV) {
+        ps2_timer_poll_div = 0;
+        ps2kbd_tick();
+    }
+#endif
     tsr_callback_t cb = __atomic_load_n(&tsr0_callback, __ATOMIC_ACQUIRE);
     if (cb)
         cb();
@@ -1607,7 +1612,6 @@ static void show_welcome_screen(void) {
     for (int frame = 0; frame < 700; frame++) {
         int is_down = 0, keycode = 0;
 #ifdef BOARD_HAS_PS2
-        ps2kbd_tick();
         ps2kbd_get_key(&is_down, &keycode);
 #endif
 #ifdef USB_HID_ENABLED

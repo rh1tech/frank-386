@@ -14,7 +14,7 @@ extern "C" {
 // Must be called after ps2_init()
 void ps2kbd_init(void);
 
-// Poll for keyboard events, call frequently
+// Service raw PS/2 input. Called periodically from the core0 timer.
 void ps2kbd_tick(void);
 
 // Get next key event

@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -28,6 +28,9 @@ option(EMM "Enable LTEMM support" OFF)
 set(VIDEO_MODE "EGA128" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
+
+# Audio output configuration (I2S or PWM)
+set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 
 if(VIDEO_MODE STREQUAL "MCGA")
     add_compile_definitions(MCGA=1)
@@ -84,7 +87,7 @@ set_property(CACHE CPU_TARGET PROPERTY STRINGS 286 386)
 if(NOT CPU_TARGET STREQUAL "286" AND NOT CPU_TARGET STREQUAL "386")
     message(FATAL_ERROR "CPU_TARGET must be 286 or 386, got '${CPU_TARGET}'")
 endif()
-set(BUILD_NAME "${CPU_TARGET}")
+set(BUILD_NAME "${CPU_TARGET}-${VIDEO_MODE}")
 #
 # NOTE: the tree previously shipped with I386_MODE commented out, so the
 # binary named "386" was in fact a 286-mode core. This switch now makes
@@ -107,9 +110,6 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
 set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
-
-# Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 
 # USB role is selected at runtime (HOST by default, DEVICE via config.ini).
 # Both TinyUSB roles are compiled into every firmware image.
@@ -317,15 +317,6 @@ if(EMM)
     SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}-emm")
 else ()
     SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-1.6V-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
-endif()
-if(VIDEO_MODE STREQUAL "EGA128")
-    SET(BUILD_NAME "${BUILD_NAME}-EGA128")
-elseif(VIDEO_MODE STREQUAL "VGA128")
-    SET(BUILD_NAME "${BUILD_NAME}-VGA128")
-elseif(VIDEO_MODE STREQUAL "MCGA")
-    SET(BUILD_NAME "${BUILD_NAME}-MCGA")
-elseif(VIDEO_MODE STREQUAL "VGA256")
-    SET(BUILD_NAME "${BUILD_NAME}-VGA256")
 endif()
 
 #=============================================================================

@@ -22,7 +22,7 @@
 /*      guest-visible on real DOS; here the equivalents are the */
 /*      guest-resident scratch members appended to struct       */
 /*      dos_data (fcb_dmatch / fcb_dmatch_tmp / fcb_ren_name),  */
-/*      addressed via x86_FAR_PTR(DOS_PSP, ...).                */
+/*      addressed directly from DOS_PSP + X86_INTERNAL_DATA_OFF.*/
 /*                                                              */
 /****************************************************************/
 

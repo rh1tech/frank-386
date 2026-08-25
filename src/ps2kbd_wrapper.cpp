@@ -5,15 +5,30 @@
 
 #include "ps2kbd_wrapper.h"
 #include "ps2kbd_mrmltr.h"
-#include <queue>
 
 struct KeyEvent {
     int is_down;
     int keycode;  // Linux input keycode
 };
 
-static std::queue<KeyEvent> event_queue;
+#define PS2_EVENT_QUEUE_SIZE 64u
+#define PS2_EVENT_QUEUE_MASK (PS2_EVENT_QUEUE_SIZE - 1u)
+
+static KeyEvent event_queue[PS2_EVENT_QUEUE_SIZE];
+static uint32_t event_head;
+static uint32_t event_tail;
 static Ps2Kbd_Mrmltr* kbd = nullptr;
+
+static inline void event_queue_push(int is_down, int keycode) {
+    uint32_t head = __atomic_load_n(&event_head, __ATOMIC_RELAXED);
+    uint32_t next = (head + 1u) & PS2_EVENT_QUEUE_MASK;
+
+    if (next == __atomic_load_n(&event_tail, __ATOMIC_ACQUIRE))
+        return;
+
+    event_queue[head] = {is_down, keycode};
+    __atomic_store_n(&event_head, next, __ATOMIC_RELEASE);
+}
 
 // HID keycode to Linux input keycode mapping
 // Linux keycodes are essentially evdev codes (same as AT Set 1 for most keys)
@@ -151,35 +166,35 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
 
     if (changed_mods & KEYBOARD_MODIFIER_LEFTCTRL) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_LEFTCTRL) != 0;
-        event_queue.push({is_down, 29});  // Left Ctrl
+        event_queue_push(is_down, 29);  // Left Ctrl
     }
     if (changed_mods & KEYBOARD_MODIFIER_LEFTSHIFT) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_LEFTSHIFT) != 0;
-        event_queue.push({is_down, 42});  // Left Shift
+        event_queue_push(is_down, 42);  // Left Shift
     }
     if (changed_mods & KEYBOARD_MODIFIER_LEFTALT) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_LEFTALT) != 0;
-        event_queue.push({is_down, 56});  // Left Alt
+        event_queue_push(is_down, 56);  // Left Alt
     }
     if (changed_mods & KEYBOARD_MODIFIER_LEFTGUI) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_LEFTGUI) != 0;
-        event_queue.push({is_down, 125}); // Left GUI
+        event_queue_push(is_down, 125); // Left GUI
     }
     if (changed_mods & KEYBOARD_MODIFIER_RIGHTCTRL) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_RIGHTCTRL) != 0;
-        event_queue.push({is_down, 97});  // Right Ctrl
+        event_queue_push(is_down, 97);  // Right Ctrl
     }
     if (changed_mods & KEYBOARD_MODIFIER_RIGHTSHIFT) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_RIGHTSHIFT) != 0;
-        event_queue.push({is_down, 54});  // Right Shift
+        event_queue_push(is_down, 54);  // Right Shift
     }
     if (changed_mods & KEYBOARD_MODIFIER_RIGHTALT) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_RIGHTALT) != 0;
-        event_queue.push({is_down, 100}); // Right Alt
+        event_queue_push(is_down, 100); // Right Alt
     }
     if (changed_mods & KEYBOARD_MODIFIER_RIGHTGUI) {
         int is_down = (curr->modifier & KEYBOARD_MODIFIER_RIGHTGUI) != 0;
-        event_queue.push({is_down, 126}); // Right GUI
+        event_queue_push(is_down, 126); // Right GUI
     }
 
     // Check for newly pressed keys
@@ -195,7 +210,7 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
             if (!found) {
                 int linux_code = hid_to_linux_keycode(curr->keycode[i]);
                 if (linux_code != 0) {
-                    event_queue.push({1, linux_code});
+                    event_queue_push(1, linux_code);
                 }
             }
         }
@@ -214,7 +229,7 @@ static void key_handler(hid_keyboard_report_t *curr, hid_keyboard_report_t *prev
             if (!found) {
                 int linux_code = hid_to_linux_keycode(prev->keycode[i]);
                 if (linux_code != 0) {
-                    event_queue.push({0, linux_code});
+                    event_queue_push(0, linux_code);
                 }
             }
         }
@@ -232,11 +247,14 @@ extern "C" void ps2kbd_tick(void) {
 }
 
 extern "C" int ps2kbd_get_key(int *is_down, int *keycode) {
-    if (event_queue.empty()) {
+    uint32_t tail = __atomic_load_n(&event_tail, __ATOMIC_RELAXED);
+
+    if (tail == __atomic_load_n(&event_head, __ATOMIC_ACQUIRE))
         return 0;
-    }
-    KeyEvent e = event_queue.front();
-    event_queue.pop();
+
+    KeyEvent e = event_queue[tail];
+    __atomic_store_n(&event_tail, (tail + 1u) & PS2_EVENT_QUEUE_MASK,
+                     __ATOMIC_RELEASE);
     *is_down = e.is_down;
     *keycode = e.keycode;
     return 1;
