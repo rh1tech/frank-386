@@ -28,6 +28,7 @@
 
 #include "hdrs.h"
 #include "ioctl_guest_proxy.h"
+#include "request_guest.h"
 
 /*
  * WARNING:  this code is non-portable (8086 specific).
@@ -71,6 +72,8 @@ STATIC const UBYTE cmd [] = {
 
 int DosDevIOctl(lregs * r)
 {
+  const dos_far_ptr rq_far = fdos_sda_request_far(offsetof(struct dos_data, ClkReqHdr));
+  const fdos_request_guest_ref rq = fdos_request_guest(rq_far);
   dos_far_ptr x86_dev;
   unsigned attr = 0;
 
@@ -151,7 +154,7 @@ int DosDevIOctl(lregs * r)
       }
       x86_dev = fdos_ioctl_sft_dev(_s);
       attr = fdos_ioctl_dhdr_attr(x86_dev);
-      CharReqHdr.r_unit = 0;
+      FDOS_REQUEST_SET8(rq, r_unit, 0);
       break;
     }
 
@@ -171,7 +174,7 @@ int DosDevIOctl(lregs * r)
       dos_far_ptr _dpbp = get_dpb((CPU_BL & 0x1f) == 0 ? fdos_ioctl_default_drive() : (CPU_BL & 0x1f) - 1);
       if (! far_is_null(_dpbp))
       {
-        CharReqHdr.r_unit = fdos_ioctl_dpb_subunit(_dpbp);
+        FDOS_REQUEST_SET8(rq, r_unit, fdos_ioctl_dpb_subunit(_dpbp));
         x86_dev = fdos_ioctl_dpb_device(_dpbp);
         attr = fdos_ioctl_dhdr_attr(x86_dev);
       }
@@ -238,40 +241,40 @@ int DosDevIOctl(lregs * r)
       return DE_INVLDFUNC;
   }
 
-  CharReqHdr.r_command = cmd[CPU_AL];
+  FDOS_REQUEST_SET8(rq, r_command, cmd[CPU_AL]);
   if (CPU_AL == 0x0C || CPU_AL == 0x0D || CPU_AL >= 0x10) /* generic or query */
   {
-    CharReqHdr.r_cat = CPU_CH;            /* category (major) code */
-    CharReqHdr.r_fun = CPU_CL;            /* function (minor) code */
-    CharReqHdr.r_si = CPU_SI;             /* contents of SI and DI */
-    CharReqHdr.r_di = CPU_DI;
-    CharReqHdr.r_io = MK_FP(CPU_DS, CPU_DX);    /* parameter block */
+    FDOS_REQUEST_SET8(rq, r_cat, CPU_CH);            /* category (major) code */
+    FDOS_REQUEST_SET8(rq, r_fun, CPU_CL);            /* function (minor) code */
+    fdos_request_set16(rq, offsetof(request, r_si), CPU_SI);             /* contents of SI and DI */
+    fdos_request_set16(rq, offsetof(request, r_di), CPU_DI);
+    FDOS_REQUEST_SET_FAR(rq, r_io, MK_FP(CPU_DS, CPU_DX));    /* parameter block */
   }
   else
   {
-    CharReqHdr.r_count = CPU_CX;
-    CharReqHdr.r_trans = MK_FP(CPU_DS, CPU_DX);
+    FDOS_REQUEST_SET16(rq, r_count, CPU_CX);
+    FDOS_REQUEST_SET_FAR(rq, r_trans, MK_FP(CPU_DS, CPU_DX));
   }
-  CharReqHdr.r_length = sizeof(request);
-  CharReqHdr.r_status = 0;
+  FDOS_REQUEST_SET8(rq, r_length, sizeof(request));
+  FDOS_REQUEST_SET16(rq, r_status, 0);
 
-  execrh(x86_FAR_PTR(DOS_PSP, &CharReqHdr) /* -> request */, x86_dev);
+  execrh(rq_far, x86_dev);
 
-  if (CharReqHdr.r_status & S_ERROR)
+  if (FDOS_REQUEST_GET16(rq, r_status) & S_ERROR)
   {
-    fdos_ioctl_set_crit_err_code((UWORD)((CharReqHdr.r_status & S_MASK) + 0x13));
+    fdos_ioctl_set_crit_err_code((UWORD)((FDOS_REQUEST_GET16(rq, r_status) & S_MASK) + 0x13));
     return DE_ACCESS;
   }
 
   if (CPU_AL <= 0x05)                       /* 0x02, 0x03, 0x04, 0x05 */
-    CPU_AX = CharReqHdr.r_count;
+    CPU_AX = FDOS_REQUEST_GET16(rq, r_count);
   else if (CPU_AL <= 0x07)                  /* 0x06, 0x07 */
-    CPU_AX = (CharReqHdr.r_status & S_BUSY) ? 0000 : 0x00ff;
+    CPU_AX = (FDOS_REQUEST_GET16(rq, r_status) & S_BUSY) ? 0000 : 0x00ff;
   else if (CPU_AL == 0x08)                  /* 0x08 */
-    CPU_AX = (CharReqHdr.r_status & S_BUSY) ? 1 : 0;
+    CPU_AX = (FDOS_REQUEST_GET16(rq, r_status) & S_BUSY) ? 1 : 0;
   else if (CPU_AL == 0x0e || CPU_AL == 0x0f) /* 0x0e, 0x0f */
-    CPU_AL = CharReqHdr.r_unit;
+    CPU_AL = FDOS_REQUEST_GET8(rq, r_unit);
   else                                     /* 0x0c, 0x0d, 0x10, 0x11 */
-    CPU_AX = CharReqHdr.r_status;
+    CPU_AX = FDOS_REQUEST_GET16(rq, r_status);
   return SUCCESS;
 }

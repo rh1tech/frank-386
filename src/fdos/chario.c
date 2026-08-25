@@ -52,6 +52,7 @@
  */
 
 #include "hdrs.h"
+#include "request_guest.h"
 #include "bios/bios.h"
 
 extern const dos_far_ptr x86_szLine; /// TODO: ensure reusable
@@ -152,21 +153,26 @@ static dos_far_ptr chario_internal_kb(void)
 
 STATIC int CharRequest(/*struct dhdr*/dos_far_ptr *pdev, unsigned command)
 {
-  CharReqHdr.r_command = command;
-  CharReqHdr.r_unit = 0;
-  CharReqHdr.r_status = 0;
-  CharReqHdr.r_length = sizeof(request);
-  execrh(x86_FAR_PTR(DOS_PSP, &CharReqHdr) /* -> request */, *pdev);
-  if (CharReqHdr.r_status & S_ERROR)
+  const dos_far_ptr rq_far = fdos_sda_request_far(offsetof(struct dos_data, ClkReqHdr));
+  const fdos_request_guest_ref rq = fdos_request_guest(rq_far);
+  UWORD status;
+
+  FDOS_REQUEST_SET8(rq, r_command, command);
+  FDOS_REQUEST_SET8(rq, r_unit, 0);
+  FDOS_REQUEST_SET16(rq, r_status, 0);
+  FDOS_REQUEST_SET8(rq, r_length, sizeof(request));
+  execrh(rq_far, *pdev);
+  status = FDOS_REQUEST_GET16(rq, r_status);
+  if (status & S_ERROR)
   {
     for (;;) {
-      switch (char_error(&CharReqHdr, *pdev))
+      switch (char_error_status(status, *pdev))
       {
       case ABORT:
       case FAIL:
         return DE_INVLDACC;
       case CONTINUE:
-        CharReqHdr.r_count = 0;
+        FDOS_REQUEST_SET16(rq, r_count, 0);
         return 0;
       case RETRY:
         return 1;
@@ -181,11 +187,16 @@ long BinaryCharIO(/*struct dhdr*/dos_far_ptr *pdev, size_t n, dos_far_ptr bp, un
   int err;
   do
   {
-    CharReqHdr.r_count = n;
-    CharReqHdr.r_trans = bp;
+    {
+      const fdos_request_guest_ref rq = fdos_request_guest(
+          fdos_sda_request_far(offsetof(struct dos_data, ClkReqHdr)));
+      FDOS_REQUEST_SET16(rq, r_count, n);
+      FDOS_REQUEST_SET_FAR(rq, r_trans, bp);
+    }
     err = CharRequest(pdev, command);
   } while (err == 1);
-  return err == SUCCESS ? (long)CharReqHdr.r_count : err;
+  return err == SUCCESS ? (long)FDOS_REQUEST_GET16(
+      fdos_request_guest(fdos_sda_request_far(offsetof(struct dos_data, ClkReqHdr))), r_count) : err;
 }
 
 /* STATE FUNCTIONS */
@@ -198,9 +209,13 @@ STATIC void CharCmd(dos_far_ptr *pdev, unsigned command)
 STATIC int Busy(dos_far_ptr *pdev)
 {
   CharCmd(pdev, C_NDREAD);
-  if (CharReqHdr.r_status & S_ERROR)
-    CharCmd(pdev, C_ISTAT);
-  return CharReqHdr.r_status & S_BUSY;
+  {
+    const fdos_request_guest_ref rq = fdos_request_guest(
+        fdos_sda_request_far(offsetof(struct dos_data, ClkReqHdr)));
+    if (FDOS_REQUEST_GET16(rq, r_status) & S_ERROR)
+      CharCmd(pdev, C_ISTAT);
+    return FDOS_REQUEST_GET16(rq, r_status) & S_BUSY;
+  }
 }
 
 void con_flush(dos_far_ptr *pdev)
@@ -234,9 +249,13 @@ int StdinBusy(void)
 int ndread(dos_far_ptr *pdev)
 {
   CharCmd(pdev, C_NDREAD);
-  if (CharReqHdr.r_status & S_BUSY)
-    return -1;
-  return CharReqHdr.r_ndbyte;
+  {
+    const fdos_request_guest_ref rq = fdos_request_guest(
+        fdos_sda_request_far(offsetof(struct dos_data, ClkReqHdr)));
+    if (FDOS_REQUEST_GET16(rq, r_status) & S_BUSY)
+      return -1;
+    return FDOS_REQUEST_GET8(rq, r_ndbyte);
+  }
 }
 
 /* OUTPUT FUNCTIONS */

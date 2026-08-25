@@ -23,9 +23,15 @@ using fdos_guest::sfttbl_ref;
 using fdos_guest::dpb_ref;
 using fdos_guest::buffer_ref;
 using fdos_guest::guest_bytes_ref;
+using fdos_guest::request_ref;
 
 static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
+
+static inline request_ref fdos_char_request()
+{
+  return request_ref(MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, ClkReqHdr))));
+}
 
 #if PDB_DEBUG
 extern "C" int snprintf(char *s, size_t n, const char *fmt, ...);
@@ -238,11 +244,11 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
 }
 
 /* Abort, retry or fail for character devices                   */
-COUNT char_error(request * rq, dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
+COUNT char_error_status(UWORD status, dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
 {
-  fdos_idata.crit_err_code() = (rq->r_status & S_MASK) + 0x13;
+  fdos_idata.crit_err_code() = (status & S_MASK) + 0x13;
   return CriticalError(EFLG_CHAR | EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE,
-                       0, rq->r_status & S_MASK, x86_lpDevice);
+                       0, status & S_MASK, x86_lpDevice);
 }
 
 /* Abort, retry or fail for block devices                       */
@@ -255,11 +261,6 @@ COUNT block_error_status(UWORD status, COUNT nDrive,
                        nDrive, status & S_MASK, x86_lpDevice);
 }
 
-COUNT block_error(request * rq, COUNT nDrive,
-                  dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode)
-{
-  return block_error_status(rq->r_status, nDrive, x86_lpDevice, mode);
-}
 
 /* common - call the clock driver */
 void ExecuteClockDriverRequest(BYTE command)
@@ -300,7 +301,7 @@ static unsigned char DosGetDateRegs(UWORD *out_year, UBYTE *out_month, UBYTE *ou
 
   ExecuteClockDriverRequest(C_INPUT);
 
-  if (CharReqHdr.r_status & S_ERROR)
+  if (fdos_char_request().status() & S_ERROR)
     return 0;
 
   for (Year = 1980, c = fdos_idata.clock_days();;)
@@ -384,8 +385,8 @@ static int DosSetDateRegs(UWORD Year, UWORD Month, UWORD DayOfMonth)
 
   ExecuteClockDriverRequest(C_OUTPUT);
 
-  if (CharReqHdr.r_status & S_ERROR)
-    return char_error(&CharReqHdr, fdos_lol.clock());
+  if (fdos_char_request().status() & S_ERROR)
+    return char_error_status(fdos_char_request().status(), fdos_lol.clock());
   return SUCCESS;
 }
 
@@ -398,7 +399,7 @@ static void DosGetTimeRegs(UBYTE *out_hour, UBYTE *out_minute, UBYTE *out_second
 {
   ExecuteClockDriverRequest(C_INPUT);
 
-  if (CharReqHdr.r_status & S_ERROR)
+  if (fdos_char_request().status() & S_ERROR)
     return;
 
   *out_hour = fdos_idata.clock_hours();
@@ -440,8 +441,8 @@ static int DosSetTimeRegs(UBYTE hour, UBYTE minute, UBYTE second, UBYTE hundredt
 
   ExecuteClockDriverRequest(C_OUTPUT);
 
-  if (CharReqHdr.r_status & S_ERROR)
-    return char_error(&CharReqHdr, fdos_lol.clock());
+  if (fdos_char_request().status() & S_ERROR)
+    return char_error_status(fdos_char_request().status(), fdos_lol.clock());
   return SUCCESS;
 }
 

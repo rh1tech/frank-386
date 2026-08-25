@@ -262,9 +262,10 @@ STATIC void InstallVDISK(void)
   if (!DosLoadedInHMA)
     return;
 
-  memcpy(ARM_PTR (MK_FP(0xffff, 0x0010)), &VDISK_BOOT_SEKTOR, sizeof(VDISK_BOOT_SEKTOR));
+  guest_write_block(EFFECTIVE(MK_FP(0xffff, 0x0010)),
+                    &VDISK_BOOT_SEKTOR, sizeof(VDISK_BOOT_SEKTOR));
 
-  *(WORD FAR *) ARM_PTR ( MK_FP(0xffff, 0x002e) ) = 1024 + 64;
+  pstore16(EFFECTIVE(MK_FP(0xffff, 0x002e)), 1024 + 64);
 }
 
 /*

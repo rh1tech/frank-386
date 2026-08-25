@@ -159,9 +159,13 @@ STATIC void push_ddt(ddt *pddt)
   dos_far_ptr fddt = DynAlloc("ddt", 1, sizeof(ddt));
   guest_write_block(((uint32_t)FP_SEG(fddt) << 4) + FP_OFF(fddt), pddt, sizeof(ddt));
   if (pddt->ddt_logdriveno != 0) {
-    ((ddt*)ARM_PTR(fddt) - 1)->ddt_next = fddt;
-    if (pddt->ddt_driveno == 0 && pddt->ddt_logdriveno == 1)
-      ((ddt*)ARM_PTR(fddt) - 1)->ddt_descflags |= DF_CURLOG | DF_MULTLOG;
+    uint32_t prev = EFFECTIVE(fddt) - sizeof(ddt);
+    pstore16(prev + offsetof(ddt, ddt_next), FP_OFF(fddt));
+    pstore16(prev + offsetof(ddt, ddt_next) + sizeof(UWORD), FP_SEG(fddt));
+    if (pddt->ddt_driveno == 0 && pddt->ddt_logdriveno == 1) {
+      UWORD flags = pload16(prev + offsetof(ddt, ddt_descflags));
+      pstore16(prev + offsetof(ddt, ddt_descflags), flags | DF_CURLOG | DF_MULTLOG);
+    }
   }
 }
 
@@ -276,10 +280,11 @@ STATIC int LBA_Get_Drive_Parameters(CPU* cpu, int drive, struct DriveParamS *dri
 
   // put it on x86 stack RAM, do not move SP, since it is temporary
   dos_far_ptr lba_bios_parameters = MK_FP(CPU_SS, CPU_SP - sizeof(struct _bios_LBA_disk_parameterS));
-  struct _bios_LBA_disk_parameterS* plba_bios_parameters = (struct _bios_LBA_disk_parameterS*)ARM_PTR(lba_bios_parameters);
+  uint32_t lba_params_linear = EFFECTIVE(lba_bios_parameters);
   /* query disk size and DMA handling, geometry is queried later by INT13,08 */
-  memset(plba_bios_parameters, 0, sizeof(struct _bios_LBA_disk_parameterS));
-  plba_bios_parameters->size = sizeof(struct _bios_LBA_disk_parameterS);
+  guest_fill_block(lba_params_linear, 0, sizeof(struct _bios_LBA_disk_parameterS));
+  pstore16(lba_params_linear + offsetof(struct _bios_LBA_disk_parameterS, size),
+           sizeof(struct _bios_LBA_disk_parameterS));
 
   CPU_SI = FP_OFF(lba_bios_parameters);
   SET_DS (FP_SEG(lba_bios_parameters));
@@ -293,29 +298,33 @@ STATIC int LBA_Get_Drive_Parameters(CPU* cpu, int drive, struct DriveParamS *dri
     goto StandardBios;
   }
 
-  if (plba_bios_parameters->heads > 0xffff ||
-      plba_bios_parameters->sectors > 0xffff ||
-      (plba_bios_parameters->totalSect == 0 &&
-       plba_bios_parameters->totalSectHigh == 0))
+  ULONG lba_heads = pload32(lba_params_linear + offsetof(struct _bios_LBA_disk_parameterS, heads));
+  ULONG lba_sectors = pload32(lba_params_linear + offsetof(struct _bios_LBA_disk_parameterS, sectors));
+  ULONG lba_total = pload32(lba_params_linear + offsetof(struct _bios_LBA_disk_parameterS, totalSect));
+  ULONG lba_total_high = pload32(lba_params_linear + offsetof(struct _bios_LBA_disk_parameterS, totalSectHigh));
+  UWORD lba_information = pload16(lba_params_linear + offsetof(struct _bios_LBA_disk_parameterS, information));
+  if (lba_heads > 0xffff ||
+      lba_sectors > 0xffff ||
+      (lba_total == 0 && lba_total_high == 0))
   {
     if (firstPass) 
     {
       printf("Suspicious LBA disk parameters, reverting to CHS access:\n");
       printf("  drive %02x, heads=%lu, sectors=%lu, total=0x%lx-%08lx\n",
            drive,
-           (ULONG) plba_bios_parameters->heads,
-           (ULONG) plba_bios_parameters->sectors,
-           (ULONG) plba_bios_parameters->totalSect,
-           (ULONG) plba_bios_parameters->totalSectHigh);
+           (ULONG) lba_heads,
+           (ULONG) lba_sectors,
+           (ULONG) lba_total,
+           (ULONG) lba_total_high);
     }
 
     goto StandardBios;
   }
 
   /* restrict disk size to 2TB, because we can not handle more */
-  if (plba_bios_parameters->totalSectHigh == 0)
+  if (lba_total_high == 0)
   {
-    driveParam->total_sectors = plba_bios_parameters->totalSect;
+    driveParam->total_sectors = lba_total;
   }
   else
   {
@@ -325,10 +334,10 @@ STATIC int LBA_Get_Drive_Parameters(CPU* cpu, int drive, struct DriveParamS *dri
 
   /* if we arrive here, mark drive as LBA capable */
   driveParam->descflags = DF_LBA;
-  if (plba_bios_parameters->information & 8)
+  if (lba_information & 8)
     driveParam->descflags |= DF_WRTVERIFY;
 
-  if (plba_bios_parameters->information & 1)
+  if (lba_information & 1)
   {
     /* DMA boundary errors are handled transparently */
     driveParam->descflags |= DF_DMA_TRANSPARENT;
@@ -430,8 +439,9 @@ void init_LBA_to_CHS(struct CHS *chs, ULONG LBA_address,
 int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
                    ULONG LBA_address, dos_far_ptr buffer)
 {
-  struct _bios_LBA_address_packet* pdap = (struct _bios_LBA_address_packet*)ARM_PTR(x86_dap);
-  pdap->packet_size = sizeof(struct _bios_LBA_address_packet);
+  uint32_t dap_linear = EFFECTIVE(x86_dap);
+  pstore8(dap_linear + offsetof(struct _bios_LBA_address_packet, packet_size),
+          sizeof(struct _bios_LBA_address_packet));
 
   struct CHS chs;
   int num_retries;
@@ -467,10 +477,13 @@ int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
         (InitKernelConfig.ForceLBA || ExtLBAForce || (chs.Cylinder > 1023)))
     {
       if (InitKernelConfig.Verbose >= 1) printf("LBA mode\n");
-      pdap->number_of_blocks = 1;
-      pdap->buffer_address = buffer;
-      pdap->block_address_high = 0;       /* clear high part */
-      pdap->block_address = LBA_address;  /* clear high part */
+      pstore16(dap_linear + offsetof(struct _bios_LBA_address_packet, number_of_blocks), 1);
+      pstore16(dap_linear + offsetof(struct _bios_LBA_address_packet, buffer_address),
+               FP_OFF(buffer));
+      pstore16(dap_linear + offsetof(struct _bios_LBA_address_packet, buffer_address) + sizeof(UWORD),
+               FP_SEG(buffer));
+      pstore32(dap_linear + offsetof(struct _bios_LBA_address_packet, block_address_high), 0);
+      pstore32(dap_linear + offsetof(struct _bios_LBA_address_packet, block_address), LBA_address);
 
       /* Load the registers and call the interrupt. */
       CPU_AX = LBA_READ;
@@ -512,19 +525,21 @@ int Read1LBASector(CPU* cpu, struct DriveParamS *driveParam, unsigned drive,
     converts physical into logical representation of partition entry
 */
 
-STATIC void ConvCHSToIntern(struct CHS *chs, UBYTE * pDisk)
+STATIC void ConvCHSToIntern(struct CHS *chs, uint32_t pDisk)
 {
-  chs->Head = pDisk[0];
-  chs->Sector = pDisk[1] & 0x3f;
-  chs->Cylinder = pDisk[2] + ((pDisk[1] & 0xc0) << 2);
+  UBYTE b1 = pload8(pDisk + 1);
+  chs->Head = pload8(pDisk);
+  chs->Sector = b1 & 0x3f;
+  chs->Cylinder = pload8(pDisk + 2) + ((b1 & 0xc0) << 2);
 }
 
-static BOOL ConvPartTableEntryToIntern(struct PartTableEntry * pEntry,
-                                UBYTE * pDisk)
+static BOOL ConvPartTableEntryToIntern(struct PartTableEntry *pEntry,
+                                       dos_far_ptr disk)
 {
   int i;
+  uint32_t pDisk = EFFECTIVE(disk);
 
-  if (pDisk[0x1fe] != 0x55 || pDisk[0x1ff] != 0xaa)
+  if (pload8(pDisk + 0x1fe) != 0x55 || pload8(pDisk + 0x1ff) != 0xaa)
   {
     memset(pEntry, 0, 4 * sizeof(struct PartTableEntry));
 
@@ -535,15 +550,14 @@ static BOOL ConvPartTableEntryToIntern(struct PartTableEntry * pEntry,
 
   for (i = 0; i < 4; i++, pDisk += 16, pEntry++)
   {
+    pEntry->Bootable = pload8(pDisk);
+    pEntry->FileSystem = pload8(pDisk + 4);
 
-    pEntry->Bootable = pDisk[0];
-    pEntry->FileSystem = pDisk[4];
+    ConvCHSToIntern(&pEntry->Begin, pDisk + 1);
+    ConvCHSToIntern(&pEntry->End, pDisk + 5);
 
-    ConvCHSToIntern(&pEntry->Begin, pDisk+1);
-    ConvCHSToIntern(&pEntry->End, pDisk+5);
-
-    pEntry->RelSect = *(ULONG *) (pDisk + 8);
-    pEntry->NumSect = *(ULONG *) (pDisk + 12);
+    pEntry->RelSect = pload32(pDisk + 8);
+    pEntry->NumSect = pload32(pDisk + 12);
   }
   return TRUE;
 }
@@ -1058,7 +1072,7 @@ ReadNextPartitionTable:
     return PartitionsToIgnore;
   }
 
-  if (!ConvPartTableEntryToIntern(PTable, ARM_PTR(InitDiskTransferBuffer)))
+  if (!ConvPartTableEntryToIntern(PTable, InitDiskTransferBuffer))
   {
     /* there is some strange hardware out in the world,
        which returns OK on first read, but the data are

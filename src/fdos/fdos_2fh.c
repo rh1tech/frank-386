@@ -1,4 +1,5 @@
 #include "hdrs.h"
+#include "request_guest.h"
 #include "kernel_guest_proxy.h"
 #include "bios/bios.h"
 #include "fdos.h"
@@ -1190,11 +1191,12 @@ bool fdos_2fh(CPU* cpu) {
                    native "request rq;" local does not - linear_to_far() on it
                    yielded a bogus guest pointer. Use the shared IoReqHdr slot
                    in internal_data (guest RAM), like every other execrh() caller. */
-                request *rq = &IoReqHdrD;
-                memset(rq, 0, sizeof(*rq));
-                rq->r_length = sizeof(*rq);
-                rq->r_command = C_OPEN;
-                execrh(x86_FAR_PTR(DOS_PSP, rq) /* -> request */, fdos_sft_dev_raw(entry));
+                const dos_far_ptr rq_far = fdos_sda_request_far(offsetof(struct dos_data, IoReqHdr));
+                const fdos_request_guest_ref rq = fdos_request_guest(rq_far);
+                guest_fill_block(rq.linear, 0, sizeof(request));
+                FDOS_REQUEST_SET8(rq, r_length, sizeof(request));
+                FDOS_REQUEST_SET8(rq, r_command, C_OPEN);
+                execrh(rq_far, fdos_sft_dev_raw(entry));
             }
             fdos_sft_set_psp_raw(entry, fdos_dos_cu_psp());
         }

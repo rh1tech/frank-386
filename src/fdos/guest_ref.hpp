@@ -805,6 +805,7 @@ public:
     FDOS_REQ_SCALAR(UBYTE, command, r_command)
     FDOS_REQ_SCALAR(UWORD, status, r_status)
     FDOS_REQ_SCALAR(BYTE, mcmdesc, r_mcmdesc)
+    FDOS_REQ_SCALAR(BYTE, meddesc, r_meddesc)
     FDOS_REQ_SCALAR(BYTE, mcretcode, r_mcretcode)
     FDOS_REQ_SCALAR(UBYTE, nunits, r_nunits)
     FDOS_REQ_SCALAR(UBYTE, firstunit, r_firstunit)
@@ -814,6 +815,8 @@ public:
     FDOS_REQ_SCALAR(LONG, huge, r_huge)
     FDOS_REQ_SCALAR(UBYTE, cat, r_cat)
     FDOS_REQ_SCALAR(UBYTE, fun, r_fun)
+    FDOS_REQ_SCALAR(UWORD, si, r_si)
+    FDOS_REQ_SCALAR(UWORD, di, r_di)
 #undef FDOS_REQ_SCALAR
 
 #define FDOS_REQ_FAR(name, field) \

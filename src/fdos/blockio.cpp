@@ -81,6 +81,7 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
     return 0x0201;              /* illegal command */
   }
   using fdos_guest::dhdr_ref;
+using fdos_guest::request_ref;
   using fdos_guest::dpb_ref;
   using fdos_guest::dos_data_ref;
   using fdos_guest::lol_ref;
@@ -105,42 +106,45 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
   if (dpb_secsize != 512)
     return 0x0201;              /* error + illegal command */
 
+  const dos_far_ptr rq_far = MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, IoReqHdr)));
+  request_ref rq(rq_far);
+
   for (;;)
   {
-    IoReqHdrD.r_length = sizeof(request);
-    IoReqHdrD.r_unit = dpb_subunit;
+    rq.length(sizeof(request));
+    rq.unit(dpb_subunit);
 
     switch (mode)
     {
       case DSKWRITE:
         if ((UBYTE)dsk_idata.verify_ena())
         {
-          IoReqHdrD.r_command = C_OUTVFY;
+          rq.command(C_OUTVFY);
           break;
         }
         /* else fall through */
       case DSKWRITEINT26:
-        IoReqHdrD.r_command = C_OUTPUT;
+        rq.command(C_OUTPUT);
         break;
 
       case DSKREADINT25:
       case DSKREAD:
-        IoReqHdrD.r_command = C_INPUT;
+        rq.command(C_INPUT);
         break;
       default:
         return 0x0100;          /* illegal command */
     }
 
-    IoReqHdrD.r_status = 0;
-    IoReqHdrD.r_meddesc = dpb_mdb;
-    IoReqHdrD.r_count = numblocks;
+    rq.status(0);
+    rq.meddesc((BYTE)dpb_mdb);
+    rq.count(numblocks);
     if ((device_attr & ATTR_HUGE) || blkno >= MAXSHORT)
     {
-      IoReqHdrD.r_start = HUGECOUNT;
-      IoReqHdrD.r_huge = blkno;
+      rq.start(HUGECOUNT);
+      rq.huge(blkno);
     }
     else
-      IoReqHdrD.r_start = (UWORD)blkno;
+      rq.start((UWORD)blkno);
 
     /*
      * Some drivers normalise transfer address so HMA transfers are disastrous!
@@ -149,21 +153,21 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
      */
     if (FP_SEG(buf) >= 0xa000 && numblocks == 1 && (UBYTE)dsk_lol.bufloc() != LOC_CONV)
     {
-      IoReqHdrD.r_trans = dsk_lol.deblock_buf();
+      rq.trans(dsk_lol.deblock_buf());
       if (mode == DSKWRITE || mode == DSKWRITEINT26)
         fmemcpy(dsk_lol.deblock_buf(), buf, dpb_secsize);
 
-      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpb_device);
+      execrh(rq_far, dpb_device);
 
       if (mode == DSKREAD || mode == DSKREADINT25)
         fmemcpy(buf, dsk_lol.deblock_buf(), dpb_secsize);
     }
     else
     {
-      IoReqHdrD.r_trans = buf;
-      execrh(x86_FAR_PTR(DOS_PSP, &IoReqHdrD) /* -> request */, dpb_device);
+      rq.trans(buf);
+      execrh(rq_far, dpb_device);
     }
-    if ((IoReqHdrD.r_status & (S_ERROR | S_DONE)) == S_DONE)
+    if ((rq.status() & (S_ERROR | S_DONE)) == S_DONE)
       break;
 
     /*
@@ -173,9 +177,9 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
      * an image, and entering the guest critical-error callback from the
      * native block path is both unnecessary and re-entrant.
      */
-    if ((IoReqHdrD.r_status & (S_ERROR | S_MASK)) ==
+    if ((rq.status() & (S_ERROR | S_MASK)) ==
         (S_ERROR | E_NOTRDY))
-      return IoReqHdrD.r_status;
+      return rq.status();
 
     /* INT25/26 (_SEEMS_ TO) return immediately with 0x8002,
        if drive is not online,...
@@ -185,14 +189,14 @@ UWORD dskxfer(COUNT dsk, ULONG blkno, dos_far_ptr buf, UWORD numblocks, COUNT mo
        other condition codes not tested
      */
     if (mode >= DSKWRITEINT26)
-      return (IoReqHdrD.r_status);
+      return rq.status();
 
   loop:
-    switch (block_error(&IoReqHdrD, dpb_unit, dpb_device, mode))
+    switch (block_error_status(rq.status(), dpb_unit, dpb_device, mode))
     {
       case ABORT:
       case FAIL:
-        return (IoReqHdrD.r_status);
+        return rq.status();
 
       case RETRY:
         continue;

@@ -353,7 +353,7 @@ void /*ASMCFUNC*/ ASMPASCAL fmemcpyBack(void FAR * d, const void FAR * s, size_t
 void /*ASMCFUNC*/ ASMPASCAL fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n);
 #define fstrcpy strcpy
 void * /*ASMCFUNC*/ ASMPASCAL memcpy(void *d, const void * s, size_t n);
-void * /*ASMCFUNC*/ ASMPASCAL fmemset(dos_far_ptr s, int ch, size_t n);
+void /*ASMCFUNC*/ ASMPASCAL fmemset(dos_far_ptr s, int ch, size_t n);
 void * /*ASMCFUNC*/ ASMPASCAL memset(void * s, int ch, size_t n);
 
 int /*ASMCFUNC*/ ASMPASCAL memcmp(const void *m1, const void *m2, size_t n);

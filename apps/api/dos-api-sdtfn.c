@@ -1349,14 +1349,6 @@ int read(int handle, void *buffer, unsigned int count)
         total += regs.w.ax;
 
         /*
-         * Keep emulator/device service progressing during long DOS/FatFS reads.
-         * Application-specific schedulers must not be driven from this generic
-         * DOS I/O wrapper.
-         */
-        (void)dos_yield();
-
-
-        /*
          * A successful DOS read is allowed to return fewer bytes than CX.
          * Do not treat a non-zero short read as EOF here: this wrapper's
          * contract is already to satisfy the caller's whole count by issuing
@@ -1407,7 +1399,6 @@ int write(int handle, const void *buffer, unsigned int count)
             return total ? (int)total : -1;
 
         total += regs.w.ax;
-        (void)dos_yield();
         if (regs.w.ax < chunk)
             break;
     }
