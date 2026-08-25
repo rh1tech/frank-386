@@ -57,8 +57,6 @@ struct fcom_guest {
   char text[160];
   char path[128];
   char path2[128];
-  char env_value[256];
-  char env_path[1024];
   dmatch find;
   UBYTE io[256];
   UWORD owned_env_seg;
@@ -515,19 +513,16 @@ static int dos_get_cwd(CPU *cpu, UWORD command_psp,
   return int21_failed(cpu) ? -(int)CPU_AX : 0;
 }
 
-static int fcom_env_copy_value(UWORD command_psp, const char *name,
-                               char *dst, size_t dst_size)
+static char *fcom_env_alloc_value(UWORD command_psp, const char *name,
+                                  size_t max_size)
 {
   const UWORD env_seg = fcom_guest_psp_environment(command_psp);
   const size_t name_len = strlen(name);
   uint32_t env;
   unsigned left = 0x8000u;
 
-  if (dst_size == 0)
-    return 0;
-  dst[0] = '\0';
-  if (env_seg == 0)
-    return 0;
+  if (max_size == 0 || env_seg == 0)
+    return NULL;
 
   env = fcom_guest_linear(env_seg, 0);
   while (left != 0 && fcom_guest_read8(env) != 0) {
@@ -538,16 +533,25 @@ static int fcom_env_copy_value(UWORD command_psp, const char *name,
     if (n > name_len &&
         fcom_guest_env_name_matches(env, n, name, name_len)) {
       size_t value_len = n - name_len - 1u;
-      if (value_len >= dst_size)
-        return 0;
+      char *dst;
+
+      /* Keep the old size limits without making transient environment
+       * values resident members of struct fcom_guest. */
+      if (value_len >= max_size)
+        return NULL;
+
+      dst = (char *)malloc(value_len + 1u);
+      if (dst == NULL)
+        return NULL;
+
       fcom_guest_read(env + (uint32_t)name_len + 1u, dst, value_len);
       dst[value_len] = '\0';
-      return 1;
+      return dst;
     }
     env += (uint32_t)n + 1u;
     left -= (unsigned)n + 1u;
   }
-  return 0;
+  return NULL;
 }
 
 static void prompt_append_char(char **dst, size_t *left, char ch)
@@ -614,9 +618,8 @@ static void prompt_append_time(CPU *cpu, UWORD command_psp,
 
 static void show_prompt(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
 {
-  const char *format = fcom_env_copy_value(command_psp, "PROMPT",
-                                              g->env_value, sizeof(g->env_value))
-                           ? g->env_value : NULL;
+  char *env_format = fcom_env_alloc_value(command_psp, "PROMPT", 256u);
+  const char *format = env_format;
   char *dst = g->text;
   size_t left = sizeof(g->text);
 
@@ -694,6 +697,7 @@ static void show_prompt(CPU *cpu, UWORD command_psp, struct fcom_guest *g)
                    FCOM_WORK_OFFSET +
                      (UWORD)offsetof(struct fcom_guest, text),
                    (UWORD)(dst - g->text));
+  free(env_format);
 }
 
 static void ensure_prompt_column_zero(CPU *cpu, UWORD command_psp,
@@ -2156,11 +2160,13 @@ static void builtin_path(CPU *cpu, UWORD command_psp,
   size_t n;
 
   if (*p == '\0' && strchr(args, ';') == NULL) {
-    if (fcom_env_copy_value(command_psp, "PATH",
-                            g->env_path, sizeof(g->env_path))) {
+    char *env_path = fcom_env_alloc_value(command_psp, "PATH", 1024u);
+
+    if (env_path != NULL) {
       dos_puts(cpu, command_psp, g, "PATH=");
-      dos_puts(cpu, command_psp, g, g->env_path);
+      dos_puts(cpu, command_psp, g, env_path);
       dos_puts(cpu, command_psp, g, "\r\n");
+      free(env_path);
       return;
     }
     dos_puts(cpu, command_psp, g, "No search path defined.\r\n");
@@ -4567,14 +4573,6 @@ static int path_is_explicit(const char *name)
          strchr(name, ':') != NULL;
 }
 
-static const char *find_path_value(UWORD command_psp,
-                                   struct fcom_guest *g)
-{
-  return fcom_env_copy_value(command_psp, "PATH",
-                             g->env_path, sizeof(g->env_path))
-      ? g->env_path : NULL;
-}
-
 static int make_path_candidate(char *dst, size_t dst_size,
                                const char *dir, size_t dir_len,
                                const char *program)
@@ -4597,6 +4595,7 @@ static int fcom_find_which(CPU *cpu, UWORD command_psp,
                            const char *name,
                            char *result, size_t result_size)
 {
+  char *path_storage;
   const char *path;
 
   if (path_is_explicit(name))
@@ -4607,7 +4606,8 @@ static int fcom_find_which(CPU *cpu, UWORD command_psp,
                                name, result, result_size))
     return 1;
 
-  path = find_path_value(command_psp, g);
+  path_storage = fcom_env_alloc_value(command_psp, "PATH", 1024u);
+  path = path_storage;
   while (path != NULL && *path != '\0') {
     const char *end = strchr(path, ';');
     size_t len = end != NULL ? (size_t)(end - path) : strlen(path);
@@ -4625,14 +4625,17 @@ static int fcom_find_which(CPU *cpu, UWORD command_psp,
         make_path_candidate(g->text, sizeof(g->text),
                             dir, len, name) &&
         fcom_try_which_candidate(cpu, command_psp, g,
-                                 g->text, result, result_size))
+                                 g->text, result, result_size)) {
+      free(path_storage);
       return 1;
+    }
 
     if (end == NULL)
       break;
     path = end + 1;
   }
 
+  free(path_storage);
   return 0;
 }
 
@@ -5292,19 +5295,19 @@ static int fcom_copy_option(const char *arg,
 }
 
 static void fcom_copy_parse_env(UWORD command_psp,
-                                struct fcom_guest *g,
                                 struct fcom_copy_parse *parse)
 {
-  const char *env = fcom_env_copy_value(command_psp, "COPYCMD",
-                                         g->env_value, sizeof(g->env_value))
-                        ? g->env_value : NULL;
+  char *env = fcom_env_alloc_value(command_psp, "COPYCMD", 256u);
   char *cursor;
 
-  if (env == NULL || *env == '\0')
+  if (env == NULL)
     return;
 
-  if (strlen(env) >= sizeof(((struct fcom_guest *)0)->batch_line))
+  if (*env == '\0' ||
+      strlen(env) >= sizeof(((struct fcom_guest *)0)->batch_line)) {
+    free(env);
     return;
+  }
 
   /*
    * COPYCMD contributes options only. FreeCOM explicitly discards any
@@ -5326,6 +5329,8 @@ static void fcom_copy_parse_env(UWORD command_psp,
       (void)fcom_copy_option(token, parse, &flags);
     }
   }
+
+  free(env);
 }
 
 static int fcom_copy_count_items(char *line, unsigned *items,
@@ -5631,7 +5636,7 @@ static void builtin_copy(CPU *cpu, UWORD command_psp,
   size_t items_bytes;
 
   memset(parse, 0, sizeof(*parse));
-  fcom_copy_parse_env(command_psp, g, parse);
+  fcom_copy_parse_env(command_psp, parse);
 
   if (strlen(args) >= sizeof(g->batch_line) ||
       strlen(args) >= sizeof(g->redirect_command)) {
@@ -7039,6 +7044,7 @@ static struct fcom_exec_search_workspace fcom_exec_search;
 static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
                          const char *args, UBYTE exec_mode)
 {
+  char *path_storage = NULL;
 
   build_tail(g, args);
   strcpy(g->program, g->filename);
@@ -7065,7 +7071,8 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
       (fcom_exec_search.rc != -2 && fcom_exec_search.rc != -3))
     goto resolved;
 
-  fcom_exec_search.path = find_path_value(command_psp, g);
+  path_storage = fcom_env_alloc_value(command_psp, "PATH", 1024u);
+  fcom_exec_search.path = path_storage;
   while (fcom_exec_search.path && *fcom_exec_search.path) {
     fcom_exec_search.end = strchr(fcom_exec_search.path, ';');
     fcom_exec_search.len = fcom_exec_search.end
@@ -7101,6 +7108,7 @@ static int exec_external(CPU *cpu, UWORD command_psp, struct fcom_guest *g,
     fcom_exec_search.path = fcom_exec_search.end + 1;
   }
 resolved:
+  free(path_storage);
   /*
    * Keep BAT fallback and bad-command reporting here. A separate wrapper
    * remained live for the whole exec_program()->DosExec() path and cost
@@ -7740,6 +7748,7 @@ static int open_batch_candidate(CPU *cpu, UWORD command_psp,
 static int find_batch_file(CPU *cpu, UWORD command_psp,
                            struct fcom_guest *g, const char *name)
 {
+  char *path_storage;
   const char *path;
   int handle;
 
@@ -7750,7 +7759,8 @@ static int find_batch_file(CPU *cpu, UWORD command_psp,
   if (handle >= 0 || (handle != -2 && handle != -3))
     return handle;
 
-  path = find_path_value(command_psp, g);
+  path_storage = fcom_env_alloc_value(command_psp, "PATH", 1024u);
+  path = path_storage;
   while (path && *path) {
     const char *end = strchr(path, ';');
     size_t len = end ? (size_t)(end - path) : strlen(path);
@@ -7766,8 +7776,10 @@ static int find_batch_file(CPU *cpu, UWORD command_psp,
     if (len && make_path_candidate(g->text, sizeof(g->text),
                                    dir, len, name)) {
       handle = open_batch_candidate(cpu, command_psp, g, g->text);
-      if (handle >= 0 || (handle != -2 && handle != -3))
+      if (handle >= 0 || (handle != -2 && handle != -3)) {
+        free(path_storage);
         return handle;
+      }
     }
 
     if (!end)
@@ -7775,6 +7787,7 @@ static int find_batch_file(CPU *cpu, UWORD command_psp,
     path = end + 1;
   }
 
+  free(path_storage);
   return -2;
 }
 

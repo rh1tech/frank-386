@@ -45,6 +45,7 @@ static constexpr uint32_t fcom_lol_linear =
 namespace {
 constexpr unsigned FCOM_SHADOW_MAX_DEPTH = 8;
 struct shadow_state {
+    uint8_t *storage;
     uint32_t base;
     size_t size;
 };
@@ -168,7 +169,7 @@ int fcom_guest_shadow_enter(uint32_t base, void *storage, size_t size)
         return 0;
     if (shadow_depth != 0) {
         raw_write(shadow_base, shadow_storage, shadow_size);
-        shadow_stack[shadow_depth - 1] = {shadow_base, shadow_size};
+        shadow_stack[shadow_depth - 1] = {shadow_storage, shadow_base, shadow_size};
     }
     shadow_storage = static_cast<uint8_t *>(storage);
     shadow_base = base;
@@ -186,6 +187,7 @@ void fcom_guest_shadow_leave(void)
     --shadow_depth;
     if (shadow_depth != 0) {
         const shadow_state prev = shadow_stack[shadow_depth - 1];
+        shadow_storage = prev.storage;
         shadow_base = prev.base;
         shadow_size = prev.size;
         raw_read(shadow_base, shadow_storage, shadow_size);

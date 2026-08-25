@@ -843,7 +843,7 @@ static void load_default_config(void) {
 #if EMULATE_LTEMS
     if (detected_psram >= (4u << 20)) {
         config.mem_size = detected_psram - (2u << 20);
-        ems_base_ptr = guest_ram_base + config.mem_size;
+        ems_base_ptr = PC_RAM + config.mem_size;
     } else {
         config.mem_size = detected_psram;
         ems_base_ptr = NULL;
@@ -1461,6 +1461,7 @@ void vga_hw_process_deferred(void);
 static void __not_in_flash_func(default_tsr0)(void)
 {
     i8254_update_irq(pc->pit);
+    cmos_update_irq(pc->cmos);
 }
 
 static void __not_in_flash_func(default_tsr1)(void)
