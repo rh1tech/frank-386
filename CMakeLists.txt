@@ -15,7 +15,7 @@ endif()
 cmake_minimum_required(VERSION 3.13)
 
 # Board configuration variant (M1, M2, PC, Z2 or C2)
-set(BOARD "M1" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
+set(BOARD "M2" CACHE STRING "Board variant: M1, M2, PC, Z2 or C2")
 # Alias for backwards compatibility
 if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
@@ -25,7 +25,7 @@ endif()
 option(EMM "Enable LTEMM support" OFF)
 
 # Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "EGA128" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
 

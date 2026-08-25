@@ -98,20 +98,6 @@ const dos_far_ptr x86_com3_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 8)
 const dos_far_ptr x86_com4_dev= MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 9);
 const dos_far_ptr x86_clk_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 10);
 const dos_far_ptr x86_blk_dev = MK_FP(DOS_PSP, 0x07A8 + sizeof(struct dhdr) * 11);
-struct dhdr* con_dev;// = (struct dhdr*)ARM_PTR(x86_con_dev);
-struct dhdr* prn_dev;// = (struct dhdr*)ARM_PTR(x86_prn_dev);
-struct dhdr* aux_dev;//...
-struct dhdr* lpt1_dev;
-struct dhdr* lpt2_dev;
-struct dhdr* lpt3_dev;
-struct dhdr* com1_dev;
-struct dhdr* com2_dev;
-struct dhdr* com3_dev;
-struct dhdr* com4_dev;
-struct dhdr* clk_dev;
-struct dhdr* blk_dev;
-struct lol* LoL;// = (struct lol*)ARM_PTR(x86_FIXED_DATA);
-struct dos_data* internal_data;// (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
 
 
 static inline uint32_t kernel_guest_linear(dos_far_ptr p)
@@ -2529,11 +2515,9 @@ STATIC void init_kernel(CPU* cpu)
             dsk_init(cpu));
 
     PreConfig();
-/*
-printf("DBG after PreConfig CDSp=%04X:%04X native=%p lastdrive=%u nblkdev=%u DPBp=%04X:%04X\n",
-       FP_SEG(LoL->CDSp), FP_OFF(LoL->CDSp), ARM_PTR(LoL->CDSp),
-       LoL->lastdrive, LoL->nblkdev, FP_SEG(LoL->DPBp), FP_OFF(LoL->DPBp));
-*/
+/* Historical debug output dereferenced LoL through a persistent host
+   pointer.  LoL is guest-resident now; diagnostics must use lol_ref or
+   explicit guest accessors instead. */
     /* Number of units */
     if (pload8(kernel_guest_linear(x86_blk_dev) + offsetof(struct dhdr, dh_name)) > 0) {
         update_dcb(x86_blk_dev);
@@ -2742,11 +2726,8 @@ void kernel(CPU* _cpu) {
     kernel_guest_fill(kernel_guest_linear(x86_INTERNAL_DATA), 0,
                       sizeof(struct dos_data));
 
-    /* LoL/SDA are guest-resident state.  Keep the legacy host-pointer
-       globals NULL so new code cannot accidentally regain a persistent
-       alias into a pageable cache slot. */
-    LoL = NULL;
-    internal_data = NULL;
+    /* LoL/SDA are guest-resident only.  There is deliberately no persistent
+       host-pointer alias: every access goes through guest refs/primitives. */
 
     pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, switchar), '/');
     pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, net_set_count), 1);

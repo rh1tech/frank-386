@@ -26,9 +26,6 @@
 /* write to the Free Software Foundation, 675 Mass Ave,         */
 /* Cambridge, MA 02139, USA.                                    */
 /****************************************************************/
-extern struct lol* LoL;
-extern struct dos_data* internal_data;
-extern struct dhdr* blk_dev;    /* built-in block device driver header */
 COUNT ASMCFUNC
     CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
                            dos_far_ptr /* -> struct dhdr */ x86_lpDevice);

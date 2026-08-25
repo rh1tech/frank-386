@@ -68,6 +68,16 @@ static BOOL arm_native_runtime_available(void)
   return psram_usable_size() >= (1u << 20);
 }
 
+/* The ARM native loader is the sole remaining consumer of a stable host
+   alias for DOS guest memory.  Callers must already have passed
+   arm_native_runtime_available(); SPI/SWAP paging never reaches this helper.
+   Keep the conversion centralized so generic FDOS code cannot accidentally
+   reintroduce persistent ARM_PTR() aliases. */
+static __attribute__((always_inline)) void *arm_native_guest_ptr(dos_far_ptr p)
+{
+  return ARM_PTR(p);
+}
+
 /* Native-yield IRQ trampoline uses the same callback trap mechanism as
    bios_intcall(), but deliberately does not execute the suspended parent
    CS:IP. */
@@ -758,7 +768,7 @@ static void *arm_app_psram_realloc(void *ptr, size_t size)
 
 static UWORD arm_app_dos_segment(const void *ptr)
 {
-  uintptr_t guest_base = (uintptr_t)ARM_PTR(MK_FP(0, 0));
+  uintptr_t guest_base = (uintptr_t)X86_RAM_BASE;
   uintptr_t address = (uintptr_t)ptr;
   uintptr_t linear;
 
@@ -803,7 +813,7 @@ static void *arm_app_dos_malloc(size_t size)
   if (DosMemAlloc((UWORD)paras_long, fdos_dos_mem_access_mode(),
                   &mcb_seg, &largest) != SUCCESS)
     return NULL;
-  return ARM_PTR(MK_FP((UWORD)(mcb_seg + 1), 0));
+  return arm_native_guest_ptr(MK_FP((UWORD)(mcb_seg + 1), 0));
 }
 
 void *arm_native_app_malloc(size_t size)
@@ -927,7 +937,7 @@ size_t arm_native_app_malloc_largest(void)
    Their metadata scratch remains in SecPathBuffer; only after the QSPI guard
    may it be exposed as a stable native alias. */
 #define ELF_SCRATCH_FAR MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, PriPathBuffer)))
-#define ElfScratch ((BYTE *)ARM_PTR(ELF_SCRATCH_FAR))
+#define ElfScratch ((BYTE *)arm_native_guest_ptr(ELF_SCRATCH_FAR))
 
 static int arm_elf_read_meta(COUNT fd, ULONG file_off, void *dst, UWORD len)
 {
@@ -1355,7 +1365,7 @@ static ULONG arm_elf_chunk_payload_off(UWORD data_seg, ULONG logical_start,
                                        ULONG align)
 {
   return arm_elf_chunk_payload_off_native(
-      (uintptr_t)ARM_PTR(MK_FP(data_seg, 0)), logical_start, align);
+      (uintptr_t)arm_native_guest_ptr(MK_FP(data_seg, 0)), logical_start, align);
 }
 
 static int arm_elf_section_runtime_addr(UWORD base_seg,
@@ -1375,12 +1385,12 @@ static int arm_elf_section_runtime_addr(UWORD base_seg,
 
   if (logical_off < state->primary_size &&
       width <= state->primary_size - logical_off) {
-    *addr = (ULONG)(uintptr_t)ARM_PTR(
+    *addr = (ULONG)(uintptr_t)arm_native_guest_ptr(
         arm_elf_guest_ptr(base_seg, state->offset + logical_off));
     return SUCCESS;
   }
   if (state->size == 0 && logical_off == 0 && width == 0) {
-    *addr = (ULONG)(uintptr_t)ARM_PTR(
+    *addr = (ULONG)(uintptr_t)arm_native_guest_ptr(
         arm_elf_guest_ptr(base_seg, state->offset));
     return SUCCESS;
   }
@@ -1405,7 +1415,7 @@ static int arm_elf_section_runtime_addr(UWORD base_seg,
   }
   if (width == 0 && logical_off == state->size &&
       state->primary_size == state->size) {
-    *addr = (ULONG)(uintptr_t)ARM_PTR(
+    *addr = (ULONG)(uintptr_t)arm_native_guest_ptr(
         arm_elf_guest_ptr(base_seg, state->offset + state->size));
     return SUCCESS;
   }
@@ -1761,11 +1771,12 @@ static int arm_elf_copy_startup_kind(COUNT fd, UWORD base_seg,
         break;
 
       if (states[best].size != 0) {
-        BYTE *src = (BYTE *)ARM_PTR(
-            arm_elf_guest_ptr(base_seg, states[best].offset));
-        BYTE *dst = (BYTE *)ARM_PTR(
-            arm_elf_guest_ptr(base_seg, dst_off + count * sizeof(ULONG)));
-        dos_api_memcpy(dst, src, states[best].size);
+        guest_move_block(
+            task_guest_linear(arm_elf_guest_ptr(
+                base_seg, dst_off + count * sizeof(ULONG))),
+            task_guest_linear(arm_elf_guest_ptr(
+                base_seg, states[best].offset)),
+            states[best].size);
         count += states[best].size / sizeof(ULONG);
       }
       previous = best;
@@ -1823,7 +1834,7 @@ static int arm_elf_build_startup_arrays(COUNT fd, UWORD base_seg,
     return rc;
   }
 
-  meta->preinit_array_addr = (ULONG)(uintptr_t)ARM_PTR(
+  meta->preinit_array_addr = (ULONG)(uintptr_t)arm_native_guest_ptr(
       arm_elf_guest_ptr(base_seg, off));
   rc = arm_elf_copy_startup_kind(fd, base_seg, meta,
                                  ARM_ELF_STARTUP_PREINIT, off,
@@ -1832,7 +1843,7 @@ static int arm_elf_build_startup_arrays(COUNT fd, UWORD base_seg,
     return rc;
   off += meta->preinit_array_count * sizeof(ULONG);
 
-  meta->init_array_addr = (ULONG)(uintptr_t)ARM_PTR(
+  meta->init_array_addr = (ULONG)(uintptr_t)arm_native_guest_ptr(
       arm_elf_guest_ptr(base_seg, off));
   rc = arm_elf_copy_startup_kind(fd, base_seg, meta,
                                  ARM_ELF_STARTUP_INIT, off,
@@ -1841,7 +1852,7 @@ static int arm_elf_build_startup_arrays(COUNT fd, UWORD base_seg,
     return rc;
   off += meta->init_array_count * sizeof(ULONG);
 
-  meta->fini_array_addr = (ULONG)(uintptr_t)ARM_PTR(
+  meta->fini_array_addr = (ULONG)(uintptr_t)arm_native_guest_ptr(
       arm_elf_guest_ptr(base_seg, off));
   rc = arm_elf_copy_startup_kind(fd, base_seg, meta,
                                  ARM_ELF_STARTUP_FINI, off,
@@ -2297,7 +2308,8 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
     if (piece_end > logical) {
       ULONG piece_size = piece_end - logical;
       if (sh.type == SHT_NOBITS) {
-        nf_memset(ARM_PTR(arm_elf_guest_ptr(base_seg, off)), 0, piece_size);
+        guest_fill_block(task_guest_linear(arm_elf_guest_ptr(base_seg, off)),
+                         0, piece_size);
       } else {
         rc = arm_elf_read_section(fd, base_seg, off, sh.offset, piece_size);
         if (rc != SUCCESS) {
@@ -2364,7 +2376,8 @@ retry_pool:
 
     piece_size = piece_end - logical;
     if (sh.type == SHT_NOBITS) {
-      nf_memset(ARM_PTR(arm_elf_guest_ptr(data_seg, data_off)), 0, piece_size);
+      guest_fill_block(task_guest_linear(arm_elf_guest_ptr(data_seg, data_off)),
+                       0, piece_size);
     } else {
       rc = arm_elf_read_section(fd, data_seg, data_off,
                                 sh.offset + logical, piece_size);
@@ -2395,11 +2408,11 @@ retry_pool:
        teardown/TSR ownership sees them as part of the child. */
     fdos_mcb_set_owner(mcb_seg, base_seg);
 
-    chunk = (arm_elf_sec_chunk *)ARM_PTR(MK_FP(data_seg, 0));
+    chunk = (arm_elf_sec_chunk *)arm_native_guest_ptr(MK_FP(data_seg, 0));
     chunk->next_addr = 0;
     chunk->logical_start = logical;
     chunk->logical_end = piece_end;
-    chunk->data_addr = (ULONG)(uintptr_t)ARM_PTR(MK_FP(data_seg, 0));
+    chunk->data_addr = (ULONG)(uintptr_t)arm_native_guest_ptr(MK_FP(data_seg, 0));
     chunk->data_off = data_off;
     chunk->mcb_seg = mcb_seg;
     chunk->data_seg = data_seg;
@@ -2779,7 +2792,8 @@ void doom_stack_guard_check(unsigned stage)
   if (doom_diag_dos_stack_seg != 0)
   {
     volatile uint8_t *base =
-        (volatile uint8_t *)ARM_PTR(MK_FP(doom_diag_dos_stack_seg, 0));
+        (volatile uint8_t *)arm_native_guest_ptr(
+            MK_FP(doom_diag_dos_stack_seg, 0));
 
     for (i = 0; i < DOOM_DOS_STACK_GUARD; ++i)
     {
@@ -2892,10 +2906,10 @@ static int arm_native_reserve_dos_stack_low(ULONG stack_size,
 
   *out_mcb = mcb_seg;
   *out_seg = mcb_seg + 1;
-  nf_memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
+  guest_fill_block(task_guest_seg_linear(*out_seg), 0, stack_size);
   if (stack_size >= DOOM_DOS_STACK_GUARD)
-    nf_memset(ARM_PTR(MK_FP(*out_seg, 0)),
-           DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
+    guest_fill_block(task_guest_seg_linear(*out_seg),
+                     DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   fdos_mcb_set_owner(mcb_seg, fdos_dos_cu_psp());
   fdos_mcb_set_name8(mcb_seg, "ARMSTK  ");
@@ -2935,10 +2949,10 @@ static int arm_native_reserve_dos_stack(ULONG stack_size,
 
   *out_mcb = mcb_seg;
   *out_seg = mcb_seg + 1;
-  nf_memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
+  guest_fill_block(task_guest_seg_linear(*out_seg), 0, stack_size);
   if (stack_size >= DOOM_DOS_STACK_GUARD)
-    nf_memset(ARM_PTR(MK_FP(*out_seg, 0)),
-           DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
+    guest_fill_block(task_guest_seg_linear(*out_seg),
+                     DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   /* Temporary owner until the child PSP exists. */
   fdos_mcb_set_owner(mcb_seg, fdos_dos_cu_psp());
@@ -3094,8 +3108,8 @@ static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
     return DE_NOMEM;
   }
   text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
-  argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
-  text = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg, text_off));
+  argv = (ULONG *)arm_native_guest_ptr(arm_elf_guest_ptr(base_seg, argv_off));
+  text = (BYTE *)arm_native_guest_ptr(arm_elf_guest_ptr(base_seg, text_off));
   nf_memset(argv, 0, ARM_ELF_ARGV_SLOTS * sizeof(ULONG));
   nf_memset(text, 0, ARM_ELF_ARG_TEXT_SIZE);
 
@@ -3110,7 +3124,7 @@ static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
   }
 
   if (!far_is_null(exp->exec.cmd_line) && !far_is_end(exp->exec.cmd_line)) {
-    tail = (const CommandTail *)ARM_PTR(exp->exec.cmd_line);
+    tail = (const CommandTail *)arm_native_guest_ptr(exp->exec.cmd_line);
     tail_len = tail->ctCount;
     if (tail_len > sizeof(tail->ctBuffer))
       tail_len = sizeof(tail->ctBuffer);
@@ -3177,8 +3191,8 @@ static int arm_ez_build_argv(UWORD base_seg, arm_ez_load_meta *meta,
     return DE_NOMEM;
 
   text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
-  argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
-  text = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg, text_off));
+  argv = (ULONG *)arm_native_guest_ptr(arm_elf_guest_ptr(base_seg, argv_off));
+  text = (BYTE *)arm_native_guest_ptr(arm_elf_guest_ptr(base_seg, text_off));
   nf_memset(argv, 0, ARM_ELF_ARGV_SLOTS * sizeof(ULONG));
   nf_memset(text, 0, ARM_ELF_ARG_TEXT_SIZE);
 
@@ -3193,7 +3207,7 @@ static int arm_ez_build_argv(UWORD base_seg, arm_ez_load_meta *meta,
   }
 
   if (!far_is_null(exp->exec.cmd_line) && !far_is_end(exp->exec.cmd_line)) {
-    tail = (const CommandTail *)ARM_PTR(exp->exec.cmd_line);
+    tail = (const CommandTail *)arm_native_guest_ptr(exp->exec.cmd_line);
     tail_len = tail->ctCount;
     if (tail_len > sizeof(tail->ctBuffer))
       tail_len = sizeof(tail->ctBuffer);
@@ -3321,7 +3335,7 @@ static int arm_ez_read_native_image(COUNT fd, BYTE *dst,
       return DE_INVLDFMT;
     }
 
-    dos_api_memcpy(dst + done, ARM_PTR(stage), chunk);
+    guest_read_block(task_guest_linear(stage), dst + done, chunk);
     done += chunk;
   }
 
@@ -3552,7 +3566,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   load_seg = alloc_mcb + 1;
 
   if (image_in_low) {
-    image_base = (BYTE *)ARM_PTR(MK_FP(load_seg, 0));
+    image_base = (BYTE *)arm_native_guest_ptr(MK_FP(load_seg, 0));
     image_data = image_base + EZ_IMAGE_RVA;
     if (arm_elf_read_section(fd, load_seg, EZ_IMAGE_RVA,
                              header.header_size,
@@ -3620,7 +3634,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
     }
   }
 
-  meta = (arm_ez_load_meta *)ARM_PTR(arm_elf_guest_ptr(load_seg, meta_off));
+  meta = (arm_ez_load_meta *)arm_native_guest_ptr(arm_elf_guest_ptr(load_seg, meta_off));
   nf_memset(meta, 0, sizeof(*meta));
   meta->entry_addr = (ULONG)(uintptr_t)(image_base + header.entry_rva);
   meta->native_stack_size = native_stack_size;
@@ -3802,7 +3816,8 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   load_seg = alloc_mcb + 1;
 
   /* Persistent loader metadata belongs to the child allocation. */
-  meta = (arm_elf_load_meta *)ARM_PTR(arm_elf_guest_ptr(load_seg, metadata_off));
+  meta = (arm_elf_load_meta *)arm_native_guest_ptr(
+      arm_elf_guest_ptr(load_seg, metadata_off));
   nf_memset(meta, 0, metadata_size);
   meta->loader_started_us = get_uticks();
   meta->eh = eh;
@@ -5698,7 +5713,7 @@ static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
     }
     else
       rc = DosArmEzLoader(&TempExeBlock, mode, fd,
-                          (BYTE *)ARM_PTR(x86_lp));
+                          (BYTE *)arm_native_guest_ptr(x86_lp));
   }
   else if (rc >= 4 &&
            task_sec_read8(0) == 0x7f &&
@@ -5714,7 +5729,7 @@ static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
     }
     else
       rc = DosArmElfLoader(&TempExeBlock, mode, fd,
-                           (BYTE *)ARM_PTR(x86_lp));
+                           (BYTE *)arm_native_guest_ptr(x86_lp));
   }
   else if (rc != 0)
     rc = DosComLoader(x86_lp, &TempExeBlock, mode, fd);
