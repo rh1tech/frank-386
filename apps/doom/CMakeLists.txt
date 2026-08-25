@@ -96,6 +96,7 @@ add_executable(${PROJECT_NAME}
     i_ibm.c
     i_sound.c
     dmx.c
+    dmx_tsm_native.c
     mus2mid.c
     fx_native.c
     pcfx_native.c

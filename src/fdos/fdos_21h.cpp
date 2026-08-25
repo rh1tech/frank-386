@@ -1216,20 +1216,24 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             exactly this XX.YY.
             this makes most MS programs more happy.
           */
-          UBYTE FAR *retp = ARM_PTR ( MK_FP(CPU_CS, CPU_IP) );
+          const uint32_t retp = ((uint32_t)CPU_CS << 4) + CPU_IP;
+          const UBYTE b0 = pload8(retp);
 
-          if (retp[0] == 0x3d &&  /* cmp ax, xxyy */
-              (retp[3] == 0x75 || retp[3] == 0x74))       /* je/jne error    */
+          if (b0 == 0x3d &&  /* cmp ax, xxyy */
+              (pload8(retp + 3u) == 0x75 ||
+               pload8(retp + 3u) == 0x74))       /* je/jne error    */
           {
-            R_AL = retp[1];
-            R_AH = retp[2];
+            R_AL = pload8(retp + 1u);
+            R_AH = pload8(retp + 2u);
           }
-          else if (retp[0] == 0x86 &&     /* xchg al,ah   */
-                  retp[1] == 0xc4 && retp[2] == 0x3d &&  /* cmp ax, xxyy */
-                  (retp[5] == 0x75 || retp[5] == 0x74))  /* je/jne error    */
+          else if (b0 == 0x86 &&     /* xchg al,ah   */
+                  pload8(retp + 1u) == 0xc4 &&
+                  pload8(retp + 2u) == 0x3d &&  /* cmp ax, xxyy */
+                  (pload8(retp + 5u) == 0x75 ||
+                   pload8(retp + 5u) == 0x74))  /* je/jne error    */
           {
-            R_AL = retp[4];
-            R_AH = retp[3];
+            R_AL = pload8(retp + 4u);
+            R_AH = pload8(retp + 3u);
           }
 
         }

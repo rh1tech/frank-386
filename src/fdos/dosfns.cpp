@@ -12,6 +12,7 @@ extern "C" {
 using fdos_guest::cds_ref;
 using fdos_guest::dhdr_ref;
 using fdos_guest::dos_data_ref;
+using fdos_guest::dmatch_ref;
 using fdos_guest::dpb_ref;
 using fdos_guest::lol_ref;
 using fdos_guest::psp_ref;
@@ -132,12 +133,13 @@ STATIC void ConvertPathNameToFCBName(char *FCBName, const char *PathName)
 
 STATIC void set_fcbname(const char *path)
 {
-  /* Leaf-only direct mapping: ConvertPathNameToFCBName() performs no guest
-     accesses, so the mapped SDA page cannot be displaced while this pointer
-     is live. */
-  struct dos_data *idata =
-      (struct dos_data *)ARM_PTR(MK_FP(DOS_PSP, X86_INTERNAL_DATA_OFF));
-  ConvertPathNameToFCBName(((struct dirent *)idata->DirEntBuffer)->dir_name, path);
+  BYTE name[FNAME_SIZE + FEXT_SIZE + 1];
+  const UWORD off = (UWORD)(X86_INTERNAL_DATA_OFF +
+                            offsetof(dos_data, DirEntBuffer) +
+                            offsetof(struct dirent, dir_name));
+
+  ConvertPathNameToFCBName((char *)name, path);
+  guest_write(MK_FP(DOS_PSP, off), name, sizeof(name));
 }
 
 /*
@@ -1390,23 +1392,16 @@ STATIC int pop_dmp(int rc, dos_far_ptr dta_far)
   dosfns_idata.dta(dta_far);
   if (rc == SUCCESS)
   {
-    /* The DTA is whatever the guest set with AH=1Ah, and a dmatch is 43
-       bytes, so it can straddle the end of the guest's segment. Do the
-       update as read-modify-write through a native scratch: reading the
-       current contents first means the bytes the original never touches
-       (dm_name past its NUL, say) stay byte-identical, and the wrapping
-       write puts the tail back at seg:0000 instead of into the next
-       segment. The scratch is a 43-byte auto - no SRAM cost. */
-    dmatch dm;
+    BYTE name[FNAME_SIZE + FEXT_SIZE + 2];
+    const dmatch_ref dm(dta_far);
 
-    guest_read(&dm, dta_far, sizeof(dm));
-    memcpy(&dm, &sda_tmp_dmD, 21);
-    dm.dm_attr_fnd = (BYTE) SearchDirD.dir_attrib;
-    dm.dm_time = SearchDirD.dir_time;
-    dm.dm_date = SearchDirD.dir_date;
-    dm.dm_size = (LONG) SearchDirD.dir_size;
-    ConvertName83ToNameSZ((BYTE FAR *)dm.dm_name, (BYTE FAR *)SearchDirD.dir_name);
-    guest_write(dta_far, &dm, sizeof(dm));
+    dm.write_prefix(&sda_tmp_dmD);
+    dm.attr_found((BYTE)SearchDirD.dir_attrib);
+    dm.time_found(SearchDirD.dir_time);
+    dm.date_found(SearchDirD.dir_date);
+    dm.size_found((ULONG)SearchDirD.dir_size);
+    ConvertName83ToNameSZ(name, (BYTE FAR *)SearchDirD.dir_name);
+    dm.write_name(name, strlen((const char *)name) + 1u);
   }
   return rc;
 }
@@ -1461,8 +1456,9 @@ COUNT DosFindNext(void)
   COUNT rc;
   dos_far_ptr dta_far = dosfns_idata.dta();
 
-  /* DTA is guest-supplied; 21 bytes from it can cross the segment end. */
-  guest_read(&sda_tmp_dmD, dta_far, 21);
+  /* DTA is guest-supplied; only the 21-byte search prefix is consumed by
+     the FAT walker. Keep that native working state, but never alias the DTA. */
+  dmatch_ref(dta_far).read_prefix(&sda_tmp_dmD);
 
   /* findnext will always fail on a volume id search or device name */
   /* Upstream guards the dm_entry sentinel with "!(dm_drive & 0x80)": bit 7

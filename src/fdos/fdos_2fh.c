@@ -1269,17 +1269,17 @@ bool fdos_2fh(CPU* cpu) {
          * upstream FreeDOS: the internal NLS helpers cannot safely process
          * a source string whose segment is not the kernel data segment.
          */
-        const char *src = (const char *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
-        char *dst = (char *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
-        char ch;
+        uint32_t src = ((uint32_t)CPU_DS << 4) + CPU_SI;
+        uint32_t dst = ((uint32_t)CPU_ES << 4) + CPU_DI;
+        UBYTE ch;
 
         do {
-            ch = *src++;
+            ch = pload8(src++);
             if (ch >= 'a' && ch <= 'z')
                 ch -= 'a' - 'A';
             else if (ch == '/')
                 ch = '\\';
-            *dst++ = ch;
+            pstore8(dst++, ch);
         } while (ch != '\0');
 
         cf = 0;
@@ -1287,8 +1287,8 @@ bool fdos_2fh(CPU* cpu) {
     else
     if (CPU_AX == 0x1212) {
         /* DOS internal: length of ES:DI ASCIIZ, including the NUL. */
-        const char *s = (const char *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
-        CPU_CX = (UWORD)(strlen(s) + 1u);
+        const uint32_t s = ((uint32_t)CPU_ES << 4) + CPU_DI;
+        CPU_CX = (UWORD)(guest_strnlen_block(s, 0xffffu) + 1u);
         cf = 0;
     }
     else
@@ -1371,10 +1371,10 @@ bool fdos_2fh(CPU* cpu) {
          * means an invalid drive designator.  On a valid X: prefix SI is
          * advanced past the two characters, matching upstream FreeDOS.
          */
-        const BYTE *p = (const BYTE *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
-        UBYTE ch = p[0];
+        const uint32_t p = ((uint32_t)CPU_DS << 4) + CPU_SI;
+        UBYTE ch = pload8(p);
 
-        if (ch == 0 || p[1] != ':') {
+        if (ch == 0 || pload8(p + 1u) != ':') {
             CPU_AL = 0;
         } else {
             ch |= 0x20;
@@ -1396,13 +1396,13 @@ bool fdos_2fh(CPU* cpu) {
     else
     if (CPU_AX == 0x121e) {
         /* DOS internal: case-insensitive ASCII comparison of two ASCIIZ names. */
-        const BYTE *s1 = (const BYTE *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
-        const BYTE *s2 = (const BYTE *)ARM_PTR(MK_FP(CPU_ES, CPU_DI));
+        uint32_t s1 = ((uint32_t)CPU_DS << 4) + CPU_SI;
+        uint32_t s2 = ((uint32_t)CPU_ES << 4) + CPU_DI;
         UBYTE c1, c2;
 
         do {
-            c1 = *s1++;
-            c2 = *s2++;
+            c1 = pload8(s1++);
+            c2 = pload8(s2++);
             if (c1 >= 'a' && c1 <= 'z') c1 -= 'a' - 'A';
             if (c2 >= 'a' && c2 <= 'z') c2 -= 'a' - 'A';
         } while (c1 != 0 && c1 == c2);
@@ -1534,8 +1534,8 @@ bool fdos_2fh(CPU* cpu) {
     else
     if (CPU_AX == 0x1225) {
         /* DOS internal: length of DS:SI ASCIIZ, including the NUL. */
-        const char *s = (const char *)ARM_PTR(MK_FP(CPU_DS, CPU_SI));
-        CPU_CX = (UWORD)(strlen(s) + 1u);
+        const uint32_t s = ((uint32_t)CPU_DS << 4) + CPU_SI;
+        CPU_CX = (UWORD)(guest_strnlen_block(s, 0xffffu) + 1u);
         cf = 0;
     }
     else

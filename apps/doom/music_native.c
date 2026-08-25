@@ -5,8 +5,8 @@
  * selected by DOOM (normally 0x330).  The backend therefore only needs to
  * sequence a Standard MIDI File and write MIDI bytes to that port.
  *
- * Timing is cooperative: a 140-Hz TSM service runs from TSM_Yield(), i.e. in
- * normal ARM application context after dos_yield() has serviced the emulator.
+ * Timing follows the DMX model: a 140-Hz TSM service is dispatched
+ * asynchronously from the native TSR0 timer hook on core0.
  * No host IRQ, DPMI task manager or second hardware timer is involved.
  *
  * The same sequencer feeds either the MPU-401 UART or a native OPL2 driver.

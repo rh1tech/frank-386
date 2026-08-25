@@ -18,6 +18,7 @@ namespace {
 using fdos_guest::cds_ref;
 using fdos_guest::dos_data_ref;
 using fdos_guest::lol_ref;
+using fdos_guest::psp_ref;
 using fdos_guest::sft_ref;
 using fdos_guest::sfttbl_ref;
 using fdos_guest::dpb_ref;
@@ -201,6 +202,104 @@ extern "C" UWORD fdos_psp_max_files(UWORD psp_seg)
 extern "C" dos_far_ptr fdos_psp_file_table(UWORD psp_seg)
 {
     return fdos_proxy_far_load(((uint32_t)psp_seg << 4) + offsetof(psp, ps_filetab));
+}
+
+static inline uint32_t fdos_psp_linear(UWORD psp_seg)
+{
+    return (uint32_t)psp_seg << 4;
+}
+
+extern "C" void fdos_psp_set_parent(UWORD psp_seg, UWORD parent)
+{
+    pstore16(fdos_psp_linear(psp_seg) + offsetof(psp, ps_parent), parent);
+}
+
+extern "C" void fdos_psp_set_prev(UWORD psp_seg, dos_far_ptr prev)
+{
+    fdos_proxy_far_store(fdos_psp_linear(psp_seg) + offsetof(psp, ps_prevpsp), prev);
+}
+
+extern "C" void fdos_psp_set_size(UWORD psp_seg, UWORD size)
+{
+    pstore16(fdos_psp_linear(psp_seg) + offsetof(psp, ps_size), size);
+}
+
+extern "C" void fdos_psp_set_max_files(UWORD psp_seg, UWORD count)
+{
+    psp_ref(psp_seg).max_files(count);
+}
+
+extern "C" void fdos_psp_set_file_table(UWORD psp_seg, dos_far_ptr table)
+{
+    psp_ref(psp_seg).file_table(table);
+}
+
+extern "C" void fdos_psp_set_environment(UWORD psp_seg, UWORD env_seg)
+{
+    pstore16(fdos_psp_linear(psp_seg) + offsetof(psp, ps_environ), env_seg);
+}
+
+extern "C" void fdos_psp_set_return_version(UWORD psp_seg, UWORD version)
+{
+    psp_ref(psp_seg).return_dos_version(version);
+}
+
+static inline size_t fdos_psp_vector_offset(unsigned which)
+{
+    switch (which) {
+    case 0x22: return offsetof(psp, ps_isv22);
+    case 0x23: return offsetof(psp, ps_isv23);
+    default:   return offsetof(psp, ps_isv24);
+    }
+}
+
+extern "C" void fdos_psp_set_vector(UWORD psp_seg, unsigned which, dos_far_ptr vector)
+{
+    fdos_proxy_far_store(fdos_psp_linear(psp_seg) + fdos_psp_vector_offset(which), vector);
+}
+
+extern "C" dos_far_ptr fdos_psp_vector(UWORD psp_seg, unsigned which)
+{
+    return fdos_proxy_far_load(fdos_psp_linear(psp_seg) + fdos_psp_vector_offset(which));
+}
+
+static inline size_t fdos_psp_fcb_offset(unsigned which)
+{
+    return which == 1 ? offsetof(psp, ps_fcb1) : offsetof(psp, ps_fcb2);
+}
+
+extern "C" void fdos_psp_set_fcb_drive(UWORD psp_seg, unsigned which, UBYTE drive)
+{
+    pstore8(fdos_psp_linear(psp_seg) + fdos_psp_fcb_offset(which) + offsetof(fcb, fcb_drive), drive);
+}
+
+extern "C" UBYTE fdos_psp_fcb_drive(UWORD psp_seg, unsigned which)
+{
+    return pload8(fdos_psp_linear(psp_seg) + fdos_psp_fcb_offset(which) + offsetof(fcb, fcb_drive));
+}
+
+extern "C" void fdos_psp_clear_fcb_name(UWORD psp_seg, unsigned which)
+{
+    guest_fill_block(fdos_psp_linear(psp_seg) + fdos_psp_fcb_offset(which) + offsetof(fcb, fcb_fname),
+                     ' ', FNAME_SIZE + FEXT_SIZE);
+}
+
+extern "C" void fdos_psp_set_command_empty(UWORD psp_seg)
+{
+    const uint32_t base = fdos_psp_linear(psp_seg) + offsetof(psp, ps_cmd);
+    pstore8(base + offsetof(CommandTail, ctCount), 0);
+    pstore8(base + offsetof(CommandTail, ctBuffer), 0x0d);
+}
+
+extern "C" void fdos_psp_set_file_handle(UWORD psp_seg, UWORD index, UBYTE handle)
+{
+    psp_ref(psp_seg).file_handle(index, handle);
+}
+
+extern "C" void fdos_sft_inc_ref_raw(dos_far_ptr sft_ptr)
+{
+    const sft_ref r(sft_ptr);
+    r.count((UWORD)(r.count() + 1u));
 }
 
 extern "C" void fdos_lol_set_network_retry(UWORD delay, UWORD retry)

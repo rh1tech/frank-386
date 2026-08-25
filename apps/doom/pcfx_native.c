@@ -2,9 +2,8 @@
  * Native-FDOS PC speaker backend for the restored DMX PCFX interface.
  *
  * The original Apogee PCFX driver used a hardware timer ISR.  Native ARM
- * applications already have the cooperative TSM scheduler: every dos_yield()
- * services the emulator and then dispatches due TSM callbacks in normal ARM
- * context.  PCFX therefore needs no host IRQ and no DPMI code.
+ * applications use the DMX-compatible asynchronous TSM scheduler on core0.
+ * PCFX therefore needs no separate host timer and no DPMI code.
  *
  * DMX passes PC speaker data as a byte stream containing little-endian
  * 16-bit PIT channel-2 divisors, one divisor per 140-Hz service tick.
@@ -147,7 +146,7 @@ int PCFX_Play(PCSound *sound, int priority, unsigned long callbackval)
 
     /*
      * Do not wait for the first 140-Hz deadline before producing sound.
-     * Program the first divisor immediately, then let cooperative TSM advance
+     * Program the first divisor immediately, then let asynchronous TSM advance
      * the remaining samples.
      */
     pcfx_service();

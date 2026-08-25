@@ -921,6 +921,40 @@ private:
     linear_t addr_;
 };
 
+class dmatch_ref final {
+public:
+    __attribute__((always_inline)) explicit dmatch_ref(dos_far_ptr p) : addr_(p) {}
+    __attribute__((always_inline)) UBYTE drive() const { return read_field<UBYTE>(offsetof(dmatch, dm_drive)); }
+    __attribute__((always_inline)) UBYTE attr_search() const { return read_field<UBYTE>(offsetof(dmatch, dm_attr_srch)); }
+    __attribute__((always_inline)) UWORD entry() const { return read_field<UWORD>(offsetof(dmatch, dm_entry)); }
+    __attribute__((always_inline)) void attr_found(UBYTE v) const { write_field<UBYTE>(offsetof(dmatch, dm_attr_fnd), v); }
+    __attribute__((always_inline)) void time_found(dtime v) const { write_field<dtime>(offsetof(dmatch, dm_time), v); }
+    __attribute__((always_inline)) void date_found(ddate v) const { write_field<ddate>(offsetof(dmatch, dm_date), v); }
+    __attribute__((always_inline)) void size_found(ULONG v) const { write_field<ULONG>(offsetof(dmatch, dm_size), v); }
+    __attribute__((always_inline)) void write_prefix(const void *src) const {
+        guest_write(at(0), src, offsetof(dmatch, dm_attr_fnd));
+    }
+    __attribute__((always_inline)) void read_prefix(void *dst) const {
+        guest_read(dst, at(0), offsetof(dmatch, dm_attr_fnd));
+    }
+    __attribute__((always_inline)) void write_name(const void *src, std::size_t len) const {
+        guest_write(at(offsetof(dmatch, dm_name)), src, len);
+    }
+private:
+    __attribute__((always_inline)) dos_far_ptr at(std::size_t off) const {
+        return MK_FP(FP_SEG(addr_), static_cast<UWORD>(FP_OFF(addr_) + off));
+    }
+    template <typename T> __attribute__((always_inline)) T read_field(std::size_t off) const {
+        T value;
+        guest_read(&value, at(off), sizeof(value));
+        return value;
+    }
+    template <typename T> __attribute__((always_inline)) void write_field(std::size_t off, T value) const {
+        guest_write(at(off), &value, sizeof(value));
+    }
+    dos_far_ptr addr_;
+};
+
 class buffer_ref final : private ref_base<buffer> {
 public:
     __attribute__((always_inline)) explicit buffer_ref(dos_far_ptr p)

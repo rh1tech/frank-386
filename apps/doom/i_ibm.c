@@ -25,8 +25,8 @@
 #include <graph.h>
 #endif
 #include "DoomDef.h"
+#include "dmx.h"
 #ifdef ELF_MODE
-#include "tsr_callback.h"
 #include "i_native_memory.h"
 #include "dos_mem.h"
 #endif
@@ -939,41 +939,10 @@ int I_TimerISR (void)
 }
 
 #ifdef ELF_MODE
-/* Restore the original DOS model: ticcount advances asynchronously.
- * TSR0 is dispatched by the existing 44.1 kHz core0 timer; 44100/35
- * is exactly 1260, so the original 35 Hz game clock needs no fraction. */
-#define NATIVE_DOOM_TSR0_DIVISOR 1260u
-static tsr_callback_t native_doom_previous_tsr0;
-static unsigned native_doom_tsr0_divider;
-static boolean native_doom_timer_hooked;
-
-static void I_NativeTimerCallback(void)
+void _fini(void *ctx)
 {
-	if (++native_doom_tsr0_divider == NATIVE_DOOM_TSR0_DIVISOR)
-	{
-		native_doom_tsr0_divider = 0;
-		I_TimerISR();
-	}
-
-	if (native_doom_previous_tsr0)
-		native_doom_previous_tsr0();
-}
-
-void I_NativeStartupTimer(void)
-{
-	native_doom_tsr0_divider = 0;
-	native_doom_previous_tsr0 = set_tsr0_callback(I_NativeTimerCallback);
-	native_doom_timer_hooked = true;
-}
-
-void I_NativeShutdownTimer(void)
-{
-	if (!native_doom_timer_hooked)
-		return;
-
-	set_tsr0_callback(native_doom_previous_tsr0);
-	native_doom_previous_tsr0 = 0;
-	native_doom_timer_hooked = false;
+	(void)ctx;
+	TSM_Remove();
 }
 #endif
 
@@ -991,25 +960,17 @@ void I_StartupTimer (void)
 #ifndef NOTIMER
 	// installs master timer.  Must be done before StartupTimer()!
 	TSM_Install(140);
-#ifdef ELF_MODE
-	I_NativeStartupTimer();
-#else
 	tsm_ID = TSM_NewService (I_TimerISR, 35, 0, 0); // max priority
 	if (tsm_ID == -1)
 	{
 		I_Error("Can't register 35 Hz timer w/ DMX library");
 	}
 #endif
-#endif
 }
 
 void I_ShutdownTimer (void)
 {
-#ifdef ELF_MODE
-	I_NativeShutdownTimer();
-#else
 	TSM_DelService(tsm_ID);
-#endif
 	TSM_Remove();
 }
 

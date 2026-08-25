@@ -60,6 +60,14 @@ void pc_service(struct PC *pc);
 uint32_t get_uticks(void);
 size_t psram_usable_size(void);
 
+static BOOL arm_native_runtime_available(void)
+{
+  /* Native ARM code/data addresses must remain stable for the lifetime of
+     the process. Only physically detected QSPI PSRAM provides that model;
+     SPI/SWAP guest paging deliberately has no stable native aliases. */
+  return psram_usable_size() >= (1u << 20);
+}
+
 /* Native-yield IRQ trampoline uses the same callback trap mechanism as
    bios_intcall(), but deliberately does not execute the suspended parent
    CS:IP. */
@@ -4000,18 +4008,21 @@ static int cds_drive_valid(unsigned dsk)
 /*
  * Compare two SETVER filename fields case-insensitively.
  *
- * This is the original FreeDOS helper adapted only for native pointers:
- * both strings have already been mapped from guest memory by the caller.
+ * Compare a native program basename with a filename stored in the guest
+ * SETVER table without creating a native alias for the guest bytes.
  */
-STATIC WORD SetverCompareFilename(const BYTE *m1, const BYTE *m2, COUNT count)
+STATIC WORD SetverCompareFilenameGuest(const BYTE *native_name,
+                                       uint32_t guest_name,
+                                       COUNT count)
 {
   while (count--)
   {
-    if (toupper((unsigned char)*m1) != toupper((unsigned char)*m2))
-      return (WORD)((unsigned char)*m1 - (unsigned char)*m2);
+    BYTE guest_ch = pload8(guest_name++);
+    BYTE native_ch = *native_name++;
 
-    ++m1;
-    ++m2;
+    if (toupper((unsigned char)native_ch) !=
+        toupper((unsigned char)guest_ch))
+      return (WORD)((unsigned char)native_ch - (unsigned char)guest_ch);
   }
 
   return 0;
@@ -4026,24 +4037,27 @@ STATIC WORD SetverCompareFilename(const BYTE *m1, const BYTE *m2, COUNT count)
  */
 STATIC UWORD SetverGetVersion(dos_far_ptr table_ptr, const BYTE *name)
 {
-  BYTE *table;
+  uint32_t table;
   COUNT name_len;
 
   if (far_is_null(table_ptr) || name == NULL)
     return 0;
 
-  table = (BYTE *)ARM_PTR(table_ptr);
+  table = task_guest_linear(table_ptr);
   name_len = (COUNT)strlen((const char *)name);
 
-  while (*table != 0)
+  for (;;)
   {
-    BYTE len = *table;
+    BYTE len = pload8(table);
+
+    if (len == 0)
+      break;
 
     if (len == name_len &&
-        SetverCompareFilename(name, table + 1, len) == 0)
-      return *(UWORD *)(table + len + 1);
+        SetverCompareFilenameGuest(name, table + 1u, len) == 0)
+      return pload16(table + (uint32_t)len + 1u);
 
-    table += len + 3;
+    table += (uint32_t)len + 3u;
   }
 
   return 0;
@@ -4147,56 +4161,51 @@ STATIC COUNT ChildEnvGuest(exec_blk *exp, UWORD *pChildEnvSeg,
  */
 void new_psp(seg para, seg cur_psp)   /* exported: INT 21h AH=26h */
 {
-  psp p;
-  task_guest_read(task_guest_seg_linear(cur_psp), &p, sizeof(p));
-  p.ps_isv22 = getvec(0x22);
-  p.ps_isv23 = getvec(0x23);
-  p.ps_isv24 = getvec(0x24);
-  p.ps_retdosver =
+  guest_move_block(task_guest_seg_linear(para),
+                   task_guest_seg_linear(cur_psp), sizeof(psp));
+  fdos_psp_set_vector(para, 0x22, getvec(0x22));
+  fdos_psp_set_vector(para, 0x23, getvec(0x23));
+  fdos_psp_set_vector(para, 0x24, getvec(0x24));
+  fdos_psp_set_return_version(
+      para,
       ((UWORD)pload8(task_lol_linear + offsetof(struct lol, os_setver_minor)) << 8) |
-      pload8(task_lol_linear + offsetof(struct lol, os_setver_major));
-  task_guest_write(task_guest_seg_linear(para), &p, sizeof(p));
+      pload8(task_lol_linear + offsetof(struct lol, os_setver_major)));
 }
 
 void child_psp(seg para, seg cur_psp, int psize)   /* exported: INT 21h AH=55h */
 {
-  psp p, q;
+  dos_far_ptr parent_jft;
   int i;
+
   new_psp(para, cur_psp);
-  task_guest_read(task_guest_seg_linear(para), &p, sizeof(p));
-  task_guest_read(task_guest_seg_linear(cur_psp), &q, sizeof(q));
-  p.ps_parent = cur_psp;
-  p.ps_prevpsp = MK_FP(cur_psp, 0);
-  p.ps_size = psize;
-  p.ps_maxfiles = 20;
-  memset(p.ps_files, 0xff, 20);
-  p.ps_filetab = MK_FP(para, offsetof(psp, ps_files));
-  if (!far_is_null(q.ps_filetab) && !far_is_end(q.ps_filetab)) {
-    uint32_t q_jft = task_guest_linear(q.ps_filetab);
+  fdos_psp_set_parent(para, cur_psp);
+  fdos_psp_set_prev(para, MK_FP(cur_psp, 0));
+  fdos_psp_set_size(para, (UWORD)psize);
+  fdos_psp_set_max_files(para, 20);
+  guest_fill_block(task_guest_seg_linear(para) + offsetof(psp, ps_files),
+                   0xff, 20);
+  fdos_psp_set_file_table(para, MK_FP(para, offsetof(psp, ps_files)));
+
+  parent_jft = fdos_psp_file_table(cur_psp);
+  if (!far_is_null(parent_jft) && !far_is_end(parent_jft)) {
+    uint32_t q_jft = task_guest_linear(parent_jft);
     for (i = 0; i < 20; i++) {
       UBYTE h = pload8(q_jft + (uint32_t)i);
       if (h != 0xff) {
         dos_far_ptr sft_ptr = idx_to_sft(h);
-        if (!far_is_end(sft_ptr)) {
-          sft entry;
-          uint32_t sft_linear = task_guest_linear(sft_ptr);
-          task_guest_read(sft_linear, &entry, sizeof(entry));
-          if (!(entry.sft_mode & O_NOINHERIT)) {
-            p.ps_files[i] = h;
-            entry.sft_count++;
-            task_guest_write(sft_linear, &entry, sizeof(entry));
-          }
+        if (!far_is_end(sft_ptr) && !(fdos_sft_mode_raw(sft_ptr) & O_NOINHERIT)) {
+          fdos_psp_set_file_handle(para, (UWORD)i, h);
+          fdos_sft_inc_ref_raw(sft_ptr);
         }
       }
     }
   }
-  p.ps_fcb1.fcb_drive = 0;
-  memset(p.ps_fcb1.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
-  p.ps_fcb2.fcb_drive = 0;
-  memset(p.ps_fcb2.fcb_fname, ' ', FNAME_SIZE + FEXT_SIZE);
-  p.ps_cmd.ctCount = 0;
-  p.ps_cmd.ctBuffer[0] = 0xd;
-  task_guest_write(task_guest_seg_linear(para), &p, sizeof(p));
+
+  fdos_psp_set_fcb_drive(para, 1, 0);
+  fdos_psp_clear_fcb_name(para, 1);
+  fdos_psp_set_fcb_drive(para, 2, 0);
+  fdos_psp_clear_fcb_name(para, 2);
+  fdos_psp_set_command_empty(para);
 }
 
 /*
@@ -4234,7 +4243,6 @@ static dos_far_ptr /* -> caller's return address */ exec_caller_return_addr(void
 STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg,
                            exec_blk *exb, dos_far_ptr fnam)
 {
-  psp p;
   UWORD psp_mcb_seg;
   UWORD pos = 0, base = 0;
   int i;
@@ -4242,13 +4250,15 @@ STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg,
 
   psp_mcb_seg = pspseg;
   ++pspseg;
-  task_guest_read(task_guest_seg_linear(pspseg), &p, sizeof(p));
 
-  guest_read(&p.ps_cmd, exb->exec.cmd_line, sizeof(CommandTail));
+  guest_move_block(task_guest_seg_linear(pspseg) + offsetof(psp, ps_cmd),
+                   task_guest_linear(exb->exec.cmd_line), sizeof(CommandTail));
   if (FP_OFF(exb->exec.fcb_1) != 0xFFFF)
   {
-    guest_read(&p.ps_fcb1, exb->exec.fcb_1, 16);
-    guest_read(&p.ps_fcb2, exb->exec.fcb_2, 16);
+    guest_move_block(task_guest_seg_linear(pspseg) + offsetof(psp, ps_fcb1),
+                     task_guest_linear(exb->exec.fcb_1), 16);
+    guest_move_block(task_guest_seg_linear(pspseg) + offsetof(psp, ps_fcb2),
+                     task_guest_linear(exb->exec.fcb_2), 16);
   }
 
   fdos_mcb_set_owner(psp_mcb_seg, pspseg);
@@ -4257,7 +4267,7 @@ STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg,
     fdos_mcb_set_owner(envseg, pspseg);
     envseg++;
   }
-  p.ps_environ = envseg;
+  fdos_psp_set_environment(pspseg, envseg);
 
   for (;;)
   {
@@ -4289,13 +4299,11 @@ STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg,
         task_guest_read_far(task_lol_linear + offsetof(struct lol, setverPtr));
     UWORD fakever = SetverGetVersion(setver_ptr, shortname);
     if (fakever != 0)
-      p.ps_retdosver = fakever;
+      fdos_psp_set_return_version(pspseg, fakever);
   }
 
-  task_guest_write(task_guest_seg_linear(pspseg), &p, sizeof(p));
-
-  return (cds_drive_valid(p.ps_fcb1.fcb_drive) ? 0 : 0xff) |
-         (cds_drive_valid(p.ps_fcb2.fcb_drive) ? 0 : 0xff00);
+  return (cds_drive_valid(fdos_psp_fcb_drive(pspseg, 1)) ? 0 : 0xff) |
+         (cds_drive_valid(fdos_psp_fcb_drive(pspseg, 2)) ? 0 : 0xff00);
 }
 
 /*
@@ -4468,14 +4476,13 @@ static void exec_enter_child(uint32_t saved_linear,
 
 static void exec_release_child(UWORD child_psp_seg)
 {
-  psp p;
-  task_guest_read(task_guest_seg_linear(child_psp_seg), &p, sizeof(p));
-  setvec(0x22,p.ps_isv22);
-  setvec(0x23,p.ps_isv23);
-  setvec(0x24,p.ps_isv24);
+  setvec(0x22, fdos_psp_vector(child_psp_seg, 0x22));
+  setvec(0x23, fdos_psp_vector(child_psp_seg, 0x23));
+  setvec(0x24, fdos_psp_vector(child_psp_seg, 0x24));
   if (term_exit_type != 3) {
     int i;
-    for(i=0;i<p.ps_maxfiles;i++) DosClose(i);
+    UWORD maxfiles = fdos_psp_max_files(child_psp_seg);
+    for(i=0;i<maxfiles;i++) DosClose(i);
     FcbCloseAll();
     FreeProcessMem(child_psp_seg);
   }
@@ -5181,10 +5188,8 @@ static COUNT exec_run_child(dos_far_ptr entry, dos_far_ptr stack,
 
 STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
 {
-  psp *p = (psp *) ARM_PTR(MK_FP(ds, 0));
-
-  p->ps_parent = fdos_dos_cu_psp();
-  p->ps_prevpsp = MK_FP(fdos_dos_cu_psp(), 0);
+  fdos_psp_set_parent(ds, fdos_dos_cu_psp());
+  fdos_psp_set_prev(ds, MK_FP(fdos_dos_cu_psp(), 0));
 
   if (mode == EXEC_LOADNGO) {
     CfgDbgPrintf(("LOAD psp=%04x entry=%04x:%04x stack=%04x:%04x ds=%04x ax=%04x\n",
@@ -5199,7 +5204,7 @@ STATIC int load_transfer(UWORD ds, exec_blk * exp, UWORD fcbcode, COUNT mode)
      entry point/stack we computed (exp->exec.start_addr/stack) plus
      fcbcode pushed onto that stack, matching INT21/4B AL=1. */
   exp->exec.stack.offset -= 2;
-  *((UWORD *) ARM_PTR(exp->exec.stack)) = fcbcode;
+  pstore16(task_guest_linear(exp->exec.stack), fcbcode);
   return SUCCESS;
 }
 
@@ -5647,15 +5652,33 @@ static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
   else if (rc >= 2 &&
            ((const UBYTE *)&ExeHeader)[0] == 'E' &&
            ((const UBYTE *)&ExeHeader)[1] == 'Z')
-    rc = DosArmEzLoader(&TempExeBlock, mode, fd,
-                        (BYTE *)ARM_PTR(x86_lp));
+  {
+    if (!arm_native_runtime_available())
+    {
+      DosCloseSft(fd, FALSE);
+      rc = arm_ez_reject(DE_INVLDFMT,
+                         "native ARM executables require QSPI PSRAM");
+    }
+    else
+      rc = DosArmEzLoader(&TempExeBlock, mode, fd,
+                          (BYTE *)ARM_PTR(x86_lp));
+  }
   else if (rc >= 4 &&
            ((const UBYTE *)&ExeHeader)[0] == 0x7f &&
            ((const UBYTE *)&ExeHeader)[1] == 'E' &&
            ((const UBYTE *)&ExeHeader)[2] == 'L' &&
            ((const UBYTE *)&ExeHeader)[3] == 'F')
-    rc = DosArmElfLoader(&TempExeBlock, mode, fd,
-                         (BYTE *)ARM_PTR(x86_lp));
+  {
+    if (!arm_native_runtime_available())
+    {
+      DosCloseSft(fd, FALSE);
+      rc = arm_elf_reject(DE_INVLDFMT,
+                          "native ARM executables require QSPI PSRAM");
+    }
+    else
+      rc = DosArmElfLoader(&TempExeBlock, mode, fd,
+                           (BYTE *)ARM_PTR(x86_lp));
+  }
   else if (rc != 0)
     rc = DosComLoader(x86_lp, &TempExeBlock, mode, fd);
   else

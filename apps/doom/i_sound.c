@@ -24,8 +24,6 @@
 #include "i_sound.h"
 #ifdef ELF_MODE
 #include "sound_hw.h"
-extern void I_NativeStartupTimer(void);
-extern void I_NativeShutdownTimer(void);
 #endif
 
 #if (APPVER_DOOMREV < AV_DR_DM12)
@@ -55,15 +53,11 @@ void I_StartupTimer (void)
 	printf("I_StartupTimer()\n");
 	// installs master timer.  Must be done before StartupTimer()!
 	TSM_Install(SND_TICRATE);
-#ifdef ELF_MODE
-	I_NativeStartupTimer();
-#else
 	tsm_ID = TSM_NewService (I_TimerISR, 35, 0, 0); // max priority
 	if (tsm_ID == -1)
 	{
 		I_Error("Can't register 35 Hz timer w/ DMX library");
 	}
-#endif
 	i_timer_started = true;
 #endif
 }
@@ -73,11 +67,7 @@ void I_ShutdownTimer (void)
 	if (!i_timer_started)
 		return;
 
-#ifdef ELF_MODE
-	I_NativeShutdownTimer();
-#else
 	TSM_DelService(tsm_ID);
-#endif
 	TSM_Remove();
 	i_timer_started = false;
 }
