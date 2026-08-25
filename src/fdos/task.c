@@ -328,7 +328,7 @@ static dos_far_ptr task_guest_is_device(dos_far_ptr name)
 #define R_ARM_THM_PC22          10u
 #define R_ARM_THM_JUMP24        30u
 #define R_ARM_THM_ALU_ABS_G0_NC 102u
-#define DOS_API_VERSION         20
+#define DOS_API_VERSION         21
 #define ARM_ELF_DEFAULT_NATIVE_STACK_SIZE 4096u
 #define ARM_ELF_MIN_DOS_STACK_SIZE        4096u
 #define ARM_ELF_DEFAULT_DOS_STACK_SIZE    ARM_ELF_MIN_DOS_STACK_SIZE

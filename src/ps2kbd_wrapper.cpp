@@ -5,6 +5,7 @@
 
 #include "ps2kbd_wrapper.h"
 #include "ps2kbd_mrmltr.h"
+#include "hardware/sync.h"
 
 struct KeyEvent {
     int is_down;
@@ -246,16 +247,33 @@ extern "C" void ps2kbd_tick(void) {
     }
 }
 
-extern "C" int ps2kbd_get_key(int *is_down, int *keycode) {
-    uint32_t tail = __atomic_load_n(&event_tail, __ATOMIC_RELAXED);
+extern "C" int ps2kbd_get_event(int *is_down, int *keycode, int consume, int newest) {
+    uint32_t irq_state = save_and_disable_interrupts();
+    uint32_t head = __atomic_load_n(&event_head, __ATOMIC_ACQUIRE);
+    uint32_t tail = __atomic_load_n(&event_tail, __ATOMIC_ACQUIRE);
 
-    if (tail == __atomic_load_n(&event_head, __ATOMIC_ACQUIRE))
+    if (tail == head) {
+        restore_interrupts(irq_state);
         return 0;
+    }
 
-    KeyEvent e = event_queue[tail];
-    __atomic_store_n(&event_tail, (tail + 1u) & PS2_EVENT_QUEUE_MASK,
-                     __ATOMIC_RELEASE);
+    uint32_t index = newest ? ((head - 1u) & PS2_EVENT_QUEUE_MASK) : tail;
+    KeyEvent e = event_queue[index];
+
+    if (consume) {
+        if (newest)
+            __atomic_store_n(&event_head, index, __ATOMIC_RELEASE);
+        else
+            __atomic_store_n(&event_tail, (tail + 1u) & PS2_EVENT_QUEUE_MASK,
+                             __ATOMIC_RELEASE);
+    }
+
+    restore_interrupts(irq_state);
     *is_down = e.is_down;
     *keycode = e.keycode;
     return 1;
+}
+
+extern "C" int ps2kbd_get_key(int *is_down, int *keycode) {
+    return ps2kbd_get_event(is_down, keycode, 1, 0);
 }

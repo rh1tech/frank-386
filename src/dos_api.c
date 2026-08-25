@@ -6,6 +6,7 @@
 #include "board_config.h"
 #include "psram_init.h"
 #include "tsr_callback.h"
+#include "ps2kbd_wrapper.h"
 #include <math.h>
 
 #define __in_systable(group) __attribute__((section(".dos_api" group)))
@@ -22,6 +23,19 @@ extern void *arm_native_app_calloc(size_t count, size_t size);
 extern void *arm_native_app_realloc(void *ptr, size_t size);
 extern void arm_native_app_free(void *ptr);
 extern size_t arm_native_app_malloc_largest(void);
+
+int dos_keyboard_get_event_raw(uint32_t flags, int *is_down, int *keycode)
+{
+    if (!is_down || !keycode || (flags & ~3u))
+        return -1;
+#ifdef BOARD_HAS_PS2
+    return ps2kbd_get_event(is_down, keycode,
+                            (flags & 1u) != 0, (flags & 2u) != 0);
+#else
+    (void)flags;
+    return 0;
+#endif
+}
 
 /*
  * Native-ELF diagnostic latch.
@@ -482,5 +496,6 @@ unsigned long __in_systable() __aligned(4096) dos_api_table_ptrs[] = {
     (unsigned long)dos_video_get_buffer, /* 116: direct gfx_buffer pointer + size */
     (unsigned long)set_tsr0_callback, /* 117: core0 timer callback chain */
     (unsigned long)set_tsr1_callback, /* 118: core1 VGA scanline callback chain */
+    (unsigned long)dos_keyboard_get_event_raw, /* 119: native keyboard event queue */
     0
 };

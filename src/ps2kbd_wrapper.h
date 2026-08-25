@@ -23,6 +23,10 @@ void ps2kbd_tick(void);
 // keycode: Linux input keycode for ps2_put_keycode()
 int ps2kbd_get_key(int *is_down, int *keycode);
 
+// Read an event with selectable consume/peek and oldest/newest semantics.
+// Returns 1 if an event was returned, 0 if the queue is empty.
+int ps2kbd_get_event(int *is_down, int *keycode, int consume, int newest);
+
 #ifdef __cplusplus
 }
 #endif

@@ -25,7 +25,7 @@ endif()
 option(EMM "Enable LTEMM support" OFF)
 
 # Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "EGA128" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
 

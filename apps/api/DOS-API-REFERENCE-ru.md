@@ -4,7 +4,7 @@
 намеренно нет документации по прикладным compatibility-слоям, инструкций по
 сборке, `elf2ez` и сторонним библиотекам.
 
-Текущая версия ABI: **20** (`DOS_API_VERSION`).
+Текущая версия ABI: **21** (`DOS_API_VERSION`).
 
 ## 1. ABI и системная таблица
 
@@ -38,6 +38,7 @@
 | 116 | `dos_video_get_buffer()` | `dos_video.h` |
 | 117 | `set_tsr0_callback()` | `tsr_callback.h` |
 | 118 | `set_tsr1_callback()` | `tsr_callback.h` |
+| 119 | `dos_keyboard_get_event()` | `dos_keyboard.h` |
 
 Слоты 13..100 — backend compiler-runtime/math. Обычно приложение получает к
 ним доступ через операторы C и `math.h`, а не напрямую.
@@ -136,7 +137,40 @@ DMA). Это realtime hook для короткой работы, независ�
 Код callback и всё состояние, к которому он обращается, должны оставаться
 резидентными всё время, пока hook установлен.
 
-## 5. Raw video backing store
+## 5. Native keyboard event queue
+
+`dos_keyboard.h`:
+
+```c
+typedef struct dos_keyboard_event {
+    int is_down;
+    int keycode;
+} dos_keyboard_event_t;
+
+#define DOS_KEYBOARD_EVENT_CONSUME 0x01u
+#define DOS_KEYBOARD_EVENT_NEWEST  0x02u
+
+int dos_keyboard_get_event(dos_keyboard_event_t *event, uint32_t flags);
+```
+
+Метод читает host-очередь клавиатурных событий до i8042/guest IRQ1. `keycode` —
+Linux input keycode, `is_down` равен 1 для нажатия и 0 для отпускания.
+Возвращается `1`, если событие получено, `0`, если очередь пуста, и `-1` для
+неверных аргументов/флагов.
+
+Два бита флагов независимы:
+
+| Флаги | Результат |
+|---|---|
+| `0` | посмотреть самое старое событие, не удаляя его |
+| `DOS_KEYBOARD_EVENT_CONSUME` | забрать и удалить самое старое событие |
+| `DOS_KEYBOARD_EVENT_NEWEST` | посмотреть самое новое событие, не удаляя его |
+| `DOS_KEYBOARD_EVENT_CONSUME | DOS_KEYBOARD_EVENT_NEWEST` | забрать и удалить самое новое событие |
+
+При удалении самого нового события более старые элементы очереди сохраняются.
+Операция выполняется атомарно относительно timer-обработчика PS/2.
+
+## 6. Raw video backing store
 
 `dos_video.h`:
 
@@ -151,7 +185,7 @@ logic. Использовать его можно только когда при
 
 Для обычной VGA-семантики следует обращаться через guest physical VGA aperture.
 
-## 6. Conventional memory DOS
+## 7. Conventional memory DOS
 
 `dos_mem.h`:
 
@@ -170,7 +204,7 @@ pointer не относится к первому MiB гостевой RAM.
 Обычные `malloc/calloc/realloc/free` — отдельный интерфейс. Начиная с API v17
 памятью управляет allocator native-процесса через слоты 111..115.
 
-## 7. Состояние процесса и EZ
+## 8. Состояние процесса и EZ
 
 `dos_process.h`:
 

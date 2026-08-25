@@ -4,7 +4,7 @@ This document describes the public native-application interface exported by
 murm386/FDOS. It intentionally does not document application-specific
 compatibility layers, build tutorials, `elf2ez`, or third-party libraries.
 
-Current ABI version: **20** (`DOS_API_VERSION`).
+Current ABI version: **21** (`DOS_API_VERSION`).
 
 ## 1. ABI and system table
 
@@ -38,6 +38,7 @@ Important public slots:
 | 116 | `dos_video_get_buffer()` | `dos_video.h` |
 | 117 | `set_tsr0_callback()` | `tsr_callback.h` |
 | 118 | `set_tsr1_callback()` | `tsr_callback.h` |
+| 119 | `dos_keyboard_get_event()` | `dos_keyboard.h` |
 
 Slots 13..100 are compiler-runtime/math backends used by the native runtime;
 applications normally reach them through C operators and `math.h`.
@@ -138,7 +139,40 @@ I/O, or other long operations from TSR1.
 The callback code and all state it dereferences must remain resident for as
 long as the hook is installed.
 
-## 5. Video backing store
+## 5. Native keyboard event queue
+
+`dos_keyboard.h`:
+
+```c
+typedef struct dos_keyboard_event {
+    int is_down;
+    int keycode;
+} dos_keyboard_event_t;
+
+#define DOS_KEYBOARD_EVENT_CONSUME 0x01u
+#define DOS_KEYBOARD_EVENT_NEWEST  0x02u
+
+int dos_keyboard_get_event(dos_keyboard_event_t *event, uint32_t flags);
+```
+
+The call reads the host keyboard-event queue before i8042/guest IRQ1 delivery.
+`keycode` is a Linux input keycode; `is_down` is 1 for press and 0 for release.
+It returns `1` when an event is returned, `0` when the queue is empty, and `-1`
+for invalid arguments or flags.
+
+The two flag bits are independent:
+
+| Flags | Result |
+|---|---|
+| `0` | peek the oldest event |
+| `DOS_KEYBOARD_EVENT_CONSUME` | consume the oldest event |
+| `DOS_KEYBOARD_EVENT_NEWEST` | peek the newest event |
+| `DOS_KEYBOARD_EVENT_CONSUME | DOS_KEYBOARD_EVENT_NEWEST` | consume the newest event |
+
+Consuming the newest event leaves older queued events intact. The operation is
+atomic with respect to the PS/2 timer producer.
+
+## 6. Video backing store
 
 `dos_video.h`:
 
@@ -154,7 +188,7 @@ It is therefore only suitable for code that explicitly understands the current
 backing-store layout. For emulated VGA semantics use guest physical accesses
 through the normal VGA aperture instead.
 
-## 6. DOS conventional memory
+## 7. DOS conventional memory
 
 `dos_mem.h`:
 
@@ -174,7 +208,7 @@ The standard `malloc/calloc/realloc/free` interface is separate: since API v17
 allocation is owned by the native process allocator (slots 111..115), which can
 use process-local native memory and DOS memory according to the runtime policy.
 
-## 7. Process and EZ state
+## 8. Process and EZ state
 
 `dos_process.h`:
 
