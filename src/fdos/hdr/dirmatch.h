@@ -55,43 +55,14 @@ typedef struct {
 } dmatch;
 #pragma pack(pop)
 
-/* see the comment on sda_tmp_dmD/sda_tmp_dm_renD below: the built-in
-   21-byte SDA field only ever needs to hold dm_drive..reserved2 -
-   this assert exists so a future change that grows that prefix is
-   caught at compile time instead of silently corrupting whatever SDA
-   field follows sda_tmp_dm/sda_tmp_dm_ren in struct dos_data. */
+/* The guest SDA reserves 21 bytes for each temporary directory-match
+   prefix.  That is exactly dm_drive..reserved2; result fields beginning
+   at dm_attr_fnd live elsewhere.  Keep this ABI checked explicitly
+   because dmatch_handle accesses the SDA prefix by guest address rather
+   than by a native dmatch pointer. */
 _Static_assert(offsetof(dmatch, dm_attr_fnd) == 21,
-                "dmatch's dm_drive..reserved2 prefix no longer fits in the 21-byte sda_tmp_dm/sda_tmp_dm_ren SDA fields, see lol.h");
-_Static_assert(sizeof(dmatch) == 43, "sizeof(dmatch) changed - re-check every fmemcpy()/sizeof(dmatch) use site");
-
-/*
-    sda_tmp_dm/sda_tmp_dm_ren are SDA fields in the original (extern
-    ASM, see kernel.asm: _sda_tmp_dm/_sda_tmp_dm_ren), reserved there
-    as a fixed 21-byte block each (see lol.h for the matching
-    BYTE[21] fields here) - NOT sizeof(dmatch) (43 bytes with
-    WITHFAT32 active, same as without it - CLUSTER growing from 2 to
-    4 bytes exactly offsets the "reserved" field that only exists
-    when WITHFAT32 is off).
-
-    This is not a bug to fix: 21 bytes is exactly dm_drive + dm_name_pat
-    + dm_attr_srch + dm_entry + dm_dircluster + reserved2, i.e. every
-    field dir_open()/dir_init_fnode()/map_cluster() (the code that
-    actually walks fnp->f_dmp) touches. The remaining fields
-    (dm_attr_fnd/dm_time/dm_date/dm_size/dm_name) are only filled in
-    later by dos_findfirst()/dos_findnext() - and in the original,
-    *not* through sda_tmp_dm at all: see dosfns.c, which fills a
-    separate "SearchDir" variable and copies its fields into the
-    caller's dmatch one at a time, never writing dm_attr_fnd et al.
-    through &sda_tmp_dm directly. So as long as a dmatch* aliasing
-    this 21-byte field is only ever used the same way (struct fields
-    up to and including reserved2), nothing past the reserved region
-    is ever touched, exactly as in the original.
-
-    Named with a trailing D, like IoReqHdrD/MediaReqHdrD in device.h,
-    so the macro doesn't expand recursively into itself wherever
-    internal_data->sda_tmp_dm/sda_tmp_dm_ren is written.
-*/
-
+                "dmatch's dm_drive..reserved2 prefix no longer fits the 21-byte SDA temporary match fields, see lol.h");
+_Static_assert(sizeof(dmatch) == 43, "sizeof(dmatch) changed - re-check directory-match ABI and copy sites");
 
 /* A directory match can live either in guest SDA memory or in native
  * kernel-only LFN state.  Keep that distinction explicit: a raw dmatch *
@@ -199,8 +170,5 @@ static inline void dmatch_write_name_pat(dmatch_handle h, const BYTE in[FNAME_SI
                       in, FNAME_SIZE + FEXT_SIZE);
 }
 
-#define sda_tmp_dmD (*(dmatch *)&internal_data->sda_tmp_dm)
-#define sda_tmp_dm_renD (*(dmatch *)&internal_data->sda_tmp_dm_ren)
-
-#define SearchDirD (*(struct dirent *)&internal_data->SearchDir)
-#define SAttrD (internal_data->SAttr)
+/* SDA search state is guest-resident.  Native aliases are intentionally
+   omitted; use dmatch_handle and guest field/block accessors. */

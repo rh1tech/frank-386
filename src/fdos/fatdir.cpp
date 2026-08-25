@@ -57,6 +57,7 @@ extern "C" {
 #endif
 
 #include "guest_ref.hpp"
+#include "path_guest.h"
 using fdos_guest::dpb_ref;
 using fdos_guest::buffer_ref;
 
@@ -119,8 +120,8 @@ STATIC void swap_deleted(char *name)
  *  DE_BLKINVLD    - Invalid block.
  * Note. Empty directory entries always resides at the end of the directory.
 
-    Migrated from fatdir.c. getdirent()'s fmemcpy() (dos_far_ptr-based,
-    see proto.h) is replaced with a plain memcpy() here: both sides
+    Migrated from fatdir.c. getdirent()'s fdos_api_memcpy() (dos_far_ptr-based,
+    see proto.h) is replaced with a plain dos_api_memcpy() here: both sides
     (bp->b_buffer and fnp->f_dir) are native ARM memory (see fnode.h's
     note on f_node not being guest-visible), so there is no far
     pointer to translate.
@@ -214,13 +215,14 @@ COUNT dir_read(REG f_node_ptr fnp)
     char* strings throughout (see ConvertNameSZToName83() above), so
     no address-translation changes are needed here.
 */
-f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
+f_node_ptr dir_open_ref(fdos_path_ref dirname, BOOL split, f_node_ptr fnp)
 {
   int i;
+  size_t pos = 0;
   char *fcbname;
 
   /* determine what drive and dpb we are using...                 */
-  fnp->f_dpb = get_dpb(dirname[0]-'A');
+  fnp->f_dpb = get_dpb((COUNT)fdos_path_get(dirname, 0)-'A');
   /* Perform all directory common handling after all special      */
   /* handling has been performed.                                 */
 
@@ -238,30 +240,40 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
   dir_init_fnode(fnp, 0);
   DM_SET16(fnp->f_dmp, dm_entry, 0);
 
-  dirname += 2;               /* Assume FAT style drive       */
+  pos = 2;                    /* Assume FAT style drive       */
   BYTE fcbname_buf[FNAME_SIZE + FEXT_SIZE];
   dmatch_read_name_pat(fnp->f_dmp, fcbname_buf);
   fcbname = fcbname_buf;
-  while(*dirname != '\0')
+  while (fdos_path_get(dirname, pos) != '\0')
   {
-    /* skip the path seperator                              */
-    ++dirname;
+    /* skip the path separator                              */
+    ++pos;
 
     /* don't continue if we're at the end: this check is    */
     /* for root directories, the only fully-qualified path  */
     /* names that end in a \                                */
-    if (*dirname == '\0')
+    if (fdos_path_get(dirname, pos) == '\0')
       break;
 
     /* Convert the name into an absolute name for           */
-    /* comparison...                                        */
-
-    dirname = ConvertNameSZToName83(fcbname, dirname);
+    /* comparison.  Read path bytes through the tagged ref  */
+    /* so a paging miss can never invalidate a host pointer.*/
+    nf_memset(fcbname, ' ', FNAME_SIZE + FEXT_SIZE);
+    for (i = 0; i < FNAME_SIZE + FEXT_SIZE; ++i, ++pos)
+    {
+      char c = (char)fdos_path_get(dirname, pos);
+      if (c == '.')
+        i = FNAME_SIZE - 1;
+      else if (c != '\0' && c != '\\')
+        fcbname[i] = c;
+      else
+        break;
+    }
     dmatch_write_name_pat(fnp->f_dmp, fcbname);
 
     /* do not continue if we split the filename off and are */
     /* at the end                                           */
-    if (split && *dirname == '\0')
+    if (split && fdos_path_get(dirname, pos) == '\0')
       break;
 
     /* Now search through the directory to  */
@@ -292,6 +304,11 @@ f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
     }
   }
   return fnp;
+}
+
+f_node_ptr dir_open(const char *dirname, BOOL split, f_node_ptr fnp)
+{
+  return dir_open_ref(fdos_path_native(dirname), split, fnp);
 }
 
 /* Description.
@@ -371,7 +388,7 @@ BOOL dir_write_update(REG f_node_ptr fnp, BOOL update)
 const char *ConvertNameSZToName83(char *fcbname, const char *dirname)
 {
   int i;
-  memset(fcbname, ' ', FNAME_SIZE + FEXT_SIZE);
+  nf_memset(fcbname, ' ', FNAME_SIZE + FEXT_SIZE);
 
   for (i = 0; i < FNAME_SIZE + FEXT_SIZE; i++, dirname++)
   {
@@ -395,18 +412,20 @@ const char *ConvertNameSZToName83(char *fcbname, const char *dirname)
    dirmatch.h) in place of the original's bare SearchDir/SAttr/
    sda_tmp_dm globals, same rename already applied throughout this
    file for sda_tmp_dm -> sda_tmp_dmD. */
-COUNT dos_findfirst(UCOUNT attr, BYTE * name)
+COUNT dos_findfirst_ref(UCOUNT attr, fdos_path_ref name)
 {
   REG f_node_ptr fnp;
-  REG dmatch *dmp = &sda_tmp_dmD;
+  dmatch_handle dmp = dmatch_guest(MK_FP(
+      DOS_PSP,
+      (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, sda_tmp_dm))));
 
   /* first: findfirst("D:\\") returns DE_NFILES */
-  if (name[3] == '\0')
+  if (fdos_path_get(name, 3) == '\0')
     return DE_NFILES;
 
   /* Now open this directory so that we can read the      */
   /* fnode entry and do a match on it.                    */
-  if ((fnp = split_path(name, fnode_slot(0))) == NULL)
+  if ((fnp = split_path_ref(name, fnode_slot(0))) == NULL)
     return DE_PATHNOTFND;
 
   /* Now search through the directory to find the entry...        */
@@ -423,10 +442,15 @@ COUNT dos_findfirst(UCOUNT attr, BYTE * name)
     dir_init_fnode(fnp, 0);
 
   /* Now further initialize the dirmatch structure.       */
-  dmp->dm_drive = name[0] - 'A';
-  dmp->dm_attr_srch = attr;
+  DM_SET8(dmp, dm_drive, (UBYTE)(fdos_path_get(name, 0) - 'A'));
+  DM_SET8(dmp, dm_attr_srch, (UBYTE)attr);
 
   return dos_findnext();
+}
+
+COUNT dos_findfirst(UCOUNT attr, BYTE *name)
+{
+  return dos_findfirst_ref(attr, fdos_path_native((const char *)name));
 }
 
 /*
@@ -441,28 +465,31 @@ COUNT dos_findfirst(UCOUNT attr, BYTE * name)
 COUNT dos_findnext(void)
 {
   REG f_node_ptr fnp;
-  REG dmatch *dmp;
+  dmatch_handle dmp = dmatch_guest(MK_FP(
+      DOS_PSP,
+      (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, sda_tmp_dm))));
 
   /* Select the default to help non-drive specified path          */
   /* searches...                                                  */
   fnp = fnode_slot(0);
-  dmp = &sda_tmp_dmD;
-  fnp->f_dpb = get_dpb(dmp->dm_drive);
+  fnp->f_dpb = get_dpb(DM_GET8(dmp, dm_drive));
   if (media_check_tagged(fnp->f_dpb, "dos_findnext/fnp->f_dpb") < 0)
     return DE_NFILES;
 
-  dir_init_fnode(fnp, dmp->dm_dircluster);
+  dir_init_fnode(fnp, DM_GET32(dmp, dm_dircluster));
 
   /* Search through the directory to find the entry, but do a     */
   /* seek first.                                                  */
   /* Loop through the directory                                   */
   while (dir_read(fnp) == 1)
   {
-    ++dmp->dm_entry;
+    DM_SET16(dmp, dm_entry, (UWORD)(DM_GET16(dmp, dm_entry) + 1u));
     if (fnp->f_dir.dir_name[0] != DELETED
         && (fnp->f_dir.dir_attrib & D_LFN) != D_LFN)
     {
-      if (fcmp_wild(dmp->dm_name_pat, fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE))
+      BYTE dm_name_pat[FNAME_SIZE + FEXT_SIZE];
+      dmatch_read_name_pat(dmp, dm_name_pat);
+      if (fcmp_wild(dm_name_pat, fnp->f_dir.dir_name, FNAME_SIZE + FEXT_SIZE))
       {
         /*
            MSD Command.com uses FCB FN 11 & 12 with attrib set to 0x16.
@@ -476,7 +503,7 @@ COUNT dos_findnext(void)
         /* attribute inclusive search. The attribute inclusive search      */
         /* can also find volume labels if you set e.g. D_DIR|D_VOLUME      */
         UBYTE attr_srch;
-        attr_srch = dmp->dm_attr_srch & ~(D_RDONLY | D_ARCHIVE | D_DEVICE);
+        attr_srch = DM_GET8(dmp, dm_attr_srch) & ~(D_RDONLY | D_ARCHIVE | D_DEVICE);
         if (attr_srch == D_VOLID)
         {
           if (!(fnp->f_dir.dir_attrib & D_VOLID))
@@ -486,7 +513,10 @@ COUNT dos_findnext(void)
                  fnp->f_dir.dir_attrib)
           continue;
         /* If found, transfer it to the dmatch structure                */
-        memcpy(&SearchDirD, &fnp->f_dir, sizeof(struct dirent));
+        guest_write_block(
+            ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF +
+                offsetof(struct dos_data, SearchDir),
+            &fnp->f_dir, sizeof(struct dirent));
         /* return the result                                            */
         return SUCCESS;
       }
@@ -518,7 +548,7 @@ void ConvertName83ToNameSZ(BYTE FAR * destSZ, BYTE FAR * srcFCBName)
     noExtension = TRUE;
   }
 
-  memcpy(destSZ, srcFCBName, FNAME_SIZE);
+  dos_api_memcpy(destSZ, srcFCBName, FNAME_SIZE);
 
   srcFCBName += FNAME_SIZE;
 
@@ -539,7 +569,7 @@ void ConvertName83ToNameSZ(BYTE FAR * destSZ, BYTE FAR * srcFCBName)
     if (loop >= 0)
     {
       *destSZ++ = '.';
-      memcpy(destSZ, srcFCBName, loop + 1);
+      dos_api_memcpy(destSZ, srcFCBName, loop + 1);
       destSZ += loop + 1;
     }
   }

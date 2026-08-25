@@ -39,7 +39,7 @@
 #define FCB_ERROR       0xff
 
 STATIC dos_far_ptr ExtFcbToFcb(dos_far_ptr lpExtFcb);
-STATIC dos_far_ptr CommonFcbInit(dos_far_ptr lpExtFcb, BYTE * pszBuffer,
+STATIC dos_far_ptr CommonFcbInit(dos_far_ptr lpExtFcb, dos_far_ptr x86_buffer,
                                  COUNT * pCurDrive);
 STATIC void FcbNameInit(fcb * lpFcb, BYTE * pszBuffer, COUNT * pCurDrive);
 STATIC void FcbNextRecord(fcb * lpFcb);
@@ -53,6 +53,11 @@ STATIC void FcbCalcRec(dos_far_ptr lpXfcb);
 #define DMATCH_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, fcb_dmatch))
 #define DMATCH_TMP_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, fcb_dmatch_tmp))
 #define FCB_REN_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, fcb_ren_name))
+#define FCB_PRI_PATH_FAR MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, PriPathBuffer)))
+#define FCB_SEC_PATH_FAR MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, SecPathBuffer)))
+#define FCB_PRI_PATH_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, PriPathBuffer))
+#define FCB_SEC_PATH_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, SecPathBuffer))
+#define FCB_SEARCHDIR_LINEAR (FCB_SDA_LINEAR + offsetof(struct dos_data, SearchDir))
 #define Dmatch_x86 MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, fcb_dmatch)))
 #define DmatchTmp_x86 MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, fcb_dmatch_tmp)))
 
@@ -175,7 +180,7 @@ const BYTE * GetNameField(const BYTE * lpFileName, BYTE * lpDestField,
   }
 
   /* Blank out remainder of field on exit                         */
-  memset(lpDestField, cFill, nFieldSize - nIndex);
+  nf_memset(lpDestField, cFill, nFieldSize - nIndex);
   return lpFileName;
 }
 
@@ -188,8 +193,8 @@ STATIC void FcbNameFromSZ(fcb * lpFcb, const BYTE * pszName)
 {
   BOOL bDummy = FALSE;
 
-  memset(lpFcb->fcb_fname, ' ', FNAME_SIZE);
-  memset(lpFcb->fcb_fext, ' ', FEXT_SIZE);
+  nf_memset(lpFcb->fcb_fname, ' ', FNAME_SIZE);
+  nf_memset(lpFcb->fcb_fext, ' ', FEXT_SIZE);
   pszName = GetNameField(pszName, (BYTE *) lpFcb->fcb_fname,
                          FNAME_SIZE, &bDummy);
   if (*pszName == '.')
@@ -269,14 +274,14 @@ UBYTE FcbReadWrite(dos_far_ptr lpXfcb, UCOUNT recno, int mode)
 UBYTE FcbGetFileSize(dos_far_ptr lpXfcb)
 {
   int FcbDrive, sft_idx;
-  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, FCB_SEC_PATH_FAR, &FcbDrive);
   fcb local;
   unsigned recsiz;
   fcb_load(fcbp, &local);
   recsiz = local.fcb_recsiz;
-  if (!far_is_null(IsDevice(SecPathName)) || recsiz == 0)
+  if (!far_is_null(IsDeviceGuest(FCB_SEC_PATH_FAR)) || recsiz == 0)
     return FCB_ERROR;
-  sft_idx = (short)DosOpenSft(x86_FAR_PTR(DOS_PSP, (void *)SecPathName),
+  sft_idx = (short)DosOpenSft(FCB_SEC_PATH_FAR,
                               O_LEGACY | O_RDONLY | O_OPEN, 0);
   if (sft_idx >= 0)
   {
@@ -366,14 +371,14 @@ UBYTE FcbOpen(dos_far_ptr lpXfcb, unsigned flags)
   const uint32_t xbase = fcb_far_linear(lpXfcb);
   COUNT sft_idx, FcbDrive;
   unsigned attr = 0;
-  dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  dos_far_ptr fcbp = CommonFcbInit(lpXfcb, FCB_SEC_PATH_FAR, &FcbDrive);
   fcb local;
 
   fcb_load(fcbp, &local);
   if ((flags & O_CREAT) && pload8(xbase + offsetof(xfcb, xfcb_flag)) == 0xff)
     attr = pload8(xbase + offsetof(xfcb, xfcb_attrib));
 
-  sft_idx = (short)DosOpenSft(x86_FAR_PTR(DOS_PSP, (void *)SecPathName),
+  sft_idx = (short)DosOpenSft(FCB_SEC_PATH_FAR,
                               flags, attr);
   if (sft_idx < 0)
   {
@@ -411,13 +416,15 @@ STATIC dos_far_ptr ExtFcbToFcb(dos_far_ptr lpExtFcb)
   return res;
 }
 
-STATIC dos_far_ptr CommonFcbInit(dos_far_ptr lpExtFcb, BYTE * pszBuffer,
+STATIC dos_far_ptr CommonFcbInit(dos_far_ptr lpExtFcb, dos_far_ptr x86_buffer,
                                  COUNT * pCurDrive)
 {
   dos_far_ptr lpFcb = ExtFcbToFcb(lpExtFcb);
   fcb local;
+  BYTE path[2 + FNAME_SIZE + 1 + FEXT_SIZE + 1];
   fcb_load(lpFcb, &local);
-  FcbNameInit(&local, pszBuffer, pCurDrive);
+  FcbNameInit(&local, path, pCurDrive);
+  guest_write(x86_buffer, path, strlen((const char *)path) + 1u);
   return lpFcb;
 }
 
@@ -444,8 +451,8 @@ UBYTE FcbDelete(dos_far_ptr lpXfcb)
   dos_far_ptr lpOldDta = fcb_dta();
   const uint32_t xbase = fcb_far_linear(lpXfcb);
 
-  CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
-  if (!far_is_null(IsDevice(SecPathName)))
+  CommonFcbInit(lpXfcb, FCB_SEC_PATH_FAR, &FcbDrive);
+  if (!far_is_null(IsDeviceGuest(FCB_SEC_PATH_FAR)))
     result = FCB_ERROR;
   else
   {
@@ -453,7 +460,7 @@ UBYTE FcbDelete(dos_far_ptr lpXfcb)
                      ? pload8(xbase + offsetof(xfcb, xfcb_attrib)) : D_ALL;
     long rc;
     fcb_set_dta(DmatchTmp_x86);
-    rc = DosFindFirst(attr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName));
+    rc = DosFindFirst(attr, FCB_SEC_PATH_FAR);
     fcb_set_crit((UWORD)-rc);
     if (rc != SUCCESS)
       result = FCB_ERROR;
@@ -461,10 +468,11 @@ UBYTE FcbDelete(dos_far_ptr lpXfcb)
     {
       dmatch dm;
       dmatch_load(DMATCH_TMP_LINEAR, &dm);
-      SecPathName[0] = 'A' + FcbDrive - 1;
-      SecPathName[1] = ':';
-      strcpy(&SecPathName[2], dm.dm_name);
-      if (DosDelete(x86_FAR_PTR(DOS_PSP, (void *)SecPathName), attr) != SUCCESS)
+      pstore8(FCB_SEC_PATH_LINEAR, (UBYTE)('A' + FcbDrive - 1));
+      pstore8(FCB_SEC_PATH_LINEAR + 1u, ':');
+      guest_write_block(FCB_SEC_PATH_LINEAR + 2u, dm.dm_name,
+                        strlen(dm.dm_name) + 1u);
+      if (DosDelete(FCB_SEC_PATH_FAR, attr) != SUCCESS)
       {
         result = FCB_ERROR;
         break;
@@ -486,14 +494,14 @@ UBYTE FcbRename(dos_far_ptr lpXfcb)
   UBYTE result = FCB_SUCCESS;
   dos_far_ptr lpOldDta = fcb_dta();
   const uint32_t xbase = fcb_far_linear(lpXfcb);
-  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, FCB_SEC_PATH_FAR, &FcbDrive);
   rfcb rename_fcb;
 
   guest_read_block(fcb_far_linear(fcbp), &rename_fcb, sizeof(rename_fcb));
   GetNameField(rename_fcb.renNewName, buf, FNAME_SIZE, &bWildCard);
   GetNameField(rename_fcb.renNewExtent, buf + FNAME_SIZE, FEXT_SIZE, &bWildCard);
 
-  if (!far_is_null(IsDevice(SecPathName)))
+  if (!far_is_null(IsDeviceGuest(FCB_SEC_PATH_FAR)))
     result = FCB_ERROR;
   else
   {
@@ -501,7 +509,7 @@ UBYTE FcbRename(dos_far_ptr lpXfcb)
     wAttr = (pload8(xbase + offsetof(xfcb, xfcb_flag)) == 0xff)
             ? pload8(xbase + offsetof(xfcb, xfcb_attrib)) : D_ALL;
     fcb_set_dta(DmatchTmp_x86);
-    rc = DosFindFirst(wAttr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName));
+    rc = DosFindFirst(wAttr, FCB_SEC_PATH_FAR);
     fcb_set_crit((UWORD)-rc);
     if (rc != SUCCESS)
       result = FCB_ERROR;
@@ -525,10 +533,11 @@ UBYTE FcbRename(dos_far_ptr lpXfcb)
         pToPattern++;
       }
 
-      SecPathName[0] = 'A' + FcbDrive - 1;
-      SecPathName[1] = ':';
-      strcpy(&SecPathName[2], dm.dm_name);
-      rc = truename(x86_FAR_PTR(DOS_PSP, (void *)SecPathName), PriPathName, 0);
+      pstore8(FCB_SEC_PATH_LINEAR, (UBYTE)('A' + FcbDrive - 1));
+      pstore8(FCB_SEC_PATH_LINEAR + 1u, ':');
+      guest_write_block(FCB_SEC_PATH_LINEAR + 2u, dm.dm_name,
+                        strlen(dm.dm_name) + 1u);
+      rc = truename_guest(FCB_SEC_PATH_FAR, FCB_PRI_PATH_FAR, 0);
       if (rc < SUCCESS || (rc & IS_DEVICE))
       {
         result = FCB_ERROR;
@@ -536,14 +545,14 @@ UBYTE FcbRename(dos_far_ptr lpXfcb)
       }
 
       LocalFcb.fcb_drive = FcbDrive;
-      memset(ren_name, 0, sizeof(ren_name));
+      nf_memset(ren_name, 0, sizeof(ren_name));
       FcbNameInit(&LocalFcb, ren_name, &FcbDrive);
       guest_write_block(FCB_REN_LINEAR, ren_name, sizeof(ren_name));
-      rc = truename(MK_FP(DOS_PSP,
+      rc = truename_guest(MK_FP(DOS_PSP,
                           (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, fcb_ren_name))),
-                    SecPathName, 0);
+                    FCB_SEC_PATH_FAR, 0);
       if (rc < SUCCESS || (rc & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE ||
-          DosRenameTrue(PriPathName, SecPathName, wAttr) != SUCCESS)
+          DosRenameTrueGuest(FCB_PRI_PATH_FAR, FCB_SEC_PATH_FAR, wAttr) != SUCCESS)
       {
         result = FCB_ERROR;
         break;
@@ -665,7 +674,7 @@ UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)
   dos_far_ptr orig_dta = fcb_dta();
   uint32_t out = fcb_far_linear(orig_dta);
   COUNT FcbDrive;
-  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, SecPathName, &FcbDrive);
+  const dos_far_ptr fcbp = CommonFcbInit(lpXfcb, FCB_SEC_PATH_FAR, &FcbDrive);
   fcb local;
   dmatch dm;
   long rc;
@@ -674,9 +683,9 @@ UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)
   fcb_load(fcbp, &local);
   if (First)
   {
-    memset(&dm, 0, sizeof(dm));
+    nf_memset(&dm, 0, sizeof(dm));
     dm.dm_drive = local.fcb_sftno;
-    memcpy(dm.dm_name_pat, local.fcb_fname, FNAME_SIZE + FEXT_SIZE);
+    dos_api_memcpy(dm.dm_name_pat, local.fcb_fname, FNAME_SIZE + FEXT_SIZE);
     DosUpFMem((BYTE FAR *)dm.dm_name_pat, FNAME_SIZE + FEXT_SIZE);
     dm.dm_attr_srch = wAttr;
     dm.dm_entry = local.fcb_strtclst;
@@ -692,7 +701,7 @@ UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)
     out += 7;
   }
 
-  rc = First ? DosFindFirst(wAttr, x86_FAR_PTR(DOS_PSP, (void *)SecPathName))
+  rc = First ? DosFindFirst(wAttr, FCB_SEC_PATH_FAR)
              : DosFindNext();
   fcb_set_crit((UWORD)-rc);
   if (rc != SUCCESS)
@@ -703,7 +712,7 @@ UBYTE FcbFindFirstNext(dos_far_ptr lpXfcb, BOOL First)
 
   dmatch_load(DMATCH_LINEAR, &dm);
   pstore8(out++, (UBYTE)FcbDrive);
-  guest_write_block(out, &SearchDirD, sizeof(struct dirent));
+  guest_move_block(out, FCB_SEARCHDIR_LINEAR, sizeof(struct dirent));
 
   local.fcb_dirclst = (UWORD)dm.dm_dircluster;
   local.fcb_strtclst = dm.dm_entry;

@@ -111,8 +111,10 @@ UBYTE DosSelectDrv(UBYTE drv);
 COUNT DosDelete(dos_far_ptr path, int attrib);
 COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2);
 COUNT DosRenameTrue(char* path1, char* path2, int attrib);
+COUNT DosRenameTrueGuest(dos_far_ptr path1, dos_far_ptr path2, int attrib);
 COUNT DosMkRmdir(const dos_far_ptr dir, int action);
 dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname);
+dos_far_ptr IsDeviceGuest(dos_far_ptr fname);
 BOOL IsShareInstalled(BOOL recheck);
 COUNT DosLockUnlock(COUNT hndl, LONG pos, LONG len, COUNT unlock);
 int idx_to_sft_(int SftIndex);
@@ -402,6 +404,7 @@ int SetJFTSize(UWORD nHandles);
    generated name is appended), so it travels as a guest pointer. */
 long DosMkTmp(dos_far_ptr pathname, UWORD attr);
 COUNT truename(dos_far_ptr src, char * dest, COUNT t);
+COUNT truename_guest(dos_far_ptr src, dos_far_ptr dest, COUNT t);
 
 /* network.c */
 /* /// TODO:

@@ -16,6 +16,7 @@ extern "C" {
 #endif
 
 #include "guest_ref.hpp"
+#include "path_guest.h"
 
 using fdos_guest::bpb_ref;
 using fdos_guest::cds_ref;
@@ -43,14 +44,25 @@ static const lol_ref fatfs_lol(
 static const dos_far_ptr media_req_far =
     MK_FP(DOS_PSP, X86_INTERNAL_DATA_OFF + offsetof(dos_data, MediaReqHdr));
 
-static int cds_current_path_equals(dos_far_ptr p, const char *path)
+static int cds_current_path_equals_ref(dos_far_ptr p, fdos_path_ref path)
 {
+  size_t i;
   if (far_is_null(p))
     return 0;
   char current[MAX_CDSPATH];
   cds_ref(p).copy_current_path(current, sizeof(current));
-  return fstrcmp(path, current) == 0;
+  for (i = 0; i < sizeof(current); ++i)
+  {
+    const UBYTE a = fdos_path_get(path, i);
+    const UBYTE b = (UBYTE)current[i];
+    if (a != b)
+      return 0;
+    if (a == 0)
+      return 1;
+  }
+  return 0;
 }
+
 #if DIAG
 extern volatile unsigned int dos_diag_kernel_code;
 #endif
@@ -780,11 +792,11 @@ void dos_merge_file_changes(int fd)
 
     Migrated from fatfs.c verbatim.
 */
-int find_fname(const char *path, int attr, f_node_ptr fnp)
+int find_fname_ref(fdos_path_ref path, int attr, f_node_ptr fnp)
 {
   /* check for leading backslash and open the directory given that */
   /* contains the file given by path.                              */
-  if ((fnp = split_path(path, fnp)) == NULL)
+  if ((fnp = split_path_ref(path, fnp)) == NULL)
     return DE_PATHNOTFND;
 
   while (dir_read(fnp) == 1)
@@ -801,6 +813,11 @@ int find_fname(const char *path, int attr, f_node_ptr fnp)
   return DE_FILENOTFND;
 }
 
+int find_fname(const char *path, int attr, f_node_ptr fnp)
+{
+  return find_fname_ref(fdos_path_native(path), attr, fnp);
+}
+
 /* Open a file given the path. Flags is 0 for read, 1 for write and 2   */
 /* for update.                                                          */
 /* Returns an long where the high word is a status code and the low     */
@@ -809,7 +826,7 @@ int find_fname(const char *path, int attr, f_node_ptr fnp)
 /* directory opens are allowed here; these are not allowed by DosOpenSft*/
 
 STATIC VOID wipe_out(f_node_ptr fnp);
-STATIC int alloc_find_free(f_node_ptr fnp, char *path);
+STATIC int alloc_find_free_ref(f_node_ptr fnp, fdos_path_ref path);
 STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, const char *name);
 
 /*
@@ -826,10 +843,10 @@ Migrated from fatfs.c verbatim.
     directory" path), so this is a straight restore of the upstream
     logic, not new design.
 */
-int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
+int dos_open_ref(fdos_path_ref path, unsigned flags, unsigned attrib, int fd)
 {
   REG f_node_ptr fnp = sft_to_fnode(fd);
-  int status = find_fname(path, D_ALL | attrib, fnp);
+  int status = find_fname_ref(path, D_ALL | attrib, fnp);
 
   /* Check that we don't have a duplicate name, so if we  */
   /* find one, truncate it (O_CREAT).                     */
@@ -871,7 +888,7 @@ int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
   }
   else if (status == DE_FILENOTFND && (flags & O_CREAT))
   {
-    int ret = alloc_find_free(fnp, path);
+    int ret = alloc_find_free_ref(fnp, path);
     if (ret != SUCCESS)
       return ret;
     status = S_CREATED;
@@ -907,6 +924,11 @@ int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
 
   fnode_to_sft(fnp);
   return status;
+}
+
+int dos_open(char *path, unsigned flags, unsigned attrib, int fd)
+{
+  return dos_open_ref(fdos_path_native(path), flags, attrib, fd);
 }
 
 /* DosCloseSft() (the real implementation - network redirector close,
@@ -1044,10 +1066,11 @@ COUNT DosClose(COUNT hndl)
     Migrated from fatfs.c. The DEBUG-only redirected-drive check reads
     CDS flags through cds_ref because get_cds() returns a guest far pointer.
 */
-f_node_ptr split_path(const char * path, f_node_ptr fnp)
+f_node_ptr split_path_ref(fdos_path_ref path, f_node_ptr fnp)
 {
+  const size_t len = fdos_path_len(path, FDOS_PATHLEN);
   /* check if the path ends in a backslash                        */
-  if (path[strlen(path) - 1] == '\\')
+  if (len == 0 || fdos_path_get(path, len - 1u) == '\\')
     return (f_node_ptr) 0;
 
 /*  11/29/99 jt
@@ -1062,15 +1085,20 @@ f_node_ptr split_path(const char * path, f_node_ptr fnp)
 
  */
 #ifdef DEBUG
-  if (cds_ref(get_cds(path[0]-'A')).flags() & CDSNETWDRV)
+  if (cds_ref(get_cds((COUNT)fdos_path_get(path, 0)-'A')).flags() & CDSNETWDRV)
   {
-    printf("split path called for redirected file: `%s'\n", path);
+    printf("split path called for redirected file\n");
     return (f_node_ptr) 0;
   }
 #endif
 
   /* Translate the path into a useful pointer                     */
-  return dir_open(path, TRUE, fnp);
+  return dir_open_ref(path, TRUE, fnp);
+}
+
+f_node_ptr split_path(const char *path, f_node_ptr fnp)
+{
+  return split_path_ref(fdos_path_native(path), fnp);
 }
 
 /*
@@ -1091,17 +1119,17 @@ BOOL dir_exists(char * path)
     Migrated from fatfs.c. get_cds() returns a guest far pointer here,
     so the CDS start-cluster update goes through cds_ref.
 */
-int dos_cd(char *PathName)
+int dos_cd_ref(fdos_path_ref PathName)
 {
   f_node_ptr fnp;
   /* now test for its existance. If it doesn't, return an error.  */
-  if ((fnp = dir_open(PathName, FALSE, fnode_slot(0))) == NULL)
+  if ((fnp = dir_open_ref(PathName, FALSE, fnode_slot(0))) == NULL)
     return DE_PATHNOTFND;
 
   /* problem: RBIL table 01643 does not give a FAT32 field for the
      CDS start cluster. But we are not using this field ourselves */
   {
-    dos_far_ptr /* -> struct cds */ x86_cdsp = get_cds(PathName[0] - 'A');
+    dos_far_ptr /* -> struct cds */ x86_cdsp = get_cds((COUNT)fdos_path_get(PathName, 0) - 'A');
 
     /* get_cds() reports "no such drive" as the 0000:0000 sentinel, and
        ARM_PTR() resolves that to X86_RAM_BASE + 0 - the guest's interrupt
@@ -1115,6 +1143,11 @@ int dos_cd(char *PathName)
       cds_ref(x86_cdsp).start_cluster((UWORD)DM_GET32(fnp->f_dmp, dm_dircluster));
   }
   return SUCCESS;
+}
+
+int dos_cd(char *PathName)
+{
+  return dos_cd_ref(fdos_path_native(PathName));
 }
 
 
@@ -1709,9 +1742,9 @@ COUNT extend_dir(f_node_ptr fnp)
 /* alloc_find_free: resets the directory                          */
 /* Then finds a spare directory entry and if not                  */
 /* available, tries to extend the directory.                      */
-STATIC int alloc_find_free(f_node_ptr fnp, char *path)
+STATIC int alloc_find_free_ref(f_node_ptr fnp, fdos_path_ref path)
 {
-  fnp = split_path(path, fnp);
+  fnp = split_path_ref(path, fnp);
 
   /* Get a free f_node pointer so that we can use */
   /* it in building the new file.                 */
@@ -1736,7 +1769,7 @@ STATIC int alloc_find_free(f_node_ptr fnp, char *path)
   return SUCCESS;
 }
 
-COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
+COUNT dos_rename_ref(fdos_path_ref path1, fdos_path_ref path2, int attrib)
 {
   REG f_node_ptr fnp1;
   REG f_node_ptr fnp2;
@@ -1744,20 +1777,20 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
   char *fcbname;
 
   /* prevent renaming of the current directory of that drive */
-  dos_far_ptr /* -> struct cds */ _cds = get_cds(path1[0] - 'A');
-  if (cds_current_path_equals(_cds, path1))
+  dos_far_ptr /* -> struct cds */ _cds = get_cds((COUNT)fdos_path_get(path1, 0) - 'A');
+  if (cds_current_path_equals_ref(_cds, path1))
     return DE_RMVCUDIR;
 
   /* first check if the source file exists                        */
   fnp1 = fnode_slot(0);
-  ret = find_fname(path1, attrib, fnp1);
+  ret = find_fname_ref(path1, attrib, fnp1);
   if (ret != SUCCESS)
     return ret;
 
   /* Check that we don't have a duplicate name, so if we find     */
   /* one, it's an error.                                          */
   fnp2 = fnode_slot(1);
-  ret = find_fname(path2, attrib, fnp2);
+  ret = find_fname_ref(path2, attrib, fnp2);
   if (ret != DE_FILENOTFND)
     return ret == SUCCESS ? DE_ACCESS : ret;
 
@@ -1778,7 +1811,7 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
       return DE_ACCESS;
 
     /* create new entry in other directory */
-    ret = alloc_find_free(fnp2, path2);
+    ret = alloc_find_free_ref(fnp2, path2);
     if (ret != SUCCESS)
       return ret;
 
@@ -1786,7 +1819,7 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
       return ret;
 
     /* init fnode for new file name to match old file name */
-    memcpy(&fnp2->f_dir, &fnp1->f_dir, sizeof(struct dirent));
+    dos_api_memcpy(&fnp2->f_dir, &fnp1->f_dir, sizeof(struct dirent));
 
     /* Ok, so we can delete this one. Save the file info.           */
     *(fnp1->f_dir.dir_name) = DELETED;
@@ -1796,20 +1829,31 @@ COUNT dos_rename(BYTE * path1, BYTE * path2, int attrib)
   }
 
   /* put the fnode's name into the directory.                     */
-  memcpy(fnp2->f_dir.dir_name, fcbname, FNAME_SIZE + FEXT_SIZE);
+  dos_api_memcpy(fnp2->f_dir.dir_name, fcbname, FNAME_SIZE + FEXT_SIZE);
 
   /* SUCCESSful completion, return it                             */
   return dir_write(fnp2) ? SUCCESS : DE_ACCESS;
 }
 
-COUNT dos_getfattr(BYTE * name)
+COUNT dos_rename(BYTE *path1, BYTE *path2, int attrib)
+{
+  return dos_rename_ref(fdos_path_native((const char *)path1),
+                        fdos_path_native((const char *)path2), attrib);
+}
+
+COUNT dos_getfattr_ref(fdos_path_ref name)
 {
   f_node_ptr fnp = fnode_slot(0);
-  int ret = find_fname(name, D_ALL, fnp);
+  int ret = find_fname_ref(name, D_ALL, fnp);
   return ret == SUCCESS ? fnp->f_dir.dir_attrib : ret;
 }
 
-COUNT dos_setfattr(BYTE * name, UWORD attrp)
+COUNT dos_getfattr(BYTE *name)
+{
+  return dos_getfattr_ref(fdos_path_native((const char *)name));
+}
+
+COUNT dos_setfattr_ref(fdos_path_ref name, UWORD attrp)
 {
   f_node_ptr fnp;
   int rc;
@@ -1824,7 +1868,7 @@ COUNT dos_setfattr(BYTE * name, UWORD attrp)
     return DE_ACCESS;
 
   fnp = fnode_slot(0);
-  rc = find_fname(name, D_ALL, fnp);
+  rc = find_fname_ref(name, D_ALL, fnp);
   if (rc != SUCCESS)
     return rc;
 
@@ -1921,8 +1965,8 @@ STATIC CLUSTER find_fat_free(f_node_ptr fnp)
 /* initialize directory entry (creation/access stamps 0 as per MS-DOS 7.10) */
 STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluster, const char *name)
 {
-  memset(dentry, 0, sizeof(struct dirent));
-  memcpy(dentry->dir_name, name, FNAME_SIZE + FEXT_SIZE);
+  nf_memset(dentry, 0, sizeof(struct dirent));
+  dos_api_memcpy(dentry->dir_name, name, FNAME_SIZE + FEXT_SIZE);
 #ifdef WITHFAT32
   dentry->dir_start_high = (UWORD)(cluster >> 16);
 #endif
@@ -1934,11 +1978,16 @@ STATIC void init_direntry(struct dirent *dentry, unsigned attrib, CLUSTER cluste
 }
 
 
+COUNT dos_setfattr(BYTE *name, UWORD attrp)
+{
+  return dos_setfattr_ref(fdos_path_native((const char *)name), attrp);
+}
+
 /*                                                              */
 /* create a directory - returns success or a negative error     */
 /* number                                                       */
 /*                                                              */
-COUNT dos_mkdir(BYTE * dir)
+COUNT dos_mkdir_ref(fdos_path_ref dir)
 {
   REG f_node_ptr fnp;
   CLUSTER free_fat, parent;
@@ -1952,19 +2001,19 @@ COUNT dos_mkdir(BYTE * dir)
      can create an unlimited amount of same dirs. this space
      is lost forever
    */
-  if (strlen(dir) >= MAX_CDSPATH)  /* dir is already output of "truename" */
+  if (fdos_path_len(dir, FDOS_PATHLEN) >= MAX_CDSPATH)  /* dir is already output of "truename" */
     return DE_PATHNOTFND;
 
   /* Check that we don't have a duplicate name, so if we  */
   /* find one, it's an error.                             */
   fnp = fnode_slot(0);
-  ret = find_fname(dir, D_ALL, fnp);
+  ret = find_fname_ref(dir, D_ALL, fnp);
   if (ret != DE_FILENOTFND)
     return ret == SUCCESS ? DE_ACCESS : ret;
 
   parent = DM_GET32(fnp->f_dmp, dm_dircluster);
 
-  ret = alloc_find_free(fnp, dir);
+  ret = alloc_find_free_ref(fnp, dir);
   if (ret != SUCCESS)
     return ret;
 
@@ -2029,6 +2078,11 @@ COUNT dos_mkdir(BYTE * dir)
     return DE_ACCESS;
 
   return SUCCESS;
+}
+
+COUNT dos_mkdir(BYTE *dir)
+{
+  return dos_mkdir_ref(fdos_path_native((const char *)dir));
 }
 
 /*                                                              */
@@ -2123,13 +2177,13 @@ COUNT delete_dir_entry(f_node_ptr fnp)
    port - INT 21h AH=41h (DELETE FILE) had no working backend at all.
    Migrated as-is from upstream fatfs.c; depends only on find_fname() and
    delete_dir_entry(), both already present above in this file. */
-COUNT dos_delete(BYTE * path, int attrib)
+COUNT dos_delete_ref(fdos_path_ref path, int attrib)
 {
   REG f_node_ptr fnp = fnode_slot(0);
 
   /* Check that we don't have a duplicate name, so if we  */
   /* find one, it's an error.                             */
-  int ret = find_fname(path, attrib, fnp);
+  int ret = find_fname_ref(path, attrib, fnp);
   if (ret == SUCCESS)
   {
     /* Do not delete directories or r/o files       */
@@ -2146,22 +2200,27 @@ COUNT dos_delete(BYTE * path, int attrib)
     return ret;
 }
 
-COUNT dos_rmdir(BYTE * path)
+COUNT dos_delete(BYTE *path, int attrib)
+{
+  return dos_delete_ref(fdos_path_native((const char *)path), attrib);
+}
+
+COUNT dos_rmdir_ref(fdos_path_ref path)
 {
   REG f_node_ptr fnp;
 
   /* prevent removal of the current directory of that drive */
-  dos_far_ptr /* -> struct cds */ _cds = get_cds(path[0] - 'A');
-  if (cds_current_path_equals(_cds, path))
+  dos_far_ptr /* -> struct cds */ _cds = get_cds((COUNT)fdos_path_get(path, 0) - 'A');
+  if (cds_current_path_equals_ref(_cds, path))
     return DE_RMVCUDIR;
 
   /* Check that we're not trying to remove the root!      */
-  if (path[2] == '\\' && path[3] == '\0')
+  if (fdos_path_get(path, 2) == '\\' && fdos_path_get(path, 3) == '\0')
     return DE_ACCESS;
 
   /* Check that the directory is empty. Only the  */
   /* "." and ".." are permissable.                */
-  fnp = dir_open(path, FALSE, fnode_slot(0));
+  fnp = dir_open_ref(path, FALSE, fnode_slot(0));
   if (fnp == NULL)
     return DE_PATHNOTFND;
 
@@ -2195,11 +2254,16 @@ COUNT dos_rmdir(BYTE * path)
 
   /* next, split the passed dir into components (i.e. -   */
   /* path to new directory and name of new directory      */
-  if (find_fname(path, D_ALL, fnp) != SUCCESS)
+  if (find_fname_ref(path, D_ALL, fnp) != SUCCESS)
     /* this error should not happen because dir_open() succeeded above */
     return DE_PATHNOTFND;
 
   return delete_dir_entry(fnp);
+}
+
+COUNT dos_rmdir(BYTE *path)
+{
+  return dos_rmdir_ref(fdos_path_native((const char *)path));
 }
 
 /* declared in proto.h, needed by dos_findnext()

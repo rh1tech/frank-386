@@ -524,9 +524,8 @@ typedef bpb FAR *bpbptr;
 typedef BYTE FAR *byteptr;
 typedef struct dhdr FAR *dhdrptr;
 
-#define IoReqHdrD (*(request *)&internal_data->IoReqHdr)
-#define MediaReqHdrD (*(request *)&internal_data->MediaReqHdr)
-#define CharReqHdr (internal_data->ClkReqHdr)
+/* Request headers live in guest SDA.  Persistent native aliases are
+   intentionally unavailable; use request_ref/fdos_request_guest_ref. */
 
 /* dsk.c */
 /* blk_driver() is declared in init-mod.h: the native implementation takes

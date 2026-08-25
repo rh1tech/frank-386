@@ -98,14 +98,9 @@ COUNT ASMCFUNC
 #define DSKWRITEINT26   3
 #define DSKREADINT25    4
 
-/* PriPathName/SecPathBuffer are SDA fields in the original (extern
-   ASM _PriPathBuffer._PriPathName, see globals.h), reserved here as
-   internal_data->PriPathBuffer/SecPathBuffer (see lol.h). Named with
-   the original's name (not a trailing-D macro like IoReqHdrD) since,
-   unlike IoReqHdr/sda_tmp_dm, there is no internal_data field of the
-   same name to collide with. */
-#define PriPathName ((char *)internal_data->PriPathBuffer)
-#define SecPathName ((char *)internal_data->SecPathBuffer)
+/* PriPathBuffer/SecPathBuffer remain guest-resident SDA fields.
+   Persistent native aliases are intentionally not exported; use
+   fdos_path_ref/dos_far_ptr accessors instead. */
 
 extern /*struct buffer*/dos_far_ptr x86_firstAvailableBuf;
 extern /*UBYTE DiskTransferBuffer[MAX_SEC_SIZE]*/ const dos_far_ptr DiskTransferBuffer; // BSS

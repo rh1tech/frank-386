@@ -302,7 +302,7 @@ void PreConfig(void)
 {
   /* Initialize the base memory pointers                          */
 
-  CfgDbgPrintf(("SDA located at 0x%p\n", internal_data));
+  CfgDbgPrintf(("SDA guest linear=0x%08lx\n", (unsigned long)config_internal_data_linear));
   /* Begin by initializing our system buffers                     */
   /* DebugPrintf(("Preliminary %d buffers allocated at 0x%p\n", Config.cfgBuffers, buffers));*/
   config_lol.sfthead(MK_FP(FP_SEG(x86_FIXED_DATA), FP_OFF(x86_FIXED_DATA) + 0xcc)); /* &(LoL->firstsftt) */

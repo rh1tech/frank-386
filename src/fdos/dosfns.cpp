@@ -8,6 +8,7 @@ extern "C" {
 #undef load
 #endif
 #include "guest_ref.hpp"
+#include "path_guest.h"
 
 using fdos_guest::cds_ref;
 using fdos_guest::dhdr_ref;
@@ -22,6 +23,34 @@ using fdos_guest::guest_bytes_ref;
 
 static const lol_ref dosfns_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref dosfns_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
+
+static inline dos_far_ptr pri_path_far(void)
+{
+  return MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, PriPathBuffer)));
+}
+
+static inline dos_far_ptr sec_path_far(void)
+{
+  return MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, SecPathBuffer)));
+}
+
+static inline fdos_path_ref pri_path_ref(void) { return fdos_path_guest(pri_path_far()); }
+static inline fdos_path_ref sec_path_ref(void) { return fdos_path_guest(sec_path_far()); }
+
+static inline uint32_t sda_dmatch_linear(void)
+{
+  return ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF + offsetof(dos_data, sda_tmp_dm);
+}
+
+static inline dos_far_ptr sda_dmatch_far(void)
+{
+  return MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(dos_data, sda_tmp_dm)));
+}
+
+static inline uint32_t sda_searchdir_linear(void)
+{
+  return ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF + offsetof(dos_data, SearchDir);
+}
 
 static inline uint32_t dosfns_far_linear(dos_far_ptr p)
 {
@@ -116,29 +145,41 @@ int share_lock_unlock(unsigned short pspseg, int fileno, unsigned long ofs,
 }
 
 
-/*    ConvertPathNameToFCBName/set_fcbname - convert PriPathName's final
-    component into FCB (8.3, space-padded) form, stashed in
-    internal_data->DirEntBuffer (cast to a struct dirent - see lol.h:
-    DirEntBuffer is a plain BYTE[32], same as the original's "extern
-    ASM DirEntBuffer", and 32 == sizeof(struct dirent) is now enforced
-    by a _Static_assert in fat.h).
-
-    Migrated from dosfns.c verbatim.
-*/
-STATIC void ConvertPathNameToFCBName(char *FCBName, const char *PathName)
-{
-  ConvertNameSZToName83(FCBName, get_root(PathName));
-  FCBName[FNAME_SIZE + FEXT_SIZE] = '\0';
-}
-
-STATIC void set_fcbname(const char *path)
+/* Convert a path_ref's final component into FCB 8.3, space-padded
+   form in the guest-resident SDA DirEntBuffer.  The destination is
+   addressed explicitly in guest memory; no persistent SDA host pointer
+   is created. */
+STATIC void set_fcbname_ref(fdos_path_ref path)
 {
   BYTE name[FNAME_SIZE + FEXT_SIZE + 1];
+  size_t len = fdos_path_len(path, FDOS_PATHLEN);
+  size_t root = 0;
+  size_t i, out = 0;
   const UWORD off = (UWORD)(X86_INTERNAL_DATA_OFF +
                             offsetof(dos_data, DirEntBuffer) +
                             offsetof(struct dirent, dir_name));
 
-  ConvertPathNameToFCBName((char *)name, path);
+  for (i = 0; i < len; ++i)
+  {
+    UBYTE c = fdos_path_get(path, i);
+    if (c == '/' || c == '\\' || c == ':')
+      root = i + 1u;
+  }
+
+  nf_memset(name, ' ', FNAME_SIZE + FEXT_SIZE);
+  for (i = root; i < len && out < FNAME_SIZE + FEXT_SIZE; ++i)
+  {
+    UBYTE c = fdos_path_get(path, i);
+    if (c == '.')
+    {
+      out = FNAME_SIZE;
+      continue;
+    }
+    if (c == '/' || c == '\\' || c == 0)
+      break;
+    name[out++] = c;
+  }
+  name[FNAME_SIZE + FEXT_SIZE] = 0;
   guest_write(MK_FP(DOS_PSP, off), name, sizeof(name));
 }
 
@@ -197,7 +238,7 @@ STATIC int DeviceOpenSft(dos_far_ptr x86_dhp, dos_far_ptr x86_sftp)
   sftp.shroff(-1);
   sftp.count((UWORD)(sftp.count() + 1u));
   sftp.flags((UWORD)((dev_attr & ~(SFT_MASK | SFT_FSHARED)) | SFT_FDEVICE | SFT_FEOF));
-  memset(name, 0, sizeof(name));
+  nf_memset(name, 0, sizeof(name));
   devhdr.read_name(name);
   for (i = FNAME_SIZE + FEXT_SIZE - 1; name[i] == '\0'; i--)
     name[i] = ' ';
@@ -279,17 +320,11 @@ bits for flags (bits 11-8 are internal FreeDOS bits only)
 */
 long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
 {
-  /*
-   * Stack audit: this function has no large process-owned object to move to
-   * guest SS:SP.  Its 104-byte .su frame is predominantly ABI saves/spills
-   * across the many calls below; the explicit locals are only scalars and
-   * pointers.  Keep those native, but shorten their live ranges so the ARM
-   * compiler does not have to preserve path-resolution state through the
-   * later open/device paths.  Revisit only if a new .su build still shows
-   * this frame on the measured worst-case chain.
-   */
-  char open_path[FDOS_PATHLEN];
-  COUNT path_result = truename(fname, open_path, CDS_MODE_CHECK_DEV_PATH);
+  /* Keep the canonical path in the resident guest SDA.  A 128-byte native
+     pathname snapshot both wastes the constrained core0 stack and breaks the
+     paging boundary abstraction. */
+  COUNT path_result = truename_guest(fname, pri_path_far(),
+                                     CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosOpenSft 1");
   if (path_result < SUCCESS) {
     dpb_watch_check_chain("DosOpenSft 1err");
@@ -297,7 +332,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   }
   const unsigned path_kind = (unsigned)path_result;
 
-  set_fcbname(open_path);
+  set_fcbname_ref(pri_path_ref());
   dpb_watch_check_chain("DosOpenSft 2");
 
   /* now get a free system file table entry       */
@@ -321,7 +356,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   dpb_watch_check_chain("DosOpenSft 5");
   /* check for a (local) device */
   if ((path_kind & IS_DEVICE) && !(path_kind & IS_NETWORK)) {
-      dos_far_ptr dhp = IsDevice(open_path);
+      dos_far_ptr dhp = IsDeviceGuest(pri_path_far());
       dpb_watch_check_chain("DosOpenSft 6");
       if (EFFECTIVE(dhp) != 0) {
         int rc = DeviceOpenSft(dhp, lpCurSft);
@@ -387,7 +422,7 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   if (IsShareInstalled(TRUE))
   {
     const WORD shroff = (WORD)share_open_check(
-        x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
+        pri_path_far(),
         (UWORD)dosfns_idata.cu_psp(), flags & 0x03, (flags >> 4) & 0x07);
     sft_ref(lpCurSft).shroff(shroff);
     if (shroff < 0)
@@ -399,9 +434,9 @@ long DosOpenSft(dos_far_ptr fname, unsigned flags, unsigned attrib)
   {
     const sft_ref ref(lpCurSft);
     ref.count((UWORD)(ref.count() + 1u));
-    ref.flags((UWORD)(UBYTE)(open_path[0] - 'A'));
+    ref.flags((UWORD)(UBYTE)(fdos_path_get(pri_path_ref(), 0) - 'A'));
   }
-  long open_result = dos_open(open_path, flags, attrib, sft_idx);
+  long open_result = dos_open_ref(pri_path_ref(), flags, attrib, sft_idx);
   dpb_watch_check_chain("DosOpenSft 10");
   if (open_result < 0)
   {
@@ -717,15 +752,31 @@ const char *get_root(const char *fname)
     is a dos_far_ptr in this codebase (see device.h), not a directly
     dereferenceable pointer like the original's "struct dhdr FAR *".
 */
-dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
+static dos_far_ptr IsDeviceRef(fdos_path_ref fname)
 {
   dos_far_ptr x86_dhp;
-  const char *froot = get_root(fname);
+  size_t len = fdos_path_len(fname, FDOS_PATHLEN);
+  size_t root = 0;
+  size_t k;
   int i;
-  if ((*froot == '\0') ||
-      ((*froot == '.') && ((froot[1] == '\0') || (froot[1] == '.' && froot[2] == '\0'))))
-    return MK_FP(0, 0);
-  for (x86_dhp = MK_FP(DOS_PSP, (UWORD)(0x08F0u + offsetof(lol, nul_dev))); !far_is_end(x86_dhp); )
+
+  for (k = 0; k < len; ++k)
+  {
+    UBYTE c = fdos_path_get(fname, k);
+    if (c == '/' || c == '\\' || c == ':')
+      root = k + 1u;
+  }
+
+  {
+    UBYTE c0 = fdos_path_get(fname, root);
+    UBYTE c1 = fdos_path_get(fname, root + 1u);
+    UBYTE c2 = fdos_path_get(fname, root + 2u);
+    if (c0 == 0 || (c0 == '.' && (c1 == 0 || (c1 == '.' && c2 == 0))))
+      return MK_FP(0, 0);
+  }
+
+  for (x86_dhp = MK_FP(DOS_PSP, (UWORD)(0x08F0u + offsetof(lol, nul_dev)));
+       !far_is_end(x86_dhp); )
   {
     const dhdr_ref dhp(x86_dhp);
     const dos_far_ptr next = dhp.next();
@@ -735,15 +786,17 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
       dhp.read_name(name);
       for (i = 0; i < FNAME_SIZE; i++)
       {
-        unsigned char c1 = (unsigned char)froot[i];
-        if (c1 == '.' || c1 == '\0')
+        unsigned char c1 = fdos_path_get(fname, root + (size_t)i);
+        if (c1 == '.' || c1 == 0)
         {
           for (; i < FNAME_SIZE; i++)
           {
             const unsigned char c2 = name[i];
-            if (c2 != ' ' && c2 != '\0')
+            if (c2 != ' ' && c2 != 0)
               break;
           }
+          if (i == FNAME_SIZE)
+            return x86_dhp;
           break;
         }
         if (DosUpFChar(c1) != DosUpFChar(name[i]))
@@ -755,6 +808,16 @@ dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
     x86_dhp = next;
   }
   return MK_FP(0, 0);
+}
+
+dos_far_ptr /*struct dhdr*/ IsDevice(const char *fname)
+{
+  return IsDeviceRef(fdos_path_native(fname));
+}
+
+dos_far_ptr IsDeviceGuest(dos_far_ptr fname)
+{
+  return IsDeviceRef(fdos_path_guest(fname));
 }
 
 /*
@@ -822,7 +885,7 @@ COUNT DosGetFattr(dos_far_ptr name)
 {
   COUNT result;
 
-  result = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  result = truename_guest(name, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosGetFattr");
   if (result < SUCCESS)
     return result;
@@ -836,10 +899,10 @@ COUNT DosGetFattr(dos_far_ptr name)
                validy consist of just two slashes.
                -- 2001/09/03 ska*/
 
-  if (PriPathName[3] == '\0')
+  if (fdos_path_get(pri_path_ref(), 3) == '\0')
     return 0x10;
 
-  set_fcbname(PriPathName);
+  set_fcbname_ref(pri_path_ref());
 /// TODO:
 ///  if (result & IS_NETWORK)
 ///    return network_redirector(REM_GETATTRZ);
@@ -847,7 +910,7 @@ COUNT DosGetFattr(dos_far_ptr name)
   if (result & IS_DEVICE)
     return DE_FILENOTFND;
 
-  return dos_getfattr(PriPathName);
+  return dos_getfattr_ref(pri_path_ref());
 }
 
 /* This function is almost identical to DosGetFattr().
@@ -857,12 +920,12 @@ COUNT DosSetFattr(dos_far_ptr name, UWORD attrp)
 {
   COUNT result;
 
-  result = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  result = truename_guest(name, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosSetFattr");
   if (result < SUCCESS)
     return result;
 
-  set_fcbname(PriPathName);
+  set_fcbname_ref(pri_path_ref());
 /// TODO:
 ///  if (result & IS_NETWORK)
 ///    return remote_setfattr(attrp);
@@ -876,25 +939,25 @@ COUNT DosSetFattr(dos_far_ptr name, UWORD attrp)
     /* SHARE closes the file if it is opened in
      * compatibility mode, else generate a critical error.
      * Here generate a critical error by opening in "rw compat" mode */
-    if ((result = share_open_check(x86_FAR_PTR(DOS_PSP, PriPathName) /* -> char[] */,
+    if ((result = share_open_check(pri_path_far(),
                                    DOS_PSP, O_RDWR, 0)) < 0)
       return result;
     /* else dos_setfattr will close the file */
     share_close_file(result);
   }
-  return dos_setfattr(PriPathName, attrp);
+  return dos_setfattr_ref(pri_path_ref(), attrp);
 }
 
 COUNT DosMkRmdir(const dos_far_ptr dir, int action)
 {
   COUNT result;
 
-  result = truename(dir, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  result = truename_guest(dir, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosMkRmdir");
   if (result < SUCCESS)
     return result;
 
-  set_fcbname(PriPathName);
+  set_fcbname_ref(pri_path_ref());
 /// TODO:
 ///  if (result & IS_NETWORK)
 ///    return network_redirector(action == 0x39 ? REM_MKDIR : REM_RMDIR);
@@ -902,7 +965,7 @@ COUNT DosMkRmdir(const dos_far_ptr dir, int action)
   if (result & IS_DEVICE)
     return DE_ACCESS;
 
-  return (action == 0x39 ? dos_mkdir : dos_rmdir)(PriPathName);
+  return action == 0x39 ? dos_mkdir_ref(pri_path_ref()) : dos_rmdir_ref(pri_path_ref());
 }
 
 COUNT DosRenameTrue(BYTE * path1, BYTE * path2, int attrib)
@@ -921,11 +984,20 @@ COUNT DosRenameTrue(BYTE * path1, BYTE * path2, int attrib)
   return dos_rename(path1, path2, attrib);
 }
 
+COUNT DosRenameTrueGuest(dos_far_ptr path1, dos_far_ptr path2, int attrib)
+{
+  fdos_path_ref p1 = fdos_path_guest(path1);
+  fdos_path_ref p2 = fdos_path_guest(path2);
+  if (fdos_path_get(p1, 0) != fdos_path_get(p2, 0))
+    return DE_DEVICE;
+  return dos_rename_ref(p1, p2, attrib);
+}
+
 COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2)
 {
   COUNT result;
 
-  result = truename(path2, SecPathName, CDS_MODE_CHECK_DEV_PATH);
+  result = truename_guest(path2, sec_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosRename 1");
   if (result < SUCCESS)
     return result;
@@ -933,17 +1005,17 @@ COUNT DosRename(dos_far_ptr path1, dos_far_ptr path2)
   if ((result & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE)
     return DE_FILENOTFND;
 
-  result = truename(path1, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  result = truename_guest(path1, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosRename 2");
   if (result < SUCCESS)
     return result;
 
-  set_fcbname(PriPathName);
+  set_fcbname_ref(pri_path_ref());
 
   if ((result & (IS_NETWORK | IS_DEVICE)) == IS_DEVICE)
     return DE_FILENOTFND;
 
-  return DosRenameTrue(PriPathName, SecPathName, D_ALL);
+  return dos_rename_ref(pri_path_ref(), sec_path_ref(), D_ALL);
 }
 
 COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
@@ -957,14 +1029,20 @@ COUNT DosTruename(dos_far_ptr src, dos_far_ptr dest)
    * This port's truename() already accepts a guest far source pointer
    * and writes to a native kernel buffer.
    */
-  COUNT rc = truename(src, PriPathName, CDS_MODE_ALLOW_WILDCARDS);
+  COUNT rc = truename_guest(src, pri_path_far(), CDS_MODE_ALLOW_WILDCARDS);
   dpb_watch_check_chain("DosTruename");
   if (rc >= SUCCESS) {
     /* dest is the guest's ES:DI. A truename can be 128 bytes, so a guest
        that points DI near the end of its segment must have the tail wrap
        back to ES:0000, not run on into the next segment. */
-    guest_strcpy(dest, PriPathName);
-    set_fcbname(PriPathName);
+    {
+      const size_t n = fdos_path_len(pri_path_ref(), FDOS_PATHLEN - 1u);
+      size_t i;
+      for (i = 0; i <= n; ++i)
+        pstore8(((uint32_t)FP_SEG(dest) << 4) + (UWORD)(FP_OFF(dest) + (UWORD)i),
+                fdos_path_get(pri_path_ref(), i));
+    }
+    set_fcbname_ref(pri_path_ref());
   }
   return rc;
 }
@@ -1067,15 +1145,14 @@ int SetJFTSize(UWORD nHandles)
   newtab = MK_FP(block, 0);
 
   i = process.max_files();
-  /* Copy the existing part, then fill the rest with "no open file".
-     If the guest left ps_filetab pointing at a sentinel, there is nothing
-     to carry over: copying would seed the new table with bytes read out of
-     the IVT and hand them back as SFT indices. Inherit nothing instead -
-     the fmemset() below then marks every handle closed. The new table then marks every remaining handle closed. */
+  /* Copy the existing guest JFT into the new guest JFT, then fill the rest
+     with "no open file". If ps_filetab is a sentinel, inherit nothing: a
+     guest copy from it would read IVT bytes and turn them into SFT indices. */
   if (far_is_null(process.file_table()) || far_is_end(process.file_table()))
     i = 0;
   else
-    fmemcpy(newtab, process.file_table(), i);
+    guest_move_block(dosfns_far_linear(newtab),
+                     dosfns_far_linear(process.file_table()), i);
   fmemset(MK_FP(block, i), 0xff, nHandles - i);
 
   process.max_files(nHandles);
@@ -1257,16 +1334,23 @@ COUNT DosGetCuDir(UBYTE drive, dos_far_ptr dst)
   if (drive-- == 0)
     drive = (UBYTE)dosfns_idata.default_drive();
 
-  SecPathName[0] = (BYTE)('A' + (drive & 0x1f));
-  SecPathName[1] = ':';
-  SecPathName[2] = '\0';
+  pstore8(sec_path_ref().guest_linear + 0u, (UBYTE)('A' + (drive & 0x1f)));
+  pstore8(sec_path_ref().guest_linear + 1u, ':');
+  pstore8(sec_path_ref().guest_linear + 2u, 0);
 
-  if (truename(x86_FAR_PTR(DOS_PSP, (void *)SecPathName),
-               PriPathName, CDS_MODE_SKIP_PHYSICAL) < SUCCESS)
+  if (truename_guest(sec_path_far(), pri_path_far(),
+                    CDS_MODE_SKIP_PHYSICAL) < SUCCESS)
     return DE_INVLDDRV;
 
   /* dst is the guest's DS:SI (AH=47h); same wrap reasoning as DosTruename. */
-  guest_strcpy(dst, PriPathName + 3);
+  {
+    size_t i;
+    fdos_path_ref sub = fdos_path_sub(pri_path_ref(), 3u);
+    const size_t n = fdos_path_len(sub, FDOS_PATHLEN - 3u);
+    for (i = 0; i <= n; ++i)
+      pstore8(((uint32_t)FP_SEG(dst) << 4) + (UWORD)(FP_OFF(dst) + (UWORD)i),
+              fdos_path_get(sub, i));
+  }
   return SUCCESS;
 }
 
@@ -1279,21 +1363,21 @@ COUNT DosChangeDir(dos_far_ptr s)
 {
   COUNT result;
 
-  result = truename(s, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  result = truename_guest(s, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosChangeDir");
   if (result < SUCCESS)
     return DE_PATHNOTFND;
 
-  set_fcbname(PriPathName);
+  set_fcbname_ref(pri_path_ref());
 
-  if (CDS_WRITABLE(dosfns_idata.current_ldt()) && (strlen(PriPathName) >= MAX_CDSPATH))
+  if (CDS_WRITABLE(dosfns_idata.current_ldt()) && (fdos_path_len(pri_path_ref(), FDOS_PATHLEN) >= MAX_CDSPATH))
     return DE_PATHNOTFND;
 
   /// TODO:
   ///  if (result & IS_NETWORK)
   ///    return network_redirector(REM_CHDIR);
 
-  result = dos_cd(PriPathName);
+  result = dos_cd_ref(pri_path_ref());
   if (result < SUCCESS)
     return result;
 
@@ -1304,8 +1388,14 @@ COUNT DosChangeDir(dos_far_ptr s)
   if (CDS_WRITABLE(current_ldt))
   {
     const cds_ref cdsp(current_ldt);
-    cdsp.write_current_path(PriPathName);
-    if (PriPathName[7] == 0)
+    {
+      const size_t n = fdos_path_len(pri_path_ref(), MAX_CDSPATH - 1u);
+      guest_move_block(
+          ((uint32_t)FP_SEG(dosfns_idata.current_ldt()) << 4) +
+              FP_OFF(dosfns_idata.current_ldt()) + offsetof(cds, cdsCurrentPath),
+          pri_path_ref().guest_linear, n + 1u);
+    }
+    if (fdos_path_get(pri_path_ref(), 7) == 0)
       cdsp.current_path_byte(8, 0);
   }
   return SUCCESS;
@@ -1321,12 +1411,12 @@ COUNT DosDelete(dos_far_ptr path, int attrib)
 {
   COUNT result;
 
-  result = truename(path, PriPathName, CDS_MODE_CHECK_DEV_PATH);
+  result = truename_guest(path, pri_path_far(), CDS_MODE_CHECK_DEV_PATH);
   dpb_watch_check_chain("DosDelete");
   if (result < SUCCESS)
     return result;
 
-  set_fcbname(PriPathName);
+  set_fcbname_ref(pri_path_ref());
 
   /// TODO:
   ///  if (result & IS_NETWORK)
@@ -1338,55 +1428,14 @@ COUNT DosDelete(dos_far_ptr path, int attrib)
   ///  if (IsShareInstalled(TRUE) && share_is_file_open(PriPathName))
   ///    return DE_ACCESS;
 
-  return dos_delete(PriPathName, attrib);
+  return dos_delete_ref(pri_path_ref(), attrib);
 }
 
-/* DosFindFirst()/DosFindNext() (INT 21h AH=4Eh/
-   4Fh) were declared in proto.h but never implemented in this port -
-   without them DIR, wildcard COPY, and any directory enumeration had
-   no working backend at all. Migrated from upstream dosfns.c, with
-   two adaptations for this port (documented inline below):
-     1. the original passes the caller's DTA around as a bare near/far
-        dmatch* (since real DOS keeps results directly in the DTA
-        buffer) - here internal_data->dta is a dos_far_ptr, so pop_dmp
-        takes it as such and ARM_PTR-converts it once, writing fields
-        directly instead of calling fmemcpy() (which needs a guest
-        dos_far_ptr *source* too - see kernel.c; sda_tmp_dmD is native
-        memory, not a guest address, so fmemcpy would be the wrong
-        tool here regardless).
-     2. get_root() in this port already returns a plain native char*
-        (see dosfns.c), not a near/far pointer requiring FP_OFF() to
-        extract - original's "FP_OFF(get_root(...))" is simplified
-        accordingly.
-   network_redirector branch dropped, same as DosMkRmdir/DosChangeDir
-   above (no redirector in this port). */
-/* DosFindFirst()/DosFindNext() (INT 21h AH=4Eh/
-   4Fh) were declared in proto.h but never implemented in this port -
-   without them DIR, wildcard COPY, and any directory enumeration had
-   no working backend at all. Migrated from upstream dosfns.c, with
-   two adaptations for this port (documented inline below):
-     1. the original passes the caller's DTA around as a bare near/far
-        dmatch* (since real DOS keeps results directly in the DTA
-        buffer) - here internal_data->dta is a dos_far_ptr, so pop_dmp
-        takes it as such and ARM_PTR-converts it once, writing fields
-        directly instead of calling fmemcpy() (which needs a guest
-        dos_far_ptr *source* too - see kernel.c; sda_tmp_dmD is native
-        memory reached through internal_data, not something we'd want
-        to reconstruct a far pointer for just to hand to fmemcpy).
-     2. DosFindFirst() takes dos_far_ptr name directly (like
-        DosChangeDir/DosOpenSft do) instead of the stale BYTE FAR*
-        prototype that was here before - a native pointer can't be
-        turned back into a guest far pointer relative to an arbitrary
-        segment (e.g. the caller's DS), only relative to a segment its
-        address is actually known to be reachable from; DOS_PSP (the
-        kernel's own reserved segment, see mcb.h) is that segment for
-        internal_data's fields, which is why it - not the caller's DS
-        or the DTA's segment - is used below for sda_tmp_dmD.
-   get_root() in this port already returns a plain native char*, not
-   a near/far pointer requiring FP_OFF() to extract - original's
-   "FP_OFF(get_root(...))" is simplified accordingly. network_redirector
-   branch dropped, same as DosMkRmdir/DosChangeDir above (no redirector
-   in this port). */
+/* DosFindFirst()/DosFindNext() (INT 21h AH=4Eh/4Fh).
+   The caller DTA, SDA search prefix, and SearchDir are guest-resident.
+   Access them through dmatch_ref/pload/pstore instead of manufacturing
+   native aliases; this keeps enumeration valid across paging cache
+   refills.  Network redirector handling remains omitted. */
 STATIC int pop_dmp(int rc, dos_far_ptr dta_far)
 {
   dosfns_idata.dta(dta_far);
@@ -1395,12 +1444,21 @@ STATIC int pop_dmp(int rc, dos_far_ptr dta_far)
     BYTE name[FNAME_SIZE + FEXT_SIZE + 2];
     const dmatch_ref dm(dta_far);
 
-    dm.write_prefix(&sda_tmp_dmD);
-    dm.attr_found((BYTE)SearchDirD.dir_attrib);
-    dm.time_found(SearchDirD.dir_time);
-    dm.date_found(SearchDirD.dir_date);
-    dm.size_found((ULONG)SearchDirD.dir_size);
-    ConvertName83ToNameSZ(name, (BYTE FAR *)SearchDirD.dir_name);
+    {
+      size_t i;
+      for (i = 0; i < offsetof(dmatch, dm_attr_fnd); ++i)
+        pstore8(((uint32_t)FP_SEG(dta_far) << 4) + (UWORD)(FP_OFF(dta_far) + (UWORD)i),
+                pload8(sda_dmatch_linear() + (uint32_t)i));
+    }
+    dm.attr_found(pload8(sda_searchdir_linear() + offsetof(struct dirent, dir_attrib)));
+    dm.time_found(pload16(sda_searchdir_linear() + offsetof(struct dirent, dir_time)));
+    dm.date_found(pload16(sda_searchdir_linear() + offsetof(struct dirent, dir_date)));
+    dm.size_found(pload32(sda_searchdir_linear() + offsetof(struct dirent, dir_size)));
+    {
+      BYTE raw[FNAME_SIZE + FEXT_SIZE];
+      guest_read_block(sda_searchdir_linear() + offsetof(struct dirent, dir_name), raw, sizeof(raw));
+      ConvertName83ToNameSZ(name, raw);
+    }
     dm.write_name(name, strlen((const char *)name) + 1u);
   }
   return rc;
@@ -1411,18 +1469,18 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
   int rc;
   dos_far_ptr dta_far = dosfns_idata.dta();
 
-  rc = truename(name, PriPathName, CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
+  rc = truename_guest(name, pri_path_far(), CDS_MODE_CHECK_DEV_PATH | CDS_MODE_ALLOW_WILDCARDS);
   dpb_watch_check_chain("DosFindFirst");
   if (rc < SUCCESS)
     return rc;
 
-  set_fcbname(PriPathName);
+  set_fcbname_ref(pri_path_ref());
 
-  SAttrD = (BYTE) attr;
+  pstore8(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF + offsetof(dos_data, SAttr), (UBYTE)attr);
 
-  dosfns_idata.dta(x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD));
-  memset(&sda_tmp_dmD, 0, sizeof(dmatch));
-  memset(&SearchDirD, 0, sizeof(struct dirent));
+  dosfns_idata.dta(sda_dmatch_far());
+  guest_fill_block(sda_dmatch_linear(), 0, offsetof(dmatch, dm_attr_fnd));
+  guest_fill_block(sda_searchdir_linear(), 0, sizeof(struct dirent));
 
   /// TODO:
   ///  if (rc & IS_NETWORK)
@@ -1430,23 +1488,34 @@ COUNT DosFindFirst(UCOUNT attr, dos_far_ptr name)
 
   if (rc & IS_DEVICE)
   {
-    const char *p;
     COUNT i;
+    size_t root = 0;
+    const size_t plen = fdos_path_len(pri_path_ref(), FDOS_PATHLEN);
 
     /* make sure the next search fails */
-    sda_tmp_dmD.dm_entry = 0xffff;
+    pstore16(sda_dmatch_linear() + offsetof(dmatch, dm_entry), 0xffff);
     /* Found a matching device. Hence there cannot be wildcards. */
-    SearchDirD.dir_attrib = D_DEVICE;
-    SearchDirD.dir_time = dos_gettime();
-    SearchDirD.dir_date = dos_getdate();
-    p = get_root(PriPathName);
-    memset(SearchDirD.dir_name, ' ', FNAME_SIZE + FEXT_SIZE);
-    for (i = 0; i < FNAME_SIZE && *p && *p != '.'; i++)
-      SearchDirD.dir_name[i] = *p++;
+    pstore8(sda_searchdir_linear() + offsetof(struct dirent, dir_attrib), D_DEVICE);
+    pstore16(sda_searchdir_linear() + offsetof(struct dirent, dir_time), dos_gettime());
+    pstore16(sda_searchdir_linear() + offsetof(struct dirent, dir_date), dos_getdate());
+    for (size_t k = 0; k < plen; ++k)
+    {
+      UBYTE c = fdos_path_get(pri_path_ref(), k);
+      if (c == '/' || c == '\\' || c == ':')
+        root = k + 1u;
+    }
+    guest_fill_block(sda_searchdir_linear() + offsetof(struct dirent, dir_name), ' ', FNAME_SIZE + FEXT_SIZE);
+    for (i = 0; i < FNAME_SIZE; ++i)
+    {
+      UBYTE c = fdos_path_get(pri_path_ref(), root + (size_t)i);
+      if (!c || c == '.')
+        break;
+      pstore8(sda_searchdir_linear() + offsetof(struct dirent, dir_name) + (uint32_t)i, c);
+    }
     rc = SUCCESS;
   }
   else
-    rc = dos_findfirst(attr, PriPathName);
+    rc = dos_findfirst_ref(attr, pri_path_ref());
 
   return pop_dmp(rc, dta_far);
 }
@@ -1458,7 +1527,12 @@ COUNT DosFindNext(void)
 
   /* DTA is guest-supplied; only the 21-byte search prefix is consumed by
      the FAT walker. Keep that native working state, but never alias the DTA. */
-  dmatch_ref(dta_far).read_prefix(&sda_tmp_dmD);
+  {
+    size_t i;
+    for (i = 0; i < offsetof(dmatch, dm_attr_fnd); ++i)
+      pstore8(sda_dmatch_linear() + (uint32_t)i,
+              pload8(((uint32_t)FP_SEG(dta_far) << 4) + (UWORD)(FP_OFF(dta_far) + (UWORD)i)));
+  }
 
   /* findnext will always fail on a volume id search or device name */
   /* Upstream guards the dm_entry sentinel with "!(dm_drive & 0x80)": bit 7
@@ -1467,12 +1541,13 @@ COUNT DosFindNext(void)
      the guard. It is unreachable today (no redirector can create such a
      search), but the DTA is guest-writable, so restore upstream's exact
      condition rather than rely on that. */
-  if ((sda_tmp_dmD.dm_attr_srch & ~(D_RDONLY | D_ARCHIVE | D_DEVICE)) == D_VOLID
-      || (!(sda_tmp_dmD.dm_drive & 0x80) && sda_tmp_dmD.dm_entry == 0xffff))
+  if ((pload8(sda_dmatch_linear() + offsetof(dmatch, dm_attr_srch)) & ~(D_RDONLY | D_ARCHIVE | D_DEVICE)) == D_VOLID
+      || (!(pload8(sda_dmatch_linear() + offsetof(dmatch, dm_drive)) & 0x80) &&
+          pload16(sda_dmatch_linear() + offsetof(dmatch, dm_entry)) == 0xffff))
     return DE_NFILES;
 
-  memset(&SearchDirD, 0, sizeof(struct dirent));
-  dosfns_idata.dta(x86_FAR_PTR(DOS_PSP, (void*)&sda_tmp_dmD));
+  guest_fill_block(sda_searchdir_linear(), 0, sizeof(struct dirent));
+  dosfns_idata.dta(sda_dmatch_far());
   rc = dos_findnext();
 
   return pop_dmp(rc, dta_far);

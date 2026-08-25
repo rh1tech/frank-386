@@ -2311,25 +2311,35 @@ invalid_path:
 }
 
 
+/* truename() is core0-synchronous and never recursively invokes itself.
+ * Keep its legacy pointer-oriented parser on two native scratch strings,
+ * while guest source/destination buffers are transferred only through the
+ * paging-aware bulk primitives.  This removes the old 128-byte stack
+ * snapshot and, crucially, never exposes PriPathBuffer/SecPathBuffer as a
+ * host pointer. */
+static char truename_src_scratch[FDOS_PATHLEN];
+static char truename_dst_scratch[FDOS_PATHLEN];
+
 COUNT truename(dos_far_ptr x86_src, char *dest, COUNT mode)
 {
-  /*
-   * Pageable guest RAM has no pinned pages.  Snapshot only the caller's
-   * ASCIIZ pathname; live CDS metadata is read through field proxies, and
-   * only cdsCurrentPath is copied into a stable native path buffer.
-   */
-  char src_snapshot[FDOS_PATHLEN];
   const uint32_t src_linear = ((uint32_t)FP_SEG(x86_src) << 4) + FP_OFF(x86_src);
-  size_t i = 0;
+  size_t n = guest_strnlen_block(src_linear, FDOS_PATHLEN - 1u);
+  if (n >= FDOS_PATHLEN - 1u && pload8(src_linear + (uint32_t)n) != 0)
+    n = FDOS_PATHLEN - 1u;
+  guest_read_block(src_linear, truename_src_scratch, n);
+  truename_src_scratch[n] = '\0';
+  return truename_worker(x86_src, truename_src_scratch, dest, mode);
+}
 
-  for (; i + 1u < sizeof(src_snapshot); ++i)
+COUNT truename_guest(dos_far_ptr x86_src, dos_far_ptr x86_dest, COUNT mode)
+{
+  COUNT rc = truename(x86_src, truename_dst_scratch, mode);
+  if (rc >= SUCCESS)
   {
-    src_snapshot[i] = (char)pload8(src_linear + (uint32_t)i);
-    if (src_snapshot[i] == '\0')
-      break;
+    const size_t n = strnlen(truename_dst_scratch, FDOS_PATHLEN - 1u);
+    guest_write(x86_dest, truename_dst_scratch, n + 1u);
   }
-  src_snapshot[sizeof(src_snapshot) - 1u] = '\0';
-  return truename_worker(x86_src, src_snapshot, dest, mode);
+  return rc;
 }
 
 /* FAT time notation in the form of hhhh hmmm mmmd dddd (d = double second)
@@ -2732,10 +2742,11 @@ void kernel(CPU* _cpu) {
     kernel_guest_fill(kernel_guest_linear(x86_INTERNAL_DATA), 0,
                       sizeof(struct dos_data));
 
-    /* Legacy globals remain for not-yet-migrated C units, but initialization
-       itself no longer relies on contiguous host mappings. */
-    LoL = (struct lol*)ARM_PTR(x86_FIXED_DATA);
-    internal_data = (struct dos_data*)ARM_PTR(x86_INTERNAL_DATA);
+    /* LoL/SDA are guest-resident state.  Keep the legacy host-pointer
+       globals NULL so new code cannot accidentally regain a persistent
+       alias into a pageable cache slot. */
+    LoL = NULL;
+    internal_data = NULL;
 
     pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, switchar), '/');
     pstore8(KERNEL_IDATA_LINEAR + offsetof(struct dos_data, net_set_count), 1);

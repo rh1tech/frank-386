@@ -76,19 +76,39 @@ bool drop_bios_callback(CPU *cpu, bios_callback_params_t *params);
 bool cpu_pending_trap(void);
 void cpu_pending_trap_set(bool v);
 
-#define ExeHeader (*(exe_header *)(SecPathName + 0))
-#define TempExeBlock (*(exec_blk *)(SecPathName + sizeof(exe_header)))
-#define Shell (SecPathName + sizeof(exe_header) + sizeof(exec_blk))
+/* SecPathBuffer remains a DOS guest scratch area.  Never expose it as a
+   native pointer: in SPI/SWAP paging an ARM_PTR alias is only valid for the
+   currently mapped cache span. */
+static const uint32_t task_sec_path_linear =
+    ((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF +
+    offsetof(struct dos_data, SecPathBuffer);
 
-/* Scratch pair of UWORDs used only while reading EXE relocation table
-   entries (DosExeLoader()). Reuses the same SecPathName bytes as
-   Shell: safe, because by the time DosExeLoader() runs, "lp" (which
-   may itself have been Shell, e.g. for the running shell re-EXEC'ing
-   itself) has already been fully consumed by DosOpenSft() at the very
-   start of DosExec(), and Shell isn't touched again until well after
-   DosExec() returns (see P_0() below) - same "recycle SecPathBuffer"
-   approach already used for ExeHeader/TempExeBlock. */
-#define RelocBuf ((UWORD *)(SecPathName + sizeof(exe_header) + sizeof(exec_blk)))
+static inline dos_far_ptr task_sec_path_far(size_t off)
+{
+  return MK_FP(DOS_PSP,
+               (UWORD)(X86_INTERNAL_DATA_OFF +
+                       offsetof(struct dos_data, SecPathBuffer) + off));
+}
+
+static inline UBYTE task_sec_read8(size_t off)
+{
+  return pload8(task_sec_path_linear + (uint32_t)off);
+}
+
+static inline UWORD task_sec_read16(size_t off)
+{
+  return pload16(task_sec_path_linear + (uint32_t)off);
+}
+
+#define EXE_U16(member) task_sec_read16(offsetof(exe_header, member))
+
+/* The EXEC parameter block is native working state passed between native C
+   routines.  It is deliberately not stored in pageable guest memory. */
+static exec_blk TempExeBlock;
+
+/* Two guest UWORDs immediately after the EXE header are used as relocation
+   input scratch. */
+#define TASK_RELOC_OFF (sizeof(exe_header))
 
 #define DEVLOAD_CHUNK_PARAS (32256 / 16)       /* also used by EXEC_OVERLAY loads */
 #define CHUNK           32256                  /* bytes per DosExeLoader() read */
@@ -788,7 +808,10 @@ static void *arm_app_dos_malloc(size_t size)
 
 void *arm_native_app_malloc(size_t size)
 {
-  void *ptr = arm_app_psram_malloc(size);
+  void *ptr;
+  if (!arm_native_runtime_available())
+    return NULL;
+  ptr = arm_app_psram_malloc(size);
   return ptr != NULL ? ptr : arm_app_dos_malloc(size);
 }
 
@@ -796,6 +819,8 @@ void arm_native_app_free(void *ptr)
 {
   UWORD segment;
 
+  if (!arm_native_runtime_available())
+    return;
   if (ptr == NULL)
     return;
   if (arm_app_psram_owns(ptr)) {
@@ -818,13 +843,15 @@ void *arm_native_app_calloc(size_t count, size_t size)
   total = count * size;
   ptr = arm_native_app_malloc(total);
   if (ptr != NULL)
-    memset(ptr, 0, total);
+    nf_memset(ptr, 0, total);
   return ptr;
 }
 
 void *arm_native_app_realloc(void *ptr, size_t size)
 {
   UWORD segment;
+  if (!arm_native_runtime_available())
+    return NULL;
   ULONG old_size;
   void *new_ptr;
 
@@ -850,7 +877,7 @@ void *arm_native_app_realloc(void *ptr, size_t size)
     new_ptr = arm_app_dos_malloc(size);
     if (new_ptr == NULL)
       return NULL;
-    memcpy(new_ptr, ptr, old_payload < size ? old_payload : size);
+    dos_api_memcpy(new_ptr, ptr, old_payload < size ? old_payload : size);
     arm_app_psram_free(ptr);
     return new_ptr;
   }
@@ -878,7 +905,7 @@ void *arm_native_app_realloc(void *ptr, size_t size)
   new_ptr = arm_native_app_malloc(size);
   if (new_ptr == NULL)
     return NULL;
-  memcpy(new_ptr, ptr, old_size < size ? old_size : size);
+  dos_api_memcpy(new_ptr, ptr, old_size < size ? old_size : size);
   arm_native_app_free(ptr);
   return new_ptr;
 }
@@ -886,6 +913,8 @@ void *arm_native_app_realloc(void *ptr, size_t size)
 size_t arm_native_app_malloc_largest(void)
 {
   UWORD paragraphs = 0;
+  if (!arm_native_runtime_available())
+    return 0;
   size_t psram_largest = arm_app_psram_largest();
   size_t dos_largest = 0;
 
@@ -894,10 +923,11 @@ size_t arm_native_app_malloc_largest(void)
   return psram_largest > dos_largest ? psram_largest : dos_largest;
 }
 
-/* Metadata reads must still pass through DosRWSft(), whose destination is a
-   guest far pointer.  RelocBuf is existing synchronous task.c scratch space
-   and is large enough for the largest metadata record read here (64-byte EZ header). */
-#define ElfScratch ((BYTE *)RelocBuf)
+/* Native ARM loaders are runtime-guarded by arm_native_runtime_available().
+   Their metadata scratch remains in SecPathBuffer; only after the QSPI guard
+   may it be exposed as a stable native alias. */
+#define ELF_SCRATCH_FAR MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, PriPathBuffer)))
+#define ElfScratch ((BYTE *)ARM_PTR(ELF_SCRATCH_FAR))
 
 static int arm_elf_read_meta(COUNT fd, ULONG file_off, void *dst, UWORD len)
 {
@@ -907,10 +937,10 @@ static int arm_elf_read_meta(COUNT fd, ULONG file_off, void *dst, UWORD len)
   if (pos < 0)
     return DE_INVLDFMT;
   got = DosRWSft(fd, len,
-                 x86_FAR_PTR(DOS_PSP, ElfScratch), XFR_READ);
+                 ELF_SCRATCH_FAR, XFR_READ);
   if (got != len)
     return DE_INVLDFMT;
-  memcpy(dst, ElfScratch, len);
+  dos_api_memcpy(dst, ElfScratch, len);
   return SUCCESS;
 }
 
@@ -1019,10 +1049,10 @@ static int arm_elf_read_native_section(COUNT fd, void *dst,
   while (done < size) {
     UWORD chunk = (UWORD)min((ULONG)ARM_ELF_NATIVE_READ_CHUNK, size - done);
     LONG got = DosRWSft(fd, chunk,
-                        x86_FAR_PTR(DOS_PSP, ElfScratch), XFR_READ);
+                        ELF_SCRATCH_FAR, XFR_READ);
     if (got != chunk)
       return DE_INVLDFMT;
-    memcpy(out + done, ElfScratch, chunk);
+    dos_api_memcpy(out + done, ElfScratch, chunk);
     done += chunk;
   }
   return SUCCESS;
@@ -1457,7 +1487,7 @@ static int arm_elf_find_blocking_symbol(COUNT fd,
   if (entsize < sizeof(arm_elf32_sym))
     return DE_INVLDFMT;
   count = meta->symtab.size / entsize;
-  memset(&best, 0, sizeof(best));
+  nf_memset(&best, 0, sizeof(best));
 
   for (i = 0; i < count; ++i) {
     arm_elf32_sym sym;
@@ -1735,7 +1765,7 @@ static int arm_elf_copy_startup_kind(COUNT fd, UWORD base_seg,
             arm_elf_guest_ptr(base_seg, states[best].offset));
         BYTE *dst = (BYTE *)ARM_PTR(
             arm_elf_guest_ptr(base_seg, dst_off + count * sizeof(ULONG)));
-        memcpy(dst, src, states[best].size);
+        dos_api_memcpy(dst, src, states[best].size);
         count += states[best].size / sizeof(ULONG);
       }
       previous = best;
@@ -2267,7 +2297,7 @@ static int arm_elf_load_section(COUNT fd, UWORD base_seg,
     if (piece_end > logical) {
       ULONG piece_size = piece_end - logical;
       if (sh.type == SHT_NOBITS) {
-        memset(ARM_PTR(arm_elf_guest_ptr(base_seg, off)), 0, piece_size);
+        nf_memset(ARM_PTR(arm_elf_guest_ptr(base_seg, off)), 0, piece_size);
       } else {
         rc = arm_elf_read_section(fd, base_seg, off, sh.offset, piece_size);
         if (rc != SUCCESS) {
@@ -2334,7 +2364,7 @@ retry_pool:
 
     piece_size = piece_end - logical;
     if (sh.type == SHT_NOBITS) {
-      memset(ARM_PTR(arm_elf_guest_ptr(data_seg, data_off)), 0, piece_size);
+      nf_memset(ARM_PTR(arm_elf_guest_ptr(data_seg, data_off)), 0, piece_size);
     } else {
       rc = arm_elf_read_section(fd, data_seg, data_off,
                                 sh.offset + logical, piece_size);
@@ -2438,7 +2468,7 @@ app_heap_fallback:
       }
 
       if (sh.type == SHT_NOBITS) {
-        memset((BYTE *)allocation + data_off, 0, piece_size);
+        nf_memset((BYTE *)allocation + data_off, 0, piece_size);
       } else {
         rc = arm_elf_read_native_section(fd, (BYTE *)allocation + data_off,
                                          sh.offset + logical, piece_size);
@@ -2495,8 +2525,8 @@ static int arm_elf_read_crt_requirements(
   UBYTE have_fallback = FALSE;
   UWORD i;
 
-  memset(requirements, 0, sizeof(*requirements));
-  memset(&fallback, 0, sizeof(fallback));
+  nf_memset(requirements, 0, sizeof(*requirements));
+  nf_memset(&fallback, 0, sizeof(fallback));
 
   for (i = 0; i < meta->eh.shnum; ++i) {
     arm_elf32_shdr sh;
@@ -2709,6 +2739,8 @@ static UWORD doom_diag_dos_stack_size;
  */
 void doom_stack_guard_check(unsigned stage)
 {
+  if (!arm_native_runtime_available())
+    return;
   extern volatile uint32_t dos_diag_kernel_code;
   uintptr_t sp;
   unsigned i;
@@ -2802,9 +2834,9 @@ static int arm_elf_native_stack_acquire(ULONG size, uintptr_t *bottom,
   *previous_cursor = cursor;
   *bottom = next;
   arm_elf_native_stack_cursor = next;
-  memset((void *)next, 0, size);
+  nf_memset((void *)next, 0, size);
   if (size >= DOOM_NATIVE_STACK_GUARD)
-    memset((void *)next, DOOM_STACK_CANARY, DOOM_NATIVE_STACK_GUARD);
+    nf_memset((void *)next, DOOM_STACK_CANARY, DOOM_NATIVE_STACK_GUARD);
   return SUCCESS;
 }
 
@@ -2860,9 +2892,9 @@ static int arm_native_reserve_dos_stack_low(ULONG stack_size,
 
   *out_mcb = mcb_seg;
   *out_seg = mcb_seg + 1;
-  memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
+  nf_memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
   if (stack_size >= DOOM_DOS_STACK_GUARD)
-    memset(ARM_PTR(MK_FP(*out_seg, 0)),
+    nf_memset(ARM_PTR(MK_FP(*out_seg, 0)),
            DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   fdos_mcb_set_owner(mcb_seg, fdos_dos_cu_psp());
@@ -2903,9 +2935,9 @@ static int arm_native_reserve_dos_stack(ULONG stack_size,
 
   *out_mcb = mcb_seg;
   *out_seg = mcb_seg + 1;
-  memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
+  nf_memset(ARM_PTR(MK_FP(*out_seg, 0)), 0, stack_size);
   if (stack_size >= DOOM_DOS_STACK_GUARD)
-    memset(ARM_PTR(MK_FP(*out_seg, 0)),
+    nf_memset(ARM_PTR(MK_FP(*out_seg, 0)),
            DOOM_STACK_CANARY, DOOM_DOS_STACK_GUARD);
 
   /* Temporary owner until the child PSP exists. */
@@ -3064,8 +3096,8 @@ static int arm_elf_build_argv(UWORD base_seg, arm_elf_load_meta *meta,
   text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
   argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
   text = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg, text_off));
-  memset(argv, 0, ARM_ELF_ARGV_SLOTS * sizeof(ULONG));
-  memset(text, 0, ARM_ELF_ARG_TEXT_SIZE);
+  nf_memset(argv, 0, ARM_ELF_ARGV_SLOTS * sizeof(ULONG));
+  nf_memset(text, 0, ARM_ELF_ARG_TEXT_SIZE);
 
   if (namep != NULL && *namep != '\0') {
     ULONG start = text_used;
@@ -3147,8 +3179,8 @@ static int arm_ez_build_argv(UWORD base_seg, arm_ez_load_meta *meta,
   text_off = argv_off + ARM_ELF_ARGV_SLOTS * sizeof(ULONG);
   argv = (ULONG *)ARM_PTR(arm_elf_guest_ptr(base_seg, argv_off));
   text = (BYTE *)ARM_PTR(arm_elf_guest_ptr(base_seg, text_off));
-  memset(argv, 0, ARM_ELF_ARGV_SLOTS * sizeof(ULONG));
-  memset(text, 0, ARM_ELF_ARG_TEXT_SIZE);
+  nf_memset(argv, 0, ARM_ELF_ARGV_SLOTS * sizeof(ULONG));
+  nf_memset(text, 0, ARM_ELF_ARG_TEXT_SIZE);
 
   if (namep != NULL && *namep != '\0') {
     ULONG start = text_used;
@@ -3289,7 +3321,7 @@ static int arm_ez_read_native_image(COUNT fd, BYTE *dst,
       return DE_INVLDFMT;
     }
 
-    memcpy(dst + done, ARM_PTR(stage), chunk);
+    dos_api_memcpy(dst + done, ARM_PTR(stage), chunk);
     done += chunk;
   }
 
@@ -3567,7 +3599,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   }
 
   if (header.image_mem_size > header.image_file_size)
-    memset(image_data + header.image_file_size, 0,
+    nf_memset(image_data + header.image_file_size, 0,
            header.image_mem_size - header.image_file_size);
 
   for (i = 0; i < header.reloc_count; ++i) {
@@ -3589,7 +3621,7 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
   }
 
   meta = (arm_ez_load_meta *)ARM_PTR(arm_elf_guest_ptr(load_seg, meta_off));
-  memset(meta, 0, sizeof(*meta));
+  nf_memset(meta, 0, sizeof(*meta));
   meta->entry_addr = (ULONG)(uintptr_t)(image_base + header.entry_rva);
   meta->native_stack_size = native_stack_size;
   meta->dos_stack_size = dos_stack_size;
@@ -3771,7 +3803,7 @@ static COUNT DosArmElfLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
 
   /* Persistent loader metadata belongs to the child allocation. */
   meta = (arm_elf_load_meta *)ARM_PTR(arm_elf_guest_ptr(load_seg, metadata_off));
-  memset(meta, 0, metadata_size);
+  nf_memset(meta, 0, metadata_size);
   meta->loader_started_us = get_uticks();
   meta->eh = eh;
   meta->shnum = eh.shnum;
@@ -4126,8 +4158,10 @@ STATIC COUNT ChildEnvGuest(exec_blk *exp, UWORD *pChildEnvSeg,
   pstore16(dst_linear, 1);
   dst_linear += sizeof(UWORD);
 
-  if ((ret = truename(pathname, PriPathName,
-                      CDS_MODE_SKIP_PHYSICAL)) < SUCCESS)
+  if ((ret = truename_guest(
+           pathname,
+           MK_FP(DOS_PSP, (UWORD)(X86_INTERNAL_DATA_OFF + offsetof(struct dos_data, PriPathBuffer))),
+           CDS_MODE_SKIP_PHYSICAL)) < SUCCESS)
   {
     dpb_watch_check_chain("ChildEnv 1");
     return ret;
@@ -4279,7 +4313,7 @@ STATIC UWORD patchPSPGuest(UWORD pspseg, UWORD envseg,
     ++pos;
   }
 
-  memset(shortname, 0, sizeof(shortname));
+  nf_memset(shortname, 0, sizeof(shortname));
   for (i = 0; i < 12; ++i)
   {
     UBYTE c = task_far_peek8(fnam, (UWORD)(base + i));
@@ -4661,7 +4695,7 @@ static void arm_elf_service_guest_irq(void)
   old_pending_trap = cpu_pending_trap();
   old_ifl = ifl;
 
-  memset(&params, 0, sizeof(params));
+  nf_memset(&params, 0, sizeof(params));
   params.callback = arm_elf_irq_return;
   params.expected_cs = 0xFFEF;
   params.expected_ip = 0x000F;
@@ -5365,7 +5399,7 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
   UWORD exe_size;
   UWORD image_size;
 
-  image_size = (ExeHeader.exPages << 5) - ExeHeader.exHeaderSize;
+  image_size = (EXE_U16(exPages) << 5) - EXE_U16(exHeaderSize);
 
   if ((mode & 0x7f) != EXEC_OVERLAY)
   {
@@ -5375,7 +5409,7 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
     COUNT rc;
 
     image_size += sizeof(psp) / 16;
-    exe_size = image_size + ExeHeader.exMinAlloc;
+    exe_size = image_size + EXE_U16(exMinAlloc);
 
     if (exe_size < image_size)   /* overflow: exMinAlloc==0xffff etc. */
       return DE_NOMEM;
@@ -5392,13 +5426,13 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
     if (rc == SUCCESS)
       rc = ExecMemLargest(&asize, exe_size);
 
-    exe_size = image_size + ExeHeader.exMaxAlloc;
+    exe_size = image_size + EXE_U16(exMaxAlloc);
     if (exe_size > asize || exe_size < image_size)
       exe_size = asize;
 
     /* exMinAlloc==exMaxAlloc==0: allocate the largest possible block
        and load the image as high in it as possible */
-    if ((ExeHeader.exMinAlloc | ExeHeader.exMaxAlloc) == 0)
+    if ((EXE_U16(exMinAlloc) | EXE_U16(exMaxAlloc)) == 0)
       exe_size = asize;
 
     if (rc == SUCCESS)
@@ -5421,7 +5455,7 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
   else
     mem = exp->load.load_seg;
 
-  if (SftSeek(fd, (LONG) ExeHeader.exHeaderSize * 16UL, SEEK_SET) < SUCCESS)
+  if (SftSeek(fd, (LONG) EXE_U16(exHeaderSize) * 16UL, SEEK_SET) < SUCCESS)
   {
     if (mode != EXEC_OVERLAY)
     {
@@ -5437,7 +5471,7 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
   {
     exe_size -= sizeof(psp) / 16;
     start_seg += sizeof(psp) / 16;
-    if (exe_size > 0 && (ExeHeader.exMinAlloc | ExeHeader.exMaxAlloc) == 0)
+    if (exe_size > 0 && (EXE_U16(exMinAlloc) | EXE_U16(exMaxAlloc)) == 0)
     {
       start_seg += fdos_mcb_size((seg)(mem - 1)) - image_size;
     }
@@ -5464,14 +5498,15 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
 
   {
     COUNT i;
-    UWORD *reloc = RelocBuf;
 
-    SftSeek(fd, (LONG) ExeHeader.exRelocTable, SEEK_SET);
-    for (i = 0; i < ExeHeader.exRelocItems; i++)
+    SftSeek(fd, (LONG) EXE_U16(exRelocTable), SEEK_SET);
+    for (i = 0; i < EXE_U16(exRelocItems); i++)
     {
       uint32_t spot;
+      UWORD reloc_off;
+      UWORD reloc_seg;
 
-      if (DosRWSft(fd, sizeof(UWORD) * 2, x86_FAR_PTR(DOS_PSP, reloc) /* -> UWORD[] */,
+      if (DosRWSft(fd, sizeof(UWORD) * 2, task_sec_path_far(TASK_RELOC_OFF),
                    XFR_READ) != sizeof(UWORD) * 2)
       {
         if (mode != EXEC_OVERLAY)
@@ -5481,16 +5516,18 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
         }
         return DE_INVLDDATA;
       }
+      reloc_off = task_sec_read16(TASK_RELOC_OFF);
+      reloc_seg = task_sec_read16(TASK_RELOC_OFF + sizeof(UWORD));
       if (mode == EXEC_OVERLAY)
       {
         spot = task_guest_linear(
-            MK_FP((UWORD)(reloc[1] + mem), reloc[0]));
+            MK_FP((UWORD)(reloc_seg + mem), reloc_off));
         pstore16(spot, (UWORD)(pload16(spot) + exp->load.reloc));
       }
       else
       {
         spot = task_guest_linear(
-            MK_FP((UWORD)(reloc[1] + start_seg), reloc[0]));
+            MK_FP((UWORD)(reloc_seg + start_seg), reloc_off));
         pstore16(spot, (UWORD)(pload16(spot) + start_seg));
       }
     }
@@ -5510,8 +5547,8 @@ COUNT DosExeLoader(dos_far_ptr namep, exec_blk * exp, COUNT mode, COUNT fd)
               task_idata_read16(offsetof(struct dos_data, cu_psp)),
               mem + asize);
     fcbcode = patchPSPGuest(mem - 1, env, exp, namep);
-    exp->exec.stack = MK_FP(ExeHeader.exInitSS + start_seg, ExeHeader.exInitSP);
-    exp->exec.start_addr = MK_FP(ExeHeader.exInitCS + start_seg, ExeHeader.exInitIP);
+    exp->exec.stack = MK_FP(EXE_U16(exInitSS) + start_seg, EXE_U16(exInitSP));
+    exp->exec.start_addr = MK_FP(EXE_U16(exInitCS) + start_seg, EXE_U16(exInitIP));
     load_transfer(mem, exp, fcbcode, mode);
   }
   return SUCCESS;
@@ -5631,7 +5668,7 @@ static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
   if ((mode & 0x7f) > EXEC_OVERLAY || (mode & 0x7f) == 2)
     return DE_INVLDFMT;
 
-  memcpy(&TempExeBlock, ep, sizeof(exec_blk));
+  dos_api_memcpy(&TempExeBlock, ep, sizeof(exec_blk));
 
   dos_far_ptr x86_dhp = task_guest_is_device(x86_lp);
   if (EFFECTIVE(x86_dhp) ||           /* don't try to "execute" e.g. C:\NUL */
@@ -5643,15 +5680,15 @@ static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
   fd = (COUNT) (openresult & 0xffff);
 
   rc = (int) DosRWSft(fd, sizeof(exe_header),
-                      x86_FAR_PTR(DOS_PSP, &ExeHeader) /* -> exe_header */,
+                      task_sec_path_far(0),
                       XFR_READ);
 
   if (rc == sizeof(exe_header) &&
-      (ExeHeader.exSignature == MAGIC || ExeHeader.exSignature == OLD_MAGIC))
+      (EXE_U16(exSignature) == MAGIC || EXE_U16(exSignature) == OLD_MAGIC))
     rc = DosExeLoader(x86_lp, &TempExeBlock, mode, fd);
   else if (rc >= 2 &&
-           ((const UBYTE *)&ExeHeader)[0] == 'E' &&
-           ((const UBYTE *)&ExeHeader)[1] == 'Z')
+           task_sec_read8(0) == 'E' &&
+           task_sec_read8(1) == 'Z')
   {
     if (!arm_native_runtime_available())
     {
@@ -5664,10 +5701,10 @@ static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
                           (BYTE *)ARM_PTR(x86_lp));
   }
   else if (rc >= 4 &&
-           ((const UBYTE *)&ExeHeader)[0] == 0x7f &&
-           ((const UBYTE *)&ExeHeader)[1] == 'E' &&
-           ((const UBYTE *)&ExeHeader)[2] == 'L' &&
-           ((const UBYTE *)&ExeHeader)[3] == 'F')
+           task_sec_read8(0) == 0x7f &&
+           task_sec_read8(1) == 'E' &&
+           task_sec_read8(2) == 'L' &&
+           task_sec_read8(3) == 'F')
   {
     if (!arm_native_runtime_available())
     {
@@ -5688,7 +5725,7 @@ static COUNT DosExecFar(COUNT mode, exec_blk *ep, dos_far_ptr x86_lp)
   }
 
   if (mode == EXEC_LOAD && rc == SUCCESS)
-    memcpy(ep, &TempExeBlock, sizeof(exec_blk));
+    dos_api_memcpy(ep, &TempExeBlock, sizeof(exec_blk));
 
   return rc;
 }
@@ -5725,48 +5762,74 @@ VOID P_0(CPU * cpu_, struct config FAR *Config)
   for ( ; ; )   /* endless shell load loop - reboot or shut down to exit it! */
   {
 #if GUEST_SHELL
-  BYTE *tailp, *endp;
+  size_t tail_off, end_off;
   exec_blk exb;
   UBYTE mode = Config->cfgP_0_startmode;
+  const dos_far_ptr shell_far = task_sec_path_far(0);
+  const uint32_t shell_linear = task_sec_path_linear;
+  const size_t shell_capacity = sizeof(((struct dos_data *)0)->SecPathBuffer);
 
   /* build exec block and save all parameters here as init part will vanish! */
-  exb.exec.fcb_1 = exb.exec.fcb_2 = MK_FP(0xffff, 0xffff);  /* "no FCBs" - see
-                                                                far_is_end()/
-                                                                patchPSP() */
+  exb.exec.fcb_1 = exb.exec.fcb_2 = MK_FP(0xffff, 0xffff);
   exb.exec.env_seg = DOS_PSP + 8;
-  fstrcpy(Shell, Config->cfgInit);
-  /* join name and tail */
-  fstrcpy(Shell + strlen(Shell), Config->cfgInitTail);
-  endp =  Shell + strlen(Shell);
+  {
+    size_t init_len = strnlen((const char *)Config->cfgInit, shell_capacity - 1u);
+    size_t tail_len = strnlen((const char *)Config->cfgInitTail,
+                              shell_capacity - init_len - 1u);
+    guest_write_block(shell_linear, Config->cfgInit, init_len);
+    guest_write_block(shell_linear + (uint32_t)init_len,
+                      Config->cfgInitTail, tail_len);
+    end_off = init_len + tail_len;
+    pstore8(shell_linear + (uint32_t)end_off, 0);
+  }
 
-    BYTE *p;
-    /* if there are no parameters, point to end without "\r\n" */
-    if((tailp = strchr(Shell,'\t')) == NULL &&
-       (tailp = strchr(Shell, ' ')) == NULL)
-        tailp = endp - 2;
-    /* shift tail to right by 2 to make room for '\0', ctCount */
-    for (p = endp - 1; p >= tailp; p--)
-      *(p + 2) = *p;
-    /* terminate name and tail */
-    *tailp =  *(endp + 2) = '\0';
-    /* ctCount: just past '\0' do not count the "\r\n" */
+  /* Preserve the original P_0 byte layout exactly, but operate on the guest
+     SecPathBuffer by offset rather than through a host pointer. */
+  if (Config->cfgInitTail[0] == 0)
+    tail_off = end_off >= 2u ? end_off - 2u : 0u;
+  else
+  {
+    size_t tab_off = guest_find_byte(shell_linear, '\t', end_off);
+    size_t space_off = guest_find_byte(shell_linear, ' ', end_off);
+    size_t split_off;
+    if (tab_off == SIZE_MAX)
+      split_off = space_off;
+    else if (space_off == SIZE_MAX)
+      split_off = tab_off;
+    else
+      split_off = tab_off < space_off ? tab_off : space_off;
+
+    if (split_off == SIZE_MAX)
+      tail_off = end_off >= 2u ? end_off - 2u : 0u;
+    else
     {
-      CommandTail *ct = (CommandTail *)(tailp + 1);
-      ct->ctCount = endp - tailp - 2;
-      exb.exec.cmd_line = x86_FAR_PTR(DOS_PSP, ct) /* -> CommandTail */;
+      pstore8(shell_linear + (uint32_t)split_off, 0);
+      tail_off = split_off + 1u;
     }
-    CfgDbgPrintf(("EXEC file='%s' tail='%s'\n", Shell, tailp + 2));
-    res_DosExec(mode, &exb, Shell);
-    /* only reached once the shell terminates (or couldn't be
-       started at all) - matches upstream: P_0's loop always falls
-       through here and reprompts, exactly like real DOS does if
-       COMMAND.COM itself exits. */
-    put_string("Bad or missing Command Interpreter: "); /* failure _or_ exit */
-    put_string(Shell);
-    put_string(tailp + 2);
-    put_string(" Enter the full shell command line: ");
-    endp = Shell + res_read(cpu_, STDIN, x86_FAR_PTR(DOS_PSP, Shell) /* -> char[] */, NAMEMAX);
-    *endp = '\0';                             /* terminate string for strchr */
+  }
+
+  if (tail_off != 0u)
+    --tail_off;
+  pstore8(shell_linear + (uint32_t)tail_off,
+          (UBYTE)((end_off - tail_off) - 2u));
+  exb.exec.cmd_line = task_sec_path_far(tail_off);
+
+  DosExecGuest(mode, &exb, shell_far);
+  put_string("Bad or missing Command Interpreter: ");
+  {
+    UBYTE c;
+    size_t i = 0;
+    while ((c = task_sec_read8(i++)) != 0)
+      write_char_stdout(c);
+    i = tail_off + 2u;
+    while ((c = task_sec_read8(i++)) != 0)
+      write_char_stdout(c);
+  }
+  put_string(" Enter the full shell command line: ");
+  {
+    COUNT n = res_read(cpu_, STDIN, shell_far, NAMEMAX);
+    pstore8(shell_linear + (uint32_t)n, 0);
+  }
 #else
     /*
      * One fcom_run() call represents one COMMAND process lifetime.
