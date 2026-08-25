@@ -27,6 +27,7 @@ static void test_tsr0(void)
     uint32_t count = ++tsr0_count;
 
     tsr_video[0] = hex_digit(count);
+    tsr_video[1] = 0x04;
     if (previous_tsr0 != 0)
         previous_tsr0();
 }
@@ -36,6 +37,7 @@ static void test_tsr1(void)
     uint32_t count = ++tsr1_count;
 
     tsr_video[79u * 2u] = hex_digit(count);
+    tsr_video[79u * 2u + 1u] = 0x04;
     if (previous_tsr1 != 0)
         previous_tsr1();
 }
@@ -300,7 +302,9 @@ static int stay_resident(void)
     tsr0_count = 0;
     tsr1_count = 0;
     tsr_video[0] = '0';
+    tsr_video[1] = 0x04;
     tsr_video[79u * 2u] = '0';
+    tsr_video[79u * 2u + 1u] = 0x04;
     previous_tsr0 = set_tsr0_callback(test_tsr0);
     previous_tsr1 = set_tsr1_callback(test_tsr1);
 

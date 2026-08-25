@@ -169,15 +169,29 @@ static volatile int update_requested = 0;  // Set by update call
 #endif
 uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((section(".bss.gfx_buffer"), aligned(4)));
 
-// Fast text palette for 2-bit pixel pairs
-extern uint32_t conv_color2[1024]; // 4096 in hdmi only
-static uint16_t* txt_palette_fast = (uint16_t*)&conv_color2[0]; ///[256 * 4]; 2048, reusing
+// VGA renderer hot palettes.  Keep these in SRAM9 so Core 1 palette
+// lookups do not contend with Core 0 for SRAM0..3.
+//
+// Text needs only the foreground/background byte for each of 128 effective
+// attributes (bit 7 is ignored by the current renderer): 128 * 2 = 256 B.
+// Graphics needs one 16-bit dither pair per DAC entry: 256 * 2 = 512 B.
+// The opposite dither phase is just a byte swap, so a second 256-entry table
+// is redundant.  Total SCRATCH_Y cost: 768 B.
+static uint16_t vga_text_attr_colors[128] __scratch_y("vga_text_attr_colors");
+uint16_t palette_a[256] __scratch_y("vga_palette_a");
 
-// Graphics palette (256 entries) - 16-bit dithered format
-// Each entry: low byte = c_hi (conv0), high byte = c_lo (conv1)
-// even - A, odd - B
-uint16_t palette_a[512] __aligned(4);
-static uint16_t* palette_b = &palette_a[256];
+static inline uint16_t vga_palette_phase(uint8_t idx, bool swap_phase) {
+    uint16_t v = palette_a[idx];
+    return swap_phase ? (uint16_t)((v << 8) | (v >> 8)) : v;
+}
+
+static inline uint16_t vga_text_pair(uint16_t colors, uint32_t bits) {
+    uint8_t fg = (uint8_t)colors;
+    uint8_t bg = (uint8_t)(colors >> 8);
+    uint8_t left  = (bits & 1u) ? fg : bg;
+    uint8_t right = (bits & 2u) ? fg : bg;
+    return (uint16_t)left | ((uint16_t)right << 8);
+}
 
 // 16-color EGA palette (for 16-color modes) - 8-bit VGA format with sync bits
 static uint8_t ega_palette[16];
@@ -203,12 +217,12 @@ int cursor_blink_state = 1;
 
 // Direct pointer to VGA register state (set once by core0 after vga_init).
 // ISR reads cr[], ar[] directly at the right moment — no volatile intermediates.
-VGAState *vga_state = NULL;
+VGAState* __scratch_y("vga_state") vga_state = NULL;
 
 // Per-frame values latched by ISR from vga_state->cr[] late in vblank
-uint16_t frame_vram_offset   = 0;
-uint8_t  frame_pixel_panning = 0;
-int      frame_line_compare  = -1;
+uint16_t __scratch_y("frame_vram_offset") frame_vram_offset   = 0;
+uint8_t  __scratch_y("frame_pixel_panning") frame_pixel_panning = 0;
+int      __scratch_y("frame_line_compare") frame_line_compare  = -1;
 
 int text_cols = 80;
 // Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
@@ -281,7 +295,6 @@ static void vga_color_to_dithered(uint8_t r6, uint8_t g6, uint8_t b6, uint32_t i
     uint8_t c_lo = TMPL_LINE | (conv1[r] << 4) | (conv1[g] << 2) | conv1[b];
 
     palette_a[idx] = (uint16_t)c_hi | ((uint16_t)c_lo << 8);
-    palette_b[idx] = (uint16_t)c_lo | ((uint16_t)c_hi << 8);
 }
 
 static void init_palettes(void) {
@@ -306,24 +319,14 @@ static void init_palettes(void) {
         0x3F | TMPL_LINE,  // 15: White
     };
     
-    // Build fast palette for text rendering
-    // Each entry handles 2 pixels (foreground/background combinations)
-    // For 2-bit value from glyph: high bit is LEFT pixel, low bit is RIGHT pixel
-    // When we extract (glyph >> 6) & 3, we get bits 7,6 where bit7=left, bit6=right
-    // Index XY (X=bit7, Y=bit6): X is left pixel, Y is right pixel
-    // Output 16-bit: low byte outputs first (left), high byte outputs second (right)
-    for (int i = 0; i < 256; i++) {
+    // Store only foreground/background colors.  The four two-pixel
+    // combinations are assembled in registers by vga_text_pair().
+    for (int i = 0; i < 128; i++) {
         uint8_t fg = cga_colors[i & 0x0F];
-        uint8_t bg = cga_colors[i >> 4];
-        
-        // Index bits: [left_pixel][right_pixel]
-        // For little-endian 16-bit output: low byte = left, high byte = right
-        txt_palette_fast[i * 4 + 0] = bg | (bg << 8);  // 00: left=bg, right=bg
-        txt_palette_fast[i * 4 + 1] = fg | (bg << 8);  // 01: left=fg, right=bg (bit7=0,bit6=1)
-        txt_palette_fast[i * 4 + 2] = bg | (fg << 8);  // 10: left=bg, right=fg (bit7=1,bit6=0)
-        txt_palette_fast[i * 4 + 3] = fg | (fg << 8);  // 11: left=fg, right=fg
+        uint8_t bg = cga_colors[(i >> 4) & 0x07];
+        vga_text_attr_colors[i] = (uint16_t)fg | ((uint16_t)bg << 8);
     }
-    
+
     // Initialize 256-color dithered palette with black (will be overwritten by emulator)
     for (int i = 0; i < 256; i++) {
         vga_color_to_dithered(0, 0, 0, i);
@@ -375,14 +378,14 @@ static void __time_critical_func(render_gfx_line_vga_planar256)(uint32_t line, u
     // base is in dwords; gfx_buffer is bytes, so byte offset = base * 4
     const uint32_t *src32 = (const uint32_t *)(gfx_buffer + base * 4);
     // Select dither phase per scanline
-    uint16_t *active_palette = (src_line & 1) ? palette_a : palette_b;
+    bool swap_phase = (src_line & 1u) == 0;
     // 320 pixels -> 80 dwords -> 160 output dwords (640px doubled)
     for (int i = 0; i < 80; i++) {
         uint32_t pixels = src32[i];
-        uint16_t p0 = active_palette[pixels & 0xFF];
-        uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
-        uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
-        uint16_t p3 = active_palette[(pixels >> 24) & 0xFF];
+        uint16_t p0 = vga_palette_phase((uint8_t)pixels, swap_phase);
+        uint16_t p1 = vga_palette_phase((uint8_t)(pixels >> 8), swap_phase);
+        uint16_t p2 = vga_palette_phase((uint8_t)(pixels >> 16), swap_phase);
+        uint16_t p3 = vga_palette_phase((uint8_t)(pixels >> 24), swap_phase);
         *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
         *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
     }
@@ -432,14 +435,14 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint3
         // offset is in dwords; gfx_buffer is bytes, so byte offset = offset * 4
         const uint32_t *src32 = (const uint32_t *)(gfx_buffer + offset * 4);
         // Select dither phase per scanline
-        uint16_t *active_palette = (src_line & 1) ? palette_a : palette_b;
+        bool swap_phase = (src_line & 1u) == 0;
         // 320 pixels -> 80 dwords
         for (int i = 0; i < 80; i++) {
             uint32_t pixels = src32[i];
-            uint16_t p0 = active_palette[pixels & 0xFF];
-            uint16_t p1 = active_palette[(pixels >> 8) & 0xFF];
-            uint16_t p2 = active_palette[(pixels >> 16) & 0xFF];
-            uint16_t p3 = active_palette[(pixels >> 24) & 0xFF];
+            uint16_t p0 = vga_palette_phase((uint8_t)pixels, swap_phase);
+            uint16_t p1 = vga_palette_phase((uint8_t)(pixels >> 8), swap_phase);
+            uint16_t p2 = vga_palette_phase((uint8_t)(pixels >> 16), swap_phase);
+            uint16_t p3 = vga_palette_phase((uint8_t)(pixels >> 24), swap_phase);
             *out32++ = (uint32_t)p0 | ((uint32_t)p1 << 16);
             *out32++ = (uint32_t)p2 | ((uint32_t)p3 << 16);
         }
@@ -461,17 +464,21 @@ static void __time_critical_func(render_gfx_line_vbe8)(uint32_t line,
     }
 
     const uint8_t *src = gfx_buffer + line * 640u;
-    uint16_t *pal = (line & 1u) ? palette_b : palette_a;
+    bool swap_phase = (line & 1u) != 0;
 
     /*
      * Two neighbouring source pixels use opposite dither phases. Pack four
      * physical pixels per uint32 without horizontal doubling.
      */
     for (int i = 0; i < 160; ++i) {
-        uint8_t p0 = (uint8_t)(pal[src[i * 4 + 0]] & 0xFFu);
-        uint8_t p1 = (uint8_t)(pal[src[i * 4 + 1]] >> 8);
-        uint8_t p2 = (uint8_t)(pal[src[i * 4 + 2]] & 0xFFu);
-        uint8_t p3 = (uint8_t)(pal[src[i * 4 + 3]] >> 8);
+        uint16_t q0 = vga_palette_phase(src[i * 4 + 0], swap_phase);
+        uint16_t q1 = vga_palette_phase(src[i * 4 + 1], swap_phase);
+        uint16_t q2 = vga_palette_phase(src[i * 4 + 2], swap_phase);
+        uint16_t q3 = vga_palette_phase(src[i * 4 + 3], swap_phase);
+        uint8_t p0 = (uint8_t)(q0 & 0xFFu);
+        uint8_t p1 = (uint8_t)(q1 >> 8);
+        uint8_t p2 = (uint8_t)(q2 & 0xFFu);
+        uint8_t p3 = (uint8_t)(q3 >> 8);
         out32[i] = (uint32_t)p0 |
                    ((uint32_t)p1 << 8) |
                    ((uint32_t)p2 << 16) |
@@ -823,7 +830,7 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             } else {
                 glyph = font_8x16[ch * 16 + glyph_line];
             }
-            uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
+            uint16_t colors = vga_text_attr_colors[attr & 0x7F];
 
             if (cursor_blink_state && col == cursor_x &&
                 char_row == (uint32_t)cursor_y &&
@@ -835,16 +842,16 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             // 8px glyph -> 4x uint16 (каждый uint16 = 2 пикселя)
             uint16_t v;
             if (!double_h) {
-                v = pal[glyph & 3];           *out16++ = v;
-                v = pal[(glyph >> 2) & 3];    *out16++ = v;
-                v = pal[(glyph >> 4) & 3];    *out16++ = v;
-                v = pal[(glyph >> 6) & 3];    *out16++ = v;
+                v = vga_text_pair(colors, glyph & 3u);           *out16++ = v;
+                v = vga_text_pair(colors, (glyph >> 2) & 3u);    *out16++ = v;
+                v = vga_text_pair(colors, (glyph >> 4) & 3u);    *out16++ = v;
+                v = vga_text_pair(colors, (glyph >> 6) & 3u);    *out16++ = v;
             } else {
                 // true per-pixel doubling: (A,B) -> (A,A,B,B)
-                v = pal[glyph & 3];           out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 2) & 3];    out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 4) & 3];    out16_2x_per_pixel(&out16, v);
-                v = pal[(glyph >> 6) & 3];    out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, glyph & 3u);           out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, (glyph >> 2) & 3u);    out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, (glyph >> 4) & 3u);    out16_2x_per_pixel(&out16, v);
+                v = vga_text_pair(colors, (glyph >> 6) & 3u);    out16_2x_per_pixel(&out16, v);
             }
         }
     }
@@ -1031,6 +1038,7 @@ static void vga_hw_new_frame_deferred(void) {
 #define LOAD_BAR_ENABLE  0   // set to 0 to disable
 #define LOAD_BAR_HEIGHT  10   // 5px ISR load + 5px new_frame duration
 
+#if LOAD_BAR_ENABLE
 static uint32_t isr_busy_us_acc  = 0;
 static uint32_t isr_busy_us_prev = 0;
 static uint32_t blank_frame_count = 0;
@@ -1044,8 +1052,6 @@ static uint32_t anomaly_ever_seen = 0;
 static uint32_t pio_stall_ever_seen = 0;
 // Max observed vga_hw_new_frame duration in µs (for debugging long new_frame calls)
 static uint32_t new_frame_max_us = 0;
-// Deferred frame update flag (set in ISR, processed outside)
-volatile uint32_t frame_update_request = 0;
 
 // Frame period in µs — computed in vga_hw_init() to avoid overflow.
 static uint32_t frame_period_us = 16688u;
@@ -1054,7 +1060,6 @@ static uint32_t frame_period_us = 16688u;
 // Called for absolute scanlines in range [active_end .. active_end+LOAD_BAR_HEIGHT).
 static void __time_critical_func(render_load_bar)(uint32_t abs_line,
                                                    uint32_t *output_buffer) {
-#if LOAD_BAR_ENABLE
     if (abs_line < (uint32_t)active_end) return;
     if (abs_line >= (uint32_t)active_end + LOAD_BAR_HEIGHT) return;
 
@@ -1099,16 +1104,20 @@ static void __time_critical_func(render_load_bar)(uint32_t abs_line,
                 out[x] = 0xCCu;  // green: spare
         }
     }
-#endif
 }
+#endif
+
+// Deferred frame update flag (set in ISR, processed outside)
+volatile uint32_t __scratch_y("frame_update_request") frame_update_request = 0;
 
 static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
-    uint32_t t_enter = timer_hw->timerawl;
     dma_hw->ints0 = 1u << dma_ctrl_chan;
-    static uint32_t current_line = 0;
-    static uint32_t prev_line    = 0xFFFFFFFF;
+    static uint32_t __scratch_y("current_line") current_line = 0;
     uint32_t line = current_line++;
 
+#if LOAD_BAR_ENABLE
+    static uint32_t __scratch_y("prev_line") prev_line    = 0xFFFFFFFF;
+    uint32_t t_enter = timer_hw->timerawl;
     // Check PIO FDEBUG.TXSTALL - sticky bit set if PIO ever ran out of data
     // This is the definitive indicator of a DMA underrun causing sync loss.
     uint32_t txstall_bit = 1u << (8 + vga_sm);
@@ -1121,9 +1130,15 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
     if (prev_line != 0xFFFFFFFF && line > prev_line + 1)
         missed_isr_count += line - prev_line - 1;
     prev_line = line;
+#endif
 
     if (line >= N_LINES_TOTAL) {
-        line = current_line = prev_line = 0;
+        line = current_line = 
+#if LOAD_BAR_ENABLE
+        prev_line =
+#endif
+         0;
+#if LOAD_BAR_ENABLE
         isr_busy_us_prev  = isr_busy_us_acc;
         isr_busy_us_acc   = 0;
         blank_frame_prev  = blank_frame_count;
@@ -1140,10 +1155,11 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
             // If new_frame took more than one scanline (~32µs), that's a problem
             if (dt > 32) anomaly_ever_seen = 1;
         }*/
-        // Defer heavy frame work outside ISR
-        frame_update_request = 1;
         if (vga_state && vga_get_mode(vga_state) == 0)
             blank_frame_count = 1;
+#endif
+        // Defer heavy frame work outside ISR
+        frame_update_request = 1;
     }
     
     // Update VGA status register 1 (port 0x3DA) from ISR — this is the
@@ -1202,15 +1218,19 @@ static void __isr  __not_in_flash_func(dma_handler_vga)(void) {
 
         dma_channel_set_read_addr(dma_ctrl_chan, &lines_pattern[render_buf], false);
         render_line(prepare_line, lines_pattern[render_buf]);
+#if LOAD_BAR_ENABLE
         // Load bar goes into the inactive region below active_end (e.g. lines 440-479)
         render_load_bar(prepare_line, lines_pattern[render_buf]);
+#endif
     }
 
     if (vga_state) {
         vga_state->st01 |= ST01_DISP_ENABLE; // start invisible line-part
     }
+#if LOAD_BAR_ENABLE
     // Accumulate ISR busy time (µs)
     isr_busy_us_acc += timer_hw->timerawl - t_enter;
+#endif
 
     /* Native TSR1 hook: called once per scanline on core1, after the
        time-critical VGA DMA/render work is complete. Client callbacks run
@@ -1254,7 +1274,9 @@ void vga_hw_reclock(void) {
     uint32_t div_int  = (uint32_t)clk_div;
     uint32_t div_frac = (uint32_t)((clk_div - (float)div_int) * 256.0f);
     VGA_PIO->sm[vga_sm].clkdiv = (div_int << 16) | (div_frac << 8);
+#if LOAD_BAR_ENABLE
     frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
+#endif
 }
 
 static uint32_t vga_line0[LINE_SIZE / 4] __scratch_y("vga_line0") = { 0 };
@@ -1309,6 +1331,7 @@ void vga_hw_init(void) {
     float sys_clk = (float)clock_get_hz(clk_sys);
     float clk_div = sys_clk / VGA_CLK;
 
+#if LOAD_BAR_ENABLE
     // Frame period: LINE_SIZE pixels per line, N_LINES_TOTAL lines, at VGA_CLK px/s
     // Use float to avoid 32-bit overflow (800*525*1e6 ≈ 4.2e11)
     frame_period_us = (uint32_t)((float)(LINE_SIZE * N_LINES_TOTAL) * 1000000.0f / VGA_CLK);
@@ -1316,7 +1339,7 @@ void vga_hw_init(void) {
     DBG_PRINT("  System clock: %.1f MHz\n", sys_clk / 1e6f);
     DBG_PRINT("  Clock divider: %.4f\n", clk_div);
     DBG_PRINT("  Frame period: %lu us\n", (unsigned long)frame_period_us);
-    
+#endif    
     lines_pattern[0] = vga_line0;
     lines_pattern[1] = vga_line1;
     lines_pattern[2] = vga_line2;
@@ -1380,6 +1403,7 @@ void vga_hw_init(void) {
     channel_config_set_transfer_data_size(&c0, DMA_SIZE_32);
     channel_config_set_read_increment(&c0, true);
     channel_config_set_write_increment(&c0, false);
+    channel_config_set_high_priority(&c0, true);
     
     uint dreq = (VGA_PIO == pio0) ? DREQ_PIO0_TX0 + vga_sm : DREQ_PIO1_TX0 + vga_sm;
     channel_config_set_dreq(&c0, dreq);
@@ -1393,6 +1417,7 @@ void vga_hw_init(void) {
     channel_config_set_transfer_data_size(&c1, DMA_SIZE_32);
     channel_config_set_read_increment(&c1, false);
     channel_config_set_write_increment(&c1, false);
+    channel_config_set_high_priority(&c1, true);
     channel_config_set_chain_to(&c1, dma_data_chan);
     
     dma_channel_configure(dma_ctrl_chan, &c1,
@@ -1528,16 +1553,20 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (!frame_update_request)
         return;
     frame_update_request = 0;
+#if LOAD_BAR_ENABLE
     uint32_t t0 = timer_hw->timerawl;
+#endif
     if (!SELECT_VGA && required_to_repair_text_pal) {
         required_to_repair_text_pal = false;
         // Only restore palette entries (0..1023), not the DMA line buffers (1024..1223)
         memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
     }
     vga_hw_new_frame_deferred();
+#if LOAD_BAR_ENABLE
     uint32_t dt = timer_hw->timerawl - t0;
     if (dt > new_frame_max_us)
         new_frame_max_us = dt;
     if (dt > 32)
         anomaly_ever_seen = 1;
+#endif
 }

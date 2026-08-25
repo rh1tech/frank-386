@@ -863,6 +863,12 @@ f:
     if (vga_state) {
         vga_state->st01 |= ST01_DISP_ENABLE; // start invisible line-part
     }
+
+    /* Native TSR1 hook: called once per scanline on core1, after the
+       time-critical VGA DMA/render work is complete. Client callbacks run
+       in this IRQ context and must return quickly or video timing will fail. */
+    extern void tsr1_dispatch(void);
+    tsr1_dispatch();
 }
 
 static inline void irq_remove_handler_DMA_core1() {

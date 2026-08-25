@@ -1470,12 +1470,12 @@ static void __not_in_flash_func(default_tsr1)(void)
 static tsr_callback_t tsr0_callback = default_tsr0;
 static tsr_callback_t tsr1_callback = default_tsr1;
 
-tsr_callback_t set_tsr0_callback(tsr_callback_t cb)
+tsr_callback_t __not_in_flash_func(set_tsr0_callback)(tsr_callback_t cb)
 {
     return __atomic_exchange_n(&tsr0_callback, cb, __ATOMIC_ACQ_REL);
 }
 
-tsr_callback_t set_tsr1_callback(tsr_callback_t cb)
+tsr_callback_t __not_in_flash_func(set_tsr1_callback)(tsr_callback_t cb)
 {
     return __atomic_exchange_n(&tsr1_callback, cb, __ATOMIC_ACQ_REL);
 }
