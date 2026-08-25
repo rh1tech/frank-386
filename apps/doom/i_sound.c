@@ -24,6 +24,8 @@
 #include "i_sound.h"
 #ifdef ELF_MODE
 #include "sound_hw.h"
+extern void I_NativeStartupTimer(void);
+extern void I_NativeShutdownTimer(void);
 #endif
 
 #if (APPVER_DOOMREV < AV_DR_DM12)
@@ -53,11 +55,15 @@ void I_StartupTimer (void)
 	printf("I_StartupTimer()\n");
 	// installs master timer.  Must be done before StartupTimer()!
 	TSM_Install(SND_TICRATE);
+#ifdef ELF_MODE
+	I_NativeStartupTimer();
+#else
 	tsm_ID = TSM_NewService (I_TimerISR, 35, 0, 0); // max priority
 	if (tsm_ID == -1)
 	{
 		I_Error("Can't register 35 Hz timer w/ DMX library");
 	}
+#endif
 	i_timer_started = true;
 #endif
 }
@@ -67,7 +73,11 @@ void I_ShutdownTimer (void)
 	if (!i_timer_started)
 		return;
 
+#ifdef ELF_MODE
+	I_NativeShutdownTimer();
+#else
 	TSM_DelService(tsm_ID);
+#endif
 	TSM_Remove();
 	i_timer_started = false;
 }
@@ -441,14 +451,6 @@ void I_StopSong(int handle)
 	s = ticcount;
 	while (ticcount - s < 10)
 	{
-#ifdef ELF_MODE
-	  /*
-	   * Original DOS advances ticcount asynchronously from the DMX timer IRQ.
-	   * Native ELF uses the cooperative TSM backend, so a busy wait here would
-	   * never make progress unless we explicitly pump it.
-	   */
-	  TSM_Yield();
-#endif
 	}
   }
 }
@@ -922,21 +924,10 @@ void I_ShutdownSound (void)
 	int start;
 	extern volatile int ticcount;
 
-	/*
-	 * Wait for at least 30 ticks, not for one exact ticcount value.
-	 *
-	 * Under native ELF TSM_Yield() may service more than one timer callback
-	 * before returning (and now may also run guest IRQ work).  The old
-	 * "s != ticcount" test can therefore step over s and wait until integer
-	 * wraparound, which looks exactly like a clean switch to text mode followed
-	 * by an exit into nowhere.
-	 */
+	/* Wait for at least 30 asynchronous 35 Hz ticks. */
 	start = ticcount;
 	while ((unsigned)(ticcount - start) < 30u)
 	{
-#ifdef ELF_MODE
-	  TSM_Yield();
-#endif
 	}
   }
 #endif

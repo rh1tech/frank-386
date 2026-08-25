@@ -1562,9 +1562,18 @@ static void bios_post_components(PC *pc, size_t psram_size)
     snprintf(right, sizeof(right), "QSPI PSRAM Up to 16 MB");
 #endif
     bios_post_table_row(pc, left, right);
-
+#if EMULATE_LTEMS
+    if (phys_mem_size >= (4u << 20)) {
+    	snprintf(left, sizeof(left), "PC RAM   : %lu KB / 2048 KB EMS",
+        	     (unsigned long)((phys_mem_size - 2048) >> 10));
+	} else {
+		snprintf(left, sizeof(left), "PC RAM   : %lu KB",
+				(unsigned long)(phys_mem_size >> 10));
+	}
+#else
     snprintf(left, sizeof(left), "PC RAM   : %lu KB",
              (unsigned long)(phys_mem_size >> 10));
+#endif
     snprintf(right, sizeof(right), "Mouse    : %s",
              pc->mouse_enabled ? "PS/2" : "not installed");
     bios_post_table_row(pc, left, right);

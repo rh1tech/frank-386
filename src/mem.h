@@ -6,6 +6,16 @@
 #include <stddef.h>
 #include <string.h>
 #include "ems.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+void *dos_api_memcpy(void *dst, const void *src, size_t len);
+const void *dos_api_memchr(const void *src, int value, size_t len);
+void *nf_memset(void *ptr, int value, size_t len);
+#ifdef __cplusplus
+}
+#endif
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
 #include "ega128_paging.h"
 #endif
@@ -110,7 +120,7 @@ static inline void guest_read_block(uint32_t src, void *dst, size_t len)
         uint32_t span;
         const uint8_t *p = guest_span_ptr_read(src, &span);
         size_t n = len < span ? len : span;
-        memcpy(out, p, n);
+        dos_api_memcpy(out, p, n);
         out += n;
         src += (uint32_t)n;
         len -= n;
@@ -128,7 +138,7 @@ static inline void guest_write_block(uint32_t dst, const void *src, size_t len)
         uint32_t span;
         uint8_t *p = guest_span_ptr(dst, &span);
         size_t n = len < span ? len : span;
-        memcpy(p, in, n);
+        dos_api_memcpy(p, in, n);
         in += n;
         dst += (uint32_t)n;
         len -= n;
@@ -306,10 +316,64 @@ static inline void guest_fill_block(uint32_t dst, uint8_t value, size_t len)
         uint32_t span;
         uint8_t *p = guest_span_ptr(dst, &span);
         size_t n = len < span ? len : span;
-        memset(p, value, n);
+        nf_memset(p, value, n);
         dst += (uint32_t)n;
         len -= n;
     }
+}
+
+/* Search guest memory without paying pload8() dispatch on every byte.
+ * Linear RAM has one direct native scan; pageable RAM resolves one cache span
+ * at a time.  EMS/VGA still use the generic span/device path because their
+ * backing is not one stable linear array. */
+static inline size_t guest_find_byte_spans(uint32_t src, uint8_t value, size_t len)
+{
+    size_t done = 0;
+    while (len) {
+        if (unlikely(VGA_WINDOW(src))) {
+            if (pload8(src) == value)
+                return done;
+            ++src;
+            ++done;
+            --len;
+            continue;
+        }
+
+        uint32_t span;
+        const uint8_t *p = guest_span_ptr_read(src, &span);
+        size_t n = len < span ? len : span;
+        const uint8_t *q = (const uint8_t *)dos_api_memchr(p, value, n);
+        if (q)
+            return done + (size_t)(q - p);
+        src += (uint32_t)n;
+        done += n;
+        len -= n;
+    }
+    return SIZE_MAX;
+}
+
+static inline size_t guest_find_byte(uint32_t src, uint8_t value, size_t len)
+{
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    if (unlikely(ega128_paging_active()))
+        return guest_find_byte_spans(src, value, len);
+#endif
+#if EMULATE_LTEMS
+    if (unlikely(EMS_WINDOW(src) || (len && EMS_WINDOW(src + (uint32_t)len - 1u))))
+        return guest_find_byte_spans(src, value, len);
+#endif
+    if (unlikely(VGA_WINDOW(src) || (len && VGA_WINDOW(src + (uint32_t)len - 1u))))
+        return guest_find_byte_spans(src, value, len);
+
+    const uint8_t *base = PC_RAM + src;
+    const uint8_t *q = (const uint8_t *)dos_api_memchr(base, value, len);
+    return q ? (size_t)(q - base) : SIZE_MAX;
+}
+
+static inline size_t guest_strnlen_block(uint32_t src, size_t maxlen)
+{
+    size_t off = guest_find_byte(src, 0, maxlen);
+    return off == SIZE_MAX ? maxlen : off;
 }
 
 static inline bool __attribute__((always_inline))
@@ -395,14 +459,6 @@ static inline void guest_move_block(uint32_t dst, uint32_t src, size_t len)
         return;
     }
 
-#if defined(EGA128) || defined(VGA128) || defined(MCGA)
-    if (unlikely(ega128_paging_active())) {
-        while (len--)
-            pstore8(dst++, pload8(src++));
-        return;
-    }
-#endif
-
     while (len) {
         if (unlikely(VGA_WINDOW(src) || VGA_WINDOW(dst))) {
             pstore8(dst++, pload8(src++));
@@ -416,7 +472,7 @@ static inline void guest_move_block(uint32_t dst, uint32_t src, size_t len)
         size_t n = len;
         if (n > src_span) n = src_span;
         if (n > dst_span) n = dst_span;
-        memcpy(d, s, n);
+        dos_api_memcpy(d, s, n);
         src += (uint32_t)n;
         dst += (uint32_t)n;
         len -= n;

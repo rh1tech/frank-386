@@ -1324,7 +1324,7 @@ void guest_lin_write(uint32_t lin, const void *src, size_t n) {
         uint32_t span;
         uint8_t *h = guest_span_ptr(lin, &span);
         size_t chunk = (span < n) ? span : n;
-        memcpy(h, p, chunk);
+        dos_api_memcpy(h, p, chunk);
         p += chunk; lin += chunk; n -= chunk;
     }
 }
@@ -1335,7 +1335,7 @@ void guest_lin_read(void *dst, uint32_t lin, size_t n) {
         uint32_t span;
         const uint8_t *h = guest_span_ptr(lin, &span);
         size_t chunk = (span < n) ? span : n;
-        memcpy(p, h, chunk);
+        dos_api_memcpy(p, h, chunk);
         p += chunk; lin += chunk; n -= chunk;
     }
 }
@@ -1345,7 +1345,7 @@ static void guest_lin_set(uint32_t lin, int v, size_t n) {
         uint32_t span;
         uint8_t *h = guest_span_ptr(lin, &span);
         size_t chunk = (span < n) ? span : n;
-        memset(h, v, chunk);
+        nf_memset(h, v, chunk);
         lin += chunk; n -= chunk;
     }
 }
@@ -1390,7 +1390,7 @@ void fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n) {
                 size_t m = left;
                 if (m > dspan) m = dspan;
                 if (m > sspan) m = sspan;
-                memcpy(dh, sh, m);
+                dos_api_memcpy(dh, sh, m);
                 dlin += m; slin += m; left -= m;
             }
         }

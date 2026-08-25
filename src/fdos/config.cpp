@@ -69,25 +69,12 @@ static inline void cfg_guest_write_far(uint32_t addr, dos_far_ptr v)
 
 static inline size_t cfg_guest_strnlen(uint32_t addr, size_t maxlen)
 {
-  size_t n = 0;
-  while (n < maxlen && pload8(addr + (uint32_t)n) != 0)
-    ++n;
-  return n;
+  return guest_strnlen_block(addr, maxlen);
 }
 
 static inline void cfg_guest_move(uint32_t dst, uint32_t src, size_t len)
 {
-  if (dst == src || len == 0)
-    return;
-  if (dst < src || dst >= src + len) {
-    while (len--)
-      pstore8(dst++, pload8(src++));
-  } else {
-    dst += (uint32_t)len;
-    src += (uint32_t)len;
-    while (len--)
-      pstore8(--dst, pload8(--src));
-  }
+  guest_move_block(dst, src, len);
 }
 
 static BYTE szBuf[256];

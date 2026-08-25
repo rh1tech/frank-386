@@ -217,6 +217,21 @@ void *__not_in_flash_func(nf_memset)(void *ptr, int value, size_t len)
     return ptr;
 }
 
+const void *__not_in_flash_func(dos_api_memchr)(const void *src,
+                                                    int value,
+                                                    size_t len)
+{
+    const uint8_t *p = (const uint8_t *)src;
+    const uint8_t value8 = (uint8_t)value;
+
+    while (len--) {
+        if (*p == value8)
+            return p;
+        ++p;
+    }
+    return NULL;
+}
+
 void *__not_in_flash_func(dos_api_memcpy)(void *dst,
                                           const void *src,
                                           size_t len)
