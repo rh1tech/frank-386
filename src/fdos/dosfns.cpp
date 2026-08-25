@@ -17,6 +17,7 @@ using fdos_guest::lol_ref;
 using fdos_guest::psp_ref;
 using fdos_guest::sft_ref;
 using fdos_guest::sfttbl_ref;
+using fdos_guest::guest_bytes_ref;
 
 static const lol_ref dosfns_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref dosfns_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
@@ -1086,18 +1087,17 @@ long DosMkTmp(dos_far_ptr pathname, UWORD attr)
   /* create filename from current date and time */
   /* the guest's DS:DX buffer is mutated in place, as documented for
      INT 21h AH=5Ah: the generated name is appended to the path */
-  char *base = (char *) ARM_PTR (pathname);
-  char *ptmp;
+  const guest_bytes_ref path(pathname);
+  size_t ptmp = guest_strnlen_block(path.linear(), NAMEMAX);
   unsigned long randvar;
   long rc;
   int loop;
 
-  ptmp = base + strlen(base);
   if ((UBYTE)dosfns_lol.os_major() == 5) { /* clone some bad habit of MS DOS 5.0 only */
-    if (ptmp == base || (ptmp[-1] != '\\' && ptmp[-1] != '/'))
-      *ptmp++ = '\\';
+    if (ptmp == 0 || (path.byte(ptmp - 1) != '\\' && path.byte(ptmp - 1) != '/'))
+      path.byte(ptmp++, '\\');
   }
-  ptmp[8] = '\0';
+  path.byte(ptmp + 8, '\0');
 
   randvar = ((unsigned long)dos_getdate() << 16) | dos_gettime();
 
@@ -1106,13 +1106,16 @@ long DosMkTmp(dos_far_ptr pathname, UWORD attr)
     unsigned long tmp = randvar++;
     int i;
     for(i = 7; i >= 0; tmp >>= 4, i--)
-      ptmp[i] = ((char)tmp & 0xf) + 'A';
+      path.byte(ptmp + i, (UBYTE)(((char)tmp & 0xf) + 'A'));
 
     /* DOS versions: > 5: characters A - P
        < 5: hex digits */
     if ((UBYTE)dosfns_lol.os_major() < 5)
-      for (i = 0; i < 8; i++)
-        ptmp[i] -= (ptmp[i] < 'A' + 10) ? '0' - 'A' : 10;
+      for (i = 0; i < 8; i++) {
+        UBYTE ch = path.byte(ptmp + i);
+        ch = (UBYTE)(ch - (ch < 'A' + 10 ? '0' - 'A' : 10));
+        path.byte(ptmp + i, ch);
+      }
 
     /* only create new file -- 2001/09/22 ska*/
     rc = DosOpen(pathname, O_LEGACY | O_CREAT | O_RDWR, attr);
@@ -1188,15 +1191,21 @@ dos_far_ptr /*struct dpb*/ GetDriveDPB(UBYTE drive, COUNT *rc)
 }
 
 #define IS_SLASH(ch) ((ch) == '\\' || (ch) == '/')
-COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
+COUNT DosGetExtFree(dos_far_ptr DriveString, dos_far_ptr xfsp)
 {
+  const guest_bytes_ref drive(DriveString);
+  const guest_bytes_ref out(xfsp);
   dos_far_ptr cdsp_x86 = MK_FP(0, 0);
-  memset(xfsp, 0, sizeof(struct xfreespace));
-  xfsp->xfs_datasize = sizeof(struct xfreespace);
-  if (!*DriveString || (*DriveString == '.') || (IS_SLASH(DriveString[0]) && !IS_SLASH(DriveString[1])))
+
+  guest_fill_block(out.linear(), 0, sizeof(struct xfreespace));
+  out.word(offsetof(struct xfreespace, xfs_datasize), sizeof(struct xfreespace));
+
+  const UBYTE ch0 = drive.byte(0);
+  const UBYTE ch1 = drive.byte(1);
+  if (!ch0 || ch0 == '.' || (IS_SLASH(ch0) && !IS_SLASH(ch1)))
     cdsp_x86 = get_cds((UBYTE)dosfns_idata.default_drive());
-  else if (DriveString[1] == ':')
-    cdsp_x86 = get_cds(DosUpFChar(*DriveString) - 'A');
+  else if (ch1 == ':')
+    cdsp_x86 = get_cds(DosUpFChar(ch0) - 'A');
   if (far_is_null(cdsp_x86))
     return DE_INVLDDRV;
   const cds_ref cdsp(cdsp_x86);
@@ -1206,18 +1215,25 @@ COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace FAR *xfsp)
   if (far_is_null(dpbp_x86) || media_check_tagged(dpbp_x86, "DosGetExtFree/cdsDpb") < 0)
     return DE_INVLDDRV;
   const dpb_ref dpbp(dpbp_x86);
-  xfsp->xfs_secsize = dpbp.dpb_secsize();
+
+  const ULONG secsize = dpbp.dpb_secsize();
 #ifdef WITHFAT32
-  xfsp->xfs_totalclusters = (dpbp.is_fat32() ? dpbp.dpb_xsize() : dpbp.dpb_size()) - 1;
+  const ULONG totalclusters =
+      (dpbp.is_fat32() ? dpbp.dpb_xsize() : dpbp.dpb_size()) - 1;
 #else
-  xfsp->xfs_totalclusters = dpbp.dpb_size() - 1;
+  const ULONG totalclusters = dpbp.dpb_size() - 1;
 #endif
-  xfsp->xfs_freeclusters = dos_free(dpbp_x86);
-  xfsp->xfs_clussize = dpbp.cluster_mask() + 1;
-  xfsp->xfs_totalunits = xfsp->xfs_totalclusters;
-  xfsp->xfs_freeunits = xfsp->xfs_freeclusters;
-  xfsp->xfs_totalsectors = xfsp->xfs_totalclusters * xfsp->xfs_clussize;
-  xfsp->xfs_freesectors = xfsp->xfs_freeclusters * xfsp->xfs_clussize;
+  const ULONG freeclusters = dos_free(dpbp_x86);
+  const ULONG clussize = dpbp.cluster_mask() + 1;
+
+  out.dword(offsetof(struct xfreespace, xfs_secsize), secsize);
+  out.dword(offsetof(struct xfreespace, xfs_totalclusters), totalclusters);
+  out.dword(offsetof(struct xfreespace, xfs_freeclusters), freeclusters);
+  out.dword(offsetof(struct xfreespace, xfs_clussize), clussize);
+  out.dword(offsetof(struct xfreespace, xfs_totalunits), totalclusters);
+  out.dword(offsetof(struct xfreespace, xfs_freeunits), freeclusters);
+  out.dword(offsetof(struct xfreespace, xfs_totalsectors), totalclusters * clussize);
+  out.dword(offsetof(struct xfreespace, xfs_freesectors), freeclusters * clussize);
   return SUCCESS;
 }
 

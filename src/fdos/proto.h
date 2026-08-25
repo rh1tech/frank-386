@@ -183,7 +183,7 @@ CLUSTER dos_free(dos_far_ptr /* -> struct dpb */ x86_dpbp);
 BOOL dir_exists(char * path);
 struct xfreespace;
 UWORD DosGetFree(UBYTE drive, UWORD * navc, UWORD * bps, UWORD * nc);
-COUNT DosGetExtFree(BYTE FAR *DriveString, struct xfreespace* xfsp);
+COUNT DosGetExtFree(dos_far_ptr DriveString, dos_far_ptr xfsp);
 
 f_node_ptr split_path(const char *, f_node_ptr fnp);
 

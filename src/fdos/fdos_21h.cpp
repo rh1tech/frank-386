@@ -22,6 +22,7 @@ using fdos_guest::sft_ref;
 using fdos_guest::sfttbl_ref;
 using fdos_guest::dpb_ref;
 using fdos_guest::buffer_ref;
+using fdos_guest::guest_bytes_ref;
 
 static const lol_ref fdos_lol(((uint32_t)DOS_PSP << 4) + 0x08F0u);
 static const dos_data_ref fdos_idata(((uint32_t)DOS_PSP << 4) + X86_INTERNAL_DATA_OFF);
@@ -108,8 +109,11 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
   const UWORD work_sp =
       (UWORD)((error_tos - sizeof(struct critical_error_workspace)) &
               (UWORD)~3u);
-  struct critical_error_workspace *work =
-      (struct critical_error_workspace *)ARM_PTR(MK_FP(DOS_PSP, work_sp));
+  const uint32_t work_linear = ((uint32_t)DOS_PSP << 4) + work_sp;
+  const cpu_regs_ref saved_regs(
+      work_linear + offsetof(struct critical_error_workspace, saved_regs));
+  const uint32_t saved_frame_linear =
+      work_linear + offsetof(struct critical_error_workspace, saved_frame);
   dos_far_ptr user_stack;
   dos_far_ptr /* -> struct dhdr */ device = x86_lpDevice;
   UWORD saved_ss;
@@ -129,8 +133,12 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * has a PSP:2Eh frame.  Keep a safe fallback for internal callers
    * such as INT 2Fh helpers invoked outside INT 21h.
    */
-  if (have_frame)
-    guest_read(&work->saved_frame, user_stack, sizeof(work->saved_frame));
+  if (have_frame) {
+    const uint32_t user_stack_linear =
+        ((uint32_t)FP_SEG(user_stack) << 4) + FP_OFF(user_stack);
+    guest_move_block(saved_frame_linear, user_stack_linear,
+                     sizeof(struct int21_guest_iregs));
+  }
   else
     user_stack = MK_FP(CPU_SS, CPU_SP);
 
@@ -161,7 +169,7 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * Deliberately left on the native stack: scalar flags, offsets and pointers.
    * They are small and do not remain live across another DOS process level.
    */
-  cpu_save_regs(cpu, &work->saved_regs);
+  saved_regs.save_cpu(cpu);
   saved_ss = CPU_SS;
   saved_error_mode = fdos_idata.error_mode();
   saved_indos = fdos_idata.indos();
@@ -186,10 +194,14 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
    * stack.  Restore the published DOS frame before returning to the
    * interrupted INT 21h dispatcher.
    */
-  if (have_frame)
-    guest_write(user_stack, &work->saved_frame, sizeof(work->saved_frame));
+  if (have_frame) {
+    const uint32_t user_stack_linear =
+        ((uint32_t)FP_SEG(user_stack) << 4) + FP_OFF(user_stack);
+    guest_move_block(user_stack_linear, saved_frame_linear,
+                     sizeof(struct int21_guest_iregs));
+  }
 
-  cpu_restore_regs(cpu, &work->saved_regs);
+  saved_regs.restore_cpu(cpu);
   SET_SS(saved_ss);
   fdos_idata.error_mode() = saved_error_mode;
   fdos_idata.indos() = saved_indos;
@@ -501,102 +513,110 @@ static int fcb_parse_field_sep(int c)
   return (unsigned char)c <= ' ' || strchr("/\\\"[]<>|.:;,=+\t", c) != NULL;
 }
  
-static const BYTE *fcb_parse_skip_wh(const BYTE *src)
+static size_t fcb_parse_skip_wh(const guest_bytes_ref &src, size_t off)
 {
-  while (*src == ' ' || *src == '\t')
-    ++src;
-  return src;
+  while (src.byte(off) == ' ' || src.byte(off) == '\t')
+    ++off;
+  return off;
 }
  
-static const BYTE *fcb_parse_name_field(const BYTE *src, BYTE *dst,
-                                        COUNT field_size, BOOL *wild)
+static size_t fcb_parse_name_field(const guest_bytes_ref &src, size_t off,
+                                   const guest_bytes_ref &dst, size_t dst_off,
+                                   COUNT field_size, BOOL *wild)
 {
   COUNT i = 0;
   BYTE fill = ' ';
 
-  while (*src != 0 && !fcb_parse_field_sep(*src) && i < field_size)
+  while (src.byte(off) != 0 && !fcb_parse_field_sep(src.byte(off)) &&
+         i < field_size)
   {
-    if (*src == '*')
+    const BYTE ch = src.byte(off);
+    if (ch == '*')
     {
       *wild = TRUE;
       fill = '?';
-      ++src;
+      ++off;
       break;
     }
-    if (*src == '?')
+    if (ch == '?')
       *wild = TRUE;
 
-    *dst++ = DosUpFChar(*src++);
+    dst.byte(dst_off + i, DosUpFChar(ch));
+    ++off;
     ++i;
   }
- 
-  memset(dst, fill, field_size - i);
-  return src;
+
+  if (i < field_size)
+    guest_fill_block(dst.linear(dst_off + i), fill, field_size - i);
+  return off;
 }
 
-static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp, dos_far_ptr fcbp, UWORD *next_si)
+static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp,
+                                         dos_far_ptr fcbp, UWORD *next_si)
 {
-  const BYTE *base = (const BYTE *)ARM_PTR(srcp);
-  const BYTE *src = base;
-  fcb *dst = (fcb *)ARM_PTR(fcbp);
+  const guest_bytes_ref src(srcp);
+  const guest_bytes_ref dst(fcbp);
+  size_t off = 0;
   BOOL bad_drive = FALSE;
   BOOL wild_name = FALSE;
   BOOL wild_ext = FALSE;
- 
+
   if (mode & 0x01)
-    while (fcb_parse_common_sep(*src))
-      ++src;
+    while (fcb_parse_common_sep(src.byte(off)))
+      ++off;
 
   /* MS-DOS skips spaces and tabs even without PARSE_SKIP_LEAD_SEP. */
-  src = fcb_parse_skip_wh(src);
+  off = fcb_parse_skip_wh(src, off);
 
-  if (!fcb_parse_field_sep(*src) && src[1] == ':')
+  if (!fcb_parse_field_sep(src.byte(off)) && src.byte(off + 1) == ':')
   {
-    UBYTE drive = DosUpFChar(*src) - 'A';
- 
+    UBYTE drive = DosUpFChar(src.byte(off)) - 'A';
+
     /* Keep parsing even for an invalid drive, as DOS does. */
     dos_far_ptr cds_ = get_cds(drive);
     if (far_is_null(cds_))
       bad_drive = TRUE;
- 
-    dst->fcb_drive = drive + 1;
-    src += 2;
+
+    dst.byte(offsetof(fcb, fcb_drive), drive + 1);
+    off += 2;
   }
   else if (!(mode & 0x02))
   {
-    dst->fcb_drive = 0;
+    dst.byte(offsetof(fcb, fcb_drive), 0);
   }
 
   /* Undocumented DOS behaviour: these two fields are always reset. */
-  dst->fcb_cublock = 0;
-  dst->fcb_recsiz = 0;
+  dst.word(offsetof(fcb, fcb_cublock), 0);
+  dst.word(offsetof(fcb, fcb_recsiz), 0);
 
   if (!(mode & 0x04))
-    memset(dst->fcb_fname, ' ', FNAME_SIZE);
+    guest_fill_block(dst.linear(offsetof(fcb, fcb_fname)), ' ', FNAME_SIZE);
   if (!(mode & 0x08))
-    memset(dst->fcb_fext, ' ', FEXT_SIZE);
+    guest_fill_block(dst.linear(offsetof(fcb, fcb_fext)), ' ', FEXT_SIZE);
 
   /* Special names '.' and '..' return immediately, without extension. */
-  if (*src == '.')
+  if (src.byte(off) == '.')
   {
-    dst->fcb_fname[0] = '.';
-    ++src;
-    if (*src == '.')
-     {
-      dst->fcb_fname[1] = '.';
-      ++src;
+    dst.byte(offsetof(fcb, fcb_fname), '.');
+    ++off;
+    if (src.byte(off) == '.')
+    {
+      dst.byte(offsetof(fcb, fcb_fname) + 1, '.');
+      ++off;
     }
-    *next_si = FP_OFF(srcp) + (UWORD)(src - base);
+    *next_si = FP_OFF(srcp) + (UWORD)off;
     return 0;
   }
- 
-  src = fcb_parse_name_field(src, dst->fcb_fname, FNAME_SIZE, &wild_name);
- 
-  if (*src == '.')
-    src = fcb_parse_name_field(src + 1, dst->fcb_fext, FEXT_SIZE, &wild_ext);
- 
-  *next_si = FP_OFF(srcp) + (UWORD)(src - base);
- 
+
+  off = fcb_parse_name_field(src, off, dst, offsetof(fcb, fcb_fname),
+                             FNAME_SIZE, &wild_name);
+
+  if (src.byte(off) == '.')
+    off = fcb_parse_name_field(src, off + 1, dst, offsetof(fcb, fcb_fext),
+                               FEXT_SIZE, &wild_ext);
+
+  *next_si = FP_OFF(srcp) + (UWORD)off;
+
   if (bad_drive)
     return 0xff;
   return (wild_name || wild_ext) ? 1 : 0;
@@ -688,12 +708,10 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
     /* Get extended free drive space */
     case 0x03:
     {
-      struct xfreespace FAR *xfsp = (struct xfreespace FAR *)ARM_PTR(R_FP_ES_DI);
-
       if (R_CX < sizeof(struct xfreespace))
         return DE_INVLDBUF;
 
-      rc = DosGetExtFree((BYTE FAR *)ARM_PTR(R_FP_DS_DX), xfsp);
+      rc = DosGetExtFree(R_FP_DS_DX, R_FP_ES_DI);
       if (rc != SUCCESS)
         return rc;
       break;
@@ -710,17 +728,21 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
       if (rc != SUCCESS)
         return rc;
 
-      struct xdpbforformat FAR *xdffp = (struct xdpbforformat FAR *)ARM_PTR(R_FP_ES_DI);
-      xdffp->xdff_datasize = sizeof(struct xdpbforformat);
-      xdffp->xdff_version.actual = 0;
+      const guest_bytes_ref xdff(R_FP_ES_DI);
+      constexpr size_t xdff_union = offsetof(struct xdpbforformat, xdff_f);
+      xdff.word(offsetof(struct xdpbforformat, xdff_datasize),
+                sizeof(struct xdpbforformat));
+      xdff.word(offsetof(struct xdpbforformat, xdff_version), 0);
 
       const dpb_ref dpb(_dpb);
-      switch ((UWORD)xdffp->xdff_function)
+      const UWORD xdff_function =
+          (UWORD)xdff.dword(offsetof(struct xdpbforformat, xdff_function));
+      switch (xdff_function)
       {
         case 0x00:
         {
-          ULONG nfreeclst = xdffp->xdff_f.setdpbcounts.nfreeclst;
-          ULONG cluster = xdffp->xdff_f.setdpbcounts.cluster;
+          ULONG nfreeclst = xdff.dword(xdff_union + 0);
+          ULONG cluster = xdff.dword(xdff_union + 4);
           if (dpb.dpb_fatsize() == 0)
           {
             const ULONG xsize = dpb.dpb_xsize();
@@ -748,7 +770,8 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
         {
           fdos_guest::ddt_ref ddt(getddt_far(R_DL));
           /* Both endpoints are guest addresses; do not expose either cache slot. */
-          const dos_far_ptr src = xdffp->xdff_f.rebuilddpb.bpbp;
+          const dos_far_ptr src =
+              MK_FP(xdff.word(xdff_union + 6), xdff.word(xdff_union + 4));
           const uint32_t src_linear = ((uint32_t)FP_SEG(src) << 4) + FP_OFF(src);
           guest_move_block(ddt.current_bpb_linear(), src_linear, sizeof(bpb));
         }
@@ -768,18 +791,18 @@ rebuild_dpb:
           if (dpb.dpb_fatsize() != 0)
             return DE_INVLDPARM;
 
-          value = xdffp->xdff_f.setget.fdos_new;
-          if ((UWORD)xdffp->xdff_function == 0x03)
+          value = xdff.dword(xdff_union + 0);
+          if (xdff_function == 0x03)
           {
             if (value != 0xFFFFFFFFUL && (value & ~(0xf | 0x80)))
               return DE_INVLDPARM;
-            xdffp->xdff_f.setget.old = dpb.dpb_xflags();
+            xdff.dword(xdff_union + 4, dpb.dpb_xflags());
           }
           else
           {
             if (value != 0xFFFFFFFFUL && (value < 2 || value > dpb.dpb_xsize()))
               return DE_INVLDPARM;
-            xdffp->xdff_f.setget.old = dpb.dpb_xrootclst();
+            xdff.dword(xdff_union + 4, dpb.dpb_xrootclst());
           }
 
           if (value != 0xFFFFFFFFUL)
@@ -790,7 +813,7 @@ rebuild_dpb:
             const buffer_ref b(x86_bp);
             BYTE flag = static_cast<BYTE>(b.flag() & ~(BFR_DATA | BFR_DIR | BFR_FAT));
             b.flag(static_cast<BYTE>(flag | BFR_VALID | BFR_DIRTY));
-            if ((UWORD)xdffp->xdff_function == 0x03)
+            if (xdff_function == 0x03)
               b.data16(BT_BPB + offsetof(bpb, bpb_xflags), (UWORD)value);
             else
               b.data32(BT_BPB + offsetof(bpb, bpb_xrootclst), value);
@@ -807,7 +830,7 @@ rebuild_dpb:
     /* Extended absolute disk read/write */
     case 0x05:
     {
-      BYTE FAR *SectorBlock = (BYTE FAR *)ARM_PTR(MK_FP(R_DS, R_BX));
+      const guest_bytes_ref SectorBlock(MK_FP(R_DS, R_BX));
       ULONG blkno;
       UWORD nblks;
       dos_far_ptr bufp;
@@ -819,14 +842,9 @@ rebuild_dpb:
       if (R_DL > (UBYTE)fdos_lol.lastdrive() || R_DL == 0)
         return -0x207;
 
-      blkno =  (ULONG)SectorBlock[0]
-             | ((ULONG)SectorBlock[1] << 8)
-             | ((ULONG)SectorBlock[2] << 16)
-             | ((ULONG)SectorBlock[3] << 24);
-      nblks =  (UWORD)SectorBlock[4]
-             | ((UWORD)SectorBlock[5] << 8);
-      bufp = MK_FP((UWORD)(SectorBlock[8] | ((UWORD)SectorBlock[9] << 8)),
-                   (UWORD)(SectorBlock[6] | ((UWORD)SectorBlock[7] << 8)));
+      blkno = SectorBlock.dword(0);
+      nblks = SectorBlock.word(4);
+      bufp = MK_FP(SectorBlock.word(8), SectorBlock.word(6));
         
       mode = ((R_SI & 1) == 0) ? DSKREADINT25 : DSKWRITEINT26;
 
