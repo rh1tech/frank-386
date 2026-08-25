@@ -746,9 +746,11 @@ static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
 
         case 0x01:
         {
-          ddt *pddt = getddt(R_DL);
-          /* bpbp is a guest far pointer out of the IOCTL packet. */
-          guest_read(&pddt->ddt_bpb, xdffp->xdff_f.rebuilddpb.bpbp, sizeof(bpb));
+          fdos_guest::ddt_ref ddt(getddt_far(R_DL));
+          /* Both endpoints are guest addresses; do not expose either cache slot. */
+          const dos_far_ptr src = xdffp->xdff_f.rebuilddpb.bpbp;
+          const uint32_t src_linear = ((uint32_t)FP_SEG(src) << 4) + FP_OFF(src);
+          guest_move_block(ddt.current_bpb_linear(), src_linear, sizeof(bpb));
         }
         /* fall through */
         case 0x02:

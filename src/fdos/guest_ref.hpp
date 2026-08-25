@@ -585,6 +585,7 @@ private:
 
 class bpb_ref final : private ref_base<bpb> {
 public:
+    __attribute__((always_inline)) explicit bpb_ref(linear_t addr) : ref_base<bpb>(addr) {}
     __attribute__((always_inline)) explicit bpb_ref(dos_far_ptr p)
         : ref_base<bpb>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
 
@@ -599,7 +600,16 @@ public:
     FDOS_GUEST_R16(bpb_nsize)
     FDOS_GUEST_R8(bpb_mdesc)
     FDOS_GUEST_R16(bpb_nfsect)
+    FDOS_GUEST_R16(bpb_nsecs)
+    FDOS_GUEST_R16(bpb_nheads)
     FDOS_GUEST_R32(bpb_huge)
+    __attribute__((always_inline)) linear_t linear() const { return base_linear(); }
+    __attribute__((always_inline)) void read(void *dst, size_t n = sizeof(bpb)) const {
+        guest_read_block(base_linear(), dst, n);
+    }
+    __attribute__((always_inline)) void write(const void *src, size_t n = sizeof(bpb)) const {
+        guest_write_block(base_linear(), src, n);
+    }
 #ifdef WITHFAT32
     FDOS_GUEST_R32(bpb_xnfsect)
     FDOS_GUEST_R16(bpb_xflags)
@@ -610,6 +620,175 @@ public:
 #undef FDOS_GUEST_R8
 #undef FDOS_GUEST_R16
 #undef FDOS_GUEST_R32
+};
+
+class ddt_ref final : private ref_base<ddt> {
+public:
+    __attribute__((always_inline)) explicit ddt_ref(linear_t addr) : ref_base<ddt>(addr) {}
+    __attribute__((always_inline)) explicit ddt_ref(dos_far_ptr p)
+        : ref_base<ddt>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+
+    __attribute__((always_inline)) linear_t linear() const { return base_linear(); }
+
+#define FDOS_DDT_RW8(name, field) \
+    __attribute__((always_inline)) UBYTE name() const { return scalar_load<UBYTE>(offsetof(ddt, field)); } \
+    __attribute__((always_inline)) void name(UBYTE v) const { scalar_store<UBYTE>(offsetof(ddt, field), v); }
+#define FDOS_DDT_RW16(name, field) \
+    __attribute__((always_inline)) UWORD name() const { return scalar_load<UWORD>(offsetof(ddt, field)); } \
+    __attribute__((always_inline)) void name(UWORD v) const { scalar_store<UWORD>(offsetof(ddt, field), v); }
+#define FDOS_DDT_RW32(name, field) \
+    __attribute__((always_inline)) ULONG name() const { return scalar_load<ULONG>(offsetof(ddt, field)); } \
+    __attribute__((always_inline)) void name(ULONG v) const { scalar_store<ULONG>(offsetof(ddt, field), v); }
+    FDOS_DDT_RW8(driveno, ddt_driveno)
+    FDOS_DDT_RW8(logdriveno, ddt_logdriveno)
+    FDOS_DDT_RW8(flags, ddt_flags)
+    FDOS_DDT_RW16(file_open_count, ddt_FileOC)
+    FDOS_DDT_RW8(type, ddt_type)
+    FDOS_DDT_RW16(descflags, ddt_descflags)
+    FDOS_DDT_RW16(ncyl, ddt_ncyl)
+    FDOS_DDT_RW8(ltrack, ddt_ltrack)
+    FDOS_DDT_RW32(lasttime, ddt_fh)
+    FDOS_DDT_RW32(serialno, ddt_serialno)
+    FDOS_DDT_RW32(offset, ddt_offset)
+#undef FDOS_DDT_RW8
+#undef FDOS_DDT_RW16
+#undef FDOS_DDT_RW32
+
+    __attribute__((always_inline)) bpb_ref current_bpb() const {
+        return bpb_ref(base_linear() + offsetof(ddt, ddt_bpb));
+    }
+    __attribute__((always_inline)) bpb_ref default_bpb() const {
+        return bpb_ref(base_linear() + offsetof(ddt, ddt_defbpb));
+    }
+    __attribute__((always_inline)) linear_t current_bpb_linear() const {
+        return base_linear() + offsetof(ddt, ddt_bpb);
+    }
+    __attribute__((always_inline)) linear_t default_bpb_linear() const {
+        return base_linear() + offsetof(ddt, ddt_defbpb);
+    }
+
+    __attribute__((always_inline)) void copy_current_bpb_from_default() const {
+        guest_move_block(current_bpb_linear(), default_bpb_linear(), sizeof(bpb));
+    }
+    __attribute__((always_inline)) void read_current_bpb(void *dst, size_t n = sizeof(bpb)) const {
+        guest_read_block(current_bpb_linear(), dst, n);
+    }
+    __attribute__((always_inline)) void write_current_bpb(const void *src, size_t n = sizeof(bpb)) const {
+        guest_write_block(current_bpb_linear(), src, n);
+    }
+    __attribute__((always_inline)) void read_default_bpb(void *dst, size_t n = sizeof(bpb)) const {
+        guest_read_block(default_bpb_linear(), dst, n);
+    }
+    __attribute__((always_inline)) void write_default_bpb(const void *src, size_t n = sizeof(bpb)) const {
+        guest_write_block(default_bpb_linear(), src, n);
+    }
+    __attribute__((always_inline)) linear_t volume_linear() const { return base_linear() + offsetof(ddt, ddt_volume); }
+    __attribute__((always_inline)) linear_t fstype_linear() const { return base_linear() + offsetof(ddt, ddt_fstype); }
+    __attribute__((always_inline)) void read_volume(void *dst, size_t n = sizeof(((ddt *)0)->ddt_volume)) const {
+        guest_read_block(volume_linear(), dst, n);
+    }
+    __attribute__((always_inline)) void write_volume(const void *src, size_t n = sizeof(((ddt *)0)->ddt_volume)) const {
+        guest_write_block(volume_linear(), src, n);
+    }
+    __attribute__((always_inline)) void read_fstype(void *dst, size_t n = sizeof(((ddt *)0)->ddt_fstype)) const {
+        guest_read_block(fstype_linear(), dst, n);
+    }
+    __attribute__((always_inline)) void write_fstype(const void *src, size_t n = sizeof(((ddt *)0)->ddt_fstype)) const {
+        guest_write_block(fstype_linear(), src, n);
+    }
+};
+
+
+class bios_lba_packet_ref final : private ref_base<_bios_LBA_address_packet> {
+public:
+    __attribute__((always_inline)) explicit bios_lba_packet_ref(dos_far_ptr p)
+        : ref_base<_bios_LBA_address_packet>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+
+    __attribute__((always_inline)) void packet_size(UBYTE v) const { scalar_store<UBYTE>(offsetof(_bios_LBA_address_packet, packet_size), v); }
+    __attribute__((always_inline)) void reserved_1(UBYTE v) const { scalar_store<UBYTE>(offsetof(_bios_LBA_address_packet, reserved_1), v); }
+    __attribute__((always_inline)) void number_of_blocks(UWORD v) const { scalar_store<UWORD>(offsetof(_bios_LBA_address_packet, number_of_blocks), v); }
+    __attribute__((always_inline)) void buffer_address(dos_far_ptr p) const {
+        const uint32_t x = (static_cast<uint32_t>(FP_SEG(p)) << 16) | FP_OFF(p);
+        scalar_store<uint32_t>(offsetof(_bios_LBA_address_packet, buffer_address), x);
+    }
+    __attribute__((always_inline)) void block_address(ULONG v) const { scalar_store<ULONG>(offsetof(_bios_LBA_address_packet, block_address), v); }
+    __attribute__((always_inline)) void block_address_high(ULONG v) const { scalar_store<ULONG>(offsetof(_bios_LBA_address_packet, block_address_high), v); }
+};
+
+class gblkio_ref final : private ref_base<gblkio> {
+public:
+    __attribute__((always_inline)) explicit gblkio_ref(dos_far_ptr p)
+        : ref_base<gblkio>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+    __attribute__((always_inline)) UBYTE spcfunbit() const { return scalar_load<UBYTE>(offsetof(gblkio, gbio_spcfunbit)); }
+    __attribute__((always_inline)) UBYTE devtype() const { return scalar_load<UBYTE>(offsetof(gblkio, gbio_devtype)); }
+    __attribute__((always_inline)) void devtype(UBYTE v) const { scalar_store<UBYTE>(offsetof(gblkio, gbio_devtype), v); }
+    __attribute__((always_inline)) UWORD devattrib() const { return scalar_load<UWORD>(offsetof(gblkio, gbio_devattrib)); }
+    __attribute__((always_inline)) void devattrib(UWORD v) const { scalar_store<UWORD>(offsetof(gblkio, gbio_devattrib), v); }
+    __attribute__((always_inline)) UWORD ncyl() const { return scalar_load<UWORD>(offsetof(gblkio, gbio_ncyl)); }
+    __attribute__((always_inline)) void ncyl(UWORD v) const { scalar_store<UWORD>(offsetof(gblkio, gbio_ncyl), v); }
+    __attribute__((always_inline)) void media(UBYTE v) const { scalar_store<UBYTE>(offsetof(gblkio, gbio_media), v); }
+    __attribute__((always_inline)) bpb_ref bpb_data() const { return bpb_ref(base_linear() + offsetof(gblkio, gbio_bpb)); }
+};
+
+class gblkrw_ref final : private ref_base<gblkrw> {
+public:
+    __attribute__((always_inline)) explicit gblkrw_ref(dos_far_ptr p)
+        : ref_base<gblkrw>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+    __attribute__((always_inline)) UWORD head() const { return scalar_load<UWORD>(offsetof(gblkrw, gbrw_head)); }
+    __attribute__((always_inline)) UWORD cyl() const { return scalar_load<UWORD>(offsetof(gblkrw, gbrw_cyl)); }
+    __attribute__((always_inline)) UWORD sector() const { return scalar_load<UWORD>(offsetof(gblkrw, gbrw_sector)); }
+    __attribute__((always_inline)) UWORD nsecs() const { return scalar_load<UWORD>(offsetof(gblkrw, gbrw_nsecs)); }
+    __attribute__((always_inline)) dos_far_ptr buffer() const {
+        const uint32_t x = scalar_load<uint32_t>(offsetof(gblkrw, gbrw_buffer));
+        return MK_FP(static_cast<UWORD>(x >> 16), static_cast<UWORD>(x));
+    }
+};
+
+class gblkfv_ref final : private ref_base<gblkfv> {
+public:
+    __attribute__((always_inline)) explicit gblkfv_ref(dos_far_ptr p)
+        : ref_base<gblkfv>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+    __attribute__((always_inline)) UBYTE spcfunbit() const { return scalar_load<UBYTE>(offsetof(gblkfv, gbfv_spcfunbit)); }
+    __attribute__((always_inline)) void spcfunbit(UBYTE v) const { scalar_store<UBYTE>(offsetof(gblkfv, gbfv_spcfunbit), v); }
+    __attribute__((always_inline)) UWORD head() const { return scalar_load<UWORD>(offsetof(gblkfv, gbfv_head)); }
+    __attribute__((always_inline)) UWORD cyl() const { return scalar_load<UWORD>(offsetof(gblkfv, gbfv_cyl)); }
+    __attribute__((always_inline)) UWORD ntracks() const { return scalar_load<UWORD>(offsetof(gblkfv, gbfv_ntracks)); }
+};
+
+class gioc_media_ref final : private ref_base<Gioc_media> {
+public:
+    __attribute__((always_inline)) explicit gioc_media_ref(dos_far_ptr p)
+        : ref_base<Gioc_media>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+    __attribute__((always_inline)) linear_t volume_linear() const { return base_linear() + offsetof(Gioc_media, ioc_volume); }
+    __attribute__((always_inline)) linear_t fstype_linear() const { return base_linear() + offsetof(Gioc_media, ioc_fstype); }
+    __attribute__((always_inline)) ULONG serialno() const { return scalar_load<ULONG>(offsetof(Gioc_media, ioc_serialno)); }
+    __attribute__((always_inline)) void serialno(ULONG v) const { scalar_store<ULONG>(offsetof(Gioc_media, ioc_serialno), v); }
+    __attribute__((always_inline)) void read_volume(void *dst, size_t n = sizeof(((Gioc_media*)0)->ioc_volume)) const { guest_read_block(base_linear() + offsetof(Gioc_media, ioc_volume), dst, n); }
+    __attribute__((always_inline)) void write_volume(const void *src, size_t n = sizeof(((Gioc_media*)0)->ioc_volume)) const { guest_write_block(base_linear() + offsetof(Gioc_media, ioc_volume), src, n); }
+    __attribute__((always_inline)) void write_fstype(const void *src, size_t n = sizeof(((Gioc_media*)0)->ioc_fstype)) const { guest_write_block(base_linear() + offsetof(Gioc_media, ioc_fstype), src, n); }
+};
+
+class access_info_ref final : private ref_base<Access_info> {
+public:
+    __attribute__((always_inline)) explicit access_info_ref(dos_far_ptr p)
+        : ref_base<Access_info>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+    __attribute__((always_inline)) BYTE flag() const { return scalar_load<BYTE>(offsetof(Access_info, AI_Flag)); }
+    __attribute__((always_inline)) void flag(BYTE v) const { scalar_store<BYTE>(offsetof(Access_info, AI_Flag), v); }
+};
+
+class guest_bytes_ref final : private ref_base<UBYTE> {
+public:
+    __attribute__((always_inline)) explicit guest_bytes_ref(dos_far_ptr p)
+        : ref_base<UBYTE>((static_cast<linear_t>(FP_SEG(p)) << 4) + FP_OFF(p)) {}
+    __attribute__((always_inline)) UBYTE byte(size_t off) const { return scalar_load<UBYTE>(off); }
+    __attribute__((always_inline)) UWORD word(size_t off) const { return scalar_load<UWORD>(off); }
+    __attribute__((always_inline)) ULONG dword(size_t off) const { return scalar_load<ULONG>(off); }
+    __attribute__((always_inline)) void byte(size_t off, UBYTE v) const { scalar_store<UBYTE>(off, v); }
+    __attribute__((always_inline)) void word(size_t off, UWORD v) const { scalar_store<UWORD>(off, v); }
+    __attribute__((always_inline)) void dword(size_t off, ULONG v) const { scalar_store<ULONG>(off, v); }
+    __attribute__((always_inline)) linear_t linear(size_t off = 0) const { return base_linear() + static_cast<linear_t>(off); }
+    __attribute__((always_inline)) void read(size_t off, void *dst, size_t n) const { guest_read_block(linear(off), dst, n); }
+    __attribute__((always_inline)) void write(size_t off, const void *src, size_t n) const { guest_write_block(base_linear() + static_cast<linear_t>(off), src, n); }
 };
 
 class request_ref final : private ref_base<request> {

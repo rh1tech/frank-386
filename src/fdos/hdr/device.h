@@ -532,8 +532,7 @@ typedef struct dhdr FAR *dhdrptr;
 /* blk_driver() is declared in init-mod.h: the native implementation takes
    the CPU* it needs for the BIOS INT 13h calls, so it cannot use rqptr-only
    ASM prototype of the original. */
-ddt * getddt(int dev);
-/* Same ddt as getddt(), but as its guest far pointer (see dsk.c). */
+/* Guest far pointer to a DDT entry. Runtime native code accesses it through ddt_ref. */
 dos_far_ptr getddt_far(int dev);
 
 /* error.c */

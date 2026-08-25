@@ -21,6 +21,9 @@ if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
+# Enable LTEMM support (performance degradation is expected)
+option(EMM "Enable LTEMM support" OFF)
+
 # Video adapter profile: one mutually exclusive build mode.
 set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
@@ -107,9 +110,6 @@ set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133,
 
 # Audio output configuration (I2S or PWM)
 set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
-
-# Enable LTEMM support (performance degradation is expected)
-option(EMM "Enable LTEMM support" OFF)
 
 # USB role is selected at runtime (HOST by default, DEVICE via config.ini).
 # Both TinyUSB roles are compiled into every firmware image.
