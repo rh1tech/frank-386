@@ -376,6 +376,7 @@ set(EMU_CORE_SOURCES
     src/fdos/dosfns.cpp
     src/fdos/fcbfns.c
     src/fdos/lfnapi.c
+    src/fdos/lfn_guest_proxy.cpp
     src/fdos/fatfs.cpp
     src/fdos/fattab.cpp
     src/fdos/fatdir.cpp
@@ -726,6 +727,7 @@ set(FDOS_WARN_SOURCES
     src/fdos/dosfns.cpp
     src/fdos/fcbfns.c
     src/fdos/lfnapi.c
+    src/fdos/lfn_guest_proxy.cpp
     src/fdos/fatfs.cpp
     src/fdos/fattab.cpp
     src/fdos/fatdir.cpp

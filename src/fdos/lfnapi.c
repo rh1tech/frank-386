@@ -9,6 +9,7 @@
 #include "hdrs.h"
 #include "fdos.h"
 #include "kernel_guest_proxy.h"
+#include "lfn_guest_proxy.h"
 
 void *malloc(size_t n);
 
@@ -141,86 +142,73 @@ COUNT lfn_setup_inode(UWORD handle, ULONG dirstart, ULONG diroff)
   return SUCCESS;
 }
 
-static COUNT ufstrlen(const UNICODE *s)
+static BOOL lfn_to_guest_unicode(dos_far_ptr inode, UWORD *name_index,
+                                 const struct lfn_entry *lep)
 {
-  COUNT cnt = 0;
-  while (*s++ != 0)
-    cnt++;
-  return cnt;
-}
-
-static UBYTE lfn_checksum(const UBYTE *sfn_name)
-{
-  UBYTE sum;
-  COUNT i;
-
-  for (sum = 0, i = 11; --i >= 0; sum += *sfn_name++)
-    sum = (sum << 7) | (sum >> 1);
-
-  return sum;
-}
-
-static BOOL transfer_unicode(UNICODE **dptr, const UNICODE **sptr,
-                             COUNT count)
-{
+  const UNICODE *parts[3] = {
+    lep->lfn_name0_4, lep->lfn_name5_10, lep->lfn_name11_12
+  };
+  const UBYTE counts[3] = {5, 6, 2};
   BOOL found_zero = FALSE;
 
-  for (COUNT i = 0; i < count; i++, (*dptr)++, (*sptr)++)
+  for (UBYTE part = 0; part < 3; ++part)
   {
+    for (UBYTE i = 0; i < counts[part]; ++i)
+    {
+      UNICODE ch = parts[part][i];
+      fdos_lfn_name_set(inode, (*name_index)++,
+                        found_zero ? UNICODE_FILLER : ch);
+      if (ch == 0)
+        found_zero = TRUE;
+    }
     if (found_zero)
-      **dptr = UNICODE_FILLER;
-    else
-      **dptr = **sptr;
-
-    if (**sptr == 0)
-      found_zero = TRUE;
+      return TRUE;
   }
-
-  return found_zero;
-}
-
-static BOOL lfn_to_unicode(UNICODE **name, struct lfn_entry *lep)
-{
-  const UNICODE *ptr;
-
-  ptr = lep->lfn_name0_4;
-  if (transfer_unicode(name, &ptr, 5)) return TRUE;
-  ptr = lep->lfn_name5_10;
-  if (transfer_unicode(name, &ptr, 6)) return TRUE;
-  ptr = lep->lfn_name11_12;
-  if (transfer_unicode(name, &ptr, 2)) return TRUE;
 
   return FALSE;
 }
 
-static void unicode_to_lfn(const UNICODE **name, struct lfn_entry *lep)
+static void guest_unicode_to_lfn(dos_far_ptr inode, UWORD start_index,
+                                 struct lfn_entry *lep)
 {
-  UNICODE *ptr;
+  UNICODE *parts[3] = {
+    lep->lfn_name0_4, lep->lfn_name5_10, lep->lfn_name11_12
+  };
+  const UBYTE counts[3] = {5, 6, 2};
+  BOOL found_zero = FALSE;
+  UWORD index = start_index;
 
-  ptr = lep->lfn_name0_4;
-  transfer_unicode(&ptr, name, 5);
-  ptr = lep->lfn_name5_10;
-  transfer_unicode(&ptr, name, 6);
-  ptr = lep->lfn_name11_12;
-  transfer_unicode(&ptr, name, 2);
+  for (UBYTE part = 0; part < 3; ++part)
+  {
+    for (UBYTE i = 0; i < counts[part]; ++i, ++index)
+    {
+      if (found_zero)
+        parts[part][i] = UNICODE_FILLER;
+      else
+      {
+        UNICODE ch = fdos_lfn_name_get(inode, index);
+        parts[part][i] = ch;
+        if (ch == 0)
+          found_zero = TRUE;
+      }
+    }
+  }
 }
 
-COUNT lfn_create_entries(UWORD handle, lfn_inode_ptr lip)
+COUNT lfn_create_entries(UWORD handle, dos_far_ptr lip)
 {
   f_node_ptr fnp = lfn_get_fnode(handle);
   lfn_fnode_slot *slot = lfn_slot(handle);
   COUNT entries_needed, free_entries, rc;
-  const UNICODE *lfn_name;
   UBYTE id = 1;
   UBYTE sfn_checksum;
   UWORD sfn_offset;
 
-  if (fnp == NULL || lip == NULL)
+  if (fnp == NULL || far_is_null(lip))
     return LHE_INVLDHNDL;
 
-  lfn_name = lip->l_name;
-  sfn_checksum = lfn_checksum((UBYTE*)lip->l_dir.dir_name);
-  entries_needed = (ufstrlen(lfn_name) + CHARS_IN_LFN_ENTRY - 1)
+  sfn_checksum = fdos_lfn_sfn_checksum(lip);
+  entries_needed = (fdos_lfn_name_length(lip) + CHARS_IN_LFN_ENTRY - 1)
                  / CHARS_IN_LFN_ENTRY + 1;
 
   lfn_setup_inode(handle, fnp->f_dmp->dm_dircluster, 0);
@@ -259,20 +247,18 @@ COUNT lfn_create_entries(UWORD handle, lfn_inode_ptr lip)
   }
 
   sfn_offset = fnp->f_dmp->dm_entry;
-  memcpy(&fnp->f_dir, &lip->l_dir, sizeof(struct dirent));
+  fdos_lfn_dir_to_native(lip, &fnp->f_dir);
   if (!dir_write(fnp))
     return LHE_IOERROR;
 
   fnp->f_dmp->dm_entry--;
   for (COUNT i = 0; i < entries_needed - 1; i++, id++)
   {
-    const UNICODE *chunk = &lip->l_name[i * CHARS_IN_LFN_ENTRY];
-
     memset(&fnp->f_dir, 0, sizeof(fnp->f_dir));
     if (i == entries_needed - 2)
       id |= 0x40;
 
-    unicode_to_lfn(&chunk, lfn(fnp));
+    guest_unicode_to_lfn(lip, (UWORD)(i * CHARS_IN_LFN_ENTRY), lfn(fnp));
     lfn(fnp)->lfn_checksum = sfn_checksum;
     lfn(fnp)->lfn_id = id;
     fnp->f_dir.dir_attrib = D_LFN;
@@ -285,23 +271,22 @@ COUNT lfn_create_entries(UWORD handle, lfn_inode_ptr lip)
   }
 
   fnp->f_dmp->dm_entry = sfn_offset;
-  lip->l_diroff = sfn_offset;
+  fdos_lfn_set_diroff(lip, sfn_offset);
   return SUCCESS;
 }
 
-COUNT lfn_dir_read(UWORD handle, lfn_inode_ptr lip)
+COUNT lfn_dir_read(UWORD handle, dos_far_ptr lip)
 {
   f_node_ptr fnp = lfn_get_fnode(handle);
   COUNT rc;
   UBYTE id = 1, real_id;
-  UNICODE *lfn_name;
+  UWORD lfn_name_index = 0;
   UWORD sfn_diroff;
   BOOL name_tail;
 
-  if (fnp == NULL || lip == NULL)
+  if (fnp == NULL || far_is_null(lip))
     return LHE_INVLDHNDL;
 
-  lfn_name = lip->l_name;
   for (;;)
   {
     rc = dir_read(fnp);
@@ -311,7 +296,7 @@ COUNT lfn_dir_read(UWORD handle, lfn_inode_ptr lip)
     if (fnp->f_dir.dir_name[0] != DELETED &&
         fnp->f_dir.dir_attrib != D_LFN)
    {
-      memcpy(&lip->l_dir, &fnp->f_dir, sizeof(struct dirent));
+      fdos_lfn_dir_from_native(lip, &fnp->f_dir);
       sfn_diroff = fnp->f_dmp->dm_entry;
       break;
     }
@@ -334,7 +319,7 @@ COUNT lfn_dir_read(UWORD handle, lfn_inode_ptr lip)
     if ((real_id & 0x3f) > 20)
       return LHE_DAMAGEDFS;
 
-    name_tail = lfn_to_unicode(&lfn_name, lfn(fnp));
+    name_tail = lfn_to_guest_unicode(lip, &lfn_name_index, lfn(fnp));
     if (real_id & 0x40)
     {
       if ((id | 0x40) != real_id)
@@ -343,15 +328,15 @@ COUNT lfn_dir_read(UWORD handle, lfn_inode_ptr lip)
     }
 
     if (name_tail || real_id != id ||
-        lfn(fnp)->lfn_checksum != lfn_checksum((UBYTE*)lip->l_dir.dir_name))
+        lfn(fnp)->lfn_checksum != fdos_lfn_sfn_checksum(lip))
       return LHE_DAMAGEDFS;
 
     id++;
   }
 
-  *lfn_name = 0;
+  fdos_lfn_name_set(lip, lfn_name_index, 0);
   fnp->f_dmp->dm_entry = sfn_diroff;
-  lip->l_diroff = sfn_diroff;
+  fdos_lfn_set_diroff(lip, sfn_diroff);
   return SUCCESS;
 }
 

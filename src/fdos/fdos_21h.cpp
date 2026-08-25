@@ -1286,13 +1286,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             if (cntry == 0)
               cntry--;
             /* Get Country Information */
-            rc = DosGetCountryInformation(cntry, ARM_PTR ( R_FP_DS_DX ) );
+            rc = DosGetCountryInformation(cntry, R_FP_DS_DX);
             if (rc >= SUCCESS)
             {
-              if (cntry == (UWORD) - 1) {
-                struct nlsInfoBlock *nlsInfo = (struct nlsInfoBlock *)ARM_PTR(x86_nlsInfo);
-                cntry = ((struct nlsPackage *)ARM_PTR(nlsInfo->actPkg))->cntry;
-              }
+              if (cntry == (UWORD) - 1)
+                cntry = DosGetCountry();
               R_AX = R_BX = cntry;
             }
           }
@@ -1649,11 +1647,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             R_CF = 0;
             break;
           case 0x21:             /* upcase memory area */
-            DosUpMem(ARM_PTR(R_FP_DS_DX), R_CX);
+            DosUpMemGuest(R_FP_DS_DX, R_CX);
             R_CF = 0;
             break;
           case 0x22:             /* upcase ASCIZ */
-            DosUpString((char FAR *)ARM_PTR(R_FP_DS_DX));
+            DosUpStringGuest(R_FP_DS_DX);
             R_CF = 0;
             break;
           case 0xA0:             /* upcase single filename character */
@@ -1661,11 +1659,11 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             R_CF = 0;
             break;
           case 0xA1:             /* upcase filename memory area */
-            DosUpFMem(ARM_PTR(R_FP_DS_DX), R_CX);
+            DosUpFMemGuest(R_FP_DS_DX, R_CX);
             R_CF = 0;
             break;
           case 0xA2:             /* upcase filename ASCIZ */
-            DosUpFString((char FAR *)ARM_PTR(R_FP_DS_DX));
+            DosUpFStringGuest(R_FP_DS_DX);
             R_CF = 0;
             break;
           case 0x23:             /* check Yes/No response */
@@ -1683,7 +1681,7 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             UWORD in_es = R_ES;
             UWORD in_di = R_DI;
             #endif
-            rc = DosGetData(R_AL, R_BX, R_DX, R_CX, ARM_PTR(R_FP_ES_DI));
+            rc = DosGetData(R_AL, R_BX, R_DX, R_CX, R_FP_ES_DI);
             #if DEBUG
             CfgDbgPrintf(("INT21/65%02x GetData bx=%04x dx=%04x cx=%04x es:di=%04x:%04x -> rc=%d ax=%04x R_CF=%d\n",
                           subfct, in_bx, in_dx, in_cx, in_es, in_di,
@@ -2058,10 +2056,10 @@ dispatch:                       /* re-entry point for AH=5Dh AL=00h
             rc = lfn_setup_inode(R_BX, MK_ULONG(R_CX, R_DX), MK_ULONG(R_SI, R_DI));
             break;
           case 0x04:
-            rc = lfn_create_entries(R_BX, (lfn_inode_ptr)ARM_PTR(R_FP_DS_DX));
+            rc = lfn_create_entries(R_BX, R_FP_DS_DX);
             break;
           case 0x05:
-            rc = lfn_dir_read(R_BX, (lfn_inode_ptr)ARM_PTR(R_FP_DS_DX));
+            rc = lfn_dir_read(R_BX, R_FP_DS_DX);
             break;
           case 0x06:
             rc = lfn_dir_write(R_BX);

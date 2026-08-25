@@ -278,8 +278,8 @@ VOID lfnapi_init(VOID);
 COUNT lfn_allocate_inode(VOID);
 COUNT lfn_free_inode(UWORD inode);
 COUNT lfn_setup_inode(UWORD inode, ULONG dir_cluster, ULONG dir_offset);
-COUNT lfn_create_entries(UWORD inode, lfn_inode_ptr out);
-COUNT lfn_dir_read(UWORD inode, lfn_inode_ptr out);
+COUNT lfn_create_entries(UWORD inode, dos_far_ptr out);
+COUNT lfn_dir_read(UWORD inode, dos_far_ptr out);
 COUNT lfn_dir_write(UWORD inode);
 COUNT extend_dir(f_node_ptr fnp);
 COUNT lfn_remove_entries(COUNT handle);
@@ -292,17 +292,22 @@ VOID DosUpMem(VOID FAR * str, unsigned len);
 #endif
 unsigned char ASMCFUNC DosUpChar(unsigned char ch);
 VOID DosUpString(char FAR * str);
+VOID DosUpMemGuest(dos_far_ptr str, unsigned len);
+VOID DosUpStringGuest(dos_far_ptr str);
 VOID DosUpFMem(VOID FAR * str, unsigned len);
+VOID DosUpFMemGuest(dos_far_ptr str, unsigned len);
 unsigned char DosUpFChar(unsigned char ch);
 VOID DosUpFString(char FAR * str);
-COUNT DosGetData(int subfct, UWORD cp, UWORD cntry, UWORD bufsize, VOID FAR * buf);
+VOID DosUpFStringGuest(dos_far_ptr str);
+COUNT DosGetData(int subfct, UWORD cp, UWORD cntry, UWORD bufsize, dos_far_ptr buf);
 bool fdos_nls_2fh(CPU *cpu);
 #ifndef DosGetCountryInformation
-COUNT DosGetCountryInformation(UWORD cntry, VOID FAR * buf);
+COUNT DosGetCountryInformation(UWORD cntry, dos_far_ptr buf);
 #endif
 #ifndef DosSetCountry
 COUNT DosSetCountry(UWORD cntry);
 #endif
+UWORD DosGetCountry(void);
 COUNT DosGetCodepage(UWORD * actCP, UWORD * sysCP);
 COUNT DosSetCodepage(UWORD actCP, UWORD sysCP);
 dos_far_ptr DosGetDBCS(void);
