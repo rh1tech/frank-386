@@ -3,6 +3,8 @@
 #include "kernel_guest_proxy.h"
 #include "bios/bios.h"
 #include "fdos.h"
+#include "sdcard.h"
+#include "psram_layout.h"
 
 #define XMS_VERSION 0x00
 #define REQUEST_HMA 0x01
@@ -33,7 +35,6 @@
  * Handing EMB storage out starting at 0x100000 lets any XMS client
  * (e.g. FreeCOM swap) overwrite the kernel/buffers in HMA.
  */
-#define XMS_EMB_BASE_PHYS 0x00110000ul
 
 #define to_physical_offset(offset) (((uint16_t)(((offset) >> 16) & 0xFFFF) << 4) + (uint16_t)((offset) & 0xFFFF))
 
@@ -50,14 +51,14 @@ static inline uint32_t emb_pool_size(void) {
 }
 
 static inline uint8_t *xms_ptr(uint32_t offset) {
-    return X86_RAM_BASE + XMS_EMB_BASE_PHYS + offset;
+    return X86_RAM_BASE + FDOS_XMS_EMB_BASE_PHYS + offset;
 }
 
 static inline uint8_t xms_load8(uint32_t offset)
 {
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active())
-        return read86(XMS_EMB_BASE_PHYS + offset);
+        return read86(FDOS_XMS_EMB_BASE_PHYS + offset);
 #endif
     return *xms_ptr(offset);
 }
@@ -66,7 +67,7 @@ static inline void xms_store8(uint32_t offset, uint8_t value)
 {
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
     if (ega128_paging_active()) {
-        write86(XMS_EMB_BASE_PHYS + offset, value);
+        write86(FDOS_XMS_EMB_BASE_PHYS + offset, value);
         return;
     }
 #endif
@@ -81,6 +82,21 @@ typedef struct {
 } emb_handle_t;
 
 static emb_handle_t emb_handles[XMS_HANDLES + 1]; /* index 0 is never a valid handle */
+
+static void xms_update_ff_qspi_floor(void)
+{
+    uint32_t high = 0;
+    for (int i = 1; i <= XMS_HANDLES; ++i) {
+        if (!emb_handles[i].used)
+            continue;
+        uint32_t end = emb_handles[i].base + emb_handles[i].size;
+        if (end > high)
+            high = end;
+    }
+    sdcard_ff_qspi_cache_set_floor(
+        SDCARD_FF_QSPI_OWNER_XMS,
+        (void *)((uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS + high));
+}
 
 /* HMA ownership. There is exactly one HMA (FFFF:0010..FFFF:FFFF, ~64K-16).
    REQUEST_HMA (01h) grants it to the FIRST caller and must refuse everyone
@@ -291,6 +307,7 @@ void reset_umb() {
         emb_handles[i].base = emb_handles[i].size = 0;
     }
     xms_handles = 0;
+    xms_update_ff_qspi_floor();
 }
 
 /*
@@ -583,6 +600,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             emb_handles[hnd].base = base;
             emb_handles[hnd].size = size;
             xms_handles++;
+            xms_update_ff_qspi_floor();
             CPU_DX = (uint16_t)hnd;
             CPU_AX = 1;
             CPU_BL = 0;
@@ -603,6 +621,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             emb_handles[hnd].used = 0;
             emb_handles[hnd].base = emb_handles[hnd].size = 0;
             if (xms_handles) xms_handles--;
+            xms_update_ff_qspi_floor();
             CPU_AX = 1;
             CPU_BL = 0;
             break;
@@ -682,7 +701,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 move_data.destination_handle,
                 (unsigned long)move_data.destination_offset,
                 (unsigned long)(move_data.destination_handle
-                    ? XMS_EMB_BASE_PHYS + move_data.destination_offset
+                    ? FDOS_XMS_EMB_BASE_PHYS + move_data.destination_offset
                     : move_data.destination_offset),
                 err ? " REJECTED" : "");
             #endif
@@ -812,7 +831,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 break;
             }
             emb_handles[hnd].locks++;
-            const uint32_t phys = XMS_EMB_BASE_PHYS + emb_handles[hnd].base;
+            const uint32_t phys = FDOS_XMS_EMB_BASE_PHYS + emb_handles[hnd].base;
             CPU_DX = (uint16_t)(phys >> 16);
             CPU_BX = (uint16_t)(phys & 0xFFFF);
             CPU_AX = 1;
@@ -864,6 +883,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
             emb_handle_t *h = &emb_handles[hnd];
             if (new_size <= h->size) {
                 h->size = new_size;
+                xms_update_ff_qspi_floor();
                 CPU_AX = 1;
                 CPU_BL = 0;
                 break;
@@ -883,6 +903,7 @@ static bool xms_handler(CPU* cpu, bios_callback_params_t* params) {
                 xms_move_xms_to_xms(base, old_base, old_size);
             h->base = base;
             h->size = new_size;
+            xms_update_ff_qspi_floor();
             CPU_AX = 1;
             CPU_BL = 0;
             break;

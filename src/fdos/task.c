@@ -32,17 +32,11 @@
 #if DIAG
 extern volatile uint32_t dos_diag_kernel_code;
 #endif
-/*
- * fdos/hdr/portab.h already publishes the guest PSRAM base as
- * PSRAM_BASE_ADDR.  board_config.h publishes the same address through the
- * board-level PSRAM_BASE macro, but does so with another unconditional
- * definition.  Drop the API-side spelling before importing board_config.h;
- * this TU needs its PSRAM_SIZE_BYTES configuration as well.
- */
-#ifdef PSRAM_BASE_ADDR
-#undef PSRAM_BASE_ADDR
-#endif
+/* board_config.h also publishes the PSRAM base.  Its compatibility alias is
+ * guarded, so it can coexist with the FreeDOS-side definition from portab.h. */
 #include "../board_config.h"
+#include "sdcard.h"
+#include "psram_layout.h"
 
 /*
  * Keep this dependency narrow.  Including ../pc.h here pulls host stdio
@@ -517,6 +511,22 @@ typedef struct arm_app_heap_block {
 _Static_assert(sizeof(arm_app_heap_block) == ARM_APP_HEAP_ALIGN,
                "native application heap header alignment");
 
+/* QSPI L2 is a discardable owner of the free PSRAM tail.  Native application
+ * memory uses in-band heap headers, so the first implementation only raises
+ * this high-water mark.  It never reclaims native heap space on free; that
+ * conservative policy avoids exposing stale cache lines over live allocator
+ * metadata and can be relaxed later when the heap moves to out-of-band extents. */
+static uintptr_t arm_ff_qspi_high_water;
+
+static void arm_ff_qspi_claim_until(uintptr_t end)
+{
+  if (end <= arm_ff_qspi_high_water)
+    return;
+  arm_ff_qspi_high_water = end;
+  sdcard_ff_qspi_cache_set_floor(SDCARD_FF_QSPI_OWNER_NATIVE,
+                                  (void *)end);
+}
+
 static uintptr_t arm_app_align_up(uintptr_t value)
 {
   return (value + (ARM_APP_HEAP_ALIGN - 1u)) &
@@ -566,6 +576,7 @@ static int arm_app_heap_init(void)
   arm_app_active_heap->begin = (ULONG)begin;
   arm_app_active_heap->end = (ULONG)end;
   first = (arm_app_heap_block *)begin;
+  arm_ff_qspi_claim_until(begin + sizeof(*first));
   first->size_flags = (ULONG)(end - begin) | ARM_APP_BLOCK_FREE;
   first->prev_size = 0;
   first->magic = ARM_APP_BLOCK_MAGIC;
@@ -617,6 +628,12 @@ static void arm_app_split_allocated(arm_app_heap_block *block, ULONG wanted)
 {
   ULONG old_size = arm_app_block_size(block);
   ULONG remainder = old_size - wanted;
+
+  /* The final free block's payload may currently be occupied by discardable
+   * QSPI cache lines.  Shrink the cache before writing a new tail header or
+   * returning any part of that payload to the native application. */
+  if (arm_app_next(block) == NULL)
+    arm_ff_qspi_claim_until((uintptr_t)block + wanted + sizeof(*block));
 
   if (remainder >= sizeof(arm_app_heap_block) + ARM_APP_MIN_PAYLOAD) {
     arm_app_heap_block *tail =
@@ -2691,8 +2708,7 @@ typedef int (*arm_elf_req_ver_fn)(void);
  * so nested native EXEC can safely consume it LIFO without colliding with a
  * parent's application allocations.
  */
-#define ARM_ELF_NATIVE_STACK_ARENA_SIZE (256u * 1024u)
-#define ARM_ELF_APP_PSRAM_BEGIN_OFFSET  0x00110000ul
+
 
 typedef struct __attribute__((aligned(4))) arm_elf_process_requirements {
   ULONG struct_size __attribute__((aligned(4)));
@@ -2715,11 +2731,11 @@ typedef arm_elf_process_requirements *
 /*
  * Native stack arena.
  *
- * PSRAM_SIZE_BYTES already excludes the EMS backing store when LTEMS is
- * enabled, so this arena is carved from the top of the application-visible
- * PSRAM portion, not from EMS.  The application heap ends below this entire
- * arena.  Stack lifetimes follow synchronous nested EXEC, so a LIFO allocator
- * is sufficient and cannot fragment.
+ * The stack arena is carved from the top of physically detected QSPI PSRAM.
+ * The FatFs reclaimable L2 cache independently caps its ceiling at
+ * config.mem_size, so LTEMS backing is never borrowed by the cache.  Stack
+ * lifetimes follow synchronous nested EXEC, so a LIFO allocator is sufficient
+ * and cannot fragment.
  */
 static uintptr_t arm_elf_native_stack_cursor;
 
@@ -3594,6 +3610,8 @@ static COUNT DosArmEzLoader(exec_blk *exp, COUNT mode, COUNT fd, BYTE *namep)
       rc = arm_ez_reject(DE_NOMEM, "EZ image does not fit application PSRAM");
       goto fail;
     }
+    arm_ff_qspi_claim_until(
+        (psram_image_addr + header.image_mem_size + 15u) & ~(uintptr_t)15u);
     image_data = (BYTE *)psram_image_addr;
     image_base = image_data - EZ_IMAGE_RVA;
     fail_stage = "PSRAM image read/staging";

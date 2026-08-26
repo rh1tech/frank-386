@@ -43,4 +43,19 @@
  * guarantee that it is no longer live for its previous purpose. */
 void sdcard_enable_ff_stack_cache(void *storage, size_t bytes);
 
+/*
+ * Optional second-level FatFs cache in direct-mapped QSPI PSRAM.  The data
+ * arena is reclaimable: callers publish the lowest address still available
+ * to the cache for each owner.  The cache itself occupies only the free tail
+ * below the fixed ceiling supplied at enable time.
+ */
+typedef enum {
+    SDCARD_FF_QSPI_OWNER_XMS = 0,
+    SDCARD_FF_QSPI_OWNER_NATIVE = 1,
+    SDCARD_FF_QSPI_OWNER_COUNT
+} sdcard_ff_qspi_owner_t;
+
+void sdcard_enable_ff_qspi_cache(void *minimum, void *ceiling);
+void sdcard_ff_qspi_cache_set_floor(sdcard_ff_qspi_owner_t owner, void *floor);
+
 #endif // _SDCARD_H_

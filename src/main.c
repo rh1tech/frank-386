@@ -49,6 +49,7 @@
 #include "nespad.h"
 #endif
 #include "sdcard.h"
+#include "fdos/psram_layout.h"
 #include "ff.h"
 #include "audio.h"
 
@@ -1335,6 +1336,30 @@ static bool init_emulator(void) {
     DBG_PRINT("  PSRAM detected: %lu KB; guest RAM: %lu KB\n",
               (unsigned long)(detected_psram / 1024),
               (unsigned long)(config.mem_size / 1024));
+
+    /*
+     * Direct-QSPI builds can use the currently unowned extended-memory tail as
+     * an L2 FatFs cache.  config.mem_size already excludes the fixed LTEMS
+     * backing store when EMM is enabled.  Keep the cache below both that guest
+     * boundary and the fixed native-stack arena; XMS/native owners will raise
+     * the reclaim floor dynamically as they consume PSRAM.
+     */
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    const bool direct_qspi_guest = !ega128_paging_active();
+#else
+    const bool direct_qspi_guest = true;
+#endif
+    if (direct_qspi_guest &&
+        detected_psram > FDOS_XMS_EMB_BASE_PHYS +
+                             ARM_ELF_NATIVE_STACK_ARENA_SIZE) {
+        uintptr_t low = (uintptr_t)PSRAM_BASE_ADDR + FDOS_XMS_EMB_BASE_PHYS;
+        uintptr_t guest_end = (uintptr_t)PSRAM_BASE_ADDR + config.mem_size;
+        uintptr_t stack_begin = (uintptr_t)PSRAM_BASE_ADDR + detected_psram -
+                                ARM_ELF_NATIVE_STACK_ARENA_SIZE;
+        uintptr_t high = guest_end < stack_begin ? guest_end : stack_begin;
+        if (high > low)
+            sdcard_enable_ff_qspi_cache((void *)low, (void *)high);
+    }
 
 #if REMOTE_MEM
     /* Claim a window of the slave's SRAM immediately above local RAM.

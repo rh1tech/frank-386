@@ -111,7 +111,9 @@
 
 // Aliases for compatibility with psram_init.h
 #define PSRAM_SIZE_BYTES PSRAM_SIZE
+#ifndef PSRAM_BASE_ADDR
 #define PSRAM_BASE_ADDR  PSRAM_BASE
+#endif
 
 // Runtime function to get PSRAM pin based on chip package
 static inline uint get_psram_pin(void) {

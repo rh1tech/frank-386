@@ -88,6 +88,150 @@ static uint8_t ff_stack_cache_valid[FF_STACK_CACHE_MAX_SECTORS];
 static uint8_t ff_stack_cache_sectors;
 static uint8_t ff_stack_cache_victim;
 
+/*
+ * Reclaimable L2 cache in memory-mapped QSPI PSRAM.  Lines are anchored from
+ * the fixed ceiling downward, so shrinking the free tail never moves the
+ * surviving lines.  A direct mapping keeps all tags out of scarce SRAM; each
+ * QSPI line carries its own LBA tag and epoch next to the 512-byte payload.
+ *
+ * owner_floor[] is deliberately small and generic.  XMS may move its floor
+ * both ways as EMBs are allocated/freed.  The native allocator currently only
+ * raises its floor (see task.c), which is conservative but cannot resurrect a
+ * line over in-band heap metadata that may still be live.
+ */
+typedef struct __attribute__((aligned(4))) {
+    uint32_t tag;
+    uint32_t epoch;
+    BYTE data[FF_STACK_CACHE_SECTOR_SIZE];
+} ff_qspi_cache_line_t;
+
+#define FF_QSPI_CACHE_INVALID_EPOCH 0u
+
+static uintptr_t ff_qspi_cache_minimum;
+static uintptr_t ff_qspi_cache_ceiling;
+static uintptr_t ff_qspi_cache_owner_floor[SDCARD_FF_QSPI_OWNER_COUNT];
+static uint32_t ff_qspi_cache_max_lines;
+static uint32_t ff_qspi_cache_active_lines;
+static uint32_t ff_qspi_cache_epoch = 1u;
+static bool ff_qspi_cache_enabled;
+
+static inline uintptr_t ff_qspi_cache_effective_floor(void)
+{
+    uintptr_t floor = ff_qspi_cache_minimum;
+    for (uint32_t i = 0; i < SDCARD_FF_QSPI_OWNER_COUNT; ++i)
+        if (ff_qspi_cache_owner_floor[i] > floor)
+            floor = ff_qspi_cache_owner_floor[i];
+    if (floor > ff_qspi_cache_ceiling)
+        floor = ff_qspi_cache_ceiling;
+    return floor;
+}
+
+static inline ff_qspi_cache_line_t *ff_qspi_cache_line(uint32_t slot)
+{
+    return (ff_qspi_cache_line_t *)(ff_qspi_cache_ceiling -
+        (uintptr_t)(slot + 1u) * sizeof(ff_qspi_cache_line_t));
+}
+
+static void __not_in_flash_func(ff_qspi_cache_resize)(void)
+{
+    uint32_t old_active = ff_qspi_cache_active_lines;
+    uintptr_t floor;
+    uint32_t active;
+
+    if (!ff_qspi_cache_enabled || ff_qspi_cache_max_lines == 0) {
+        ff_qspi_cache_active_lines = 0;
+        return;
+    }
+
+    floor = ff_qspi_cache_effective_floor();
+    active = (uint32_t)((ff_qspi_cache_ceiling - floor) /
+                        sizeof(ff_qspi_cache_line_t));
+    if (active > ff_qspi_cache_max_lines)
+        active = ff_qspi_cache_max_lines;
+
+    /* Growing exposes memory that an owner may have overwritten while it was
+     * outside the cache.  Invalidate only the newly visible line headers. */
+    if (active > old_active) {
+        for (uint32_t slot = old_active; slot < active; ++slot)
+            ff_qspi_cache_line(slot)->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+    }
+    ff_qspi_cache_active_lines = active;
+}
+
+static inline uint32_t ff_qspi_cache_slot(LBA_t sector)
+{
+    if (!ff_qspi_cache_max_lines)
+        return 0;
+    return (uint32_t)(sector % ff_qspi_cache_max_lines);
+}
+
+static ff_qspi_cache_line_t *__not_in_flash_func(ff_qspi_cache_find)(LBA_t sector)
+{
+    uint32_t slot;
+    ff_qspi_cache_line_t *line;
+
+    if (!ff_qspi_cache_enabled || !ff_qspi_cache_active_lines)
+        return NULL;
+    slot = ff_qspi_cache_slot(sector);
+    if (slot >= ff_qspi_cache_active_lines)
+        return NULL;
+    line = ff_qspi_cache_line(slot);
+    if (line->epoch != ff_qspi_cache_epoch || line->tag != sector)
+        return NULL;
+    return line;
+}
+
+static void __not_in_flash_func(ff_qspi_cache_store)(LBA_t sector,
+                                                      UINT count,
+                                                      const BYTE *src)
+{
+    if (!ff_qspi_cache_enabled || !ff_qspi_cache_active_lines)
+        return;
+    for (UINT i = 0; i < count; ++i) {
+        LBA_t tag = sector + i;
+        uint32_t slot = ff_qspi_cache_slot(tag);
+        ff_qspi_cache_line_t *line;
+        if (slot >= ff_qspi_cache_active_lines)
+            continue;
+        line = ff_qspi_cache_line(slot);
+        line->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+        dos_api_memcpy(line->data,
+                       src + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE,
+                       FF_STACK_CACHE_SECTOR_SIZE);
+        line->tag = tag;
+        line->epoch = ff_qspi_cache_epoch;
+    }
+}
+
+static void __not_in_flash_func(ff_qspi_cache_invalidate_range)(LBA_t sector,
+                                                                 UINT count)
+{
+    if (!ff_qspi_cache_enabled || !count)
+        return;
+    for (UINT i = 0; i < count; ++i) {
+        LBA_t tag = sector + i;
+        uint32_t slot = ff_qspi_cache_slot(tag);
+        ff_qspi_cache_line_t *line;
+        if (slot >= ff_qspi_cache_active_lines)
+            continue;
+        line = ff_qspi_cache_line(slot);
+        if (line->epoch == ff_qspi_cache_epoch && line->tag == tag)
+            line->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+    }
+}
+
+static void __not_in_flash_func(ff_qspi_cache_invalidate_all)(void)
+{
+    if (!ff_qspi_cache_enabled)
+        return;
+    ++ff_qspi_cache_epoch;
+    if (ff_qspi_cache_epoch == FF_QSPI_CACHE_INVALID_EPOCH) {
+        ff_qspi_cache_epoch = 1u;
+        for (uint32_t slot = 0; slot < ff_qspi_cache_active_lines; ++slot)
+            ff_qspi_cache_line(slot)->epoch = FF_QSPI_CACHE_INVALID_EPOCH;
+    }
+}
+
 static bool __not_in_flash_func(ff_stack_cache_read_disabled)(LBA_t sector,
                                                                UINT count,
                                                                BYTE *dst)
@@ -114,10 +258,12 @@ static void __not_in_flash_func(ff_stack_cache_invalidate_all)(void)
 {
     nf_memset(ff_stack_cache_valid, 0, sizeof(ff_stack_cache_valid));
     ff_stack_cache_victim = 0;
+    ff_qspi_cache_invalidate_all();
 }
 
 static void __not_in_flash_func(ff_stack_cache_invalidate_range)(LBA_t sector, UINT count)
 {
+    ff_qspi_cache_invalidate_range(sector, count);
     if (!ff_stack_cache_sectors || !count)
         return;
     for (uint32_t slot = 0; slot < ff_stack_cache_sectors; ++slot) {
@@ -156,20 +302,40 @@ static bool __not_in_flash_func(ff_stack_cache_read_active)(LBA_t sector,
                                                              UINT count,
                                                              BYTE *dst)
 {
-    if (!count || count > ff_stack_cache_sectors)
+    if (!count)
         return false;
 
-    /* Keep FatFs multi-sector requests atomic at this layer: on a partial hit
-     * the normal lower cache/card path handles the complete request. */
+    /* First pass only proves that the complete FatFs request is resident in
+     * L1 or L2.  Partial hits must not modify dst because disk_read() then
+     * falls through to the lower cache/card path for the whole request. */
     for (UINT i = 0; i < count; ++i) {
-        if (ff_stack_cache_find(sector + i) < 0)
+        if (ff_stack_cache_find(sector + i) >= 0)
+            continue;
+        if (ff_qspi_cache_find(sector + i) == NULL)
             return false;
     }
+
     for (UINT i = 0; i < count; ++i) {
-        uint32_t slot = (uint32_t)ff_stack_cache_find(sector + i);
-        dos_api_memcpy(dst + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE,
-                       ff_stack_cache_data + (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
-                       FF_STACK_CACHE_SECTOR_SIZE);
+        LBA_t tag = sector + i;
+        int l1 = ff_stack_cache_find(tag);
+        BYTE *out = dst + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE;
+        if (l1 >= 0) {
+            dos_api_memcpy(out,
+                           ff_stack_cache_data +
+                               (size_t)l1 * FF_STACK_CACHE_SECTOR_SIZE,
+                           FF_STACK_CACHE_SECTOR_SIZE);
+        } else {
+            ff_qspi_cache_line_t *line = ff_qspi_cache_find(tag);
+            uint32_t slot;
+            dos_api_memcpy(out, line->data, FF_STACK_CACHE_SECTOR_SIZE);
+            /* Promote an L2 hit into the small SRAM L1. */
+            if (ff_stack_cache_sectors) {
+                slot = ff_stack_cache_alloc(tag);
+                dos_api_memcpy(ff_stack_cache_data +
+                                   (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
+                               line->data, FF_STACK_CACHE_SECTOR_SIZE);
+            }
+        }
     }
     return true;
 }
@@ -178,6 +344,9 @@ static void __not_in_flash_func(ff_stack_cache_store_active)(LBA_t sector,
                                                               UINT count,
                                                               const BYTE *src)
 {
+    ff_qspi_cache_store(sector, count, src);
+    if (!ff_stack_cache_sectors)
+        return;
     for (UINT i = 0; i < count; ++i) {
         uint32_t slot = ff_stack_cache_alloc(sector + i);
         dos_api_memcpy(ff_stack_cache_data + (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
@@ -202,6 +371,46 @@ void sdcard_enable_ff_stack_cache(void *storage, size_t bytes)
     ff_stack_cache_invalidate_all();
     ff_stack_cache_store_hook = ff_stack_cache_store_active;
     ff_stack_cache_read_hook = ff_stack_cache_read_active;
+}
+
+void sdcard_enable_ff_qspi_cache(void *minimum, void *ceiling)
+{
+    uintptr_t lo = ((uintptr_t)minimum + 3u) & ~(uintptr_t)3u;
+    uintptr_t hi = (uintptr_t)ceiling & ~(uintptr_t)3u;
+
+    ff_qspi_cache_enabled = false;
+    ff_qspi_cache_active_lines = 0;
+    ff_qspi_cache_max_lines = 0;
+    if (!minimum || !ceiling || hi <= lo + sizeof(ff_qspi_cache_line_t))
+        return;
+
+    ff_qspi_cache_minimum = lo;
+    ff_qspi_cache_ceiling = hi;
+    for (uint32_t i = 0; i < SDCARD_FF_QSPI_OWNER_COUNT; ++i) {
+        if (ff_qspi_cache_owner_floor[i] < lo)
+            ff_qspi_cache_owner_floor[i] = lo;
+        else if (ff_qspi_cache_owner_floor[i] > hi)
+            ff_qspi_cache_owner_floor[i] = hi;
+    }
+    ff_qspi_cache_max_lines =
+        (uint32_t)((hi - lo) / sizeof(ff_qspi_cache_line_t));
+    ff_qspi_cache_epoch = 1u;
+    ff_qspi_cache_enabled = ff_qspi_cache_max_lines != 0;
+    ff_qspi_cache_resize();
+    if (ff_qspi_cache_enabled) {
+        ff_stack_cache_store_hook = ff_stack_cache_store_active;
+        ff_stack_cache_read_hook = ff_stack_cache_read_active;
+    }
+}
+
+void sdcard_ff_qspi_cache_set_floor(sdcard_ff_qspi_owner_t owner, void *floor)
+{
+    uintptr_t p;
+    if ((unsigned)owner >= SDCARD_FF_QSPI_OWNER_COUNT)
+        return;
+    p = (uintptr_t)floor;
+    ff_qspi_cache_owner_floor[owner] = p;
+    ff_qspi_cache_resize();
 }
 
 #ifdef SDCARD_PIO
