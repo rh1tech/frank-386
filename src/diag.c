@@ -115,9 +115,10 @@ static char *diag_str(char *p, const char *s)
 extern uint32_t __StackBottom;
 extern uint32_t __StackTop;
 /* Bottom of the TEXT_BUFFER region (0x2003D000) and the hard floor for the
-   core0 stack. The stack may legitimately extend down from CORE0_STACK through
-   CORE0_STACK_EXT (boot-only junk) and into TEXT_BUFFER (text_buffer_sram),
-   but must never drop below this - past it lies main RAM / the heap. */
+   non-relocated core0 stack. It may legitimately extend down from CORE0_STACK
+   through CORE0_STACK_EXT and into TEXT_BUFFER, but must never drop below this.
+   Direct-QSPI reduced-VRAM builds instead move SP into GFX_BUFFER and reclaim
+   CORE0_STACK_EXT+CORE0_STACK as the FatFs cache. */
 extern uint32_t __text_buffer_area__;
 
 static uint32_t *diag_lo, *diag_hi;

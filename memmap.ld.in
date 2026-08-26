@@ -29,8 +29,8 @@ MEMORY
     /* SRAM0..3 blocks */
     RAM(rwx) : ORIGIN = 0x20000000, LENGTH = 244k /* main RAM, core0 stack protected */
     TEXT_BUFFER(rwx) : ORIGIN = 0x2003D000, LENGTH = 4k  /* OSD fast SRAM, core0 stack extention (partly protected) */
-    CORE0_STACK_EXT(rwx) : ORIGIN = 0x2003E000, LENGTH = 4k  /* not used in normal flow variables, core0 stack extention */
-    CORE0_STACK(rwx) : ORIGIN = 0x2003f000, LENGTH = 4k  /* core0 native stack */
+    CORE0_STACK_EXT(rwx) : ORIGIN = 0x2003E000, LENGTH = 4k  /* CONFIG-only scratch; reclaimed as FatFs cache after init */
+    CORE0_STACK(rwx) : ORIGIN = 0x2003f000, LENGTH = 4k  /* core0 stack; reclaimed as FatFs cache after direct-QSPI SP relocation */
 
     /* SRAM4..7 blocks */
     GFX_BUFFER(rwx) : ORIGIN = 0x20040000, LENGTH = 256k  /* complete SRAM4..7 striped group */
@@ -318,9 +318,13 @@ SECTIONS
     /* Core 0 stack lives entirely in the dedicated CORE0_STACK region. */
     __StackTop = ORIGIN(CORE0_STACK) + LENGTH(CORE0_STACK);
     __StackBottom = __StackTop - SIZEOF(.stack_dummy);
+    __Core0StackExtRegionStart = ORIGIN(CORE0_STACK_EXT);
+    __Core0StackRegionStart = ORIGIN(CORE0_STACK);
+    __Core0StackRegionEnd = ORIGIN(CORE0_STACK) + LENGTH(CORE0_STACK);
     PROVIDE(__stack = __StackTop);
 
     ASSERT(SIZEOF(.stack_dummy) <= LENGTH(CORE0_STACK), "core0 stack exceeds CORE0_STACK")
+    ASSERT(ORIGIN(CORE0_STACK_EXT) + LENGTH(CORE0_STACK_EXT) == ORIGIN(CORE0_STACK), "CORE0_STACK_EXT and CORE0_STACK must be contiguous")
     ASSERT(SIZEOF(.stack1_dummy) <= LENGTH(SCRATCH_X), "core1 stack exceeds SCRATCH_X")
     ASSERT(SIZEOF(.gfx_buffer) == @GFX_BUFFER_EXPECTED_SIZE@,
            "gfx_buffer has unexpected size")

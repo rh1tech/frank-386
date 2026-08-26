@@ -97,9 +97,8 @@ struct AdlibState {
  * OPL_calc_buffer_linear() produces 32-bit working samples.  Keep only a
  * small render tile here and convert into the long 16-bit playback queue.
  *
- * CORE0_STACK_EXT has spare SRAM in the target layout; using 64 samples costs
- * only 256 bytes there instead of keeping two 1024-sample int32 queues in the
- * ordinary heap.
+ * Keep only 64 working samples instead of two 1024-sample int32 queues.
+ * This scratch buffer is ordinary SRAM; it is not in CORE0_STACK_EXT.
  */
 #define ADLIB_RENDER_TILE 64u
 static int32_t adlib_render_scratch[ADLIB_RENDER_TILE]

@@ -6,6 +6,7 @@
 #include "bios/bios.h"
 #include "fdos.h"
 #include "i8254.h"
+#include "core0_stack.h"
 
 #define printf(...) dos_printf(__VA_ARGS__)
 CPU* cpu;
@@ -2816,6 +2817,10 @@ void kernel(CPU* _cpu) {
     dpb_watch_check_chain("kernel-before-DoInstall");
     DoInstall();
     dpb_watch_check_chain("kernel-after-DoInstall");
+
+    /* CONFIG.SYS-only CORE0_STACK_EXT data is dead now. If core0 already
+       moved into GFX_BUFFER, grow the FatFs cache from 4 KiB to 8 KiB. */
+    core0_expand_relocated_stack_services();
 
     prep_shell(_cpu);
 

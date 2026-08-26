@@ -16,6 +16,7 @@
 #include "diskio.h"
 #include "profile_subsys.h"
 #include "diskcache.h"
+#include "mem.h"
 
 
 /*--------------------------------------------------------------------------
@@ -61,6 +62,147 @@ DSTATUS Stat = STA_NOINIT;	/* Physical drive status */
 
 static
 BYTE CardType;			/* Card type flags */
+
+/*
+ * Small FatFs disk-I/O cache backed by SRAM released when core0 moves its
+ * native stack into the unused tail of GFX_BUFFER.
+ *
+ * The hooks deliberately start as SRAM-resident no-ops.  Only after SP has
+ * moved does main.c publish the active hooks and hand over CORE0_STACK.  Once
+ * CONFIG.SYS processing and the initial DoInstall() are complete,
+ * CORE0_STACK_EXT is dead boot scratch too and the same cache is re-enabled on
+ * the contiguous 8 KiB CORE0_STACK_EXT+CORE0_STACK range.
+ *
+ * Writes are true write-through: the physical SD write completes first, then
+ * the resident copy is updated.  No disk data exists only in this SRAM.
+ */
+#define FF_STACK_CACHE_SECTOR_SIZE 512u
+#define FF_STACK_CACHE_MAX_SECTORS 16u
+
+typedef bool (*ff_stack_cache_read_hook_t)(LBA_t sector, UINT count, BYTE *dst);
+typedef void (*ff_stack_cache_store_hook_t)(LBA_t sector, UINT count, const BYTE *src);
+
+static BYTE *ff_stack_cache_data;
+static LBA_t ff_stack_cache_tag[FF_STACK_CACHE_MAX_SECTORS];
+static uint8_t ff_stack_cache_valid[FF_STACK_CACHE_MAX_SECTORS];
+static uint8_t ff_stack_cache_sectors;
+static uint8_t ff_stack_cache_victim;
+
+static bool __not_in_flash_func(ff_stack_cache_read_disabled)(LBA_t sector,
+                                                               UINT count,
+                                                               BYTE *dst)
+{
+    (void)sector;
+    (void)count;
+    (void)dst;
+    return false;
+}
+
+static void __not_in_flash_func(ff_stack_cache_store_disabled)(LBA_t sector,
+                                                                UINT count,
+                                                                const BYTE *src)
+{
+    (void)sector;
+    (void)count;
+    (void)src;
+}
+
+static ff_stack_cache_read_hook_t ff_stack_cache_read_hook = ff_stack_cache_read_disabled;
+static ff_stack_cache_store_hook_t ff_stack_cache_store_hook = ff_stack_cache_store_disabled;
+
+static void __not_in_flash_func(ff_stack_cache_invalidate_all)(void)
+{
+    nf_memset(ff_stack_cache_valid, 0, sizeof(ff_stack_cache_valid));
+    ff_stack_cache_victim = 0;
+}
+
+static void __not_in_flash_func(ff_stack_cache_invalidate_range)(LBA_t sector, UINT count)
+{
+    if (!ff_stack_cache_sectors || !count)
+        return;
+    for (uint32_t slot = 0; slot < ff_stack_cache_sectors; ++slot) {
+        if (!ff_stack_cache_valid[slot])
+            continue;
+        LBA_t tag = ff_stack_cache_tag[slot];
+        if (tag >= sector && (tag - sector) < count)
+            ff_stack_cache_valid[slot] = 0;
+    }
+}
+
+static int __not_in_flash_func(ff_stack_cache_find)(LBA_t sector)
+{
+    for (uint32_t slot = 0; slot < ff_stack_cache_sectors; ++slot) {
+        if (ff_stack_cache_valid[slot] && ff_stack_cache_tag[slot] == sector)
+            return (int)slot;
+    }
+    return -1;
+}
+
+static uint32_t __not_in_flash_func(ff_stack_cache_alloc)(LBA_t sector)
+{
+    int found = ff_stack_cache_find(sector);
+    if (found >= 0)
+        return (uint32_t)found;
+
+    uint32_t slot = ff_stack_cache_victim++;
+    if (ff_stack_cache_victim == ff_stack_cache_sectors)
+        ff_stack_cache_victim = 0;
+    ff_stack_cache_tag[slot] = sector;
+    ff_stack_cache_valid[slot] = 1;
+    return slot;
+}
+
+static bool __not_in_flash_func(ff_stack_cache_read_active)(LBA_t sector,
+                                                             UINT count,
+                                                             BYTE *dst)
+{
+    if (!count || count > ff_stack_cache_sectors)
+        return false;
+
+    /* Keep FatFs multi-sector requests atomic at this layer: on a partial hit
+     * the normal lower cache/card path handles the complete request. */
+    for (UINT i = 0; i < count; ++i) {
+        if (ff_stack_cache_find(sector + i) < 0)
+            return false;
+    }
+    for (UINT i = 0; i < count; ++i) {
+        uint32_t slot = (uint32_t)ff_stack_cache_find(sector + i);
+        dos_api_memcpy(dst + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE,
+                       ff_stack_cache_data + (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
+                       FF_STACK_CACHE_SECTOR_SIZE);
+    }
+    return true;
+}
+
+static void __not_in_flash_func(ff_stack_cache_store_active)(LBA_t sector,
+                                                              UINT count,
+                                                              const BYTE *src)
+{
+    for (UINT i = 0; i < count; ++i) {
+        uint32_t slot = ff_stack_cache_alloc(sector + i);
+        dos_api_memcpy(ff_stack_cache_data + (size_t)slot * FF_STACK_CACHE_SECTOR_SIZE,
+                       src + (size_t)i * FF_STACK_CACHE_SECTOR_SIZE,
+                       FF_STACK_CACHE_SECTOR_SIZE);
+    }
+}
+
+void sdcard_enable_ff_stack_cache(void *storage, size_t bytes)
+{
+    size_t sectors = bytes / FF_STACK_CACHE_SECTOR_SIZE;
+    if (!storage || sectors == 0)
+        return;
+    if (sectors > FF_STACK_CACHE_MAX_SECTORS)
+        sectors = FF_STACK_CACHE_MAX_SECTORS;
+
+    /* Re-enabling is intentional: first CORE0_STACK (4 KiB), then the full
+     * CORE0_STACK_EXT+CORE0_STACK range (8 KiB).  Drop old tags because the
+     * backing address and number of lines change. */
+    ff_stack_cache_data = (BYTE *)storage;
+    ff_stack_cache_sectors = (uint8_t)sectors;
+    ff_stack_cache_invalidate_all();
+    ff_stack_cache_store_hook = ff_stack_cache_store_active;
+    ff_stack_cache_read_hook = ff_stack_cache_read_active;
+}
 
 #ifdef SDCARD_PIO
 pio_spi_inst_t pio_spi = {
@@ -379,6 +521,7 @@ DSTATUS disk_initialize (
 
 
 	if (drv) return STA_NOINIT;			/* Supports only drive 0 */
+	ff_stack_cache_invalidate_all();		/* Media/re-init invalidates cached sectors */
 	init_spi();							/* Initialize SPI */
     sleep_ms(10);
 
@@ -644,6 +787,7 @@ DRESULT disk_ioctl (
 		}
 		if (send_cmd(CMD32, st) == 0 && send_cmd(CMD33, ed) == 0 && send_cmd(CMD38, 0) == 0 && wait_ready(30000)) {	/* Erase sector block */
 			res = RES_OK;	/* FatFs does not check result of this command */
+			ff_stack_cache_invalidate_range((LBA_t)dp[0], (UINT)(dp[1] - dp[0] + 1u));
 		}
 		break;
 
@@ -666,10 +810,16 @@ DRESULT disk_ioctl (
  */
 DRESULT disk_read (BYTE drv, BYTE *buff, LBA_t sector, UINT count)
 {
+	if (!drv && count && !(Stat & STA_NOINIT) &&
+	    ff_stack_cache_read_hook(sector, count, buff))
+		return RES_OK;
+
 	/* Served from the slave's PSRAM when the whole request is resident;
 	 * roughly 30x faster than the same blocks over SPI. */
-	if (dc_read((uint32_t)sector, (uint32_t)count, (uint8_t *)buff))
+	if (dc_read((uint32_t)sector, (uint32_t)count, (uint8_t *)buff)) {
+		ff_stack_cache_store_hook(sector, count, buff);
 		return RES_OK;
+	}
 
 	PROF_T(t_disk);
 	DRESULT r = disk_read_impl(drv, buff, sector, count);
@@ -677,8 +827,10 @@ DRESULT disk_read (BYTE drv, BYTE *buff, LBA_t sector, UINT count)
 	PROF_ADD(t_disk, disk);
 	g_prof.disk_ops++;
 #endif
-	if (r == RES_OK)
+	if (r == RES_OK) {
+		ff_stack_cache_store_hook(sector, count, buff);
 		dc_fill((uint32_t)sector, (uint32_t)count, (const uint8_t *)buff);
+	}
 	return r;
 }
 
@@ -690,8 +842,14 @@ DRESULT disk_write (BYTE drv, const BYTE *buff, LBA_t sector, UINT count)
 	PROF_ADD(t_disk, disk);
 	g_prof.disk_ops++;
 #endif
-	/* Write-through: the card is authoritative. Drop the affected blocks
-	 * rather than patching them, since writes need not be aligned. */
+	if (r == RES_OK)
+		ff_stack_cache_store_hook(sector, count, buff);
+	else
+		/* A failed multi-sector write may have reached only part of the card. */
+		ff_stack_cache_invalidate_range(sector, count);
+
+	/* The optional slave-PSRAM cache keeps its existing invalidate-on-write
+	 * contract.  The local SRAM cache above is write-through and stays hot. */
 	dc_invalidate((uint32_t)sector, (uint32_t)count);
 	return r;
 }

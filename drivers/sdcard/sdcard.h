@@ -8,6 +8,8 @@
 #ifndef _SDCARD_H_
 #define _SDCARD_H_
 
+#include <stddef.h>
+
 // Include board configuration for pin definitions
 #ifdef RP2350_BUILD
 #include "board_config.h"
@@ -35,5 +37,10 @@
 #ifndef SDCARD_PIN_SPI0_MISO
 #define SDCARD_PIN_SPI0_MISO   16
 #endif
+
+/* Enable or resize the FatFs write-through cache in SRAM that is no longer
+ * used by core0 stack/config scratch. The caller owns the region and must
+ * guarantee that it is no longer live for its previous purpose. */
+void sdcard_enable_ff_stack_cache(void *storage, size_t bytes);
 
 #endif // _SDCARD_H_

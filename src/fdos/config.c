@@ -74,8 +74,10 @@ struct MenuSelector
 };
 
 /** Structure below holds the menu-strings */
-/* Boot-only menu table; parked in CORE0_STACK_EXT. Zero-init now works because
-   main() copies .stack_ext_area from its FLASH image at startup. */
+/* CONFIG.SYS-only menu table. It is the sole live user of
+   CORE0_STACK_EXT after InstallCommands is kept in normal SRAM. main() copies
+   .stack_ext_area from its FLASH image at startup; after init_kernel() returns
+   this table is dead and the whole 4 KiB region may be reclaimed. */
 STATIC struct MenuSelector MenuStruct[MENULINESMAX]
     __attribute__((section(".core0_stack_ext"))) BSS_INIT({0});
 STATIC int nMenuLine BSS_INIT(0);
@@ -137,14 +139,11 @@ struct instCmds {
 };
 static int numInstallCmds;
 /*
- * Boot-only: filled from CONFIG.SYS INSTALL= directives and executed exactly
- * once during FDOS init (DoInstall), then never read again. Park it in the
- * core0 stack-extension SRAM (CORE0_STACK_EXT) instead of the contended main
- * RAM. Every entry is fully written before it is read (see _CmdInstall /
- * DoInstall), so it does not rely on the zero-init the main .bss would give.
+ * INSTALL= state has runtime lifetime: INT 2F/AX=AE01 can call DoInstall()
+ * after normal boot.  Keep it in ordinary SRAM; CORE0_STACK_EXT is reserved
+ * only for data whose lifetime really ends with CONFIG.SYS processing.
  */
-static struct instCmds InstallCommands[MAX_INSTALL_CMDS]
-    __attribute__((section(".core0_stack_ext")));
+static struct instCmds InstallCommands[MAX_INSTALL_CMDS];
 
 STATIC void config_init_buffers_ex(int wantedbuffers, int allow_hma)
 {

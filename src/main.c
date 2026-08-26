@@ -1639,6 +1639,18 @@ bool core0_stack_uses_gfx_buffer;
 static void __attribute__((noinline, noreturn)) main_after_hardware(void);
 
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
+static void __attribute__((noinline, used)) core0_enable_relocated_stack_services(void)
+{
+    extern uint8_t __Core0StackRegionStart;
+    extern uint8_t __Core0StackRegionEnd;
+    uintptr_t bottom = (uintptr_t)&__Core0StackRegionStart;
+    uintptr_t top = (uintptr_t)&__Core0StackRegionEnd;
+
+    /* SP has already moved into GFX_BUFFER. CORE0_STACK is now permanently
+       free and becomes an 8-sector FatFs write-through cache. */
+    sdcard_enable_ff_stack_cache((void *)bottom, (size_t)(top - bottom));
+}
+
 static void __attribute__((naked, noreturn)) core0_stack_switch_and_continue(uintptr_t new_sp)
 {
     __asm volatile (
@@ -1646,6 +1658,8 @@ static void __attribute__((naked, noreturn)) core0_stack_switch_and_continue(uin
         "ldr r1, =core0_stack_floor_runtime\n"
         "ldr r1, [r1]\n"
         "msr msplim, r1\n"
+        /* CORE0_STACK becomes reusable only after SP has changed. */
+        "bl core0_enable_relocated_stack_services\n"
         "ldr r0, =main_after_hardware\n"
         "bx r0\n"
     );
@@ -1735,8 +1749,10 @@ int main(void) {
 
 #if defined(EGA128) || defined(VGA128) || defined(MCGA)
     /* With direct QSPI guest RAM the ram_pages tail of GFX_BUFFER is unused.
-       Reuse that SRAM as a large core0 stack without adding any checks to the
-       guest-memory hot paths. Paging/fallback builds keep the original stack. */
+       Reuse that SRAM as a large core0 stack without adding checks to the
+       guest-memory hot paths. Once SP has moved, the old CORE0_STACK becomes
+       an 8-sector FatFs cache. Paging/fallback builds keep the original stack
+       and leave this cache disabled. */
     if (guest_ram_base == (uint8_t *)PSRAM_BASE_ADDR && !ega128_paging_active()) {
         extern uint8_t __gfx_video_end__;
         extern uint8_t __gfx_buffer_end__;
@@ -1748,6 +1764,23 @@ int main(void) {
 #endif
 
     main_after_hardware();
+}
+
+void core0_expand_relocated_stack_services(void)
+{
+#if defined(EGA128) || defined(VGA128) || defined(MCGA)
+    if (core0_stack_uses_gfx_buffer) {
+        extern uint8_t __Core0StackExtRegionStart;
+        extern uint8_t __Core0StackRegionEnd;
+        uintptr_t bottom = (uintptr_t)&__Core0StackExtRegionStart;
+        uintptr_t top = (uintptr_t)&__Core0StackRegionEnd;
+
+        /* init_kernel() has returned: MenuStruct is dead, while the runtime
+           INSTALL= queue lives in ordinary SRAM. Rebuild the same cache over
+           the full contiguous 8 KiB old-stack range (16 sectors). */
+        sdcard_enable_ff_stack_cache((void *)bottom, (size_t)(top - bottom));
+    }
+#endif
 }
 
 static void __attribute__((noinline, noreturn)) main_after_hardware(void)

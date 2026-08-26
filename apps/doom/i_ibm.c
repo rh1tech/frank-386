@@ -29,11 +29,11 @@
 #ifdef ELF_MODE
 #include "i_native_memory.h"
 #include "dos_mem.h"
+#include "dos_keyboard.h"
 #endif
 #include "R_local.h"
 #ifdef ELF_MODE
 #include <dos_phys.h>
-#include <dos_vect.h>
 
 /*
  * In native ELF mode pointers such as 0xa0000/0xa4000 are guest x86 physical
@@ -782,20 +782,64 @@ void   I_StartTic (void)
 #define SC_RIGHTARROW   0x4d
 
 #ifdef ELF_MODE
-static void I_PollKeyboard(void)
+static int I_NativeKeycodeToSet1(int keycode)
 {
-    while (inp(0x64) & 1)
-    {
-        keyboardque[kbdhead & (KBDQUESIZE - 1)] = lastpress = inp(0x60);
-        kbdhead++;
-    }
+	static const unsigned char extended[32] = {
+		0x1c, 0x1d, 0x35, 0x00, 0x38, 0x00, 0x47, 0x48,
+		0x49, 0x4b, 0x4d, 0x4f, 0x50, 0x51, 0x52, 0x53,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x5b, 0x5c, 0x5d
+	};
+
+	if (keycode > 0 && keycode < 96)
+		return keycode;
+	if (keycode >= 96 && keycode <= 127)
+		return extended[keycode - 96];
+	return 0;
+}
+
+static void I_PollNativeKeyboard(void)
+{
+	dos_keyboard_event_t kev;
+
+	while ((unsigned)(kbdhead - kbdtail) < KBDQUESIZE &&
+	       dos_keyboard_get_event(&kev, DOS_KEYBOARD_EVENT_CONSUME) > 0)
+	{
+		int scan;
+
+		if (kev.keycode == 119)
+		{
+			if (kev.is_down)
+			{
+				event_t ev;
+				ev.type = ev_keydown;
+				ev.data1 = KEY_PAUSE;
+				D_PostEvent(&ev);
+			}
+			continue;
+		}
+
+		scan = I_NativeKeycodeToSet1(kev.keycode);
+		if (!scan)
+			continue;
+		if (!kev.is_down)
+			scan |= 0x80;
+
+		keyboardque[kbdhead & (KBDQUESIZE - 1)] = lastpress = scan;
+		kbdhead++;
+	}
 }
 #endif
+
 
 void   I_StartTic (void)
 {
 	int             k;
 	event_t ev;
+
+#ifdef ELF_MODE
+	I_PollNativeKeyboard();
+#endif
 	
 #if (APPVER_DOOMREV < AV_DR_DM12)
 	extern int isCyberPresent;
@@ -987,8 +1031,6 @@ extern int __wp1, __wp2, __wp3;
 
 #ifdef __WATCOMC__
 void (__interrupt __far *oldkeyboardisr) () = NULL;
-#elif defined(ELF_MODE)
-static dos_native_vector_t native_keyboard_vector;
 #endif
 
 
@@ -1007,22 +1049,6 @@ void __interrupt I_KeyboardISR (void)
     kbdhead++;
     _outbyte(0x20,0x20);
 }
-#elif defined(ELF_MODE)
-/*
- * Native equivalent of DOOM's original IRQ1 ISR.
- *
- * Returning true tells the FFE0 native-BIOS trap to execute its reusable
- * guest IRET.  That IRET returns to the synthetic yield IRQ boundary rather
- * than to the suspended parent process.
- */
-static bool I_NativeKeyboardISR(void *cpu)
-{
-    (void)cpu;
-    keyboardque[kbdhead&(KBDQUESIZE-1)] = lastpress = _inbyte(0x60);
-    kbdhead++;
-    _outbyte(0x20,0x20);
-    return true;
-}
 #endif
 
 /*
@@ -1038,10 +1064,6 @@ void I_StartupKeyboard (void)
 #if defined(__WATCOMC__) && !defined(NOKBD)
     oldkeyboardisr = _dos_getvect(KEYBOARDINT);
     _dos_setvect (0x8000 | KEYBOARDINT, I_KeyboardISR);
-#elif defined(ELF_MODE) && !defined(NOKBD)
-    if (!dos_native_setvect(&native_keyboard_vector,
-                            KEYBOARDINT, I_NativeKeyboardISR))
-        I_Error("Can't install native keyboard IRQ");
 #endif
 }
 
@@ -1051,9 +1073,6 @@ void I_ShutdownKeyboard (void)
     if (oldkeyboardisr)
         _dos_setvect (KEYBOARDINT, oldkeyboardisr);
     *(short *)0x41c = *(short *)0x41a;
-#elif defined(ELF_MODE)
-    dos_native_restorevect(&native_keyboard_vector);
-    dos_phys_write16(0x41c, dos_phys_read16(0x41a));
 #endif
 }
 
