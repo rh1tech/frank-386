@@ -96,7 +96,7 @@ The recommended entry points are:
 
 - Linux/macOS/WSL: `./build.sh`
 - Windows: `build.bat`
-- all supported 286 board/video/audio combinations: `build_all.sh` / `build_all.bat`
+- all supported 286 board/video/audio combinations, both with and without EMM: `build_all.sh` / `build_all.bat`
 
 Examples:
 
@@ -106,7 +106,7 @@ Examples:
 ./build_all.sh 286
 ```
 
-The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested.
+The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested. `build_all` builds both `EMM=OFF` and `EMM=ON` variants.
 
 See [README-host-build.md](README-host-build.md) for toolchain setup, script options, build matrix and output locations.
 

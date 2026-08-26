@@ -31,7 +31,7 @@ Either use a Pico SDK installation discoverable by the project, or export `PICO_
 export PICO_SDK_PATH=/path/to/pico-sdk
 ```
 
-A working CMake generator/build program must also be available (Ninja or Make are typical). The scripts use `cmake --build`, so they do not depend on a specific generator.
+Ninja must be available. The build scripts explicitly configure CMake with `-G Ninja` so the same generator/layout is used on every host.
 
 ### Windows
 
@@ -43,7 +43,7 @@ The easiest supported setup is the Raspberry Pi Pico VS Code extension. The proj
 
 when that file exists.
 
-`build.bat` requires `cmake` and the selected generator/toolchain to be available in the environment. Running it from a Pico SDK-enabled terminal or the VS Code integrated terminal is recommended.
+`build.bat` requires `cmake`, `ninja`, and the ARM toolchain to be available in the environment. Running it from a Pico SDK-enabled terminal or the VS Code integrated terminal is recommended. If an existing build directory was created by Visual Studio/MSBuild, the script detects the generator mismatch and recreates that build directory automatically.
 
 ## Single-variant build
 
@@ -141,26 +141,27 @@ build_all.bat 286
 
 The CPU argument is optional and defaults to `286`. Passing `386` currently stops with an error instead of silently producing an untested release matrix.
 
-Additional options are forwarded to every `build.sh` / `build.bat` invocation. For example:
+Additional options are forwarded to every `build.sh` / `build.bat` invocation. `--emm` is intentionally rejected here because `build_all` controls EMM itself and builds both states. For example:
 
 ```sh
 ./build_all.sh 286 -504 -p 66 --clean
 ```
 
-The matrix contains all four video modes for all five boards, with valid audio combinations:
+The matrix contains all four video modes for all five boards, with valid audio combinations, and builds every combination both with `EMM=OFF` and `EMM=ON`:
 
-- M1: 4 video modes × I2S/PWM = 8
-- M2: 4 × I2S/PWM = 8
-- Z2: 4 × I2S/PWM = 8
-- PC: 4 × PWM = 4
-- C2: 4 × I2S = 4
+- M1: 4 video modes × I2S/PWM × EMM off/on = 16
+- M2: 4 × I2S/PWM × EMM off/on = 16
+- Z2: 4 × I2S/PWM × EMM off/on = 16
+- PC: 4 × PWM × EMM off/on = 8
+- C2: 4 × I2S × EMM off/on = 8
 
-Total: **32 builds**.
+Total: **64 builds**.
 
 Each variant gets a separate directory below:
 
 ```text
 build/all/<board>-286-<video>-<audio>/
+build/all/<board>-286-<video>-<audio>-emm/
 ```
 
 This prevents stale CMake cache values from one variant leaking into another.
@@ -234,7 +235,7 @@ This directory contains `config.ini`, disk images and (when SD-backed paging is 
 
 `build.sh` / `build.bat` always rerun CMake configure with all normal options explicitly specified. `--clean` removes the selected build directory first.
 
-`build_all` additionally uses one build directory per variant. This is intentional: several project options are CMake cache entries and must not accidentally carry state from another board/video/audio build.
+`build_all` additionally uses one build directory per board/video/audio/EMM variant. This is intentional: several project options are CMake cache entries and must not accidentally carry state from another board/video/audio build.
 
 ## Release script
 

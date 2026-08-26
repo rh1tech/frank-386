@@ -108,7 +108,31 @@ if "!BOARD!"=="PC" set "AUDIO=PWM"
 if "!BOARD!"=="C2" set "AUDIO=I2S"
 
 if "!CLEAN!"=="1" if exist "!BUILD_DIR!" rmdir /s /q "!BUILD_DIR!"
+
+rem build.bat/build_all.bat intentionally use Ninja.  If this directory was
+rem configured by an older script with Visual Studio/MSBuild, recreate it.
+if exist "!BUILD_DIR!\CMakeCache.txt" (
+    findstr /x /c:"CMAKE_GENERATOR:INTERNAL=Ninja" "!BUILD_DIR!\CMakeCache.txt" >nul 2>&1
+    if errorlevel 1 (
+        echo Build directory uses a non-Ninja CMake generator; recreating: !BUILD_DIR!
+        rmdir /s /q "!BUILD_DIR!"
+    )
+)
 if not exist "!BUILD_DIR!" mkdir "!BUILD_DIR!"
+
+rem VS Code/Pico SDK may know Ninja even when plain cmd.exe does not.
+rem Prefer PATH, then discover the Pico SDK extension's bundled Ninja.
+set "NINJA_EXE="
+for /f "delims=" %%N in ('where ninja.exe 2^>nul') do if not defined NINJA_EXE set "NINJA_EXE=%%N"
+if not defined NINJA_EXE (
+    for /d %%D in ("%USERPROFILE%\.pico-sdk\ninja\*") do (
+        if exist "%%~fD\ninja.exe" set "NINJA_EXE=%%~fD\ninja.exe"
+    )
+)
+if not defined NINJA_EXE (
+    echo Ninja was not found on PATH or under "%USERPROFILE%\.pico-sdk\ninja". 1^>^&2
+    exit /b 2
+)
 
 echo murm386 build
 echo   CPU target : 286
@@ -117,11 +141,13 @@ echo   Video mode : !VIDEO_MODE!
 echo   Audio      : !AUDIO!
 echo   RP2350     : !CPU_SPEED! MHz
 echo   PSRAM max  : !PSRAM_SPEED! MHz
+echo   EMM        : !EMM!
 echo   Build type : !BUILD_TYPE!
 echo   Build dir  : !BUILD_DIR!
+echo   Ninja      : !NINJA_EXE!
 echo.
 
-cmake -S "%ROOT%." -B "!BUILD_DIR!" -DCMAKE_BUILD_TYPE=!BUILD_TYPE! -DCPU_TARGET=286 -DBOARD=!BOARD! -DVIDEO_MODE=!VIDEO_MODE! -DAUDIO_TYPE=!AUDIO! -DCPU_SPEED=!CPU_SPEED! -DPSRAM_SPEED=!PSRAM_SPEED! -DFORCE_HDMI=!FORCE_HDMI! -DFORCE_VGA=!FORCE_VGA! -DDEBUG_ENABLED=!DEBUG! -DDIAG_ENABLED=!DIAG! -DEMM=!EMM!
+cmake -G Ninja "-DCMAKE_MAKE_PROGRAM:FILEPATH=!NINJA_EXE!" -S "%ROOT%." -B "!BUILD_DIR!" -DCMAKE_BUILD_TYPE=!BUILD_TYPE! -DCPU_TARGET=286 -DBOARD=!BOARD! -DVIDEO_MODE=!VIDEO_MODE! -DAUDIO_TYPE=!AUDIO! -DCPU_SPEED=!CPU_SPEED! -DPSRAM_SPEED=!PSRAM_SPEED! -DFORCE_HDMI=!FORCE_HDMI! -DFORCE_VGA=!FORCE_VGA! -DDEBUG_ENABLED=!DEBUG! -DDIAG_ENABLED=!DIAG! -DEMM=!EMM!
 if errorlevel 1 exit /b %errorlevel%
 if defined JOBS (
     cmake --build "!BUILD_DIR!" --config "!BUILD_TYPE!" --parallel !JOBS!

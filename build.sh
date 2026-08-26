@@ -107,9 +107,19 @@ fi
 if [[ $CLEAN -eq 1 ]]; then
     rm -rf "$BUILD_DIR"
 fi
+
+# Keep a build directory tied to the generator selected by these scripts.
+# Older versions of build.sh/build.bat let CMake pick Visual Studio on Windows;
+# such a cache cannot be reused with Ninja.
+if [[ -f "$BUILD_DIR/CMakeCache.txt" ]] &&
+   ! grep -q '^CMAKE_GENERATOR:INTERNAL=Ninja$' "$BUILD_DIR/CMakeCache.txt"; then
+    echo "Build directory uses a non-Ninja CMake generator; recreating: $BUILD_DIR"
+    rm -rf "$BUILD_DIR"
+fi
 mkdir -p "$BUILD_DIR"
 
 CMAKE_ARGS=(
+    -G Ninja
     -S "$SCRIPT_DIR"
     -B "$BUILD_DIR"
     "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
@@ -133,6 +143,7 @@ printf '  Video mode : %s\n' "$VIDEO_MODE"
 printf '  Audio      : %s\n' "$AUDIO"
 printf '  RP2350     : %s MHz\n' "$CPU_SPEED"
 printf '  PSRAM max  : %s MHz\n' "$PSRAM_SPEED"
+printf '  EMM        : %s\n' "$EMM"
 printf '  Build type : %s\n' "$BUILD_TYPE"
 printf '  Build dir  : %s\n\n' "$BUILD_DIR"
 
