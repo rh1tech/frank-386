@@ -1,4 +1,4 @@
-# murm386 / FRANK PC firmware
+# murm286/386 RP2350 "PC" firmware
 
 RP2350-based PC/AT-compatible firmware with a 286-class x86 core, native FreeDOS kernel integration, VGA/HDMI output, SD-card storage, PS/2/USB input and multiple audio backends.
 
@@ -33,7 +33,7 @@ Exactly one video/VRAM profile is selected at build time:
 | `MCGA` | 64 KiB | Reduced-VRAM build |
 | `EGA128` | 128 KiB | Reduced-VRAM build |
 | `VGA128` | 128 KiB | Reduced-VRAM build |
-| `VGA256` | 256 KiB | Full 256 KiB VGA RAM |
+| `VGA256` | 256 KiB | Full 256 KiB VGA RAM, QSPI PSRAM required |
 
 Physical output is VGA or HDMI depending on the board and runtime/forced output selection. `--vga` and `--hdmi` in the build scripts force one path where the board supports it.
 
@@ -127,6 +127,13 @@ bin/<CMAKE_BUILD_TYPE>/
 ## Runtime controls
 
 The project contains the on-screen settings and disk-management UI. Current key bindings are implemented in `src/main.c`; consult that source when changing input mappings so documentation does not drift from code again.
+
+```text
+Win+F11 - Hardware setup
+Win+F12 - Attached disks / USB-device setup
+Ctrl+Alt+Del - soft reset
+```
+
 
 ## Source layout
 

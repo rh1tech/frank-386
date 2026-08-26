@@ -303,7 +303,12 @@ static bool sft_is_ours(void) {
     return devinfo == (uint16_t)(0x8040 | REDIR_DRIVE_LETTER);
 }
 
-static bool redirector_handler_impl() {
+#ifndef __hfa_func
+#define __hfa(group) __attribute__((section(".hfa." group)))
+#define __hfa_func(func_name) __hfa(__STRING(func_name)) func_name
+#endif
+
+static bool __hfa_func(redirector_handler_impl)() {
     char path[256];
     char guest_path[256];
     static char new_path[256];

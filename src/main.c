@@ -1522,6 +1522,7 @@ static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
         ps2kbd_tick();
     }
 #endif
+    vga_hw_process_deferred();
     return true;
 }
 
@@ -1574,7 +1575,6 @@ static void __not_in_flash_func(core1_entry)(void) {
     __dmb();
     audio_timer_ready = true;
     while(1) {
-        vga_hw_process_deferred();
         repeat_me_often();
 #ifdef DIAG_ENABLED
         diag_core1_poll();  /* reports if core0's heartbeat stopped */

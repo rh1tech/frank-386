@@ -4,6 +4,12 @@
 #include <stdbool.h>
 #include "i386.h"
 
+#ifndef __hfa_func
+#define __hfa(group) __attribute__((section(".hfa." group)))
+#define __hfa_func(func_name) func_name
+// __hfa(__STRING(func_name))
+#endif
+
 void _boot(CPU*); // like kernel/boot/boot.asm
 void kernel(CPU*); // like kernel/kernel
 

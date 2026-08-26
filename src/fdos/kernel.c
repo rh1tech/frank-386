@@ -1305,7 +1305,7 @@ static inline size_t seg_room(uint16_t off) { return (size_t)0x10000u - off; }
     proto.h - для путей данных, держащих гостевой линейный курсор напрямую
     (rwblock() в fatfs.c).
 */
-void guest_lin_write(uint32_t lin, const void *src, size_t n) {
+void __not_in_flash_func(guest_lin_write)(uint32_t lin, const void *src, size_t n) {
     const uint8_t *p = (const uint8_t *)src;
     while (n) {
         uint32_t span;
@@ -1316,7 +1316,7 @@ void guest_lin_write(uint32_t lin, const void *src, size_t n) {
     }
 }
 
-void guest_lin_read(void *dst, uint32_t lin, size_t n) {
+void __not_in_flash_func(guest_lin_read)(void *dst, uint32_t lin, size_t n) {
     uint8_t *p = (uint8_t *)dst;
     while (n) {
         uint32_t span;
@@ -1327,7 +1327,7 @@ void guest_lin_read(void *dst, uint32_t lin, size_t n) {
     }
 }
 
-static void guest_lin_set(uint32_t lin, int v, size_t n) {
+static void __not_in_flash_func(guest_lin_set)(uint32_t lin, int v, size_t n) {
     while (n) {
         uint32_t span;
         uint8_t *h = guest_span_ptr(lin, &span);
@@ -1337,7 +1337,7 @@ static void guest_lin_set(uint32_t lin, int v, size_t n) {
     }
 }
 
-void fmemset(dos_far_ptr p, int v, unsigned int sz) {
+void __not_in_flash_func(fmemset)(dos_far_ptr p, int v, unsigned int sz) {
     uint16_t seg = FP_SEG(p), off = FP_OFF(p);
     size_t n = sz;
 
@@ -1350,7 +1350,7 @@ void fmemset(dos_far_ptr p, int v, unsigned int sz) {
     }
 }
 
-void fmemcpy(dos_far_ptr d, const dos_far_ptr s, size_t n) {
+void __not_in_flash_func(fmemcpy)(dos_far_ptr d, const dos_far_ptr s, size_t n) {
     uint16_t dseg = FP_SEG(d), doff = FP_OFF(d);
     uint16_t sseg = FP_SEG(s), soff = FP_OFF(s);
 

@@ -22,15 +22,15 @@ if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
 endif()
 
 # Enable LTEMM support (performance degradation is expected)
-option(EMM "Enable LTEMM support" OFF)
+option(EMM "Enable LTEMM support" ON)
 
 # Video adapter profile: one mutually exclusive build mode.
-set(VIDEO_MODE "VGA128" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
+set(VIDEO_MODE "VGA256" CACHE STRING "Video adapter: MCGA, EGA128, VGA128 or VGA256")
 set_property(CACHE VIDEO_MODE PROPERTY STRINGS MCGA EGA128 VGA128 VGA256)
 string(TOUPPER "${VIDEO_MODE}" VIDEO_MODE)
 
 # Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
+set(AUDIO_TYPE "I2S" CACHE STRING "Audio output: I2S or PWM")
 
 if(VIDEO_MODE STREQUAL "MCGA")
     add_compile_definitions(MCGA=1)

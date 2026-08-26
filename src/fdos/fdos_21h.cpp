@@ -54,7 +54,7 @@ static void dpb_watch_int21_checkpoint(CPU* cpu, const char *where)
  * AX, BX, CX, DX, SI, DI, BP, DS, ES, followed by the hardware
  * interrupt frame IP, CS, FLAGS.
  */
-static void int21_store_guest_frame(dos_far_ptr frame,
+static void __hfa_func(int21_store_guest_frame)(dos_far_ptr frame,
                                     const cpu_regs_ref &regs,
                                     UWORD ip, UWORD cs, UWORD flags)
 {
@@ -107,7 +107,7 @@ static_assert(sizeof(struct critical_error_workspace) <=
                offsetof(struct dos_data, error_stack),
                "critical-error workspace must fit the resident DOS error stack");
 
-COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
+COUNT ASMCFUNC __hfa_func(CriticalError)(COUNT nFlag, COUNT nDrive, COUNT nError,
                              dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
 {
   const UWORD error_tos =
@@ -244,7 +244,7 @@ COUNT ASMCFUNC CriticalError(COUNT nFlag, COUNT nDrive, COUNT nError,
 }
 
 /* Abort, retry or fail for character devices                   */
-COUNT char_error_status(UWORD status, dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
+COUNT __hfa_func(char_error_status)(UWORD status, dos_far_ptr /* -> struct dhdr */ x86_lpDevice)
 {
   fdos_idata.crit_err_code() = (status & S_MASK) + 0x13;
   return CriticalError(EFLG_CHAR | EFLG_ABORT | EFLG_RETRY | EFLG_IGNORE,
@@ -252,7 +252,7 @@ COUNT char_error_status(UWORD status, dos_far_ptr /* -> struct dhdr */ x86_lpDev
 }
 
 /* Abort, retry or fail for block devices                       */
-COUNT block_error_status(UWORD status, COUNT nDrive,
+COUNT __hfa_func(block_error_status)(UWORD status, COUNT nDrive,
                          dos_far_ptr /* -> struct dhdr */ x86_lpDevice, int mode)
 {
   fdos_idata.crit_err_code() = (status & S_MASK) + 0x13;
@@ -263,7 +263,7 @@ COUNT block_error_status(UWORD status, COUNT nDrive,
 
 
 /* common - call the clock driver */
-void ExecuteClockDriverRequest(BYTE command)
+void __hfa_func(ExecuteClockDriverRequest)(BYTE command)
 {
   dos_far_ptr clock = fdos_lol.clock();
   BinaryCharIO(&clock, sizeof(struct ClockRecord),
@@ -280,7 +280,7 @@ const UWORD days[2][13] = {
     return a pointer to an array with the days for that year
 */
 
-const UWORD *is_leap_year_monthdays(UWORD y)
+const UWORD* __hfa_func(is_leap_year_monthdays)(UWORD y)
 {
   /* this is correct in a strict mathematical sense   
      return ((y) & 3 ? days[0] : (y) % 100 ? days[1] : (y) % 400 ? days[0] : days[1]); */
@@ -293,7 +293,7 @@ const UWORD *is_leap_year_monthdays(UWORD y)
   return days[1];
 }
 
-static unsigned char DosGetDateRegs(UWORD *out_year, UBYTE *out_month, UBYTE *out_day)
+static unsigned char __hfa_func(DosGetDateRegs)(UWORD *out_year, UBYTE *out_month, UBYTE *out_day)
 {
   UWORD c;
   const UWORD *pdays;
@@ -334,7 +334,7 @@ static unsigned char DosGetDateRegs(UWORD *out_year, UBYTE *out_month, UBYTE *ou
   return (fdos_idata.clock_days() + 2) % 7;
 }
 
-unsigned char DosGetDate(CPU *cpu)
+unsigned char __hfa_func(DosGetDate)(CPU *cpu)
 {
   /* Seed the locals from the register frame BEFORE calling down.
 
@@ -358,7 +358,7 @@ unsigned char DosGetDate(CPU *cpu)
   return dow;
 }
 
-UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth)
+UWORD __hfa_func(DaysFromYearMonthDay)(UWORD Year, UWORD Month, UWORD DayOfMonth)
 {
   if (Year < 1980)
     return 0;
@@ -369,7 +369,7 @@ UWORD DaysFromYearMonthDay(UWORD Year, UWORD Month, UWORD DayOfMonth)
 
 }
 
-static int DosSetDateRegs(UWORD Year, UWORD Month, UWORD DayOfMonth)
+static int __hfa_func(DosSetDateRegs)(UWORD Year, UWORD Month, UWORD DayOfMonth)
 {
   const UWORD *pdays = is_leap_year_monthdays(Year);
 
@@ -390,12 +390,12 @@ static int DosSetDateRegs(UWORD Year, UWORD Month, UWORD DayOfMonth)
   return SUCCESS;
 }
 
-int DosSetDate(CPU *cpu)
+int __hfa_func(DosSetDate)(CPU *cpu)
 {
   return DosSetDateRegs(CPU_CX, CPU_DH, CPU_DL);
 }
 
-static void DosGetTimeRegs(UBYTE *out_hour, UBYTE *out_minute, UBYTE *out_second, UBYTE *out_hundredth)
+static void __hfa_func(DosGetTimeRegs)(UBYTE *out_hour, UBYTE *out_minute, UBYTE *out_second, UBYTE *out_hundredth)
 {
   ExecuteClockDriverRequest(C_INPUT);
 
@@ -408,7 +408,7 @@ static void DosGetTimeRegs(UBYTE *out_hour, UBYTE *out_minute, UBYTE *out_second
   *out_hundredth = fdos_idata.clock_hundredths();
 }
 
-void DosGetTime(CPU *cpu)
+void __hfa_func(DosGetTime)(CPU *cpu)
 {
   /* Same reasoning as DosGetDate() above: DosGetTimeRegs() stores
      nothing when the clock driver reports S_ERROR, so the locals must
@@ -426,7 +426,7 @@ void DosGetTime(CPU *cpu)
   CPU_DL = hundredth;
 }
 
-static int DosSetTimeRegs(UBYTE hour, UBYTE minute, UBYTE second, UBYTE hundredth)
+static int __hfa_func(DosSetTimeRegs)(UBYTE hour, UBYTE minute, UBYTE second, UBYTE hundredth)
 {
   if (hour > 23 || minute > 59 || second > 59 || hundredth > 99)
      return DE_INVLDDATA;
@@ -446,7 +446,7 @@ static int DosSetTimeRegs(UBYTE hour, UBYTE minute, UBYTE second, UBYTE hundredt
   return SUCCESS;
 }
 
-int DosSetTime(CPU *cpu)
+int __hfa_func(DosSetTime)(CPU *cpu)
 {
   return DosSetTimeRegs(CPU_CH, CPU_CL, CPU_DH, CPU_DL);
 }
@@ -454,7 +454,7 @@ int DosSetTime(CPU *cpu)
 /* get current directory structure for drive
    return NULL if the CDS is not valid or the
    drive is not within range */
-dos_far_ptr/*struct cds*/ get_cds(unsigned drive)
+dos_far_ptr/*struct cds*/ __hfa_func(get_cds)(unsigned drive)
 {
   const UBYTE lastdrive = fdos_lol.lastdrive();
   const dos_far_ptr cds_base = fdos_lol.cds();
@@ -478,7 +478,7 @@ dos_far_ptr/*struct cds*/ get_cds(unsigned drive)
   return cds_ptr;
 }
 
-UBYTE DosSelectDrv(UBYTE drv)
+UBYTE __hfa_func(DosSelectDrv)(UBYTE drv)
 {
   /* dosfns.c:
    *     current_ldt = get_cds(drv);
@@ -504,24 +504,24 @@ UBYTE DosSelectDrv(UBYTE drv)
   return fdos_lol.lastdrive();
 }
 
-static int fcb_parse_common_sep(int c)
+static int __hfa_func(fcb_parse_common_sep)(int c)
 {
   return c != 0 && strchr(":;,=+ \t", c) != NULL;
 }
  
-static int fcb_parse_field_sep(int c)
+static int __hfa_func(fcb_parse_field_sep)(int c)
 {
   return (unsigned char)c <= ' ' || strchr("/\\\"[]<>|.:;,=+\t", c) != NULL;
 }
  
-static size_t fcb_parse_skip_wh(const guest_bytes_ref &src, size_t off)
+static size_t __hfa_func(fcb_parse_skip_wh)(const guest_bytes_ref &src, size_t off)
 {
   while (src.byte(off) == ' ' || src.byte(off) == '\t')
     ++off;
   return off;
 }
  
-static size_t fcb_parse_name_field(const guest_bytes_ref &src, size_t off,
+static size_t __hfa_func(fcb_parse_name_field)(const guest_bytes_ref &src, size_t off,
                                    const guest_bytes_ref &dst, size_t dst_off,
                                    COUNT field_size, BOOL *wild)
 {
@@ -552,7 +552,7 @@ static size_t fcb_parse_name_field(const guest_bytes_ref &src, size_t off,
   return off;
 }
 
-static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp,
+static UBYTE __hfa_func(DosParseFilenameIntoFcbRegs)(UBYTE mode, dos_far_ptr srcp,
                                          dos_far_ptr fcbp, UWORD *next_si)
 {
   const guest_bytes_ref src(srcp);
@@ -652,7 +652,7 @@ static UBYTE DosParseFilenameIntoFcbRegs(UBYTE mode, dos_far_ptr srcp,
 #define R_FP_ES_DI MK_FP(R_ES, R_DI)
 
 #ifdef WITHFAT32
-static COUNT int21_fat32_regs(cpu_regs_ref regs_ref)
+static COUNT __hfa_func(int21_fat32_regs)(cpu_regs_ref regs_ref)
 {
   COUNT rc;
 
@@ -880,7 +880,7 @@ rebuild_dpb:
 /*
 DOS 1+ - main DOS handler
 */
-bool fdos_21h(CPU* _cpu) {
+bool __hfa_func(fdos_21h)(CPU* _cpu) {
     COUNT rc;
     UWORD entry_ss, entry_sp;
     UWORD entry_ip, entry_cs;
@@ -2765,7 +2765,7 @@ exit_dispatch:
 #undef R_FP_DS_SI
 #undef R_FP_ES_DI
 
-UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
+UCOUNT __hfa_func(res_read)(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
     CPU_regs saved;
     cpu_save_regs(cpu, &saved);
     CPU_AH = 0x3F;
@@ -2779,7 +2779,7 @@ UCOUNT res_read(CPU* cpu, int fd, dos_far_ptr buf, UCOUNT count) {
     return res;
 }
 
-int init_switchar(int ch) {
+int __hfa_func(init_switchar)(int ch) {
     CPU_regs saved;
     cpu_save_regs(cpu, &saved);
     CPU_AX = 0x3701;
@@ -2796,7 +2796,7 @@ int init_switchar(int ch) {
    task.c. Kept separate from fdos_21h() because it's a different
    interrupt vector (handlers[0x20], registered in 286/cpu.c), not a
    sub-function of INT 21h. */
-bool fdos_20h(CPU* _cpu) {
+bool __hfa_func(fdos_20h)(CPU* _cpu) {
     cpu = _cpu;
     request_terminate(0, 0);
     return true;
@@ -2825,7 +2825,7 @@ bool fdos_20h(CPU* _cpu) {
  * Returns false: this entry consumes its own CALL/RETF-style frame and must
  * not fall through to the dispatcher's common IRET path.
  */
-bool fdos_30h(CPU* _cpu)
+bool __hfa_func(fdos_30h)(CPU* _cpu)
 {
     const UWORD entry_sp = CPU_SP;
     const UWORD caller_cs = readw86(stk_lin(CPU_SS, entry_sp, 2));

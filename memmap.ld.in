@@ -25,6 +25,7 @@ MEMORY
 {
     FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 1M
     DOS_API(rx) : ORIGIN = 0x10000000 + 1M, LENGTH = 4096
+    HIGH_FLASH_AREA(rx) : ORIGIN = 0x10000000 + 1M + 4096, LENGTH = 3M - 4096
     
     /* SRAM0..3 blocks */
     RAM(rwx) : ORIGIN = 0x20000000, LENGTH = 244k /* main RAM, core0 stack protected */
@@ -68,6 +69,13 @@ SECTIONS
         KEEP (*(.dos_api))
         __dos_api_area_end__ = .;
     } > DOS_API
+
+    .hfa_area : {
+        __hfa_area__ = .;
+        KEEP (*(.hfa))
+        KEEP (*(.hfa.*))
+        __hfa_end__ = .;
+    } > HIGH_FLASH_AREA
 
     .stack_ext_area : {
         __stack_ext_area__ = .;
