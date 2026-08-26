@@ -1,402 +1,144 @@
-# FRANK 386
+# murm386 / FRANK PC firmware
 
-Official page: **[frank.rh1.tech](https://frank.rh1.tech/)** — hub for all FRANK boards and firmware.
+RP2350-based PC/AT-compatible firmware with a 286-class x86 core, native FreeDOS kernel integration, VGA/HDMI output, SD-card storage, PS/2/USB input and multiple audio backends.
 
-i386 PC Emulator for RP2350 (Raspberry Pi Pico 2) with VGA/HDMI output, SD card storage, PS/2 and USB keyboard/mouse, NES gamepad, and audio output.
+The current production target is **286**. A 386 core still exists in the tree, but it has not been regression-tested for a long time and is intentionally excluded from the normal build scripts.
 
-Based on [Tiny386](https://github.com/hchunhui/tiny386) by Chunhui He.
+## Current status
 
-## Features
+The firmware is actively developed around the RP2350 and currently targets these board profiles:
 
-- Full i386 (and partially i486/i586) CPU emulation with optional x87 FPU
-- Up to 8MB RAM (using 8MB PSRAM)
-- VGA and HDMI graphics output (text modes and graphics up to 640x480)
-- Sound: AdLib OPL2, Sound Blaster 16, PC Speaker, Tandy, Covox, Disney Sound Source
-- SD card support for floppy, hard disk, and CD-ROM images
-- Runtime disk manager (Win+F12) for hot-swapping disk images
-- Settings menu (Win+F11) for changing emulator configuration
-- PS/2 keyboard and mouse input
-- USB keyboard and mouse input (via native USB Host)
-- NES gamepad support with mouse emulation mode
-- Boots DOS, Windows 3.x, **Windows 95**, Linux, and more
+- **M1** — Murmulator/FRANK M1 pinout
+- **M2** — Murmulator/FRANK M2 pinout
+- **PC** — Olimex PICO-PC profile
+- **Z2** — Waveshare RP2350-PiZero profile
+- **C2** — FRANK Core 2 profile
 
-## Screenshots
+The authoritative GPIO map is `src/board_config.h`. Board-specific Pico SDK headers are in `boards/`.
 
-### FRANK 386 in Action
+## CPU and DOS
 
-![Screenshot 1](screenshots/screen1.png)
-![Screenshot 2](screenshots/screen2.png)
-![Screenshot 3](screenshots/screen3.png)
-![Screenshot 4](screenshots/screen4.png)
-![Screenshot 5](screenshots/screen5.png)
+- Production CPU target: **286** (`CPU_TARGET=286`).
+- The emulator core also contains 386 support, but this branch is currently considered experimental/untested.
+- The DOS environment uses the RP2350 port of the FreeDOS kernel in `src/fdos/`.
+- The native command shell is FCOM (`src/fdos/fcom/`).
+- BIOS and DOS services are integrated into the firmware; the project is no longer the old “SeaBIOS + external VGA BIOS” layout described by earlier versions of this README.
 
-## Supported Boards
+## Video profiles
 
-This firmware is designed for RP2350-based boards with integrated VGA/HDMI, SD card, and keyboard input:
+Exactly one video/VRAM profile is selected at build time:
 
-- **[FRANK](https://rh1.tech/projects/frank?area=about)** - A versatile development board with VGA output
-- **[Murmulator](https://murmulator.ru)** - A compact retro-computing platform based on RP Pico 2 (M1 and M2 variants)
-- **[Olimex PICO-PC](https://www.olimex.com/)** - Olimex RP2350 PC board
-- **[Waveshare RP2350-PiZero](https://www.waveshare.com/)** - Waveshare RP2350 board
+| `VIDEO_MODE` | Guest video RAM | Notes |
+|---|---:|---|
+| `MCGA` | 64 KiB | Reduced-VRAM build |
+| `EGA128` | 128 KiB | Reduced-VRAM build |
+| `VGA128` | 128 KiB | Reduced-VRAM build |
+| `VGA256` | 256 KiB | Full 256 KiB VGA RAM |
 
-## Hardware Requirements
+Physical output is VGA or HDMI depending on the board and runtime/forced output selection. `--vga` and `--hdmi` in the build scripts force one path where the board supports it.
 
-- **Raspberry Pi Pico 2** (RP2350) or compatible board
-- **8MB PSRAM** (required for extended memory)
-- **VGA or HDMI connector**
-- **SD card module** (SPI mode)
-- **PS/2 keyboard** (directly connected) - OR - **USB keyboard** (via native USB port)
-- **Audio output** (optional): I2S DAC or PWM
+### Guest RAM backends
 
-> **Note:** When USB HID is enabled, the native USB port is used for keyboard/mouse input. USB serial console (CDC) is disabled in this mode; use UART for debug output.
+`VGA256` expects direct QSPI PSRAM for guest RAM.
 
-## Board Configurations
+Reduced-VRAM builds (`MCGA`, `EGA128`, `VGA128`) can use either direct QSPI PSRAM or the paging backend:
 
-Four GPIO layouts are supported: **M1**, **M2**, **PC** (Olimex), and **Z2** (Waveshare).
+- on **M1**, paging can use the external SPI PSRAM backend;
+- otherwise paging falls back to `286/pagefile.sys` on the SD card;
+- paging exposes an 8 MiB guest address space with a cache in RP2350 SRAM;
+- current cache size is 192 KiB for `MCGA` and 128 KiB for `EGA128`/`VGA128`.
 
-### VGA / HDMI
-| Signal | M1 GPIO | M2 GPIO |
-|--------|---------|---------|
-| Base   | 6       | 12      |
-| Range  | 6-13    | 12-19   |
+The paging implementation lives in `src/ega128_paging.c`.
 
-### SD Card (SPI mode)
-| Signal  | M1 GPIO | M2 GPIO |
-|---------|---------|---------|
-| CLK     | 2       | 6       |
-| CMD     | 3       | 7       |
-| DAT0    | 4       | 4       |
-| DAT3/CS | 5       | 5       |
+When reduced-VRAM builds use direct QSPI PSRAM, core0 can move its stack into the unused tail of `GFX_BUFFER`. The released stack SRAM is then available to the FatFs write-through sector cache.
 
-### PS/2 Keyboard
-| Signal | M1 GPIO | M2 GPIO |
-|--------|---------|---------|
-| CLK    | 0       | 2       |
-| DATA   | 1       | 3       |
+## Audio
 
-### PS/2 Mouse
-| Signal | M1 GPIO | M2 GPIO |
-|--------|---------|---------|
-| CLK    | 14      | 0       |
-| DATA   | 15      | 1       |
+Supported firmware audio backends are:
 
-### NES/SNES Gamepad
-| Signal | M1 GPIO | M2 GPIO |
-|--------|---------|---------|
-| CLK    | 14      | 20      |
-| DATA   | 16      | 26      |
-| LATCH  | 15      | 21      |
+- **I2S**
+- **PWM**
 
-### I2S Audio
-| Signal | M1 GPIO | M2 GPIO |
-|--------|---------|---------|
-| DATA   | 26      | 9       |
-| BCLK   | 27      | 10      |
-| LRCLK  | 28      | 11      |
+The emulated PC audio devices include PC speaker, AdLib/OPL, Sound Blaster-compatible paths, Tandy, Covox and Disney Sound Source support.
 
-## SD Card Setup
+Board restrictions are enforced by CMake/build scripts:
 
-### Directory Structure
+- `PC` uses PWM;
+- `C2` uses I2S.
 
-Create a `386/` directory on your SD card:
+## Input
 
-```
-SD Card Root/
-└── 386/
-    ├── config.ini      # Configuration file
-    ├── bios.bin        # SeaBIOS ROM (required)
-    ├── vgabios.bin     # VGA BIOS ROM (required)
-    ├── dos622.img      # Hard disk image
-    ├── boot.img        # Floppy image
-    └── ...             # Other disk images
+Depending on board capabilities:
+
+- PS/2 keyboard and mouse;
+- USB HID host keyboard/mouse;
+- NES/SNES-style gamepad support.
+
+USB host/device role is a runtime configuration; there is no longer a build-time `USB_HID_ENABLED` switch in the normal build scripts.
+
+## SD card layout
+
+Production builds use the CPU target as their data directory. For the currently supported 286 build this is:
+
+```text
+SD root/
+└── 286/
+    ├── config.ini
+    ├── disk images ...
+    └── pagefile.sys      # created/used by SD paging when needed
 ```
 
-### BIOS Files
-
-Download SeaBIOS and VGA BIOS from the [SeaBIOS releases](https://www.seabios.org/downloads/) or use bios.bin/vgabios.bin from `sdcard/386`.
-
-### Configuration File (config.ini)
-
-Create `386/config.ini`:
-
-```ini
-[pc]
-mem=8M
-bios=bios.bin
-vga_bios=vgabios.bin
-
-[frank-386]
-cpu_freq=504
-psram_freq=166
-```
-
-### Preparing Disk Images
-
-**Floppy Images (.img):**
-- Standard 1.44MB floppy images (1474560 bytes)
-- Create with: `dd if=/dev/zero of=floppy.img bs=512 count=2880`
-- Format with DOS or use pre-made DOS boot disks
-
-**Hard Disk Images (.img):**
-- Raw disk images up to 2GB
-- Create with: `dd if=/dev/zero of=hdd.img bs=1M count=512`
-- Use FDISK and FORMAT from DOS to partition and format
-
-**CD-ROM Images (.iso):**
-- Standard ISO 9660 images
-- Use CD burning software to create ISOs from CDs
-
-### Loading Disk Images
-
-**At Boot:**
-Configure disk images in `config.ini` as shown above.
-
-**At Runtime (Disk Manager):**
-1. Press **Win+F12** to open the Disk Manager
-2. Use arrow keys to select a drive (A:, B:, C:, D:, E:)
-3. Press **Enter** to browse disk images in the `386/` directory
-4. Select an image file to insert, or eject the current disk
-5. Press **Escape** to close the Disk Manager
-
-Changes made via Disk Manager are saved to `config.ini` automatically.
-
-## Controls
-
-### Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| Win+F12  | Open Disk Manager |
-| Win+F11  | Open Settings Menu |
-| Ctrl+Alt+Delete | System reset (sent to guest OS) |
-
-### Settings Menu (Win+F11)
-
-Configure emulator settings at runtime:
-- Memory size (1-8 MB)
-- CPU generation (386/486/586)
-- FPU emulation on/off
-- Sound devices (AdLib, SB16, PC Speaker, Tandy, Covox, MPU-401, DSS)
-- PS/2 or USB Mouse on/off
-- NES Mouse on/off (emulate mouse with NES gamepad D-pad, B=left click, A=right click)
-- RP2350 CPU frequency and voltage
-- PSRAM / Flash frequency
-
-Settings are saved to `config.ini` and take effect after restart.
-
-### Disk Manager (Win+F12)
-
-Manage disk images without restarting:
-- Insert/eject floppy images (A:, B:)
-- Insert/eject hard disk images (C:, D:)
-- Insert/eject CD-ROM images (E:)
+`config.ini` is optional; the firmware can start with defaults and the runtime settings/disk manager can create or update configuration.
 
 ## Building
 
-### Prerequisites
+The recommended entry points are:
 
-1. Install the [Raspberry Pi Pico SDK](https://github.com/raspberrypi/pico-sdk) (version 2.0+)
-2. Set environment variable: `export PICO_SDK_PATH=/path/to/pico-sdk`
-3. Install ARM GCC toolchain
+- Linux/macOS/WSL: `./build.sh`
+- Windows: `build.bat`
+- all supported 286 board/video/audio combinations: `build_all.sh` / `build_all.bat`
 
-### Build Steps
+Examples:
 
-```bash
-# Clone the repository
-git clone https://github.com/rh1tech/frank-386.git
-cd frank-386
-
-# Build with default settings (M2 board, 378MHz, PS/2 keyboard)
-./build.sh
-
-# Build for M1 board
-./build.sh -M1
-
-# Build with USB keyboard support
-./build.sh --usb-hid
-
-# Custom build
-./build.sh -b M1 -c 504 -p 166 --debug
+```sh
+./build.sh -M1 -VGA256 -i2s -504 -p 66 --clean
+./build.sh -M2 -VGA128 -pwm --hdmi
+./build_all.sh 286
 ```
 
-### Build Options (build.sh)
+The single-build scripts always pass `CPU_TARGET=286` intentionally. The all-build scripts accept `286` as an explicit CPU-target argument for forward compatibility, but currently reject `386` because that branch is not considered tested.
 
-| Option | Description |
-|--------|-------------|
-| `-b, --board <M1\|M2\|PC\|Z2>` | Board variant (default: M2) |
-| `-c, --cpu <MHz>` | CPU speed: 378 (default), 504 |
-| `-p, --psram <MHz>` | PSRAM speed: 133 (default), 166 |
-| `--usb-hid` | Enable USB keyboard (disables USB serial) |
-| `--hdmi` | Force HDMI output |
-| `--debug` | Enable debug output |
-| `-clean` | Clean build directory first |
+See [README-host-build.md](README-host-build.md) for toolchain setup, script options, build matrix and output locations.
 
-### Build Options (CMake)
+## Output names
 
-| Option | Description |
-|--------|-------------|
-| `-DPICO_BOARD=pico2` | Build for RP2350 (default) |
-| `-DBOARD=M1` | Use M1 GPIO layout |
-| `-DBOARD=M2` | Use M2 GPIO layout (default) |
-| `-DBOARD=PC` | Use Olimex PICO-PC layout |
-| `-DBOARD=Z2` | Use Waveshare RP2350-PiZero layout |
-| `-DCPU_SPEED=378` | CPU clock in MHz (378, 504) |
-| `-DPSRAM_SPEED=133` | PSRAM clock in MHz (133, 166) |
-| `-DUSB_HID_ENABLED=ON` | Enable USB keyboard (disables USB serial) |
-| `-DDEBUG_ENABLED=ON` | Enable verbose debug logging |
-| `-DFORCE_HDMI=ON` | Force HDMI output |
+CMake encodes the important build parameters in the firmware name. Typical output looks like:
 
-### Release Builds
-
-To build all firmware variants:
-
-```bash
-# Interactive (prompts for version)
-./release.sh
-
-# With version number
-./release.sh 1.02
+```text
+m1p2-286-VGA128-504MHz-1.6V-P66-I2S-v1.14.uf2
 ```
 
-This creates firmware files in the `release/` directory:
-- `frank-386_m1_<version>.uf2` - M1 board (Murmulator)
-- `frank-386_m2_<version>.uf2` - M2 board (Murmulator)
-- `frank-386_pc_<version>.uf2` - Olimex PICO-PC
-- `frank-386_z2_<version>.uf2` - Waveshare RP2350-PiZero
+Outputs are written under:
 
-### Flashing
-
-```bash
-# With device in BOOTSEL mode:
-picotool load build/frank-386.uf2
-
-# Or use the flash script:
-./flash.sh
+```text
+bin/<CMAKE_BUILD_TYPE>/
 ```
 
-## Troubleshooting
+## Runtime controls
 
-### "0 bytes of memory" during Windows 95 setup
-Use `setup /im` to bypass memory check.
+The project contains the on-screen settings and disk-management UI. Current key bindings are implemented in `src/main.c`; consult that source when changing input mappings so documentation does not drift from code again.
 
-### "Protection error" during Windows 95 startup
-Use [patcher9x](https://github.com/JHRobotics/patcher9x).
+## Source layout
 
-### Enable mapdrive.com support (redirector) to map SD-card to network-attached-drive H
-Set `redirector = 1` in config.ini.
+```text
+src/                 emulator, BIOS, platform and DOS integration
+src/fdos/           native FreeDOS kernel port and FCOM
+apps/                native applications and API examples
+drivers/             video, audio, SD, PSRAM, PS/2, USB HID, gamepad
+boards/              RP2350 board definitions used by Pico SDK
+slave/               FRANK Core 2 slave firmware sources
+```
 
-### No keyboard input
-- For PS/2: Check keyboard connection and GPIO pins
-- For USB: Ensure firmware was built with `--usb-hid` option
+## Upstream
 
-### SD card not detected
-- Ensure SD card is formatted as FAT32
-- Check SD card module connections
-- Verify `386/` directory exists on SD card
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
-
-## Authors & Contributors
-
-**Mikhail Matveev & DnCraptor**
-- frank-386 port and development (2026)
-- Repository: [https://github.com/rh1tech/frank-386](https://github.com/rh1tech/frank-386)
-
-## Acknowledgments
-
-This project is based on the following open-source projects:
-
-### Tiny386
-- **Project:** [Tiny386 - x86 PC Emulator](https://github.com/hchunhui/tiny386)
-- **Author:** Chunhui He
-- **License:** BSD 3-Clause
-- **Description:** The core i386 CPU emulator and PC peripheral emulation (8259 PIC, 8254 PIT, 8042 keyboard controller, VGA, sound devices).
-
-### Pico-286
-- **Project:** [Pico-286](https://github.com/xrip/pico-286)
-- **Author:** xrip
-- **License:** MIT
-- **Description:** RP2350 platform integration, disk management, VGA driver concepts.
-
-### QuakeGeneric
-- **Project:** [QuakeGeneric](https://github.com/DnCraptor/quakegeneric)
-- **Author:** DnCraptor
-- **License:** GPL v2
-- **Description:** RP2350 hardware integration patterns, Murmulator platform support, and PS/2 mouse driver implementation.
-
-### QEMU
-- **Project:** [QEMU](https://www.qemu.org/)
-- **Authors:** Fabrice Bellard (2003-2017), Vassili Karpov "malc" (2003-2005), Joachim Henke (2006)
-- **License:** MIT
-- **Description:** PC peripheral emulation code including 8259 PIC, 8254 PIT, 8257 DMA, 8042 keyboard controller, PCI bus, PC speaker, VGA, and AdLib OPL2 proxy.
-
-### MAME FM Sound Generator
-- **Project:** [MAME](https://www.mamedev.org/)
-- **Author:** Tatsuyuki Satoh (1999-2000)
-- **License:** LGPL 2.1+
-- **Description:** FM OPL sound generator (fmopl) for AdLib emulation, forked from MAME and relicensed under LGPL.
-
-### inih
-- **Project:** [inih](https://github.com/benhoyt/inih)
-- **Author:** Ben Hoyt (2009-2020)
-- **License:** BSD 3-Clause
-- **Description:** Simple INI file parser for configuration file handling.
-
-### SeaBIOS
-- **Project:** [SeaBIOS](https://www.seabios.org/)
-- **Authors:** Kevin O'Connor and contributors
-- **License:** GNU LGPL v3
-- **Description:** x86 BIOS and VGA BIOS firmware.
-
-### FatFs
-- **Project:** [FatFs](http://elm-chan.org/fsw/ff/)
-- **Author:** ChaN (2014, 2021)
-- **License:** FatFs License (BSD-style)
-- **Description:** Generic FAT filesystem module for SD card access.
-
-### FatFs Utilities
-- **Author:** Carl John Kugler III (2021)
-- **License:** Apache 2.0
-- **Description:** FatFs utility functions for error handling and result string conversion.
-
-### Raspberry Pi Pico SDK
-- **Project:** [Pico SDK](https://github.com/raspberrypi/pico-sdk)
-- **Author:** Raspberry Pi (Trading) Ltd. (2020)
-- **License:** BSD 3-Clause
-- **Description:** PIO SPI driver for SD card communication.
-
-### Memory map (tba)
-000000-000400h: IVT, 256 vectors; в POST все указывают на FFE0:00xx
-000400-000500h: BDA
-000500-000600h: BIOS/DOS scratch, частично используется: 0500 PrtSc status, 05E0 boot-drive compat
-000600-000700h: DOS kernel PSP, 0060:0000
-000680-000700h: DTA внутри PSP, 0060:0080
-000700-000AE2h: DOS kernel _TEXT
-000AE2-000DA8h: DOS kernel _IO_TEXT
-000DA8-000EF0h: DOS kernel _IO_FIXED_DATA, device headers CON..BLK
-000EF0-0019A0h: DOS kernel _FIXED_DATA, LoL/DATASTART
-0010EB-001?xxh: internal_data/SDA внутри _FIXED_DATA
-0019A0-001FF4h: DOS kernel _DATA
-001FF4-002A0Eh: DOS kernel _BSS; DiskTransferBuffer начинается тут
-002A0E-007C00h: свободно/не размечено явно 20978b
-007C00-007E00h: boot sector load buffer - removable
-007E00-08FFFFh: свободно
-090000-09FFFFh: DynAlloc area, 9000:0000; 9000:0000..0001 = DynS.Allocated, дальше DDT/DPB/etc
-0A0000-0BFFFFh: VGA window / iomem, 128 KiB
-0B0000-0B7FFFh: MDA text window, режим 07h
-0B8000-0BFFFFh: CGA/VGA text/window
-0C0000-0DFFFFh: option ROM / UMB area — явно не занята в найденном коде
-0E0000-0FFFFFh: ROM/BIOS area
-0EFC70-0EFC7Ah: floppy DPT, F000:EFC7
-0FA000-0FAFFFh: ROM font 8x16, F000:A000
-0FB000-0FBD7Fh: ROM font 8x14, F000:B000
-0FBE00-0FC5FFh: ROM font 8x8, F000:BE00
-0FFE00-0FFEFFh: fake BIOS handler area; IVT points here as FFE0:00xx
-0FFF00-0FFF06h: IRQ0 stub + reusable IRET
-0FFF50-0FFF5Fh: DPTE drive 80h
-0FFF60-0FFF6Fh: DPTE drive 81h
-0FFF70-0FFF7Bh: IRQ1 INT15/4F keyboard stub
-0FFFF0-0FFFFFh: reset-vector area
-100000+       : extended RAM if phys_mem_size > 1 MiB
+The x86 emulator is derived from Tiny386 by Chunhui He and has since accumulated substantial RP2350-specific CPU, memory, BIOS, DOS, video and peripheral work.

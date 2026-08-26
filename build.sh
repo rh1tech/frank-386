@@ -1,233 +1,144 @@
-#!/bin/bash
-# Build frank-386 - 386 Emulator for RP2350
-#
-# Usage: ./build.sh [OPTIONS]
-#   -b, --board      Board variant: M1, M2, PC, Z2, C2 (default: M2)
-#   -a, --audio      Audio output: I2S, PWM (default: PWM; PC is always PWM)
-#   -p, --psram      PSRAM speed in MHz (default: 133)
-#   -c, --cpu        CPU speed in MHz: 378 (default), 504
-#   --vga            Force VGA output (instead of HDMI)
-#   --usb-hid        Enable USB HID keyboard (disables USB CDC)
-#   --debug          Enable debug output
-#   -clean           Clean build directory first
-#   -h, --help       Show this help
-#
-# Short options:
-#   -M1, -M2, -PC, -Z2, -C2   Board variant
-#   -378, -504            CPU speed in MHz
-#   -i2s, -pwm            Audio output type
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Defaults (378/133 for stable overclocked operation)
-BOARD="M2"
+# Build one supported murm386/FRANK RP2350 firmware variant.
+# The production build scripts intentionally build the 286 core only.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+BOARD="M1"
+VIDEO_MODE="EGA128"
 AUDIO="PWM"
-PSRAM="133"
-CPU="378"
-USB_HID="OFF"
-HDMI="OFF"
-VGA="OFF"
-DEBUG="ON"
-PROFILE="OFF"
-SUBSYS="OFF"
-REMOTE="OFF"
-PINCLK="OFF"
-CODEPROF="OFF"
-PCSAMPLE="OFF"
-BBPROF="OFF"
-DISKCACHE="OFF"
-AUTOTYPE=""
+CPU_SPEED="504"
+PSRAM_SPEED="66"
+BUILD_TYPE="Release"
+BUILD_DIR="$SCRIPT_DIR/build"
+JOBS=""
 CLEAN=0
+FORCE_HDMI="OFF"
+FORCE_VGA="OFF"
+DEBUG="OFF"
+DIAG="OFF"
+EMM="OFF"
 
-# Parse arguments
+usage() {
+    cat <<'USAGE'
+Usage: ./build.sh [options]
+
+Supported production CPU target: 286
+
+Main options:
+  -b, --board M1|M2|PC|Z2|C2       Board variant (default: M1)
+  -v, --video MCGA|EGA128|VGA128|VGA256
+                                      Video/VRAM profile (default: EGA128)
+  -a, --audio I2S|PWM               Audio backend (default: PWM)
+  -c, --clock MHz                   RP2350 clock (default: 504)
+  -p, --psram MHz                   QSPI PSRAM max clock (default: 66)
+      --hdmi                        Force HDMI output
+      --vga                         Force VGA output
+      --debug                       Enable DEBUG_ENABLED
+      --diag                        Enable DIAG_ENABLED
+      --emm                         Enable EMM
+      --build-type TYPE             CMake build type (default: Release)
+      --build-dir DIR               Build directory (default: ./build)
+  -j, --jobs N                      Parallel build jobs
+      --clean                       Remove the selected build directory first
+  -h, --help                        Show this help
+
+Short forms:
+  -M1 -M2 -PC -Z2 -C2
+  -MCGA -EGA128 -VGA128 -VGA256
+  -i2s -pwm
+  -252 -378 -504
+
+Examples:
+  ./build.sh -M1 -VGA256 -i2s -504 -p 66 --clean
+  ./build.sh -M2 -VGA128 -pwm --hdmi
+USAGE
+}
+
+need_arg() {
+    if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Missing argument for $1" >&2
+        exit 2
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
-    case $1 in
-        -b|--board)
-            BOARD="$2"
-            shift 2
-            ;;
-        -M1)
-            BOARD="M1"
-            shift
-            ;;
-        -M2)
-            BOARD="M2"
-            shift
-            ;;
-        -PC)
-            BOARD="PC"
-            shift
-            ;;
-        -Z2)
-            BOARD="Z2"
-            shift
-            ;;
-        -C2)
-            BOARD="C2"
-            shift
-            ;;
-        -a|--audio)
-            AUDIO=$(echo "$2" | tr '[:lower:]' '[:upper:]')
-            shift 2
-            ;;
-        -i2s)
-            AUDIO="I2S"
-            shift
-            ;;
-        -pwm)
-            AUDIO="PWM"
-            shift
-            ;;
-        -p|--psram)
-            PSRAM="$2"
-            shift 2
-            ;;
-        -c|--cpu)
-            CPU="$2"
-            shift 2
-            ;;
-        -378)
-            CPU="378"
-            PSRAM="133"
-            shift
-            ;;
-        -504)
-            CPU="504"
-            PSRAM="166"
-            shift
-            ;;
-        --usb-hid)
-            USB_HID="ON"
-            shift
-            ;;
-        --hdmi)
-            HDMI="ON"
-            VGA="OFF"
-            shift
-            ;;
-        --vga)
-            VGA="ON"
-            HDMI="OFF"
-            shift
-            ;;
-        --debug)
-            DEBUG="ON"
-            shift
-            ;;
-        --profile)
-            PROFILE="ON"
-            shift
-            ;;
-        --subsys-profile)
-            SUBSYS="ON"
-            shift
-            ;;
-        --remote-mem)
-            REMOTE="ON"
-            shift
-            ;;
-        --pin-clocks)
-            PINCLK="ON"
-            shift
-            ;;
-        --code-profile)
-            CODEPROF="ON"
-            shift
-            ;;
-        --pc-sample)
-            PCSAMPLE="ON"
-            shift
-            ;;
-        --bb-profile)
-            BBPROF="ON"
-            shift
-            ;;
-        --disk-cache)
-            DISKCACHE="ON"
-            shift
-            ;;
-        --autotype)
-            AUTOTYPE="$2"
-            shift 2
-            ;;
-        -clean)
-            CLEAN=1
-            shift
-            ;;
-        -h|--help)
-            head -15 "$0" | tail -13
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            exit 1
-            ;;
+    case "$1" in
+        -b|--board) need_arg "$@"; BOARD="${2^^}"; shift 2 ;;
+        -v|--video) need_arg "$@"; VIDEO_MODE="${2^^}"; shift 2 ;;
+        -a|--audio) need_arg "$@"; AUDIO="${2^^}"; shift 2 ;;
+        -c|--clock) need_arg "$@"; CPU_SPEED="$2"; shift 2 ;;
+        -p|--psram) need_arg "$@"; PSRAM_SPEED="$2"; shift 2 ;;
+        --build-type) need_arg "$@"; BUILD_TYPE="$2"; shift 2 ;;
+        --build-dir) need_arg "$@"; BUILD_DIR="$2"; shift 2 ;;
+        -j|--jobs) need_arg "$@"; JOBS="$2"; shift 2 ;;
+
+        -M1|-M2|-PC|-Z2|-C2) BOARD="${1#-}"; shift ;;
+        -MCGA|-EGA128|-VGA128|-VGA256) VIDEO_MODE="${1#-}"; shift ;;
+        -i2s) AUDIO="I2S"; shift ;;
+        -pwm) AUDIO="PWM"; shift ;;
+        -252|-378|-504) CPU_SPEED="${1#-}"; shift ;;
+
+        --hdmi) FORCE_HDMI="ON"; FORCE_VGA="OFF"; shift ;;
+        --vga) FORCE_VGA="ON"; FORCE_HDMI="OFF"; shift ;;
+        --debug) DEBUG="ON"; shift ;;
+        --diag) DIAG="ON"; shift ;;
+        --emm) EMM="ON"; shift ;;
+        --clean|-clean) CLEAN=1; shift ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
 
-# Olimex PC has no I2S hardware - force PWM
-if [[ "$BOARD" == "PC" && "$AUDIO" != "PWM" ]]; then
-    echo "Warning: Olimex PC does not support I2S, forcing PWM audio"
+case "$BOARD" in M1|M2|PC|Z2|C2) ;; *) echo "Invalid board: $BOARD" >&2; exit 2 ;; esac
+case "$VIDEO_MODE" in MCGA|EGA128|VGA128|VGA256) ;; *) echo "Invalid video mode: $VIDEO_MODE" >&2; exit 2 ;; esac
+case "$AUDIO" in I2S|PWM) ;; *) echo "Invalid audio type: $AUDIO" >&2; exit 2 ;; esac
+
+# Hardware constraints mirrored from CMakeLists.txt.
+if [[ "$BOARD" == "PC" ]]; then
     AUDIO="PWM"
-fi
-
-# FRANK Core 2: TDA1387T I2S DAC, HDMI only, USB HID is the only input.
-# CMakeLists forces these too; set them here so the echoed summary is honest.
-if [[ "$BOARD" == "C2" ]]; then
+elif [[ "$BOARD" == "C2" ]]; then
     AUDIO="I2S"
-    USB_HID="ON"
-    [[ "$VGA" != "ON" ]] && HDMI="ON"
 fi
 
-# Build cmake arguments
-CMAKE_ARGS=(-DPICO_BOARD=pico2 -DCMAKE_BUILD_TYPE=MinSizeRel)
-CMAKE_ARGS+=("-DBOARD=${BOARD}")
-CMAKE_ARGS+=("-DCPU_SPEED=$CPU")
-CMAKE_ARGS+=("-DPSRAM_SPEED=$PSRAM")
-CMAKE_ARGS+=("-DAUDIO_TYPE=$AUDIO")
-
-CMAKE_ARGS+=("-DUSB_HID_ENABLED=$USB_HID")
-
-# NOTE: every optional feature below is passed explicitly as ON or OFF.
-# Omitting the flag leaves whatever CMake cached from the previous
-# configure, so `./build.sh -C2` after `./build.sh -C2 --remote-mem`
-# would quietly still have remote memory compiled in — which invalidates
-# any before/after measurement taken with it.
-CMAKE_ARGS+=("-DDEBUG_ENABLED=$DEBUG")
-
-CMAKE_ARGS+=("-DPROFILE_ENABLED=$PROFILE")
-
-CMAKE_ARGS+=("-DSUBSYS_PROFILE=$SUBSYS")
-
-CMAKE_ARGS+=("-DREMOTE_MEM=$REMOTE")
-CMAKE_ARGS+=("-DPIN_CLOCKS=$PINCLK")
-CMAKE_ARGS+=("-DCODE_PROFILE=$CODEPROF")
-CMAKE_ARGS+=("-DPC_SAMPLE=$PCSAMPLE")
-CMAKE_ARGS+=("-DBB_PROFILE=$BBPROF")
-CMAKE_ARGS+=("-DDISK_CACHE=$DISKCACHE")
-CMAKE_ARGS+=("-DAUTOTYPE=$AUTOTYPE")
-
-CMAKE_ARGS+=("-DFORCE_HDMI=$HDMI")
-
-CMAKE_ARGS+=("-DFORCE_VGA=$VGA")
-
-echo "Building frank-386:"
-echo "  Board: $BOARD"
-echo "  Audio: $AUDIO"
-echo "  CPU: $CPU MHz"
-echo "  PSRAM: $PSRAM MHz"
-echo "  USB HID: $USB_HID"
-echo "  HDMI: $HDMI"
-echo "  VGA: $VGA"
-echo "  Debug: $DEBUG"
-echo "  Profile: $PROFILE"
-echo "  Subsys profile: $SUBSYS"
-echo "  Remote mem: $REMOTE"
-echo ""
-
-if [[ $CLEAN -eq 1 ]] || [[ ! -d ./build ]]; then
-    rm -rf ./build
-    mkdir build
+if [[ $CLEAN -eq 1 ]]; then
+    rm -rf "$BUILD_DIR"
 fi
+mkdir -p "$BUILD_DIR"
 
-cd build
-cmake "${CMAKE_ARGS[@]}" ..
-make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
+CMAKE_ARGS=(
+    -S "$SCRIPT_DIR"
+    -B "$BUILD_DIR"
+    "-DCMAKE_BUILD_TYPE=$BUILD_TYPE"
+    "-DCPU_TARGET=286"
+    "-DBOARD=$BOARD"
+    "-DVIDEO_MODE=$VIDEO_MODE"
+    "-DAUDIO_TYPE=$AUDIO"
+    "-DCPU_SPEED=$CPU_SPEED"
+    "-DPSRAM_SPEED=$PSRAM_SPEED"
+    "-DFORCE_HDMI=$FORCE_HDMI"
+    "-DFORCE_VGA=$FORCE_VGA"
+    "-DDEBUG_ENABLED=$DEBUG"
+    "-DDIAG_ENABLED=$DIAG"
+    "-DEMM=$EMM"
+)
+
+printf 'murm386 build\n'
+printf '  CPU target : 286\n'
+printf '  Board      : %s\n' "$BOARD"
+printf '  Video mode : %s\n' "$VIDEO_MODE"
+printf '  Audio      : %s\n' "$AUDIO"
+printf '  RP2350     : %s MHz\n' "$CPU_SPEED"
+printf '  PSRAM max  : %s MHz\n' "$PSRAM_SPEED"
+printf '  Build type : %s\n' "$BUILD_TYPE"
+printf '  Build dir  : %s\n\n' "$BUILD_DIR"
+
+cmake "${CMAKE_ARGS[@]}"
+if [[ -n "$JOBS" ]]; then
+    cmake --build "$BUILD_DIR" --config "$BUILD_TYPE" --parallel "$JOBS"
+else
+    cmake --build "$BUILD_DIR" --config "$BUILD_TYPE" --parallel
+fi

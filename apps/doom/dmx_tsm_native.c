@@ -35,6 +35,8 @@ static uint32_t native_tsm_master_rate;
 static uint32_t native_tsm_master_phase;
 static unsigned char native_tsm_installed;
 static int native_tsm_max_priority;
+static unsigned native_tsm_update_depth;
+static volatile unsigned char native_tsm_dispatch_blocked;
 
 static void TSM_DispatchMasterTick(void)
 {
@@ -72,7 +74,8 @@ static void TSM_DispatchMasterTick(void)
 
 static void TSM_TimerCallback(void)
 {
-    if (native_tsm_installed && native_tsm_master_rate != 0)
+    if (native_tsm_installed && native_tsm_master_rate != 0 &&
+        !native_tsm_dispatch_blocked)
     {
         native_tsm_master_phase += native_tsm_master_rate;
         while (native_tsm_master_phase >= NATIVE_TSM_SOURCE_HZ)
@@ -99,6 +102,8 @@ void TSM_Install(int rate)
     native_tsm_master_rate = (uint32_t)rate;
     native_tsm_master_phase = 0;
     native_tsm_max_priority = 0;
+    native_tsm_update_depth = 0;
+    native_tsm_dispatch_blocked = 0;
     native_tsm_previous_tsr0 = set_tsr0_callback(TSM_TimerCallback);
     native_tsm_installed = 1;
 }
@@ -166,7 +171,26 @@ void TSM_Remove(void)
     native_tsm_master_rate = 0;
     native_tsm_master_phase = 0;
     native_tsm_max_priority = 0;
+    native_tsm_update_depth = 0;
+    native_tsm_dispatch_blocked = 0;
     memset(native_tsm_slots, 0, sizeof(native_tsm_slots));
+}
+
+void TSM_Lock(void)
+{
+    if (native_tsm_update_depth == 0)
+        native_tsm_dispatch_blocked = 1;
+    ++native_tsm_update_depth;
+}
+
+void TSM_Unlock(void)
+{
+    if (native_tsm_update_depth == 0)
+        return;
+
+    --native_tsm_update_depth;
+    if (native_tsm_update_depth == 0)
+        native_tsm_dispatch_blocked = 0;
 }
 
 void TSM_Yield(void)

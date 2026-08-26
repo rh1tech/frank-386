@@ -1,58 +1,241 @@
-# elf2ez — сборка под host-консоль (Win32 / Linux)
+# Host build guide
 
-Утилита `elf2ez` (ELF ET_REL для ARM Cortex-M0+ → формат EZ) теперь может
-собираться двумя способами. Поведение по умолчанию не изменилось.
+This document describes the current supported host-side build workflow for murm386/FRANK firmware.
 
-## Как собрать
+## Supported production target
 
-**По умолчанию (как и раньше) — нативная сборка под RP2040 / DOS-эмулятор:**
-```
-cmake -S . -B build
-cmake --build build          # даёт elf2ez.com через Pico SDK, как и прежде
-```
+The normal build scripts deliberately build:
 
-**Host-консоль (новое, включается ключом CMake):**
-```
-cmake -S . -B build-host -DELF2EZ_HOST=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-host     # даёт bin/Release/elf2ez(.exe)
+```text
+CPU_TARGET=286
 ```
 
-`ELF2EZ_HOST=OFF` по умолчанию, поэтому обычная сборка идёт по прежней ветке
-Pico SDK без единого изменения. При `ELF2EZ_HOST=ON` берётся штатный компилятор
-хоста (GCC / Clang / MinGW / MSVC), Pico SDK и кросс-тулчейн не подключаются.
+The 386 core remains in the source tree, but it has not been regression-tested recently. `build.sh` and `build.bat` therefore do not expose a 386 switch. `build_all.sh` / `build_all.bat` accept an optional CPU-target argument only for interface stability and currently accept **286 only**.
 
-## Что было изменено (три файла)
+## Toolchain
 
-1. **`CMakeLists.txt`** — в начало добавлены `option(ELF2EZ_HOST ...)` и ветка
-   host-сборки, завершающаяся `return()`. Оригинальный блок Pico VS Code и весь
-   нативный путь идут ниже без изменений. Бинарь host кладётся в `../../bin/<Config>`
-   (та же схема, что у нативной сборки).
+The project CMake file is set up for Pico SDK 2.2.0 and the RP2350 ARM toolchain used by the Pico VS Code extension:
 
-2. **`elf2ez.c`** — только три вставки, каждая под `#ifdef ELF2EZ_HOST`. При
-   невыставленном макросе файл препроцессируется побайтово в исходный
-   (проверено):
-   - выбор заголовков (host-шим против DOS-API);
-   - `alloc_largest_block`/`free_dos_block` на `malloc`/`free` вместо INT 21h;
-   - в `emit_ez_reloc` указатель таблицы релокаций восстанавливается из `meta`,
-     а не из 32-битного поля `reloc_store_addr` — это делает код корректным в
-     64-битном процессе (на 32-битной цели значение идентично).
+- Pico SDK: **2.2.0**
+- ARM GCC toolchain: **14_2_Rel1**
+- picotool: **2.2.0**
+- CMake: **3.13 or newer**
 
-3. **`elf2ez_host.h`** (новый) — тонкий слой совместимости. Использует **только**
-   ISO C `<stdio.h>`/`<stdlib.h>`/`<string.h>`: fd-вызовы `open/read/write/lseek/
-   close/access` реализованы поверх `FILE*`, плюс константы `O_*`, `SEEK_SET` и
-   `DOS_API_VERSION`. Никаких POSIX-only, Win32-only или экспериментальных API —
-   один и тот же путь работает на GCC/Clang/MinGW/MSVC.
+Other compatible Pico SDK/toolchain installations may work, but these are the versions encoded in the current tree.
 
-## Важно про `DOS_API_VERSION`
+### Linux / macOS / WSL
 
-Значение продублировано в `elf2ez_host.h` (сейчас `11`) и должно совпадать с
-`api/dos-api.h`. Host-сборка не может включать `dos-api.h` (тянет заголовки
-эмулятора). Если версия в `api/dos-api.h` изменится — обновите и шим.
+Either use a Pico SDK installation discoverable by the project, or export `PICO_SDK_PATH` before configuring:
 
-## Проверено
+```sh
+export PICO_SDK_PATH=/path/to/pico-sdk
+```
 
-- GCC 13, 64-бит: сборка `-Wall -Wextra` без предупреждений; проходит парсинг
-  ELF-заголовка и чтение таблицы секций через host-I/O.
-- Компиляция в режиме `-std=c89 -pedantic` без ошибок (признак совместимости с MSVC).
-- Полный цикл `cmake -DELF2EZ_HOST=ON` → сборка → запуск: бинарь корректно
-  открывает вход/выход, разбирает ELF и убирает за собой файл вывода при ошибке.
+A working CMake generator/build program must also be available (Ninja or Make are typical). The scripts use `cmake --build`, so they do not depend on a specific generator.
+
+### Windows
+
+The easiest supported setup is the Raspberry Pi Pico VS Code extension. The project automatically includes:
+
+```text
+%USERPROFILE%/.pico-sdk/cmake/pico-vscode.cmake
+```
+
+when that file exists.
+
+`build.bat` requires `cmake` and the selected generator/toolchain to be available in the environment. Running it from a Pico SDK-enabled terminal or the VS Code integrated terminal is recommended.
+
+## Single-variant build
+
+Linux/macOS/WSL:
+
+```sh
+./build.sh [options]
+```
+
+Windows:
+
+```bat
+build.bat [options]
+```
+
+Defaults:
+
+| Setting | Default |
+|---|---|
+| CPU target | `286` (fixed) |
+| Board | `M1` |
+| Video | `EGA128` |
+| Audio | `PWM` |
+| RP2350 clock | `504` MHz |
+| PSRAM max clock | `66` MHz |
+| Build type | `Release` |
+| Build directory | `build` |
+
+### Main options
+
+| Option | Values / meaning |
+|---|---|
+| `-b`, `--board` | `M1`, `M2`, `PC`, `Z2`, `C2` |
+| `-v`, `--video` | `MCGA`, `EGA128`, `VGA128`, `VGA256` |
+| `-a`, `--audio` | `I2S`, `PWM` |
+| `-c`, `--clock` | RP2350 clock in MHz |
+| `-p`, `--psram` | maximum QSPI PSRAM clock in MHz |
+| `--vga` | force VGA output |
+| `--hdmi` | force HDMI output |
+| `--debug` | `DEBUG_ENABLED=ON` |
+| `--diag` | `DIAG_ENABLED=ON` |
+| `--emm` | `EMM=ON` |
+| `--build-type` | CMake build type, default `Release` |
+| `--build-dir` | alternate CMake build directory |
+| `-j`, `--jobs` | explicit parallel-job count |
+| `--clean` | delete the selected build directory first |
+
+Short forms are also accepted:
+
+```text
+-M1 -M2 -PC -Z2 -C2
+-MCGA -EGA128 -VGA128 -VGA256
+-i2s -pwm
+-252 -378 -504
+```
+
+Examples:
+
+```sh
+./build.sh -M1 -VGA256 -i2s -504 -p 66 --clean
+./build.sh -M1 -EGA128 -i2s -504 -p 66
+./build.sh -M2 -VGA128 -pwm --hdmi
+./build.sh -Z2 -VGA128 -i2s
+```
+
+Windows uses the same options:
+
+```bat
+build.bat -M1 -VGA256 -i2s -504 -p 66 --clean
+```
+
+### Board-specific audio rules
+
+The scripts mirror CMake hardware constraints:
+
+- `PC`: PWM is forced;
+- `C2`: I2S is forced;
+- `M1`, `M2`, `Z2`: both I2S and PWM variants are buildable.
+
+C2 also has board-specific video/input constraints in `CMakeLists.txt`; CMake remains the final authority.
+
+## Building all supported variants
+
+Linux/macOS/WSL:
+
+```sh
+./build_all.sh 286
+```
+
+Windows:
+
+```bat
+build_all.bat 286
+```
+
+The CPU argument is optional and defaults to `286`. Passing `386` currently stops with an error instead of silently producing an untested release matrix.
+
+Additional options are forwarded to every `build.sh` / `build.bat` invocation. For example:
+
+```sh
+./build_all.sh 286 -504 -p 66 --clean
+```
+
+The matrix contains all four video modes for all five boards, with valid audio combinations:
+
+- M1: 4 video modes × I2S/PWM = 8
+- M2: 4 × I2S/PWM = 8
+- Z2: 4 × I2S/PWM = 8
+- PC: 4 × PWM = 4
+- C2: 4 × I2S = 4
+
+Total: **32 builds**.
+
+Each variant gets a separate directory below:
+
+```text
+build/all/<board>-286-<video>-<audio>/
+```
+
+This prevents stale CMake cache values from one variant leaking into another.
+
+## Firmware output
+
+CMake writes firmware to:
+
+```text
+bin/<build-type>/
+```
+
+For example:
+
+```text
+bin/Release/m1p2-286-VGA128-504MHz-1.6V-P66-I2S-v1.14.uf2
+```
+
+The output name is generated by CMake from board, CPU target, video profile, clock, PSRAM limit, audio type and firmware version.
+
+## Video/RAM implications
+
+`VIDEO_MODE` is not only a display-mode choice; it changes the SRAM/guest-memory layout:
+
+| Mode | VRAM | Guest RAM behaviour |
+|---|---:|---|
+| `MCGA` | 64 KiB | direct QSPI or reduced-VRAM paging backend |
+| `EGA128` | 128 KiB | direct QSPI or reduced-VRAM paging backend |
+| `VGA128` | 128 KiB | direct QSPI or reduced-VRAM paging backend |
+| `VGA256` | 256 KiB | full VRAM; direct QSPI guest RAM expected |
+
+For reduced-VRAM modes, `src/ega128_paging.c` supplies an 8 MiB virtual guest address space when direct QSPI guest RAM is unavailable. M1 can use external SPI PSRAM as backing; other cases use `286/pagefile.sys` on SD.
+
+When reduced-VRAM mode runs with direct QSPI PSRAM, core0 relocates its stack into unused `GFX_BUFFER` space. The released stack SRAM is reused by the FatFs write-through cache in the current tree.
+
+## CMake without wrapper scripts
+
+The equivalent direct configure command is:
+
+```sh
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCPU_TARGET=286 \
+  -DBOARD=M1 \
+  -DVIDEO_MODE=VGA128 \
+  -DAUDIO_TYPE=I2S \
+  -DCPU_SPEED=504 \
+  -DPSRAM_SPEED=66
+cmake --build build --parallel
+```
+
+On Windows the same `-D` options are used; only shell quoting differs.
+
+## Important CMake options not exposed by the normal scripts
+
+The project contains additional developer/profiling switches such as `PROFILE_ENABLED`, `SUBSYS_PROFILE`, `PIN_CLOCKS`, `CODE_PROFILE`, `PC_SAMPLE`, `BB_PROFILE`, `FAST_FETCH`, `DISK_CACHE`, `AUTOTYPE` and `CONTROL_STACK`.
+
+They are intentionally not part of the normal build-script interface. Use direct CMake options for development experiments so production build scripts stay deterministic.
+
+## SD data directory
+
+The data directory is tied to `CPU_TARGET` by CMake. Current supported builds use:
+
+```text
+286/
+```
+
+This directory contains `config.ini`, disk images and (when SD-backed paging is active) `pagefile.sys`.
+
+## Clean/reconfigure behaviour
+
+`build.sh` / `build.bat` always rerun CMake configure with all normal options explicitly specified. `--clean` removes the selected build directory first.
+
+`build_all` additionally uses one build directory per variant. This is intentional: several project options are CMake cache entries and must not accidentally carry state from another board/video/audio build.
+
+## Release script
+
+`release.sh` is a separate legacy release-packaging workflow and is not used by `build_all.sh` / `build_all.bat`. When release policy is updated, it should be reviewed independently against the current 286-only production matrix rather than assumed to match these scripts automatically.

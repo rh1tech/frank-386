@@ -575,9 +575,13 @@ int FX_PlayRaw(char *ptr, unsigned long length, unsigned rate,
     if (!ptr || !length || rate < 1000u || rate > 44100u)
         return FX_Error;
 
+    TSM_Lock();
     v = native_alloc_voice(priority);
     if (!v)
+    {
+        TSM_Unlock();
         return FX_Error;
+    }
 
     gain = ((unsigned)(left < 0 ? 0 : left)
           + (unsigned)(right < 0 ? 0 : right)) / 2u;
@@ -601,17 +605,27 @@ int FX_PlayRaw(char *ptr, unsigned long length, unsigned rate,
     v->active = 1;
 
     native_fx_service();
-    return v->handle;
+    {
+        int handle = v->handle;
+        TSM_Unlock();
+        return handle;
+    }
 }
 
 int FX_StopSound(int handle)
 {
-    native_fx_voice_t *v = native_find_voice(handle);
+    native_fx_voice_t *v;
 
+    TSM_Lock();
+    v = native_find_voice(handle);
     if (!v)
+    {
+        TSM_Unlock();
         return FX_Error;
+    }
 
     v->active = 0;
+    TSM_Unlock();
     return FX_Ok;
 }
 

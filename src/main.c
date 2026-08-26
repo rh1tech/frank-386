@@ -1480,6 +1480,15 @@ tsr_callback_t __not_in_flash_func(set_tsr1_callback)(tsr_callback_t cb)
 static uint8_t ps2_timer_poll_div;
 #endif
 
+static bool __not_in_flash_func(timer_callback_core0)(repeating_timer_t *rt)
+{
+    (void)rt;
+    tsr_callback_t cb = __atomic_load_n(&tsr0_callback, __ATOMIC_ACQUIRE);
+    if (cb)
+        cb();
+    return true;
+}
+
 static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
     timer_callback(rt);
 #ifdef BOARD_HAS_PS2
@@ -1488,10 +1497,6 @@ static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
         ps2kbd_tick();
     }
 #endif
-    tsr_callback_t cb = __atomic_load_n(&tsr0_callback, __ATOMIC_ACQUIRE);
-    if (cb)
-        cb();
-    vga_hw_process_deferred();
     return true;
 }
 
@@ -1544,6 +1549,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     __dmb();
     audio_timer_ready = true;
     while(1) {
+        vga_hw_process_deferred();
         repeat_me_often();
 #ifdef DIAG_ENABLED
         diag_core1_poll();  /* reports if core0's heartbeat stopped */
@@ -1810,6 +1816,12 @@ static void __attribute__((noinline, noreturn)) main_after_hardware(void)
 #endif
 
     initialized = true;
+
+    /* TSR0 is an OS/native-API source and must execute on core0.  Keep its
+       44.1 kHz source rate independent from the core1 audio timer; clients may
+       cheaply chain the saved callback on ticks they do not need. */
+    static repeating_timer_t tsr0_timer = { 0 };
+    add_repeating_timer_us(-1000000 / 44100, timer_callback_core0, pc, &tsr0_timer);
 
     /* Native POST ran before core1 could start its audio timer.  Wait until
      * the mixer is actually servicing samples, then emit the queued POST tone. */

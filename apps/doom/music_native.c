@@ -919,6 +919,7 @@ void MUSIC_Pause(void)
 
 int MUSIC_StopSong(void)
 {
+    TSM_Lock();
     if (music_playing)
         midi_all_notes_off();
 
@@ -933,6 +934,7 @@ int MUSIC_StopSong(void)
         music_tracks = NULL;
     }
     music_track_count = 0;
+    TSM_Unlock();
     return MUSIC_Ok;
 }
 
@@ -943,12 +945,14 @@ int MUSIC_PlaySong(unsigned char *song, int loopflag)
     if (music_device != GenMidi && music_device != Adlib)
         return MUSIC_InvalidCard;
 
+    TSM_Lock();
     MUSIC_StopSong();
 
     rc = midi_reset_tracks(song);
     if (rc != MUSIC_Ok)
     {
         MUSIC_ErrorCode = rc;
+        TSM_Unlock();
         return rc;
     }
 
@@ -980,6 +984,7 @@ int MUSIC_PlaySong(unsigned char *song, int loopflag)
         }
     }
 
+    TSM_Unlock();
     return MUSIC_Ok;
 }
 

@@ -102,10 +102,15 @@ char *PCFX_ErrorString(int ErrorNumber)
 
 int PCFX_Stop(int handle)
 {
+    TSM_Lock();
     if (handle != PCFX_HANDLE || !pcfx_active)
+    {
+        TSM_Unlock();
         return PCFX_VoiceNotFound;
+    }
 
     pcfx_finish();
+    TSM_Unlock();
     return PCFX_Ok;
 }
 
@@ -130,10 +135,14 @@ int PCFX_Play(PCSound *sound, int priority, unsigned long callbackval)
     if (!sound || sound->length < 2)
         return PCFX_Error;
 
+    TSM_Lock();
     if (pcfx_active)
     {
         if (priority < pcfx_priority)
+        {
+            TSM_Unlock();
             return PCFX_NoVoices;
+        }
         pcfx_finish();
     }
 
@@ -151,6 +160,7 @@ int PCFX_Play(PCSound *sound, int priority, unsigned long callbackval)
      */
     pcfx_service();
 
+    TSM_Unlock();
     return PCFX_HANDLE;
 }
 

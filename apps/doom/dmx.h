@@ -30,6 +30,8 @@ int TSM_NewService(int (*service)(void), int rate, int priority, int pause);
 void TSM_DelService(int id);
 void TSM_Remove(void);
 void TSM_Yield(void);
+void TSM_Lock(void);
+void TSM_Unlock(void);
 
 void MUS_PauseSong(int handle);
 void MUS_ResumeSong(int handle);
