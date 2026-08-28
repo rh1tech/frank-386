@@ -21,7 +21,16 @@ if(DEFINED BOARD_VARIANT AND NOT DEFINED BOARD)
     set(BOARD ${BOARD_VARIANT})
 endif()
 
-if(BOARD STREQUAL "C2")
+if(BOARD STREQUAL "Z2")
+    # Waveshare RP2350-PiZero uses RP2350B and GPIO30..47.
+    # The stock pico2 definition selects RP2350A and would truncate/alias
+    # the high GPIOs used by HDMI, microSD and PSRAM CS.
+    #
+    # Pico SDK 2.2.0 (the version referenced by this project) predates the
+    # upstream waveshare_rp2350_pizero board header, so keep a local one.
+    set(PICO_BOARD_HEADER_DIRS ${CMAKE_CURRENT_LIST_DIR}/boards CACHE PATH "" FORCE)
+    set(PICO_BOARD "frank_waveshare_rp2350_pizero" CACHE STRING "Pico board type" FORCE)
+elseif(BOARD STREQUAL "C2")
     # FRANK Core 2 master is an RP2350B. The stock pico2 definition
     # declares PICO_RP2350A 1, capping NUM_BANK0_GPIOS at 30 and
     # switching off PIO's movable GPIO window — the link bus (GPIO20..42),

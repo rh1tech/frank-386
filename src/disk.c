@@ -34,7 +34,7 @@ struct struct_fdd {
 struct struct_ata {
     FIL fil;
     char* name;
-    uint32_t usable_size;
+    FSIZE_t usable_size;
     uint16_t cyls;
     uint16_t sects;
     uint16_t heads;
@@ -121,7 +121,7 @@ static void update_floppy_cmos(void) {
 }
 
 // Detect fixed VHD (footer at end)
-static int detect_vhd(FIL *file, size_t size) {
+static int detect_vhd(FIL *file, FSIZE_t size) {
     if (size < 512) return 0;
     UINT br;
     f_lseek(file, size - 512);
@@ -201,10 +201,10 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
     }
     if(is_fdd) fdd[drivenum].name = strdup(pathname);
     else ata[drivenum].name = strdup(pathname);
-    size_t size = f_size(pf);
+    FSIZE_t size = f_size(pf);
 
     int is_vhd = detect_vhd(pf, size);
-    size_t usable_size = size;
+    FSIZE_t usable_size = size;
 
     if (is_vhd) {
         // Fixed VHD: subtract 512-byte footer
@@ -226,34 +226,66 @@ uint8_t insertdisk(uint8_t drivenum, bool is_fdd, bool is_cd, const char *pathna
         return 1;
     }
     // Validate size constraints (non-CD-ROM only)
-    if (usable_size < 360 * 1024 || usable_size > 0x1f782000UL || (usable_size & 511)) {
+    /* Allow HDD images up to 8 GiB. The old ~503 MiB limit was inherited
+     * from the original CHS-oriented disk layer. frank-386's IDE path uses
+     * LBA28 and FatFS is built with exFAT/64-bit FSIZE_t, so a 7 GiB image
+     * is representable end-to-end. */
+    if (usable_size < 360ULL * 1024ULL ||
+        usable_size > 8ULL * 1024ULL * 1024ULL * 1024ULL ||
+        (usable_size & 511ULL)) {
         f_close(pf);
         return 0;
     }
     // Determine geometry (cyls, heads, sects)
     uint16_t cyls = 0, heads = 0, sects = 0, drive_type = 47;
     if (!is_fdd) {  // Hard disk
+        /*
+         * Legacy BIOS CHS translation.
+         *
+         * The original frank-386 HDD limit (0x1f782000 bytes) was exactly
+         * 1023 cylinders * 16 heads * 63 sectors * 512 bytes. Simply
+         * lifting that limit leaves large images reporting >1023 cylinders,
+         * which DOS FORMAT rejects as invalid device geometry.
+         *
+         * For larger disks expose the traditional translated geometry
+         * 255 heads / 63 sectors. A 7 GiB image becomes ~913 cylinders,
+         * comfortably inside the BIOS 10-bit cylinder limit. LBA28 still
+         * carries the full sector count through ATA IDENTIFY.
+         */
+        const FSIZE_t legacy_chs_limit =
+            1023ULL * 16ULL * 63ULL * 512ULL;
+        const FSIZE_t translated_chs_limit =
+            1023ULL * 255ULL * 63ULL * 512ULL;
+
         sects = 63;
-        heads = 16;
-        // Try to detect geometry from MBR partition table.
-        // The end-CHS of the last partition entry encodes the heads
-        // and sectors-per-track the image was created with.
-        UINT br;
-        f_lseek(pf, 0);
-        if (FR_OK == f_read(pf, sectorbuffer, 512, &br) && br == 512
-            && sectorbuffer[510] == 0x55 && sectorbuffer[511] == 0xAA) {
-            for (int p = 0; p < 4; p++) {
-                uint8_t *pe = &sectorbuffer[0x1BE + p * 16];
-                if (pe[4] == 0) continue;          // empty slot
-                uint8_t end_h = pe[5];
-                uint8_t end_s = pe[6] & 0x3F;
-                if (end_s > 0 && end_h > 0) {
-                    heads = end_h + 1;
-                    sects = end_s;
+        heads = (usable_size > legacy_chs_limit) ? 255 : 16;
+
+        if (usable_size > translated_chs_limit) {
+            f_close(pf);
+            return 0;
+        }
+
+        // Keep MBR geometry detection only for legacy-sized images.
+        // Large images must keep stable 255/63 translation across reboots.
+        if (usable_size <= legacy_chs_limit) {
+            UINT br;
+            f_lseek(pf, 0);
+            if (FR_OK == f_read(pf, sectorbuffer, 512, &br) && br == 512
+                && sectorbuffer[510] == 0x55 && sectorbuffer[511] == 0xAA) {
+                for (int p = 0; p < 4; p++) {
+                    uint8_t *pe = &sectorbuffer[0x1BE + p * 16];
+                    if (pe[4] == 0) continue;
+                    uint8_t end_h = pe[5];
+                    uint8_t end_s = pe[6] & 0x3F;
+                    if (end_s > 0 && end_h > 0) {
+                        heads = end_h + 1;
+                        sects = end_s;
+                    }
                 }
             }
         }
-        cyls = usable_size / ((size_t)sects * heads * 512);
+
+        cyls = (uint16_t)(usable_size / ((FSIZE_t)sects * heads * 512ULL));
         ata[drivenum].drive_type = drive_type;
         ata[drivenum].usable_size = usable_size;
         ata[drivenum].cyls = cyls;

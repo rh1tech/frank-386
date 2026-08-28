@@ -9,6 +9,7 @@
 #define PSRAM_INIT_H
 
 #include "pico/stdlib.h"
+#include "board_config.h"
 #include <stdbool.h>
 
 // PSRAM memory map (may be defined by board_config.h)

@@ -113,11 +113,11 @@ bool psram_test(void) {
 
     // Test pattern at various locations
     const uint32_t test_offsets[] = {
-        0,                      // Start
-        1024,                   // 4KB
-        256 * 1024,             // 1MB
-        1024 * 1024,            // 4MB
-        2 * 1024 * 1024 - 4,    // Near end of 8MB
+        0,                                      // Start
+        4 * 1024,                               // 4 KiB
+        1 * 1024 * 1024,                        // 1 MiB
+        4 * 1024 * 1024,                        // 4 MiB
+        PSRAM_SIZE_BYTES - sizeof(uint32_t),    // Last word of PSRAM
     };
 
     const uint32_t test_pattern = 0xDEADBEEF;

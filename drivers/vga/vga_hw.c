@@ -32,6 +32,15 @@
 #include <arm_acle.h>
 #include "../../drivers/psram/psram_init.h"
 
+// Portable 8-bit bit reversal. GCC 13 does not expose __rbit() through
+// <arm_acle.h> for this build configuration, so avoid relying on that intrinsic.
+static inline uint8_t reverse_bits8(uint8_t v) {
+    v = (uint8_t)((v >> 4) | (v << 4));
+    v = (uint8_t)(((v & 0xCCu) >> 2) | ((v & 0x33u) << 2));
+    v = (uint8_t)(((v & 0xAAu) >> 1) | ((v & 0x55u) << 1));
+    return v;
+}
+
 bool SELECT_VGA = false;
 extern bool required_to_repair_text_pal;
 
@@ -666,7 +675,7 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             register uint32_t glyph;
             const uint8_t *fp = vga_get_font_ptr(vga_state, ch, (attr >> 3) & 1);
             if (fp) {
-                glyph = __rbit(fp[glyph_line * 4]) >> 24;
+                glyph = reverse_bits8(fp[glyph_line * 4]);
             } else {
                 glyph = font_8x16[ch * 16 + glyph_line];
             }

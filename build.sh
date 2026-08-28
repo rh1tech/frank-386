@@ -178,7 +178,9 @@ if [[ "$BOARD" == "C2" ]]; then
 fi
 
 # Build cmake arguments
-CMAKE_ARGS=(-DPICO_BOARD=pico2 -DCMAKE_BUILD_TYPE=MinSizeRel)
+# Let CMakeLists.txt choose the correct Pico SDK board definition.
+# This matters for Z2 (RP2350B/48 GPIO) and C2.
+CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=MinSizeRel)
 CMAKE_ARGS+=("-DBOARD=${BOARD}")
 CMAKE_ARGS+=("-DCPU_SPEED=$CPU")
 CMAKE_ARGS+=("-DPSRAM_SPEED=$PSRAM")

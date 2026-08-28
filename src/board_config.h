@@ -299,6 +299,9 @@ static inline uint get_psram_pin(void) {
 //=============================================================================
 #ifdef BOARD_Z2
 
+// On-board microSD: GPIO30=SCK, GPIO31=MOSI, GPIO40=MISO -> SPI1.
+#define SDCARD_SPI_BUS spi1
+
 // HDMI Pins
 #define HDMI_PIN_CLKN 32
 
@@ -336,7 +339,7 @@ static inline uint get_psram_pin(void) {
 #define PWM_LEFT_PIN 11
 #define BEEPER_PIN 12
 
-#endif // BOARD_PC
+#endif // BOARD_Z2
 
 //=============================================================================
 // FRANK Core 2 Layout Configuration (dual RP2350)
@@ -462,14 +465,28 @@ static inline uint get_psram_pin(void) {
 // HDMI Configuration
 //=============================================================================
 
-// HDMI differential pair encoding options
+/*
+ * Waveshare RP2350-PiZero (Z2) wiring is data-first:
+ *
+ *   GPIO32/33 = TMDS data 2
+ *   GPIO34/35 = TMDS data 1
+ *   GPIO36/37 = TMDS data 0
+ *   GPIO38/39 = TMDS clock
+ *
+ * Differential pairs are not inverted.
+ * Other FRANK boards keep the original clock-first layout.
+ */
+#ifdef BOARD_Z2
+#define HDMI_PIN_RGB_notBGR       0
+#define HDMI_PIN_invert_diffpairs 0
+#define beginHDMI_PIN_data         HDMI_BASE_PIN
+#define beginHDMI_PIN_clk          (HDMI_BASE_PIN + 6)
+#else
 #define HDMI_PIN_RGB_notBGR       1
 #define HDMI_PIN_invert_diffpairs 1
-
-// HDMI clock pins (relative to base)
-#define beginHDMI_PIN_clk   HDMI_BASE_PIN
-#define beginHDMI_PIN_data  (HDMI_BASE_PIN + 2)
-
+#define beginHDMI_PIN_clk          HDMI_BASE_PIN
+#define beginHDMI_PIN_data         (HDMI_BASE_PIN + 2)
+#endif
 //=============================================================================
 // VGA Display Configuration
 //=============================================================================
@@ -504,8 +521,10 @@ static inline uint get_psram_pin(void) {
 // SD Card Configuration
 //=============================================================================
 
-// SD Card SPI bus (use hardware SPI0 or PIO)
+// SD Card SPI bus (use hardware SPI0 or board-specific override)
+#ifndef SDCARD_SPI_BUS
 #define SDCARD_SPI_BUS spi0
+#endif
 
 /*
  * Enable PIO-based SD card for better performance.
@@ -521,7 +540,7 @@ static inline uint get_psram_pin(void) {
  * which are exactly the hardware SPI0 pins (RX/CSn/SCK/TX), so the
  * non-PIO path in sdcard.c drives it directly.
  */
-#ifndef BOARD_C2
+#if !defined(BOARD_C2) && !defined(BOARD_Z2)
 #define SDCARD_PIO 1
 #endif
 
