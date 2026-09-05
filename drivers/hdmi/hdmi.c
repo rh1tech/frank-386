@@ -3,7 +3,9 @@
 #include <malloc.h>
 #include <stdalign.h>
 #include <hardware/dma.h>
+#include <hardware/irq.h>
 #include <hardware/pio.h>
+#include <hardware/sync.h>
 #include <pico/time.h>
 #include <pico/multicore.h>
 #include <hardware/clocks.h>
@@ -41,7 +43,13 @@ extern uint32_t palette_a[256];
 #define SCREEN_WIDTH (320)
 #define SCREEN_HEIGHT (240)
 
-#define GFX_BUFFER_SIZE (256 * 1024)
+/* The guest's VGA RAM.  Was hardcoded at 256 KB in two files while
+ * EMU_VGA_MEM_SIZE_KB configured a third place; deriving it means the buffer
+ * and the size the emulator reports can no longer disagree. */
+#ifndef EMU_VGA_MEM_SIZE_KB
+#define EMU_VGA_MEM_SIZE_KB 256
+#endif
+#define GFX_BUFFER_SIZE (EMU_VGA_MEM_SIZE_KB * 1024)
 extern uint8_t gfx_buffer[GFX_BUFFER_SIZE];
 extern uint8_t text_buffer_sram[80 * 25 * 2];
 extern int text_cols;
@@ -54,6 +62,19 @@ extern VGAState *vga_state;
 // Per-frame values latched by ISR from vga_state->cr[] late in vblank
 extern uint16_t frame_vram_offset;
 extern uint8_t  frame_pixel_panning;
+extern uint8_t  frame_panning_split_off;
+extern uint8_t  frame_crtc_mode;
+extern uint8_t  frame_max_scan;
+extern uint8_t  frame_border_pix;
+extern volatile uint8_t frame_blank_active;
+
+/* Frames the guest has held the display blanked, and the bound past which we
+ * stop believing it (see dma_handler_HDMI).  ~2 s at 60 Hz. */
+#define HDMI_BLANK_MAX_FRAMES 120u
+static uint32_t hdmi_blank_frames = 0;
+extern uint8_t  frame_preset_row;
+extern uint8_t  frame_text_char_h;
+extern uint8_t  frame_overscan;
 extern int      frame_line_compare;
 // Cursor state
 extern int cursor_x, cursor_y;
@@ -70,6 +91,8 @@ extern int gfx_line_offset;  // Words per line (40 for 320px EGA, 80 for 640px)
 extern int gfx_sram_stride;  // Words per line in SRAM buffer (width/8 + 1)
 
 extern volatile uint32_t frame_update_request;
+extern const uint32_t * volatile hdmi_ega320_cache_active;
+extern const uint32_t * volatile hdmi_ega320_cache_pending;
 
 // #define HDMI_WIDTH 480 //480 Default
 // #define HDMI_HEIGHT 644 //524 Default
@@ -85,10 +108,14 @@ static int dma_chan_pal_conv;
 
 //DMA буферы
 //основные строчные данные
-// 4 line buffers for 2-line-ahead rendering (prevents DMA underflow)
+// Four line buffers for lower-priority rendering.
+// Keep these DMA control structures in the original low-contention scratch
+// bank.  Moving them into the busy main-SRAM bank makes HDMI startup unstable
+// on Z2.  The large conversion LUT, not these bottom-of-bank words, was the
+// object observed being overwritten at runtime.
 static uint32_t* __scratch_y("hdmi_ptr_3") dma_lines[4] = { NULL,NULL,NULL,NULL };
-static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[4];
-// Extra 2 line buffers (buffers 0-1 are in conv_color, 2-3 are here)
+static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[4] __aligned(16);
+// Buffers 0-1 live in conv_color's tail; buffers 2-3 are separate.
 static uint32_t hdmi_extra_line_buf[2][100];
 
 //ДМА палитра для конвертации
@@ -98,15 +125,62 @@ uint32_t conv_color2[1024]; // backup to fast restore pallete
 bool required_to_repair_text_pal = false;
 
 //индекс, проверяющий зависание
-static uint32_t irq_inx = 0;
+static volatile uint32_t irq_inx = 0;
+
+// SWD-readable timing diagnostics. EGA renderers are the heaviest users of
+// the scanline IRQ and must leave enough headroom before the next 31.8 us line.
+volatile uint32_t hdmi_isr_last_us = 0;
+volatile uint32_t hdmi_isr_max_us = 0;
+volatile uint32_t hdmi_isr_over_30_count = 0;
+volatile uint32_t hdmi_sync_isr_max_us = 0;
+volatile uint32_t hdmi_render_queue_overflow = 0;
+volatile uint32_t hdmi_render_late_drop = 0;
+
+#define HDMI_RENDER_QUEUE_SIZE 8u
+typedef struct {
+    uint16_t line;
+    uint16_t deadline_irq;
+    uint8_t buffer;
+} hdmi_render_job_t;
+
+static hdmi_render_job_t hdmi_render_jobs[HDMI_RENDER_QUEUE_SIZE];
+static volatile uint32_t hdmi_render_head = 0;
+static volatile uint32_t hdmi_render_tail = 0;
+static int hdmi_render_irq = -1;
+
+static inline bool hdmi_render_deadline_passed(uint16_t deadline_irq) {
+    return (int16_t)((uint16_t)irq_inx - deadline_irq) >= 0;
+}
 
 
 //функции и константы HDMI
 
-#define HDMI_CTRL_0 (252)
-#define HDMI_CTRL_1 (253)
-#define HDMI_CTRL_2 (254)
-#define HDMI_CTRL_3 (255)
+/*
+ * The four HDMI control symbols travel in the same byte stream as pixels and
+ * index the same 256-entry conv_color[] table, so four byte values can never
+ * be pixels - both palette setters refuse those indices for that reason.
+ * Which four is a free choice, and 252..255 was the worst one available.
+ *
+ * A 640-pixel 16-colour line packs two 4-bit colours per byte, high nibble
+ * on the left, so 0xfc..0xff mean "white next to light red / light magenta /
+ * yellow / white".  A run of white is 0xff in every single byte.  That is why
+ * every white area - the boot menu, M602's white text, the white background
+ * of the Windows 95 installer - had every second pixel forced down to 0xfb,
+ * which is white next to light cyan.  The coloured fringing that has been
+ * visible since the beginning was never a rendering bug; the encoding simply
+ * ran out of room in the one place it shows most.
+ *
+ * 0xd4..0xd7 mean "light magenta next to red / magenta / brown / light grey".
+ * Nothing in ordinary text or in a UI puts those side by side, and none of
+ * them is a same-colour run, so they cannot appear in a flat fill at all.
+ * The cost in 256-colour modes moves with them, from palette entries 252-255
+ * at the top of the VGA grey ramp to 212-215 in the middle of the colour
+ * cube, which is no worse and is used less.
+ */
+#define HDMI_CTRL_0 (0xd4)
+#define HDMI_CTRL_1 (0xd5)
+#define HDMI_CTRL_2 (0xd6)
+#define HDMI_CTRL_3 (0xd7)
 
 //программа конвертации адреса
 uint16_t pio_program_instructions_conv_HDMI[] = {
@@ -246,30 +320,106 @@ static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t 
     return ptr;
 }
 
-#define is_hdmi_sync(c) (c >= HDMI_CTRL_0)
-#define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (HDMI_CTRL_0 - 1) : c; }
+#define is_hdmi_sync(c) ((((c) & 0xfcu) == HDMI_CTRL_0))
+
+/*
+ * Replacement for a pixel byte that collides with a control symbol.
+ *
+ * Flipping bit 3 - which is what this used to do unconditionally - reasons
+ * about the byte as a *pair* of 4-bit colours, where it only brightens the
+ * right-hand pixel by one intensity step.  In a 256-colour mode the byte is
+ * not a pair: it is the palette index itself, and 0xd4..0xd7 then land on
+ * 0xdc..0xdf, four entirely unrelated entries of the guest's palette.
+ *
+ * Dune II draws the Westwood logo entirely in indices 212..215 - a blue ramp
+ * whose last step, #0f38bf, is 3964 of the logo's 10414 non-black pixels -
+ * while 220..223 held white and dark navy.  The logo came out white, and the
+ * sparkle, which is an animation of exactly those four palette entries, could
+ * not be seen at all.  The same substitution turned dark purple shadows in
+ * the intro's throne room into light grey speckles.
+ *
+ * So the substitute is chosen by colour instead: whoever programs the palette
+ * calls hdmi_set_pixel_substitutes() with the index whose colour is nearest
+ * to each reserved one.  Palettes very often hold the same colour twice -
+ * Dune II's holds this ramp again at 227, 229 and 231 - and then the
+ * substitution is exact.  The bit-3 flip stays as the initial value, so a
+ * mode that never programs a palette behaves exactly as it did.
+ */
+static uint8_t hdmi_ctrl_sub[4] = {
+    (uint8_t)(HDMI_CTRL_0 ^ 8u), (uint8_t)(HDMI_CTRL_1 ^ 8u),
+    (uint8_t)(HDMI_CTRL_2 ^ 8u), (uint8_t)(HDMI_CTRL_3 ^ 8u),
+};
+
+#define hdmi_pixel_fixup(c) (hdmi_ctrl_sub[(c) & 3u])
+
+/* sub[k] is the byte to emit in place of HDMI_CTRL_0 + k. */
+void hdmi_set_pixel_substitutes(const uint8_t *sub) {
+    for (int k = 0; k < 4; k++) {
+        uint8_t s = sub[k];
+        /* A substitute that is itself a control symbol would defeat the point. */
+        hdmi_ctrl_sub[k] = is_hdmi_sync(s) ? (uint8_t)(s ^ 8u) : s;
+    }
+}
+
+#define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? hdmi_pixel_fixup(c) : c; }
+
+/*
+ * Pixel bytes index conv_color[], but four of them are the HDMI control
+ * symbols (see HDMI_CTRL_0).  A 640-pixel EGA line packs two 4-bit colours
+ * into each byte, so a perfectly valid colour pair can otherwise select a
+ * sync symbol in the middle of active video.  The original byte-at-a-time
+ * ob() path protected against this; keep the same protection in the newer
+ * 32-bit EGA renderer.
+ */
+static __attribute__((always_inline)) inline uint8_t hdmi_safe_pixel_index(uint8_t c) {
+    return is_hdmi_sync(c) ? hdmi_pixel_fixup(c) : c;
+}
 
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
-    uint32_t char_row = line >> 4; // div 16
-    uint32_t glyph_line = line & 15;
+    /*
+     * Split screen, row-scan preset and CRTC stride.
+     *
+     * Above the line-compare match the CRTC walks from the frame's start
+     * address with the row-scan counter preset from CR08; on the line after
+     * the match it restarts at address 0 with row scan 0.  Text mode had none
+     * of this: it always read from the start address with a hard-wired
+     * 16-line character, so everything below the split came from past the end
+     * of the top region's data.
+     *
+     * Prehistorik 2's intro is built entirely on that mechanism - a smooth
+     * scrolling message in the top region, and below the split a logo drawn
+     * with a redefined font.  On the board it showed the message alone on a
+     * black screen, because the rest of the screen was reading blanks.
+     */
+    uint32_t ch_h = frame_text_char_h ? (uint32_t)frame_text_char_h : 16u;
+    uint32_t base_cell = frame_vram_offset;
+    uint32_t v = line + frame_preset_row;
+    if (frame_line_compare >= 0 && (int)line > frame_line_compare) {
+        base_cell = 0;
+        v = line - (uint32_t)(frame_line_compare + 1);
+    }
+    uint32_t char_row = v / ch_h;
+    uint32_t glyph_line = v % ch_h;
 
     int cols = text_cols;
     int double_h = (cols == 40);  // 40 columns => 2x horizontal scaling
 
-    if (char_row < 25) {
-        // Use snapped start address for the frame (prevents mid-frame tearing).
-        const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
-        const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
+    uint32_t row_cell = base_cell + char_row * (uint32_t)text_stride_cells;
+    /* gfx_buffer holds 65536 cells; a row that would run past the end is not
+     * something any real mode asks for, and clamping beats reading out. */
+    if (row_cell + (uint32_t)cols <= 65536u) {
+        const uint32_t *text_row = (const uint32_t *)gfx_buffer + row_cell;
 
         for (int col = 0; col < cols; col++) {
             uint16_t cell = text_row[col];
             uint8_t ch   = (uint8_t)(cell & 0xFF);
             uint8_t attr = (uint8_t)(cell >> 8);
-            register uint8_t glyph;
-            if (cursor_blink_state && col == cursor_x &&
+            bool cursor_here = cursor_blink_state && col == cursor_x &&
                 char_row == (uint32_t)cursor_y &&
                 glyph_line >= (uint32_t)cursor_start &&
-                glyph_line <= (uint32_t)cursor_end) {
+                glyph_line <= (uint32_t)cursor_end;
+            register uint8_t glyph;
+            if (cursor_here) {
                 glyph = 0xFF;
             } else {
                 const uint8_t *fp = vga_get_font_ptr(vga_state, ch, (attr >> 3) & 1);
@@ -281,8 +431,19 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
             }
            // uint8_t blink_or_highlite_bg = attr & 0b10000000; // TODO: use it?
             register uint8_t fg_color0 = attr & 0b00001111;
-            register uint8_t bg_color1 = attr & 0b01110000;
-            register uint8_t bg_color0 = bg_color1 >> 4;
+            /* Attribute bit 7 is blink when AC mode-control bit 3 is set;
+             * otherwise it is the background-intensity bit. */
+            register uint8_t bg_index = (attr >> 4) & 0x07;
+            if (vga_state && !(vga_state->ar[0x10] & 0x08)) {
+                bg_index |= (attr >> 4) & 0x08;
+            }
+            // In blink mode, attribute bit 7 hides the glyph for one phase.
+            if (!cursor_here && vga_state && (vga_state->ar[0x10] & 0x08) &&
+                (attr & 0x80) && !cursor_blink_state) {
+                glyph = 0;
+            }
+            register uint8_t bg_color1 = bg_index << 4;
+            register uint8_t bg_color0 = bg_index;
             register uint8_t fg_color1 = fg_color0 << 4;
             if (!double_h) {
                 ob( ((glyph & 0b00000001) ? fg_color1 : bg_color1) | ((glyph & 0b00000010) ? fg_color0 : bg_color0) );
@@ -304,6 +465,8 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *outpu
     }
 }
 
+static inline uint32_t line_compare_src(int height);
+
 static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8_t *output_buffer) {
     // Determine source line based on graphics height
     // If height > 200 (e.g. 400 in Mode X), map 1:1
@@ -322,9 +485,19 @@ static void __time_critical_func(render_gfx_line_from_sram)(uint32_t line, uint8
         // We use 32-bit words for fetch, so convert words->dwords.
         uint32_t off = gfx_line_offset;
         uint32_t stride = (off > 0) ? (off << 1) : 80u;
+        /*
+         * frame_line_compare counts *display* lines, but src_line is in
+         * source lines and a 320x200 mode shows each source line twice.
+         * Comparing the two directly - which is what this renderer alone
+         * still did - put the split twice as far down the screen as the
+         * guest asked for.  The Legend of Kyrandia scrolls its title screen
+         * in with a shrinking split, so half the picture came from the
+         * scrolled offset and half from address 0, where the previous game's
+         * framebuffer was still sitting.
+         */
         uint32_t offset;
-        if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
-            offset = (src_line - frame_line_compare) * stride;
+        if (frame_line_compare >= 0 && (int)line > frame_line_compare) {
+            offset = (src_line - line_compare_src(gfx_height)) * stride;
         } else {
             offset = frame_vram_offset + src_line * stride;
         }
@@ -489,24 +662,112 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint8_t *o
 }
 
 // Spread 8 bits of a byte into positions 0,4,8,...28
-extern uint32_t spread8_lut[256];
-
-// Merge 4 plane bytes [P3|P2|P1|P0] into 8 nibbles (pixel color indices).
-static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
-    return
-     spread8_lut[(uint8_t)ega_planes] |
-     spread8_lut[(uint8_t)(ega_planes >> 8)] << 1 |
-     spread8_lut[(uint8_t)(ega_planes >> 16)] << 2 |
-     spread8_lut[(uint8_t)(ega_planes >> 24)] << 3;
+// Spread the bits of one plane byte into bit positions 0,4,8,...28.
+// Computing this directly avoids a 1 KiB LUT: scratch Y is vulnerable to the
+// core-0 stack, while moving that LUT to main SRAM exhausts the emulator heap.
+static __attribute__((always_inline)) inline uint32_t
+ega_spread8(uint32_t plane) {
+    plane = (plane | (plane << 12)) & 0x000F000Fu;
+    plane = (plane | (plane <<  6)) & 0x03030303u;
+    plane = (plane | (plane <<  3)) & 0x11111111u;
+    return plane;
 }
 
-static inline uint32_t ega_pair(uint8_t ab) {
+// Merge 4 plane bytes [P3|P2|P1|P0] into 8 nibbles (pixel color indices).
+static __attribute__((always_inline)) inline uint32_t
+ega_pack8_from_planes(const uint32_t ega_planes) {
+    return
+     ega_spread8((uint8_t)ega_planes) |
+     ega_spread8((uint8_t)(ega_planes >> 8)) << 1 |
+     ega_spread8((uint8_t)(ega_planes >> 16)) << 2 |
+     ega_spread8((uint8_t)(ega_planes >> 24)) << 3;
+}
+
+static __attribute__((always_inline)) inline uint32_t ega_pair(uint8_t ab) {
     return ((uint32_t)(ab & 15) << 8) | (uint32_t)(ab >> 4);
 }
 
 // Render EGA planar 16-color graphics line
 // Supports both 320x200 (doubled) and 640x350 (native) modes
 // Reads from SRAM buffer (copied from PSRAM during main loop)
+/*
+ * Convert the CRTC's split-screen line into source-line units.
+ *
+ * frame_line_compare counts *display* lines, while the renderers address VRAM
+ * in source lines - in a 320x200 mode the display has 400 lines and each
+ * source line is shown twice.  Comparing the two directly means the split
+ * never happens: Supaplex asks for line compare 351 and src_line never gets
+ * past 199, so its status panel came from the scrolling offset instead of
+ * from address 0, ending up too low and cut off.  The mapping here is the
+ * same one each renderer uses to derive src_line from line.
+ */
+/*
+ * The CRTC's compatibility address wrap (CR17 bits 0 and 1), reduced to a
+ * mask.
+ *
+ * Clear bit 0 and address bit 13 comes from row-scan bit 0 instead of the
+ * counter; clear bit 1 and bit 14 comes from row-scan bit 1.  With a maximum
+ * scan line of zero the row counter never leaves zero, so this is a wrap at
+ * 8 KB (and 16 KB) - which is what Prehistorik 2's scrolling menus are built
+ * on: they keep an 8 KB ring and let the start address run past its end.
+ *
+ * The substitution applies to *every* address the line reads, not just its
+ * start: a line is 39 words long and one starting just below the boundary
+ * crosses it partway across.  Doing that with a call per word made the
+ * scanline renderer miss its deadline and the picture jitter, so the whole
+ * thing collapses to an AND and an OR computed once per line.
+ */
+/*
+ * Every address this renderer computes, one slot per display line, in the
+ * unused port-write histogram at guest 0xb5000.
+ *
+ * The model I reconstructed by hand says the whole window has content, but
+ * the screen shows a blank band along the bottom, so the renderer is reading
+ * somewhere I am not predicting.  Rather than guess again, let it say what it
+ * actually reads: dump this and compare against the same arithmetic done on
+ * the host.
+ */
+#ifndef HDMI_ADDR_LOG_ENABLED
+#define HDMI_ADDR_LOG_ENABLED 0        /* debugging aid; off in normal builds */
+#endif
+/* Guest 0xa2000: the instruction ring's space, which is free whenever the
+ * per-instruction hook is compiled out (AUDIO_DIAG_HOT=OFF).  It must not
+ * go at 0xb5000 - that is the port write histogram, which frank_diag_port()
+ * keeps updating and which trampled the first version of this log. */
+#define HDMI_ADDR_LOG ((volatile uint32_t *)(0x11000000u + 0x000a2000u))
+
+static inline void crtc_compat_mask(uint32_t src_line,
+                                    uint32_t *and_mask, uint32_t *or_bits)
+{
+    uint32_t a = 0xFFFFu, o = 0u;
+
+    if ((frame_crtc_mode & 0x03u) != 0x03u) {
+        uint32_t row = frame_max_scan ? (src_line % (frame_max_scan + 1u)) : 0u;
+        if (!(frame_crtc_mode & 0x01u)) { a &= ~0x2000u; o |= (row & 1u) << 13; }
+        if (!(frame_crtc_mode & 0x02u)) { a &= ~0x4000u; o |= ((row >> 1) & 1u) << 14; }
+    }
+    *and_mask = a;
+    *or_bits  = o;
+}
+
+static inline uint32_t line_compare_src(int height)
+{
+    /* The address counter is reset *after* the matching scanline, so the
+     * first line of the split region is line_compare + 1.  Starting it one
+     * line early made the region a source line too tall, and that extra line
+     * read past the end of Supaplex's panel into the playfield tiles behind
+     * it - a strip of red and green blocks along the bottom edge. */
+    uint32_t lc = (uint32_t)frame_line_compare + 1u;
+
+    if (height <= 100) return lc >> 2;
+    if (height <= 200) return lc >> 1;
+    if (height <= 350) {
+        int act = active_end - active_start;
+        return act > 0 ? (lc * (uint32_t)height) / (uint32_t)act : lc;
+    }
+    return lc;
+}
+
 static void __time_critical_func(render_gfx_line_ega320)(uint32_t line, uint8_t *output_buffer) {
     // Determine source line with appropriate scaling
     // 400 display lines -> gfx_height source lines
@@ -540,20 +801,64 @@ static void __time_critical_func(render_gfx_line_ega320)(uint32_t line, uint8_t 
         nf_memset(output_buffer, 0, SCREEN_WIDTH);
         return;
     }
+
+    const uint32_t *cached_frame = hdmi_ega320_cache_active;
+    if (cached_frame && gfx_width == 320 && height == 200) {
+        const uint32_t *cached_row = cached_frame + src_line * 40u;
+        uint32_t *out32 = (uint32_t *)output_buffer;
+        for (uint32_t i = 0; i < 40u; ++i) {
+            uint32_t eight_pixels = cached_row[i];
+            *out32++ = ega_pair(eight_pixels >> 24) |
+                       (ega_pair(eight_pixels >> 16) << 16);
+            *out32++ = ega_pair(eight_pixels >> 8) |
+                       (ega_pair(eight_pixels) << 16);
+        }
+        return;
+    }
+
     uint32_t gfx_width8 = gfx_width >> 3;
     uint32_t stride = gfx_line_offset > 0 ? (gfx_line_offset << 1) : gfx_width8;
 
     uint32_t offset;
-    if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
-        offset = (src_line - frame_line_compare) * stride;
+    bool in_split = (frame_line_compare >= 0 && (int)line > frame_line_compare);
+    if (in_split) {
+        /* The split region always restarts at address 0; compare in display
+         * lines and subtract the split point in source lines. */
+        offset = (src_line - line_compare_src(height)) * stride;
     } else {
         offset = frame_vram_offset + src_line * stride;
     }
 
-    offset &= 0xFFFF;
+    uint32_t wrap_and, wrap_or;
+    crtc_compat_mask(src_line, &wrap_and, &wrap_or);
+    offset = ((offset & 0xFFFFu) & wrap_and) | wrap_or;
 
-    register const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
-    register int panning = frame_pixel_panning;
+    /*
+     * The address has to be wrapped for *every* word of the line, not just
+     * for its start.  A line is 39 words long, so one that begins just below
+     * the compatibility wrap boundary crosses it partway across and the
+     * hardware folds the rest back; reading on linearly puts the tail of such
+     * a line outside the ring the game maintains, which is the seam along the
+     * right edge and around the fold.  The look-ahead word that pixel panning
+     * needs has to be wrapped for the same reason.
+     */
+#if HDMI_ADDR_LOG_ENABLED
+    if (line < 400u) {
+        HDMI_ADDR_LOG[line] = offset | (src_line << 16);
+        if (line == 0u) {
+            HDMI_ADDR_LOG[400] = frame_vram_offset;
+            HDMI_ADDR_LOG[401] = wrap_and;
+            HDMI_ADDR_LOG[402] = wrap_or;
+            HDMI_ADDR_LOG[403] = (uint32_t)stride | ((uint32_t)gfx_width8 << 16);
+        }
+    }
+#endif
+
+    register const uint32_t *vram = (const uint32_t *)gfx_buffer;
+    /* Panning is suppressed below the split when the guest asks for it, which
+     * is what keeps the strip anchored while the rest of the screen scrolls. */
+    register int panning = (in_split && frame_panning_split_off)
+                         ? 0 : frame_pixel_panning;
     register uint8_t shift1 = panning << 2;
     register uint8_t shift2 = 32 - shift1;
 
@@ -564,13 +869,22 @@ static void __time_critical_func(render_gfx_line_ega320)(uint32_t line, uint8_t 
     register uint32_t* out32 = (uint32_t*)output_buffer;
     // 320-wide mode: double each pixel horizontally
     for (int i = 0; i < words_to_render; ++i) {
-        register uint32_t eight_pixels = ega_pack8_from_planes(src32[i]);
+        uint32_t a0 = (((offset + (uint32_t)i) & wrap_and) | wrap_or);
+        register uint32_t eight_pixels = ega_pack8_from_planes(vram[a0]);
         if (panning > 0) {
-            eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(src32[i+1]) >> shift2);
+            uint32_t a1 = (((offset + (uint32_t)i + 1u) & wrap_and) | wrap_or);
+            eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(vram[a1]) >> shift2);
         }
         *out32++ = ega_pair(eight_pixels >> 24) | (ega_pair(eight_pixels >> 16) << 16);
         *out32++ = ega_pair(eight_pixels >> 8) | (ega_pair(eight_pixels) << 16);
     }
+
+    /* Everything past the active display is overscan, not last line's
+     * leftovers.  With gfx_width 312 that is the final eight pixels. */
+    uint32_t written = (uint32_t)words_to_render * 8u;
+    if (written < SCREEN_WIDTH)
+        nf_memset(output_buffer + written, frame_border_pix,
+                  SCREEN_WIDTH - written);
 }
 
 static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t *output_buffer) {
@@ -610,16 +924,24 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
     uint32_t stride = gfx_line_offset > 0 ? (gfx_line_offset << 1) : gfx_width8;
 
     uint32_t offset;
-    if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
-        offset = (src_line - frame_line_compare) * stride;
+    bool in_split = (frame_line_compare >= 0 && (int)line > frame_line_compare);
+    if (in_split) {
+        /* The split region always restarts at address 0; compare in display
+         * lines and subtract the split point in source lines. */
+        offset = (src_line - line_compare_src(height)) * stride;
     } else {
         offset = frame_vram_offset + src_line * stride;
     }
 
-    offset &= 0xFFFF;
+    uint32_t wrap_and, wrap_or;
+    crtc_compat_mask(src_line, &wrap_and, &wrap_or);
+    offset = ((offset & 0xFFFFu) & wrap_and) | wrap_or;
 
-    register const uint32_t *src32 = (const uint32_t *)(gfx_buffer + (offset << 2));
-    register int panning = frame_pixel_panning;
+    register const uint32_t *vram = (const uint32_t *)gfx_buffer;
+    /* Panning is suppressed below the split when the guest asks for it, which
+     * is what keeps the strip anchored while the rest of the screen scrolls. */
+    register int panning = (in_split && frame_panning_split_off)
+                         ? 0 : frame_pixel_panning;
     register uint8_t shift1 = panning << 2;
     register uint8_t shift2 = 32 - shift1;
 
@@ -627,20 +949,30 @@ static void __time_critical_func(render_gfx_line_ega640)(uint32_t line, uint8_t 
     int words_to_render = gfx_width8;
     if (words_to_render > 80) words_to_render = 80; // Cap at 640px
 
-    // 640-wide mode: no horizontal doubling
+    register uint32_t *out32 = (uint32_t *)output_buffer;
+    // 640-wide mode: no horizontal doubling. Each packed word already holds
+    // four two-pixel palette indices; only byte order needs reversing.
     for (register int i = 0; i < words_to_render; i++) {
-        register uint32_t eight_pixels = ega_pack8_from_planes(src32[i]);
+        uint32_t a0 = (((offset + (uint32_t)i) & wrap_and) | wrap_or);
+        register uint32_t eight_pixels = ega_pack8_from_planes(vram[a0]);
 
         if (panning > 0) {
-            eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(src32[i+1]) >> shift2);
+            uint32_t a1 = (((offset + (uint32_t)i + 1u) & wrap_and) | wrap_or);
+            eight_pixels = (eight_pixels << shift1) | (ega_pack8_from_planes(vram[a1]) >> shift2);
         }
-/// TODO: compose palleter for this case
-        // Lookup each pixel (no doubling)
-        ob ( (eight_pixels >> 24) );
-        ob ( (eight_pixels >> 16) );
-        ob ( (eight_pixels >> 8) );
-        ob ( eight_pixels );
+        uint32_t packed = __builtin_bswap32(eight_pixels);
+        *out32++ =
+            (uint32_t)hdmi_safe_pixel_index((uint8_t)packed) |
+            ((uint32_t)hdmi_safe_pixel_index((uint8_t)(packed >> 8)) << 8) |
+            ((uint32_t)hdmi_safe_pixel_index((uint8_t)(packed >> 16)) << 16) |
+            ((uint32_t)hdmi_safe_pixel_index((uint8_t)(packed >> 24)) << 24);
     }
+    /* Same as the 320-wide path: the tail of the line is overscan.  Here each
+     * output byte carries two pixels, so the fill value is doubled up. */
+    uint32_t written640 = (uint32_t)words_to_render * 4u;
+    if (written640 < SCREEN_WIDTH)
+        nf_memset(output_buffer + written640, frame_border_pix,
+                  SCREEN_WIDTH - written640);
 }
 
 void pre_render_line(void);
@@ -696,7 +1028,91 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
     nf_memset(output_buffer, 0x77, SCREEN_WIDTH);
 }
 
+/* Render pixels at a lower interrupt priority. The DMA IRQ is priority 0 and
+ * can preempt this worker every scanline to keep the control channel fed.
+ * With four buffers the queued line has roughly three scanlines of lead time.
+ */
+static void __isr __time_critical_func(hdmi_render_worker)(void) {
+    uint32_t tail = hdmi_render_tail;
+    if (tail == hdmi_render_head) return;
+
+    hdmi_render_job_t job = hdmi_render_jobs[tail & (HDMI_RENDER_QUEUE_SIZE - 1u)];
+    __dmb();
+    hdmi_render_tail = tail + 1u;
+
+    uint32_t started_us = timer_hw->timerawl;
+    bool transactional_ega = vga_state && current_mode == 2 &&
+        gfx_submode == 6 && gfx_width == 320 && gfx_height == 200 &&
+        !osd_is_visible();
+    uint8_t *output = (uint8_t *)dma_lines[job.buffer] + 72;
+
+    if (transactional_ega) {
+        // 320x200 is vertically doubled. The preceding even job atomically
+        // filled both DMA buffers, so the odd job deliberately does no work.
+        if (job.line & 1u)
+            goto render_done;
+
+        uint16_t second_deadline = job.deadline_irq + 1u;
+        if (hdmi_render_deadline_passed(second_deadline)) {
+            hdmi_render_late_drop += 2u;
+            goto render_done;
+        }
+
+        uint32_t staging[SCREEN_WIDTH / sizeof(uint32_t)] __aligned(16);
+        render_line(job.line, (uint8_t *)staging);
+
+        // The complete line is committed in one short SRAM burst. Holding off
+        // the priority-0 sync IRQ for this sub-microsecond copy guarantees it
+        // cannot select the target buffer halfway through the commit.
+        uint32_t irq_state = save_and_disable_interrupts();
+        bool first_ok = !hdmi_render_deadline_passed(job.deadline_irq);
+        bool second_ok = !hdmi_render_deadline_passed(second_deadline);
+        if (second_ok) {
+            uint32_t *dst = (uint32_t *)output;
+            uint32_t *dst_second = (uint32_t *)dma_lines[(job.buffer + 1u) & 3u] + 18;
+            for (uint32_t i = 0; i < SCREEN_WIDTH / sizeof(uint32_t); ++i) {
+                uint32_t pixels = staging[i];
+                if (first_ok)
+                    dst[i] = pixels;
+                dst_second[i] = pixels;
+            }
+            if (!first_ok)
+                ++hdmi_render_late_drop;
+        } else {
+            hdmi_render_late_drop += 2u;
+        }
+        restore_interrupts(irq_state);
+    } else {
+        render_line(job.line, output);
+    }
+
+render_done:
+    uint32_t elapsed_us = timer_hw->timerawl - started_us;
+    hdmi_isr_last_us = elapsed_us;
+    if (elapsed_us > hdmi_isr_max_us) hdmi_isr_max_us = elapsed_us;
+    if (elapsed_us > 30) ++hdmi_isr_over_30_count;
+
+    if (hdmi_render_tail != hdmi_render_head)
+        irq_set_pending((uint)hdmi_render_irq);
+}
+
+static inline void hdmi_queue_render(uint32_t line, uint32_t buffer) {
+    uint32_t head = hdmi_render_head;
+    if (head - hdmi_render_tail >= HDMI_RENDER_QUEUE_SIZE) {
+        ++hdmi_render_queue_overflow;
+        return;
+    }
+    hdmi_render_job_t *job = &hdmi_render_jobs[head & (HDMI_RENDER_QUEUE_SIZE - 1u)];
+    job->line = (uint16_t)line;
+    job->deadline_irq = (uint16_t)(irq_inx + 2u);
+    job->buffer = (uint8_t)buffer;
+    __dmb();
+    hdmi_render_head = head + 1u;
+    irq_set_pending((uint)hdmi_render_irq);
+}
+
 static void __time_critical_func(dma_handler_HDMI)() {
+    uint32_t sync_started_us = timer_hw->timerawl;
     static uint line = 0;
     irq_inx++;
 
@@ -705,8 +1121,66 @@ static void __time_critical_func(dma_handler_HDMI)() {
     if (line >= 524) {
         line = 0;
         frame_update_request = 1;
+
+        /*
+         * Honour the guest's display blank (attribute controller PAS bit
+         * clear).  A real VGA shows nothing while a game reprograms itself
+         * behind the blank; we used to keep scanning out, so the outgoing
+         * screen stayed visible under the incoming palette.
+         *
+         * This has to live here rather than in vga_hw.c: dma_handler_vga()
+         * is the analogue path and never runs on an HDMI build.
+         *
+         * The frame bound is the point of the counter.  A guest that leaves
+         * PAS clear must not be able to black the board out until the next
+         * reboot - that is why the blank used to be ignored outright.
+         */
+        if (vga_state && !(vga_state->ar_index & 0x20)) {
+            if (hdmi_blank_frames < HDMI_BLANK_MAX_FRAMES)
+                hdmi_blank_frames++;
+        } else {
+            hdmi_blank_frames = 0;
+        }
+        frame_blank_active = (hdmi_blank_frames != 0 &&
+                              hdmi_blank_frames < HDMI_BLANK_MAX_FRAMES);
     } else {
         ++line;
+    }
+
+    // Never carry late active-video work into the next frame. A stale job's
+    // target buffer has already wrapped and may be in use by DMA again.
+    if (line == 480) {
+        hdmi_render_tail = hdmi_render_head;
+
+        /*
+         * Latch the CRTC start address here, at the START of vertical
+         * blanking, because that is where a real VGA loads it into its
+         * address counter.  It used to be read at line 521, at the end of
+         * blanking, and that one difference is visible:
+         *
+         * Prehistorik 2 scrolls a pixel per frame and writes, in the same
+         * blanking interval, "start += 1" together with "panning = 7", then
+         * "panning = 0" in the next one.  On hardware the start address
+         * write comes too late for this frame's latch, so it lands one frame
+         * after the panning and the two stay in step.  Latching at 521 caught
+         * it in the same frame, putting the picture 8 px ahead for one frame
+         * and 8 px back the next - a jump every eight pixels of scroll.
+         *
+         * Written as two separate OUTs, so do not combine bytes from two
+         * different page-flip addresses.
+         */
+        if (vga_state) {
+            const uint8_t *cr = vga_state->cr;
+            uint8_t hi, lo, hi_check, lo_check;
+            do {
+                hi = cr[0x0c];
+                lo = cr[0x0d];
+                __dmb();
+                hi_check = cr[0x0c];
+                lo_check = cr[0x0d];
+            } while (hi != hi_check || lo != lo_check);
+            frame_vram_offset = (uint16_t)((hi << 8) | lo);
+        }
     }
 
     // Update VGA status register 1 (port 0x3DA) from ISR
@@ -720,29 +1194,55 @@ static void __time_critical_func(dma_handler_HDMI)() {
         }
     }
 
-    // 4-buffer rendering: DMA reads buf (line % 4), ISR renders (line+2) % 4.
-    uint32_t read_buf = line & 3;
-    uint32_t render_buf = (line + 2) & 3;
+    // Preserve the original four-buffer phase exactly.
+    uint32_t read_buf = line & 3u;
+    uint32_t render_buf = (line + 2u) & 3u;
     dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[read_buf], false);
 
     uint8_t* activ_buf = (uint8_t *)dma_lines[render_buf];
 
     if (line < 480) { //область изображения
         uint8_t* output_buffer = activ_buf + 72;
+        /* The guest has the display blanked (attribute controller PAS bit
+         * clear) while it reprograms itself.  A real VGA shows nothing, so
+         * neither do we - otherwise the outgoing screen stays visible under
+         * the incoming palette.  vga_hw.c bounds how long this can last. */
+        if (frame_blank_active) {
+            nf_memset(output_buffer, frame_border_pix, SCREEN_WIDTH);
+            goto active_sync;
+        }
+        /* Above and below the picture is letterbox, not part of the guest's
+         * screen - paint it black rather than palette index 0. */
         if (line < (uint32_t)active_start) {
-            nf_memset(output_buffer, 0, SCREEN_WIDTH);
-            goto f;
+            nf_memset(output_buffer, frame_border_pix, SCREEN_WIDTH);
+            goto active_sync;
         }
         if (line >= (uint32_t)active_end) {
-            nf_memset(output_buffer, 0, SCREEN_WIDTH);
-            goto f;
+            nf_memset(output_buffer, frame_border_pix, SCREEN_WIDTH);
+            goto active_sync;
         }
-        render_line(line - active_start, output_buffer);
-f:
-        //ССИ
-        //для выравнивания синхры
-        // --|_|---|_|---|_|----
-        //---|___________|-----
+
+        /*
+         * The 320x200x16 planar converter is now fully inlined into SRAM and
+         * completes in about 7 us.  Render it here, while the target buffer is
+         * exactly two scanlines ahead of DMA, instead of sending it through
+         * the deferred queue.  This removes the paired-buffer ownership race
+         * which could display complete but stale scanlines even though no
+         * deadline/overflow counter fired.
+         */
+        if (vga_state && current_mode == 2 && gfx_submode == 6 &&
+            gfx_width == 320 && gfx_height == 200 && !osd_is_visible()) {
+            uint32_t render_started_us = timer_hw->timerawl;
+            render_gfx_line_ega320(line - active_start, output_buffer);
+            uint32_t render_us = timer_hw->timerawl - render_started_us;
+            hdmi_isr_last_us = render_us;
+            if (render_us > hdmi_isr_max_us) hdmi_isr_max_us = render_us;
+            if (render_us > 30) ++hdmi_isr_over_30_count;
+            goto active_sync;
+        }
+
+        hdmi_queue_render(line - active_start, render_buf);
+active_sync:
         nf_memset(activ_buf + 48, HDMI_CTRL_0, 24);
         nf_memset(activ_buf, HDMI_CTRL_1, 48);
         nf_memset(activ_buf + 392, HDMI_CTRL_0, 8);
@@ -769,15 +1269,50 @@ f:
         if (line == 521) {
             if (vga_state) {
                 const uint8_t *cr = vga_state->cr;
-                frame_vram_offset = (uint16_t)((cr[0x0c] << 8) | cr[0x0d]);
+                /* The CRTC start address is latched at line 480 instead -
+                 * see the comment there.  Pixel panning stays here, at the
+                 * end of blanking, because real hardware applies it to the
+                 * very next scanlines rather than holding it for a frame. */
                 frame_pixel_panning = vga_state->ar[0x13] & 0x07;
+                frame_panning_split_off =
+                    (vga_state->ar[0x10] & 0x20) ? 1u : 0u;
+                frame_crtc_mode = cr[0x17];
+                frame_max_scan  = cr[0x09] & 0x1fu;
+                frame_overscan  = vga_state->ar[0x11];
+                frame_preset_row = cr[0x08] & 0x1fu;
+                {
+                    /* Character height from CR09, doubled when bit 7 asks for
+                     * scan doubling; and the text geometry, which until now was
+                     * only refreshed on a vblank edge that this path never
+                     * sees - it sat at 80 cells while the CRTC said 82, so
+                     * every row after the first was read one cell early. */
+                    uint32_t mh = (uint32_t)(cr[0x09] & 0x1fu) + 1u;
+                    if (cr[0x09] & 0x80u) mh <<= 1;
+                    frame_text_char_h = (uint8_t)mh;
+                    int tc = (int)cr[0x01] + 1;
+                    int ts = (int)cr[0x13] * 2;
+                    if ((tc == 40 || tc == 80) && ts > 0 && ts <= 256) {
+                        text_cols = tc;
+                        text_stride_cells = ts;
+                    }
+                }
                 int lc = (int)cr[0x18]
                        | (((int)cr[0x07] & 0x10) << 4)
                        | (((int)cr[0x09] & 0x40) << 3);
                 frame_line_compare = (lc > 0 && lc < 480) ? lc : -1;
             }
+
+            const uint32_t *pending = hdmi_ega320_cache_pending;
+            if (pending) {
+                __dmb();
+                hdmi_ega320_cache_active = pending;
+                hdmi_ega320_cache_pending = NULL;
+            }
         }
     }
+
+    uint32_t sync_us = timer_hw->timerawl - sync_started_us;
+    if (sync_us > hdmi_sync_isr_max_us) hdmi_sync_isr_max_us = sync_us;
 }
 
 static inline void irq_remove_handler_DMA_core1() {
@@ -808,6 +1343,16 @@ static inline bool hdmi_init() {
     }
 
     irq_remove_handler_DMA_core1();
+
+    if (hdmi_render_irq < 0) {
+        hdmi_render_irq = user_irq_claim_unused(true);
+        irq_set_exclusive_handler((uint)hdmi_render_irq, hdmi_render_worker);
+        // Above ordinary audio/USB IRQs, below the priority-0 HDMI sync IRQ.
+        irq_set_priority((uint)hdmi_render_irq, 0x40);
+    } else {
+        irq_set_enabled((uint)hdmi_render_irq, false);
+    }
+    hdmi_render_head = hdmi_render_tail = 0;
 
 
     //остановка всех каналов DMA
@@ -954,6 +1499,14 @@ static inline bool hdmi_init() {
     dma_lines[2] = hdmi_extra_line_buf[0];
     dma_lines[3] = hdmi_extra_line_buf[1];
 
+    // Start with four complete, valid blanking lines. This avoids sending
+    // zero/garbage TMDS indices while the lower-priority renderer warms up.
+    for (uint32_t b = 0; b < 4u; ++b) {
+        uint8_t *line = (uint8_t *)dma_lines[b];
+        nf_memset(line, HDMI_CTRL_1, 48);
+        nf_memset(line + 48, HDMI_CTRL_0, 352);
+    }
+
     //основной рабочий канал
     dma_channel_config cfg_dma = dma_channel_get_default_config(dma_chan);
     channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_8);
@@ -1059,6 +1612,7 @@ static inline bool hdmi_init() {
     }
 
     irq_set_exclusive_handler_DMA_core1();
+    irq_set_enabled((uint)hdmi_render_irq, true);
 
     dma_start_channel_mask((1u << dma_chan_ctrl));
 

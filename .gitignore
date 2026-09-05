@@ -10,6 +10,7 @@
 .depends
 .claude/
 build/
+build-*/
 bin/
 .DS_Store
 tiny386
@@ -19,3 +20,17 @@ wifikbd
 initnet
 release
 .vscode/
+
+# Local investigation artifacts. Keep conclusions in the checked-in notes,
+# not complete compiler trees and one-off source snapshots.
+snapshots/
+*.before-*
+*.readstatus-attempt
+*.block-jit-v1-tested
+apply-*.py
+i386-v*.c
+v*-to-v*.diff
+*_VALIDATION.txt
+SHA256SUMS*.txt
+*.patch
+fix-z2-hdmi.ps1

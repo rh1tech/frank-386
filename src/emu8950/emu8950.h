@@ -223,6 +223,10 @@ typedef struct __OPL {
 #endif
 
 OPL *OPL_new(uint32_t clk, uint32_t rate);
+/* Initialise an OPL in caller-owned, suitably aligned storage.  The returned
+ * object must not be passed to OPL_delete(). */
+OPL *OPL_init_inplace(void *storage, uint32_t storage_bytes,
+                      uint32_t clk, uint32_t rate);
 void OPL_delete(OPL *);
 
 void OPL_reset(OPL *);

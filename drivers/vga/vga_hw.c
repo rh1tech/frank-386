@@ -110,8 +110,27 @@ static uint vga_sm = 0;
 uint8_t text_buffer_sram[80 * 25 * 2] __attribute__((aligned(4)));
 static volatile int update_requested = 0;  // Set by update call
 
-#define GFX_BUFFER_SIZE (256 * 1024)
+/* The guest's VGA RAM.  Was hardcoded at 256 KB in two files while
+ * EMU_VGA_MEM_SIZE_KB configured a third place; deriving it means the buffer
+ * and the size the emulator reports can no longer disagree. */
+#ifndef EMU_VGA_MEM_SIZE_KB
+#define EMU_VGA_MEM_SIZE_KB 256
+#endif
+#define GFX_BUFFER_SIZE (EMU_VGA_MEM_SIZE_KB * 1024)
 uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
+
+/*
+ * HDMI EGA 320x200 frame cache. The guest's physical 0xa0000-0xbffff
+ * aperture is redirected to gfx_buffer, so its PSRAM shadow is unused apart
+ * from the first 2 KiB reserved by the OPL3 emulation. Two 32 KiB slots here
+ * let core 0 build one complete planar->chunky frame while HDMI reads the
+ * other; the DMA ISR publishes a completed slot only during vblank.
+ */
+#define HDMI_EGA320_CACHE_BYTES (320u * 200u / 2u)
+#define HDMI_EGA320_CACHE0 ((uint32_t *)(PSRAM_BASE_ADDR + 0x000a8000u))
+#define HDMI_EGA320_CACHE1 ((uint32_t *)(PSRAM_BASE_ADDR + 0x000b0000u))
+const uint32_t * volatile hdmi_ega320_cache_active = NULL;
+const uint32_t * volatile hdmi_ega320_cache_pending = NULL;
 
 // Fast text palette for 2-bit pixel pairs
 extern uint32_t conv_color2[1024]; // 4096 in hdmi only
@@ -153,6 +172,94 @@ VGAState *vga_state = NULL;
 uint16_t frame_vram_offset   = 0;
 uint8_t  frame_pixel_panning = 0;
 int      frame_line_compare  = -1;
+/*
+ * Attribute Mode Control (AR10) bit 5, latched with the rest of the frame.
+ *
+ * A split screen exists so the bottom strip stays put while the top scrolls,
+ * and this bit is how the hardware is told to leave it alone: with it set,
+ * a successful line compare forces the pixel panning register to zero for
+ * the split region.  Applying panning there too makes the strip slide with
+ * the scroll - Supaplex's status panel wobbles left and right instead of
+ * being anchored.
+ */
+uint8_t  frame_panning_split_off = 0;
+/*
+ * CRTC Mode Control (CR17) and the maximum scan line (CR09 bits 4-0).
+ *
+ * CR17 bits 0 and 1 are the CGA/EGA compatibility bits: with bit 0 clear the
+ * hardware substitutes bit 0 of the row-scan counter for address bit 13, and
+ * with bit 1 clear it does the same for bit 14 with row-scan bit 1.  That is
+ * how the old interleaved banks worked, and software still uses it as a cheap
+ * address wrap.
+ *
+ * Prehistorik 2's menu screens do exactly that: they keep an 8 KB ring and
+ * scroll the start address through it, relying on bit 13 being forced to zero
+ * so the window folds back to the top of the pattern.  Without it the bottom
+ * of the screen walks off into memory the game never draws, and the pattern
+ * only reappears when the scroll offset happens to be small enough.
+ */
+uint8_t  frame_crtc_mode = 0xe3;   /* CR17; default = no compatibility wrap */
+uint8_t  frame_max_scan   = 0;     /* CR09 bits 4-0 */
+/*
+ * Overscan colour (AR11), latched with the rest of the frame.
+ *
+ * A smooth-scrolling mode shows fewer pixels than the line buffer holds -
+ * Prehistorik 2 displays 312 of 320 so it has eight spare for pixel panning -
+ * and the renderers only ever wrote the visible part, leaving the tail of
+ * each line holding whatever the previous line left there.  On a scrolling
+ * screen that is a column of moving rubbish down the right edge.  Real
+ * hardware shows the overscan colour outside the active display.
+ */
+uint8_t  frame_overscan   = 0;     /* AR11 */
+
+/*
+ * Row-scan preset (CR08 bits 4-0) and character height (CR09), latched with
+ * the rest of the frame.
+ *
+ * The preset is the row-scan counter's starting value, which is how text mode
+ * scrolls vertically by less than a whole character: the first displayed row
+ * begins part way down its glyph.  The character height has to come from the
+ * CRTC as well - the renderer used to assume 16 unconditionally, which is only
+ * true of the modes the BIOS happens to set.
+ */
+/*
+ * The pixel value to paint where the guest's picture is not.
+ *
+ * The board sends 640x480 while a 200-line mode is 312x400, so the picture is
+ * letterboxed - forty lines above it, forty below, and sixteen output pixels
+ * down the right where the guest displays only 39 of 40 character clocks.
+ * Those margins were filled with 0, which is a *palette index*, not a colour:
+ * Prehistorik 2's map screen defines colour 0 as blue, so its picture came
+ * framed in three blue bands instead of black.
+ *
+ * None of that region exists on real hardware - a real monitor shows those
+ * 400 lines full height - so the honest thing to paint there is black.  This
+ * holds whichever palette entry is actually darkest, packed the way the
+ * current mode packs pixels into a byte (twice per byte in 16-colour and text
+ * modes, once in 256-colour), and is updated whenever a palette is set.
+ */
+uint8_t  frame_border_pix  = 0;
+uint8_t  frame_border_rgb[3] = { 0, 0, 0 };
+
+/*
+ * Honour the attribute controller's blank (PAS bit clear).  A game blanks the
+ * display while it reloads the DAC and redraws, and a real VGA shows nothing
+ * for that time.  We used to ignore it and keep scanning out, so the previous
+ * screen's pixels became visible under the incoming palette - Prehistorik 2's
+ * MODE BEGINNER screen reappearing in the level's salmon palette for about a
+ * second on the way into the level.
+ *
+ * vga_hw_set_mode() still ignores mode 0, so the mode itself survives the
+ * blank; only the scanout is blanked, and only for a bounded time.  The bound
+ * is the point: a guest that leaves PAS clear must not be able to black the
+ * board out until the next reboot, which is what made the blank be ignored in
+ * the first place.
+ */
+#define BLANK_MAX_FRAMES 120u          /* ~2 s at 60 Hz */
+volatile uint8_t  frame_blank_active = 0;
+static   uint32_t frame_blank_frames = 0;
+uint8_t  frame_preset_row  = 0;
+uint8_t  frame_text_char_h = 16;
 
 int text_cols = 80;
 // Stride in *character cells* (uint32_t per cell in gfx_buffer text layout).
@@ -203,6 +310,71 @@ void graphics_set_palette_hdmi2(
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
     uint8_t i
 );
+void hdmi_set_pixel_substitutes(const uint8_t *sub);
+
+/*
+ * Four byte values - 0xd4..0xd7, see HDMI_CTRL_0 in hdmi.c - are HDMI control
+ * symbols and can never leave the renderer as pixels, so it emits a substitute
+ * byte for them.  Which substitute is a free choice, and the only sensible one
+ * is the byte that looks most like what the guest asked for, so it has to be
+ * recomputed whenever the palette changes.  Dune II draws its Westwood logo
+ * entirely in indices 212..215; with a fixed substitute the logo was white.
+ */
+#define HDMI_RESERVED_LO   0xd4u
+#define HDMI_IS_RESERVED(b) (((b) & 0xfcu) == HDMI_RESERVED_LO)
+
+static inline int pal_dist6(const uint8_t *a, const uint8_t *b) {
+    int dr = (int)a[0] - (int)b[0];
+    int dg = (int)a[1] - (int)b[1];
+    int db = (int)a[2] - (int)b[2];
+    return dr * dr + dg * dg + db * db;
+}
+
+/* 256-colour modes: the byte is the palette index, so compare entries. */
+static void hdmi_pick_substitutes_256(const uint8_t *pal) {
+    uint8_t sub[4];
+    for (int k = 0; k < 4; k++) {
+        const uint8_t *want = pal + (HDMI_RESERVED_LO + k) * 3;
+        int best = 0, bestd = 1 << 30;
+        for (int j = 0; j < 256; j++) {
+            if (HDMI_IS_RESERVED(j)) continue;
+            int d = pal_dist6(pal + j * 3, want);
+            if (d < bestd) {
+                bestd = d;
+                best = j;
+                if (!d) break;     /* an exact duplicate is as good as it gets */
+            }
+        }
+        sub[k] = (uint8_t)best;
+    }
+    hdmi_set_pixel_substitutes(sub);
+}
+
+/*
+ * Text mode and EGA 640 pack two 4-bit indices into the byte, so the
+ * replacement has to look like both halves at once.  Searching all 256 bytes
+ * rather than each nibble separately keeps the reserved range excluded for
+ * free.
+ */
+static void hdmi_pick_substitutes_pair(const uint8_t *pal16) {
+    uint8_t sub[4];
+    for (int k = 0; k < 4; k++) {
+        int want = HDMI_RESERVED_LO + k;
+        int best = 0, bestd = 1 << 30;
+        for (int j = 0; j < 256; j++) {
+            if (HDMI_IS_RESERVED(j)) continue;
+            int d = pal_dist6(pal16 + (j >> 4) * 3, pal16 + (want >> 4) * 3)
+                  + pal_dist6(pal16 + (j & 15) * 3, pal16 + (want & 15) * 3);
+            if (d < bestd) {
+                bestd = d;
+                best = j;
+                if (!d) break;
+            }
+        }
+        sub[k] = (uint8_t)best;
+    }
+    hdmi_set_pixel_substitutes(sub);
+}
 
 // Convert 6-bit VGA DAC values to 16-bit dithered output
 // Returns: low byte = c_hi (conv0), high byte = c_lo (conv1)
@@ -500,9 +672,8 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint32_t *
     }
 }
 
-uint32_t __scratch_y("spread8_lut") spread8_lut[256];
 // Spread 8 bits of a byte into positions 0,4,8,...28
-static inline uint32_t spread8(uint32_t plane) {
+static __attribute__((always_inline)) inline uint32_t spread8(uint32_t plane) {
     plane = (plane | (plane << 12)) & 0x000F000Fu;
     plane = (plane | (plane <<  6)) & 0x03030303u;
     plane = (plane | (plane <<  3)) & 0x11111111u;
@@ -511,12 +682,84 @@ static inline uint32_t spread8(uint32_t plane) {
 
 // Merge 4 plane bytes [P3|P2|P1|P0] into 8 nibbles (pixel color indices).
 static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
-    const uint32_t pixel1 = spread8_lut[ega_planes        & 0xFFu];
-    const uint32_t pixel2 = spread8_lut[(ega_planes >> 8) & 0xFFu];
-    const uint32_t pixel3 = spread8_lut[(ega_planes >> 16) & 0xFFu];
-    const uint32_t pixel4 = spread8_lut[ega_planes >> 24];
+    const uint32_t pixel1 = spread8(ega_planes        & 0xFFu);
+    const uint32_t pixel2 = spread8((ega_planes >> 8) & 0xFFu);
+    const uint32_t pixel3 = spread8((ega_planes >> 16) & 0xFFu);
+    const uint32_t pixel4 = spread8(ega_planes >> 24);
 
     return pixel1 | pixel2 << 1 | pixel3 << 2 | pixel4 << 3;
+}
+
+static void __attribute__((noinline)) hdmi_build_ega320_cache(void) {
+#if !EGA320_PSRAM_CACHE
+    // A/B path: scanout converts the authoritative internal-SRAM VGA aperture
+    // directly.  Keep both publication pointers clear so no stale PSRAM frame
+    // can be selected after a mode change or reboot.
+    hdmi_ega320_cache_pending = NULL;
+    hdmi_ega320_cache_active = NULL;
+    return;
+#else
+    static uint32_t *build_dst = NULL;
+    static uint32_t build_next_y = 0;
+    static uint32_t build_stride = 40;
+    static uint32_t build_start = 0;
+    static uint32_t build_panning = 0;
+    static int build_line_compare = -1;
+
+    if (SELECT_VGA || current_mode != 2 || gfx_submode != 6 ||
+        gfx_width != 320 || gfx_height != 200) {
+        hdmi_ega320_cache_pending = NULL;
+        hdmi_ega320_cache_active = NULL;
+        build_dst = NULL;
+        build_next_y = 0;
+        return;
+    }
+
+    if (!build_dst) {
+        const uint32_t *active = hdmi_ega320_cache_active;
+        build_dst = (active == HDMI_EGA320_CACHE0)
+                    ? HDMI_EGA320_CACHE1 : HDMI_EGA320_CACHE0;
+        build_next_y = 0;
+        build_stride = gfx_line_offset > 0
+                       ? (uint32_t)gfx_line_offset << 1 : 40u;
+        build_start = frame_vram_offset;
+        build_panning = frame_pixel_panning;
+        build_line_compare = frame_line_compare;
+    }
+
+    uint32_t first_y = build_next_y;
+    uint32_t end_y = first_y + 100u;
+    uint32_t shift1 = build_panning << 2;
+    uint32_t shift2 = 32u - shift1;
+
+    for (uint32_t y = first_y; y < end_y; ++y) {
+        uint32_t offset;
+        if (build_line_compare >= 0 && y >= (uint32_t)build_line_compare)
+            offset = (y - (uint32_t)build_line_compare) * build_stride;
+        else
+            offset = build_start + y * build_stride;
+        offset &= 0xffffu;
+
+        const uint32_t *src = (const uint32_t *)(gfx_buffer + (offset << 2));
+        uint32_t *row = build_dst + y * 40u;
+        for (uint32_t x = 0; x < 40u; ++x) {
+            uint32_t packed = ega_pack8_from_planes(src[x]);
+            if (build_panning)
+                packed = (packed << shift1) |
+                         (ega_pack8_from_planes(src[x + 1u]) >> shift2);
+            row[x] = packed;
+        }
+    }
+
+    if (end_y == 200u) {
+        __dmb();
+        hdmi_ega320_cache_pending = build_dst;
+        build_dst = NULL;
+        build_next_y = 0;
+    } else {
+        build_next_y = end_y;
+    }
+#endif
 }
 
 // Render EGA planar 16-color graphics line
@@ -565,9 +808,38 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     }
     uint32_t stride = gfx_line_offset > 0 ? (gfx_line_offset * 2) : (gfx_width / 8);
 
+    /*
+     * Split screen.  frame_line_compare comes from the CRTC and is counted in
+     * *display* lines, while src_line is counted in source lines - in a
+     * 320x200 mode the display has 400 lines and each source line is shown
+     * twice.  Comparing the two directly, as this used to, means the split
+     * never happens: Supaplex asks for line compare 351 and src_line never
+     * gets past 199.  Its status panel then came from the scrolling offset
+     * instead, which wraps at 16 bits onto the panel image at the wrong
+     * place - a panel that is visible but shifted and cut off.
+     *
+     * So compare in display lines and convert the split point into source
+     * lines with the same rule src_line was derived by.  The 256-colour
+     * renderer already did this; this path was simply never fixed.
+     */
     uint32_t offset;
-    if (frame_line_compare >= 0 && src_line >= (uint32_t)frame_line_compare) {
-        offset = (src_line - frame_line_compare) * stride;
+    bool in_split = (frame_line_compare >= 0 && (int)line > frame_line_compare);
+    if (in_split) {
+        /* line_compare + 1: the counter resets after the matching line. */
+        uint32_t lc = (uint32_t)frame_line_compare + 1u;
+        uint32_t lc_src;
+        if (height <= 100) {
+            lc_src = lc >> 2;
+        } else if (height <= 200) {
+            lc_src = lc >> 1;
+        } else if (height <= 350) {
+            int ega_active_lines = active_end - active_start;
+            lc_src = ega_active_lines > 0
+                   ? (lc * (uint32_t)height) / (uint32_t)ega_active_lines : lc;
+        } else {
+            lc_src = lc;
+        }
+        offset = (src_line - lc_src) * stride;
     } else {
         offset = frame_vram_offset + src_line * stride;
     }
@@ -575,7 +847,7 @@ static void __time_critical_func(render_gfx_line_ega)(uint32_t line, uint32_t *o
     offset &= 0xFFFF;
 
     const uint32_t *src32 = (const uint32_t *)(gfx_buffer + offset * 4);
-    int panning = frame_pixel_panning;
+    int panning = (in_split && frame_panning_split_off) ? 0 : frame_pixel_panning;
     int shift = panning * 4;
 
     // Loop over display width
@@ -654,16 +926,26 @@ static inline void __time_critical_func(out16_2x_per_pixel)(uint16_t **pp, uint1
 static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *output_buffer) {
     uint16_t *out16 = (uint16_t *)((uint8_t *)output_buffer + SHIFT_PICTURE);
 
-    uint32_t char_row = line >> 4;
-    uint32_t glyph_line = line & 15;
+    /*
+     * Split screen, row-scan preset and CRTC stride - see the same block in
+     * drivers/hdmi/hdmi.c, which is the renderer the board actually uses.
+     */
+    uint32_t ch_h = frame_text_char_h ? (uint32_t)frame_text_char_h : 16u;
+    uint32_t base_cell = frame_vram_offset;
+    uint32_t v = line + frame_preset_row;
+    if (frame_line_compare >= 0 && (int)line > frame_line_compare) {
+        base_cell = 0;
+        v = line - (uint32_t)(frame_line_compare + 1);
+    }
+    uint32_t char_row = v / ch_h;
+    uint32_t glyph_line = v % ch_h;
 
     int cols = text_cols;
     int double_h = (cols == 40);  // 40 columns => 2x horizontal scaling
 
-    if (char_row < 25) {
-        // Use snapped start address for the frame (prevents mid-frame tearing).
-        const uint32_t *base = (const uint32_t *)(gfx_buffer + ((uint32_t)frame_vram_offset << 2));
-        const uint32_t *text_row = base + (char_row * (uint32_t)text_stride_cells);
+    uint32_t row_cell = base_cell + char_row * (uint32_t)text_stride_cells;
+    if (row_cell + (uint32_t)cols <= 65536u) {
+        const uint32_t *text_row = (const uint32_t *)gfx_buffer + row_cell;
 
         for (int col = 0; col < cols; col++) {
             uint16_t cell = text_row[col];
@@ -679,13 +961,26 @@ static void __time_critical_func(render_text_line)(uint32_t line, uint32_t *outp
             } else {
                 glyph = font_8x16[ch * 16 + glyph_line];
             }
-            uint16_t *pal = &txt_palette_fast[(attr & 0x7F) * 4];
+            /*
+             * Text attribute bit 7 is BLINK when Attribute Controller
+             * Mode Control bit 3 is set.  With blink disabled it is
+             * background intensity and must remain part of the palette index.
+             */
+            uint8_t pal_attr = attr;
+            if (vga_state && (vga_state->ar[0x10] & 0x08)) {
+                pal_attr &= 0x7F;
+            }
+            uint16_t *pal = &txt_palette_fast[pal_attr * 4];
 
-            if (cursor_blink_state && col == cursor_x &&
+            bool cursor_here = cursor_blink_state && col == cursor_x &&
                 char_row == (uint32_t)cursor_y &&
                 glyph_line >= (uint32_t)cursor_start &&
-                glyph_line <= (uint32_t)cursor_end) {
+                glyph_line <= (uint32_t)cursor_end;
+            if (cursor_here) {
                 glyph = 0xFF;
+            } else if (vga_state && (vga_state->ar[0x10] & 0x08) &&
+                       (attr & 0x80) && !cursor_blink_state) {
+                glyph = 0;
             }
 
             // 8px glyph -> 4x uint16 (каждый uint16 = 2 пикселя)
@@ -787,10 +1082,13 @@ static void __time_critical_func(render_line)(uint32_t line, uint32_t *output_bu
 }
 
 static inline void vga_hw_set_mode(int mode);
+void vga_hw_set_text_palette(const uint8_t *palette16_data);
 
 static void vga_hw_new_frame_deferred(void) {
     if (!vga_state) return;
     static int last_vga_mode = -1;
+    static int last_gfx_submode = -1;
+
     // Update cursor
     int cx, cy, cs, ce, cv;
     vga_get_cursor_info(vga_state, &cx, &cy, &cs, &ce, &cv);
@@ -805,54 +1103,135 @@ static void vga_hw_new_frame_deferred(void) {
 
     // Update VGA mode
     int vga_mode = vga_get_mode(vga_state);
-    if (vga_mode != last_vga_mode) {
+
+    /*
+     * Mode 0 is the transient blank a game sets (attribute controller PAS
+     * bit clear) while it reprograms the CRTC and reloads the DAC behind it.
+     * vga_hw_set_mode() deliberately ignores it and keeps the previous mode
+     * on screen, so the palette of that mode has to keep being maintained
+     * through the blank as well.  Returning early here instead - which is
+     * what this used to do - froze conv_color[] at the outgoing palette
+     * while the guest loaded the incoming one, and everything still being
+     * painted stayed in the old colours until the blank ended.
+     *
+     * Prehistorik 2 blanks for ~320 ms on the way out of its MODE BEGINNER
+     * screen; the picture is cleared by then, so what was left visible was
+     * the letterbox, still filled with frame_border_pix through a stale
+     * table - a coloured frame around a black screen.
+     *
+     * last_vga_mode and last_gfx_submode are left alone: the blank is not a
+     * mode change, and the palette is kept current here, so there is nothing
+     * for the end of the blank to have to repair.
+     */
+    if (vga_mode == 0) {
+        if (vga_is_palette_dirty(vga_state)) {
+            uint8_t pal16[48];
+            vga_get_palette16(vga_state, pal16);
+            if (current_mode == 1)
+                vga_hw_set_text_palette(pal16);
+            else if (gfx_submode == 2 || gfx_submode == 6)
+                vga_hw_set_palette16(pal16);
+            else
+                vga_hw_set_palette(vga_get_palette(vga_state));
+        }
+        return;
+    }
+
+    bool mode_changed = (vga_mode != last_vga_mode);
+    if (mode_changed) {
         vga_hw_set_mode(vga_mode);
         last_vga_mode = vga_mode;
     }
 
     // Update palette and graphics submode for graphics modes
     if (vga_mode == 2) {
-        // Only update palette when it actually changed
-        if (vga_is_palette_dirty(vga_state)) {
+        int gfx_w, gfx_h;
+        int new_gfx_submode = vga_get_graphics_mode(vga_state, &gfx_w, &gfx_h);
+        int line_offset = vga_get_line_offset(vga_state);
+
+        if (new_gfx_submode == 2 && gfx_w <= 320) {
+            new_gfx_submode = 6; // EGA 320*
+        }
+
+        bool submode_changed = (new_gfx_submode != last_gfx_submode);
+        bool palette_dirty = vga_is_palette_dirty(vga_state);
+
+        vga_hw_set_gfx_mode(new_gfx_submode, gfx_w, gfx_h, line_offset);
+
+        /*
+         * HDMI EGA uses conv_color[] as a 256-entry table of TWO-pixel
+         * combinations. Building it is expensive: 16x16 entries, each
+         * requiring TMDS encoding. The old code rebuilt the whole table
+         * every frame while HDMI DMA was simultaneously reading it.
+         *
+         * Besides wasting a large amount of CPU time this makes scanout see
+         * a partially rewritten palette, producing visible color flicker
+         * (especially in large 640x480x16 areas such as Windows 95 Setup).
+         *
+         * Rebuild only when the VGA/attribute palette actually changed or
+         * when entering/changing the graphics mode.
+         */
+        if (new_gfx_submode == 2 || new_gfx_submode == 6) {
+            if (palette_dirty || mode_changed || submode_changed) {
+                uint8_t ega_pal[48];
+                vga_get_palette16(vga_state, ega_pal);
+                vga_hw_set_palette16(ega_pal);
+            }
+            last_gfx_submode = new_gfx_submode;
+            return;
+        }
+
+        // 256-color modes use the normal one-pixel palette.
+        if (palette_dirty || mode_changed || submode_changed) {
             vga_hw_set_palette(vga_get_palette(vga_state));
         }
 
-        int gfx_w, gfx_h;
-        int gfx_submode = vga_get_graphics_mode(vga_state, &gfx_w, &gfx_h);
-        int line_offset = vga_get_line_offset(vga_state);
-        if (gfx_submode == 2) {
-            if (gfx_w <= 320) {
-                gfx_submode = 6; // EGA 320*
-            }
-        }
-        vga_hw_set_gfx_mode(gfx_submode, gfx_w, gfx_h, line_offset);
-
-        // For EGA mode, also update the 16-color palette
-        if (gfx_submode == 2 || gfx_submode == 6) {
-            uint8_t ega_pal[48];
-            vga_get_palette16(vga_state, ega_pal);
-            vga_hw_set_palette16(ega_pal);
-            return;
-        }
-        // HDMI only:
-        if (!SELECT_VGA) {
+        // HDMI only: fixed CGA palettes only need rebuilding on mode changes.
+        if (!SELECT_VGA && (mode_changed || submode_changed)) {
             // CGA 4-color
-            if(gfx_submode == 1) {
+            if (new_gfx_submode == 1) {
                 uint8_t c = c6_to_8(63);
-                graphics_set_palette_hdmi(0, 0, 0, 0);     // Black
+                graphics_set_palette_hdmi(0, 0, 0, 0);   // Black
                 graphics_set_palette_hdmi(0, c, c, 1);   // Cyan (bright)
                 graphics_set_palette_hdmi(c, 0, c, 2);   // Magenta (bright)
-                graphics_set_palette_hdmi(c, c, c, 3);  // White
-                return;
+                graphics_set_palette_hdmi(c, c, c, 3);   // White
             }
             // CGA 2-color (640x200 monochrome)
-            if(gfx_submode == 4) {
+            else if (new_gfx_submode == 4) {
                 graphics_set_palette_hdmi2(0,0,0,       0,0,0,       0b00); // Black+Black
                 graphics_set_palette_hdmi2(0,0,0,       255,255,255, 0b01); // Black+White
                 graphics_set_palette_hdmi2(255,255,255, 0,0,0,       0b10); // White+Black
                 graphics_set_palette_hdmi2(255,255,255, 255,255,255, 0b11); // White+White
             }
         }
+
+        last_gfx_submode = new_gfx_submode;
+    } else {
+        /*
+         * Text mode takes its 16 colours from the DAC through the attribute
+         * controller, exactly as the EGA graphics modes do.  This path used to
+         * restore a fixed CGA table instead (see vga_hw_process_deferred), so
+         * a program that loads its own palette was drawn in whatever colours
+         * that table happened to hold at those indices.
+         *
+         * Prehistorik 2's intro is drawn in text mode with a redefined font
+         * and fades its palette in: its logo came out magenta instead of
+         * yellow and the dotted waves gold instead of white.
+         *
+         * required_to_repair_text_pal is now a request to rebuild rather than
+         * to restore, so a switch out of a graphics mode still repaints the
+         * whole 256-entry pair table - just from the right source.
+         */
+        if (vga_mode == 1) {
+            bool palette_dirty = vga_is_palette_dirty(vga_state);
+            if (palette_dirty || mode_changed || required_to_repair_text_pal) {
+                required_to_repair_text_pal = false;
+                uint8_t pal16[48];
+                vga_get_palette16(vga_state, pal16);
+                vga_hw_set_text_palette(pal16);
+            }
+        }
+        last_gfx_submode = -1;
     }
 }
 
@@ -979,8 +1358,15 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
         }*/
         // Defer heavy frame work outside ISR
         frame_update_request = 1;
-        if (vga_state && vga_get_mode(vga_state) == 0)
+        if (vga_state && vga_get_mode(vga_state) == 0) {
             blank_frame_count = 1;
+            if (frame_blank_frames < BLANK_MAX_FRAMES)
+                frame_blank_frames++;
+        } else {
+            frame_blank_frames = 0;
+        }
+        frame_blank_active = (frame_blank_frames != 0 &&
+                              frame_blank_frames < BLANK_MAX_FRAMES);
     }
     
     // Update VGA status register 1 (port 0x3DA) from ISR — this is the
@@ -1022,6 +1408,28 @@ static void __isr __time_critical_func(dma_handler_vga)(void) {
                 } while (hi != cr[0x0c]);
                 frame_vram_offset = (uint16_t)((hi << 8) | lo);
                 frame_pixel_panning = vga_state->ar[0x13] & 0x07;
+                frame_panning_split_off =
+                    (vga_state->ar[0x10] & 0x20) ? 1u : 0u;
+                frame_crtc_mode = cr[0x17];
+                frame_max_scan  = cr[0x09] & 0x1fu;
+                frame_overscan  = vga_state->ar[0x11];
+                frame_preset_row = cr[0x08] & 0x1fu;
+                {
+                    /* Character height from CR09, doubled when bit 7 asks for
+                     * scan doubling; and the text geometry, which until now was
+                     * only refreshed on a vblank edge that this path never
+                     * sees - it sat at 80 cells while the CRTC said 82, so
+                     * every row after the first was read one cell early. */
+                    uint32_t mh = (uint32_t)(cr[0x09] & 0x1fu) + 1u;
+                    if (cr[0x09] & 0x80u) mh <<= 1;
+                    frame_text_char_h = (uint8_t)mh;
+                    int tc = (int)cr[0x01] + 1;
+                    int ts = (int)cr[0x13] * 2;
+                    if ((tc == 40 || tc == 80) && ts > 0 && ts <= 256) {
+                        text_cols = tc;
+                        text_stride_cells = ts;
+                    }
+                }
                 int lc = (int)cr[0x18]
                        | (((int)cr[0x07] & 0x10) << 4)
                        | (((int)cr[0x09] & 0x40) << 3);
@@ -1062,9 +1470,12 @@ void graphics_init_hdmi();
 // From main.c — needed for safe flash access at high clock speeds
 extern void set_flash_timings(int cpu_mhz, int cfg_flash);
 
-// HDMI TMDS requires an exact 252 MHz PIO clock. Boost clk_sys to 504 MHz
-// so the PIO divider is an integer 2 (no jitter).
+// HDMI TMDS requires an exact 252 MHz PIO clock. Normal builds use a
+// 504 MHz system clock and integer PIO divider 2; a 252 MHz diagnostic
+// build can select integer divider 1 through CMake.
+#ifndef HDMI_SYS_CLOCK_MHZ
 #define HDMI_SYS_CLOCK_MHZ 504
+#endif
 
 static void hdmi_boost_clock(void) {
     int cur_mhz = clock_get_hz(clk_sys) / 1000000;
@@ -1073,13 +1484,17 @@ static void hdmi_boost_clock(void) {
     vreg_set_voltage(VREG_VOLTAGE_1_65);
     sleep_ms(50);
     set_flash_timings(HDMI_SYS_CLOCK_MHZ, FLASH_MAX_FREQ_MHZ);
+    /* Same for the PSRAM: its divisor still describes the pre-boost clock,
+     * so it has to be widened before the PLL moves, not after. */
+    psram_set_timings(HDMI_SYS_CLOCK_MHZ, PSRAM_MAX_FREQ_MHZ);
     set_sys_clock_khz(HDMI_SYS_CLOCK_MHZ * 1000, false);
     /* clk_peri moved with clk_sys; the UART's divisors did not. */
     extern void console_reclock(void);
     console_reclock();
-    // Immediately reinit PSRAM for the new clock speed.
-    // Without this, PSRAM runs at ~177 MHz (overclocked) until
-    // reconfigure_clocks runs much later, causing intermittent hangs.
+    // Re-run the full init at the new clock. The divisor is already right
+    // (psram_set_timings above), but this also re-applies the read/write
+    // formats, and it is what reconfigure_clocks() would otherwise have to
+    // do much later.
     psram_init_with_freq(get_psram_pin(), PSRAM_MAX_FREQ_MHZ);
 }
 
@@ -1094,9 +1509,6 @@ void vga_hw_reclock(void) {
 }
 
 void vga_hw_init(void) {
-    for(uint32_t i = 0; i < 256; ++i) {
-        spread8_lut[i] = spread8(i);
-    }
     #if defined(FORCE_VGA)
         /* Skip the pin probe and commit to VGA. Wins over FORCE_HDMI so a
          * board that defaults to HDMI can still be built for VGA without
@@ -1300,12 +1712,60 @@ void vga_hw_set_vga_state(VGAState *s) {
 // Update palette from emulator's 6-bit VGA DAC values
 // palette_data is 768 bytes (256 entries × 3 bytes RGB, each 0-63)
 // Uses dithering for ~2197 perceived colors from 64 actual colors
+/* Darkest entry of a palette of `n` 6-bit RGB triples. */
+static int vga_darkest_index(const uint8_t *pal, int n) {
+    int best = 0, best_sum = 1 << 30;
+    for (int i = 0; i < n; i++) {
+        int sum = pal[i * 3 + 0] + pal[i * 3 + 1] + pal[i * 3 + 2];
+        if (sum < best_sum) { best_sum = sum; best = i; }
+    }
+    return best;
+}
+
+/*
+ * Which entry to fill the letterbox with.  That margin is our own padding,
+ * not part of the guest's picture, so it wants to be black - prefer an entry
+ * that actually is black over merely the darkest one, and fall back to the
+ * darkest only for a palette that holds no black at all.
+ */
+static int vga_border_index(const uint8_t *pal, int n) {
+    for (int i = 0; i < n; i++)
+        if (!pal[i * 3 + 0] && !pal[i * 3 + 1] && !pal[i * 3 + 2])
+            return i;
+    return vga_darkest_index(pal, n);
+}
+
+/* The colour the border is actually painted with, for reading over SWD. */
+static void vga_border_note(const uint8_t *pal, int b) {
+    frame_border_rgb[0] = pal[b * 3 + 0];
+    frame_border_rgb[1] = pal[b * 3 + 1];
+    frame_border_rgb[2] = pal[b * 3 + 2];
+}
+
+
 void vga_hw_set_palette(const uint8_t *palette_data) {
     for (int i = 0; i < 256; i++) {
         uint8_t r6 = palette_data[i * 3 + 0];
         uint8_t g6 = palette_data[i * 3 + 1];
         uint8_t b6 = palette_data[i * 3 + 2];
         vga_color_to_dithered(r6, g6, b6, i);
+    }
+
+    if (!SELECT_VGA)
+        hdmi_pick_substitutes_256(palette_data);
+
+/*
+ * The border index and the table entry it selects have to become visible to
+ * the scanline ISR together.  Setting frame_border_pix first and then
+ * spending ~1 ms rewriting all 256 entries means that, for that millisecond,
+ * the letterbox is drawn with the NEW index into the OLD table - and during
+ * a palette fade the rebuild runs every frame, so it is not a one-off blink
+ * but a steady wrong-coloured margin.  Assign it last.
+ */
+    {   /* 256-colour modes put one index in a byte. */
+        int b = vga_border_index(palette_data, 256);
+        vga_border_note(palette_data, b);
+        frame_border_pix = (uint8_t)b;
     }
 }
 
@@ -1319,6 +1779,21 @@ void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
         if (SELECT_VGA) {
             ega_palette[i] = vga_color_to_output(r6, g6, b6);
         } else {
+            /*
+             * Only submode 2 gets the paired palette, and that is deliberate.
+             *
+             * On HDMI the renderer is render_gfx_line_ega320() in hdmi.c, not
+             * render_gfx_line_ega() in this file, and it emits ONE 4-bit index
+             * per byte via ega_pair(). A byte therefore selects a single
+             * colour, which is what graphics_set_palette_hdmi() programs.
+             * Submode 2 (640-wide) is the one that packs two pixels per byte
+             * and needs the 256-entry pair table.
+             *
+             * Extending this to submode 6 was tried and is wrong: byte j is
+             * then looked up as the pair (0, j), so every other column renders
+             * as palette entry 0. On Prehistorik that showed as correct colours
+             * with black columns interleaved through them.
+             */
             if (gfx_submode == 2) {
                 for (int j = 0; j < 16; j++) {
                     uint8_t rj = palette16_data[j * 3 + 0];
@@ -1335,7 +1810,87 @@ void __time_critical_func(vga_hw_set_palette16)(const uint8_t *palette16_data) {
             }
         }
     }
+
+    /*
+     * Only the pair table can put a reserved byte on screen.  The 320-wide
+     * modes put one 4-bit index in a byte, so their pixels never exceed 15
+     * and the substitutes are never consulted.
+     */
+    if (!SELECT_VGA && gfx_submode == 2)
+        hdmi_pick_substitutes_pair(palette16_data);
+
+/*
+ * The border index and the table entry it selects have to become visible to
+ * the scanline ISR together.  Setting frame_border_pix first and then
+ * spending ~1 ms rewriting all 256 entries means that, for that millisecond,
+ * the letterbox is drawn with the NEW index into the OLD table - and during
+ * a palette fade the rebuild runs every frame, so it is not a one-off blink
+ * but a steady wrong-coloured margin.  Assign it last.
+ */
+    {
+        /*
+         * The byte format has to match the table this function just
+         * programmed.  Only submode 2 gets the 256-entry pair table; the
+         * 320-wide modes get one colour per byte (see the comment in the
+         * loop above).  Packing (b << 4) | b unconditionally was the bug:
+         * in submode 6 that byte selects conv_color[0xcc], an entry this
+         * function never writes, so the letterbox was drawn with whatever
+         * a previous 256-colour palette had left there - the level's
+         * salmon, in Prehistorik 2, for as long as it took the guest to
+         * get back to a 256-colour load.
+         */
+        int b = vga_border_index(palette16_data, 16);
+        vga_border_note(palette16_data, b);
+        frame_border_pix = (gfx_submode == 2) ? (uint8_t)((b << 4) | b)
+                                              : (uint8_t)b;
+    }
 }
+
+
+/*
+ * Text mode packs two 4-bit pixels into every output byte, the same as EGA
+ * 640, so it needs the full 256-entry pair table - not the one-colour-per-byte
+ * table vga_hw_set_palette16() programs for the 320-wide modes.
+ */
+void __time_critical_func(vga_hw_set_text_palette)(const uint8_t *palette16_data) {
+    for (int i = 0; i < 16; i++) {
+        uint8_t r6 = palette16_data[i * 3 + 0];
+        uint8_t g6 = palette16_data[i * 3 + 1];
+        uint8_t b6 = palette16_data[i * 3 + 2];
+        if (SELECT_VGA) {
+            ega_palette[i] = vga_color_to_output(r6, g6, b6);
+            continue;
+        }
+        for (int j = 0; j < 16; j++) {
+            uint8_t rj = palette16_data[j * 3 + 0];
+            uint8_t gj = palette16_data[j * 3 + 1];
+            uint8_t bj = palette16_data[j * 3 + 2];
+            graphics_set_palette_hdmi2(
+                c6_to_8(r6), c6_to_8(g6), c6_to_8(b6),
+                c6_to_8(rj), c6_to_8(gj), c6_to_8(bj),
+                (i << 4) | j
+            );
+        }
+    }
+
+    if (!SELECT_VGA)
+        hdmi_pick_substitutes_pair(palette16_data);
+
+/*
+ * The border index and the table entry it selects have to become visible to
+ * the scanline ISR together.  Setting frame_border_pix first and then
+ * spending ~1 ms rewriting all 256 entries means that, for that millisecond,
+ * the letterbox is drawn with the NEW index into the OLD table - and during
+ * a palette fade the rebuild runs every frame, so it is not a one-off blink
+ * but a steady wrong-coloured margin.  Assign it last.
+ */
+    {   /* Text mode really does pack two pixels per byte. */
+        int b = vga_border_index(palette16_data, 16);
+        vga_border_note(palette16_data, b);
+        frame_border_pix = (uint8_t)((b << 4) | b);
+    }
+}
+
 
 // Set graphics sub-mode: 1=CGA 4-color, 2=EGA planar, 3=VGA 256-color, 4=CGA 2-color
 void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int height, int line_offset) {
@@ -1363,12 +1918,12 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
         return;
     frame_update_request = 0;
     uint32_t t0 = timer_hw->timerawl;
-    if (!SELECT_VGA && required_to_repair_text_pal) {
-        required_to_repair_text_pal = false;
-        // Only restore palette entries (0..1023), not the DMA line buffers (1024..1223)
-        memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
-    }
+    /* The text palette is rebuilt from the DAC in vga_hw_new_frame_deferred();
+     * required_to_repair_text_pal is left set for it to consume.  Copying the
+     * fixed CGA table back over conv_color[] here is what made a guest-loaded
+     * text palette impossible to see. */
     vga_hw_new_frame_deferred();
+    hdmi_build_ega320_cache();
     uint32_t dt = timer_hw->timerawl - t0;
     if (dt > new_frame_max_us)
         new_frame_max_us = dt;

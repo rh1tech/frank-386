@@ -36,4 +36,13 @@
 #define SDCARD_PIN_SPI0_MISO   16
 #endif
 
+/*
+ * Read and clear the disk-stall counters for the window since the last call.
+ * ops counts every disk_read(), including cache hits; total_us lets the
+ * caller derive an average, max_us and stalls (reads >= 2 ms) say whether any
+ * single one was long enough to starve the audio producers on core 0.
+ */
+void disk_stall_snapshot(uint32_t *ops, uint32_t *max_us,
+			 uint32_t *total_us, uint32_t *stalls);
+
 #endif // _SDCARD_H_

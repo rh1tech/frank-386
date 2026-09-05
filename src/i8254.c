@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include "i8254.h"
+#include "audiodiag.h"
 #include <pico.h>
 //#define DEBUG_PIT
 
@@ -172,7 +173,19 @@ void i8254_ioport_write(PITState *pit, uint32_t addr, uint32_t val)
 				s->read_state = access;
 				s->write_state = access;
 
+				/*
+				 * The 8254 decodes the three mode bits as 000..101 and
+				 * aliases 110 and 111 onto modes 2 and 3.  Storing the raw
+				 * field meant a perfectly legal square-wave control word
+				 * written as 111 - which is what Disney's Aladdin writes -
+				 * arrived at i8254_update_irq() as "mode 7", missed its
+				 * switch and hit abort().  That panics the firmware into
+				 * _exit(), which is a black screen with the guest frozen
+				 * mid-instruction, no reboot and no fault recorded.
+				 */
 				s->mode = (val >> 1) & 7;
+				if (s->mode >= 6)
+					s->mode -= 4;
 				s->bcd = val & 1;
 				/* XXX: update irq timer ? */
 			}
@@ -272,6 +285,8 @@ void __not_in_flash_func(i8254_update_irq)(PITState *pit)
 	PITChannelState *s = pit->channels;
 	uint32_t d = ((uint64_t) (uticks - s->count_load_time)) * PIT_FREQ / 1000000;
 
+	FRANK_DIAG_COUNT(pit_polls);
+
 	switch(s->mode) {
 	case 2:
 	case 3:
@@ -284,6 +299,7 @@ void __not_in_flash_func(i8254_update_irq)(PITState *pit)
 				if (s->irq != -1) {
 					pit->set_irq(pit->pic, s->irq, 1);
 					pit->set_irq(pit->pic, s->irq, 0);
+					frank_diag_irq0();
 				}
 				s->last_irq_count += s->count;
 				// avoid wraparound
@@ -294,8 +310,43 @@ void __not_in_flash_func(i8254_update_irq)(PITState *pit)
 			}
 		}
 		break;
+
+	case 0:
+	case 4:
+		/*
+		 * One-shot modes: OUT rises once, `count` periods after the
+		 * counter was loaded, and stays there until it is loaded again.
+		 * pit_load_count() clears last_irq_count, so it doubles as the
+		 * "has not fired yet" flag.
+		 */
+		if (!s->last_irq_count && (int32_t)(d - s->count) >= 0) {
+			if (s->irq != -1) {
+				pit->set_irq(pit->pic, s->irq, 1);
+				pit->set_irq(pit->pic, s->irq, 0);
+				frank_diag_irq0();
+			}
+			s->last_irq_count = s->count;
+		}
+		break;
+
+	case 1:
+	case 5:
+		/*
+		 * Retriggerable one-shots, started by the gate rather than by
+		 * the counter load.  Channel 0's gate is tied high on a PC, so
+		 * these never produce an edge here.
+		 */
+		break;
+
 	default:
-		abort();
+		/*
+		 * Unreachable: the mode field is three bits and 110/111 are
+		 * folded onto 2/3 where it is latched.  It used to be abort(),
+		 * which turned any guest that programmed a legal but
+		 * unimplemented mode into a dead board rather than into silence
+		 * on one interrupt line.  Never do that from a device model.
+		 */
+		break;
 	}
 }
 

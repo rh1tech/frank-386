@@ -11,6 +11,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <malloc.h>
+#include <unistd.h>
 
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -19,6 +21,8 @@
 #include "hardware/gpio.h"
 #include "hardware/flash.h"
 #include "hardware/watchdog.h"
+#include "hardware/adc.h"
+#include "hardware/structs/powman.h"
 
 #include "hardware/structs/qmi.h"
 
@@ -27,6 +31,7 @@
 #endif
 
 #include "board_config.h"
+#include "audiodiag.h"
 #include "psram_init.h"
 #include "vga_hw.h"
 #include "vga.h"
@@ -108,6 +113,314 @@ volatile uint32_t g_mips_clk __attribute__((used));
  * a percent, so it is the one to A/B against.
  */
 volatile uint32_t g_mips_avg __attribute__((used));
+
+/*
+ * FRANK_BOOT_DIAG — a boot trace for a board that has no console to fail into.
+ *
+ * On Z2 there is nowhere for a panic to go: USB is in Host mode so the guest
+ * can have a keyboard, and GPIO0/1 — the only pins a UART could use — carry
+ * PS/2. So boot progress is recorded in three words instead, which OpenOCD
+ * reads in one transaction. That matters here: reading this board over SWD
+ * while it runs has repeatedly knocked it over, so the budget is one touch
+ * after it has already stopped, not polling while it works.
+ *
+ * g_diag_stage advances monotonically, so whatever value it is stuck at names
+ * the last milestone reached. g_diag_free_heap is the headroom immediately
+ * before pc_new(), which takes ~35 KB in one burst and, at ~92% RAM, is
+ * documented as the first allocation to run out. If the board dies with
+ * stage == DIAG_PRE_PC_NEW then that number is the whole story.
+ */
+#define DIAG_CLOCKS       1u
+#define DIAG_PSRAM_BEGIN  2u
+#define DIAG_PSRAM_OK     3u
+#define DIAG_SD_BEGIN     4u
+#define DIAG_SD_MOUNTED   5u
+#define DIAG_386_DIR      6u
+#define DIAG_CONFIG       7u
+#define DIAG_INPUT        8u
+#define DIAG_PRE_PC_NEW   9u
+#define DIAG_PC_NEW_OK   10u
+#define DIAG_MAIN_LOOP   11u
+volatile uint32_t g_diag_stage __attribute__((used));
+volatile uint32_t g_diag_free_heap __attribute__((used));
+volatile uint32_t g_diag_pc_new_failed __attribute__((used));
+
+/*
+ * Die temperature, in tenths of a degree C, sampled from ADC input 4.
+ *
+ * The board reboots with POWMAN_CHIP_RESET reporting HAD_BOR while the
+ * regulator is provably configured correctly (VREG at 1.65 V, VOUT_OK set,
+ * brownout threshold down at 1.10 V). For the core rail to actually collapse
+ * that far, the internal regulator has to be running out of headroom - and a
+ * hotter die draws more current, which is the one quantity nobody has looked
+ * at. It also fits the shape of the complaint: the same clock ran all day
+ * yesterday and fails today, after hours of continuous running.
+ *
+ * g_diag_temp_max survives until the next reset, so after a brownout the peak
+ * is still there to read. Sampling once a second costs nothing.
+ */
+volatile uint32_t g_diag_temp_x10 __attribute__((used));
+volatile uint32_t g_diag_temp_max_x10 __attribute__((used));
+
+static void temp_tick(void) {
+    static uint64_t next_us;
+    static bool inited;
+    const uint64_t now = time_us_64();
+    if (now < next_us) return;
+    next_us = now + 1000000ull;
+
+    if (!inited) {
+        adc_init();
+        adc_set_temp_sensor_enabled(true);
+        inited = true;
+        return;                 /* let the sensor settle before the first read */
+    }
+
+    adc_select_input(4);
+    const uint32_t raw = adc_read();
+    /* Datasheet: T = 27 - (V - 0.706) / 0.001721, V = raw * 3.3 / 4096. */
+    const int32_t mv = (int32_t)((raw * 3300u) / 4096u);
+    const int32_t t_x10 = 270 - (((mv - 706) * 10000) / 17210);
+    if (t_x10 < 0 || t_x10 > 2000) return;      /* implausible: ignore */
+
+    g_diag_temp_x10 = (uint32_t)t_x10;
+    if ((uint32_t)t_x10 > g_diag_temp_max_x10)
+        g_diag_temp_max_x10 = (uint32_t)t_x10;
+}
+
+/*
+ * FRANK_FAULT_BOX — carry the fault across the reboot it causes.
+ *
+ * A fault here is unreadable by every channel we have: .bss is wiped by the
+ * restart, the USB CDC console dies with the board before it can print, and
+ * escalation to lockup clears the core's own state.  The watchdog scratch
+ * registers are the one place that survives a watchdog reset, so the handler
+ * copies the essentials there and reboots deliberately instead of locking up.
+ *
+ * Only scratch[0..3] are ours: pico-sdk's watchdog_reboot() writes the boot
+ * vector into scratch[4..7], which is why scratch[7] reads "WDOG" on a live
+ * board.
+ *
+ * The naked wrapper exists because a normal C prologue would push registers
+ * and move SP off the exception frame before we could find it.  Bit 2 of
+ * EXC_RETURN says which stack the frame is on.
+ */
+#define FAULT_MAGIC 0x46414c54u   /* "FALT" */
+#define ABORT_MAGIC 0x41425254u   /* "ABRT" */
+
+/*
+ * Name the abort() that fired.
+ *
+ * The device models call abort() on states they do not implement - vga.c on
+ * an unsupported bpp, i8259.c from hw_error(), pci.c, misc.c, i386.c from
+ * cpu_abort() - and until Aladdin it was not obvious what that looks like
+ * from outside: abort() reaches _exit(), which is an infinite loop, so the
+ * board shows a black screen with the guest frozen mid-instruction, no
+ * reboot, no fault and nothing in any counter.  Finding the one in i8254.c
+ * took halting the core over SWD and walking the stack by hand.
+ *
+ * The return address makes that a single mdw.  scratch[0..3] survive a
+ * reset and are the same three words frank_fault_record() uses, so one
+ * read distinguishes a fault ("FALT"), an abort ("ABRT") and a clean guest
+ * shutdown ("SHUT").
+ */
+void __real_abort(void) __attribute__((noreturn));
+
+void __attribute__((noreturn, used)) __wrap_abort(void) {
+    watchdog_hw->scratch[0] = ABORT_MAGIC;
+    watchdog_hw->scratch[1] = (uint32_t)__builtin_return_address(0);
+    watchdog_hw->scratch[2] = g_diag_stage;
+    watchdog_hw->scratch[3] = pc ? (uint32_t)cpui386_get_cycle(pc->cpu) : 0u;
+    __real_abort();
+}
+
+
+/*
+ * Full fault record, in the PSRAM diagnostic block.
+ *
+ * The four watchdog scratch words are the only storage that survives a
+ * reset, which is why the handler used them - but they are also only four
+ * words, and the first fault they caught said CFSR = precise bus fault with
+ * BFAR valid while the stacked PC pointed at a `movs r2, #24`, an
+ * instruction that cannot touch memory.  Three words cannot tell a genuine
+ * fault from a record taken off a corrupted stack.
+ *
+ * This writes the whole exception frame and every fault status register
+ * next to the rest of the diagnostics, where there is room, and keeps the
+ * scratch markers as the reset-surviving summary.
+ */
+#define FRANK_FAULT_REC ((volatile uint32_t *)(0x11000000u + 0x000bb000u))
+
+/*
+ * Freeze the JIT exit ring the instant anything faults.
+ *
+ * The ring is in PSRAM and survives the reboot, but the guest runs thousands
+ * more blocks on the next boot attempt and overwrites it long before a debug
+ * probe can read it.  Setting this stops nj_xr_note() for good, so what stays
+ * in the ring is the sixteen exits that led to the fault.
+ */
+#if NJIT_EXIT_RING
+#define NJ_XR_FROZEN ((volatile uint32_t *)(0x11000000u + 0x000a9000u + 68u * 4u))
+#endif
+
+void __attribute__((used)) frank_fault_record(uint32_t *frame) {
+#if NJIT_EXIT_RING
+    *NJ_XR_FROZEN = 0x46524F5Au;   /* "FROZ" - stop the exit ring here */
+#endif
+    volatile uint32_t *r = FRANK_FAULT_REC;
+    r[0]  = FAULT_MAGIC;
+    r[1]  = frame[0];   /* r0  */
+    r[2]  = frame[1];   /* r1  */
+    r[3]  = frame[2];   /* r2  */
+    r[4]  = frame[3];   /* r3  */
+    r[5]  = frame[4];   /* r12 */
+    r[6]  = frame[5];   /* lr  */
+    r[7]  = frame[6];   /* pc  */
+    r[8]  = frame[7];   /* xpsr */
+    r[9]  = (uint32_t)frame;
+    r[10] = *(volatile uint32_t *)0xE000ED28u;  /* CFSR  */
+    r[11] = *(volatile uint32_t *)0xE000ED2Cu;  /* HFSR  */
+    r[12] = *(volatile uint32_t *)0xE000ED34u;  /* MMFAR */
+    r[13] = *(volatile uint32_t *)0xE000ED38u;  /* BFAR  */
+    r[14] = g_diag_stage;
+    r[15] = r[15] + 1u;                          /* how many faults so far */
+
+    watchdog_hw->scratch[0] = FAULT_MAGIC;
+    watchdog_hw->scratch[1] = frame[6];                          /* stacked PC */
+    watchdog_hw->scratch[2] = *(volatile uint32_t *)0xE000ED28u; /* CFSR */
+    watchdog_hw->scratch[3] = *(volatile uint32_t *)0xE000ED38u; /* BFAR */
+
+#if FAULT_PARK
+    /*
+     * Park instead of rebooting.  Rebooting is right for a board in use - it
+     * comes back - but it also destroys the evidence before anyone can look,
+     * which is exactly what happened chasing Supaplex: by the time SWD
+     * attached, the firmware had restarted and the stack was gone.  Parked,
+     * the core can be halted over SWD and the real call stack walked.
+     */
+    while (true) { tight_loop_contents(); }
+#else
+    watchdog_reboot(0, 0, 0);
+    while (true) { tight_loop_contents(); }
+#endif
+}
+
+/*
+ * Hardware watch on one byte of guest memory.
+ *
+ * Prehistorik 2 dies because one byte of its code, 10BB:62B8, turns from
+ * 0x50 into 0xfb - and every write path the emulator has was instrumented
+ * and stayed silent while it happened: not a store by the emulated CPU, not
+ * a DMA burst, not a string I/O read.  Whatever writes it is therefore
+ * firmware, and only the hardware can say which instruction: the Cortex-M33
+ * data watchpoint fires on the access itself and hands over the PC.
+ *
+ * Armed by writing the physical address into the diagnostics over SWD; the
+ * main loop notices and programs the comparator.  One shot - the handler
+ * disables it - so a busy address cannot turn into an interrupt storm.
+ */
+#define FRANK_DWT_COMP0     (*(volatile uint32_t *)0xE0001020u)
+#define FRANK_DWT_MASK0     (*(volatile uint32_t *)0xE0001024u)
+#define FRANK_DWT_FUNC0     (*(volatile uint32_t *)0xE0001028u)
+#define FRANK_DWT_FUNC1     (*(volatile uint32_t *)0xE0001038u)
+#define FRANK_SHPR3         (*(volatile uint32_t *)0xE000ED20u)
+#define FRANK_DFSR          (*(volatile uint32_t *)0xE000ED30u)
+#define FRANK_CPUID_SIO     (*(volatile uint32_t *)0xd0000000u)
+
+/*
+ * The hit ring: 32 entries of 16 words, guest 0xbb800..0xbc000, which is the
+ * last free space below the CS ring.  It replaces the single record the
+ * first version wrote at the same address, so a dump from before this
+ * change reads as entry zero and nothing else moves.
+ */
+#define FRANK_MON_RING      ((volatile uint32_t *)(0x11000000u + 0x000bb800u))
+#define FRANK_MON_RING_N    32u
+
+void __attribute__((used)) frank_mon_record(uint32_t *frame) {
+    FRANK_DWT_FUNC0 = 0;                 /* quiet while we look at it */
+#if FRANK_AUDIO_DIAG
+    uint32_t addr = FRANK_DIAG->mon_addr;
+    /*
+     * The watchpoint is taken after the access retires, so this reads what
+     * the write left behind rather than what was there before it - which is
+     * the whole question.  Read it uncached: the store went through the XIP
+     * cache and a cached read here could answer from the same line, saying
+     * only that the cache agrees with itself.
+     */
+    uint32_t now = addr ? *(volatile uint8_t *)((addr & 0x00ffffffu) | 0x15000000u) : 0u;
+    uint32_t n = FRANK_DIAG->mon_head;
+    volatile uint32_t *r = FRANK_MON_RING + (n % FRANK_MON_RING_N) * 16u;
+
+    r[0]  = 0x4d4f4e57u;                 /* "MONW" */
+    r[1]  = frame[6];                    /* pc, one instruction past the write */
+    r[2]  = frame[5];                    /* lr */
+    r[3]  = frame[0];                    /* r0 */
+    r[4]  = frame[1];                    /* r1 */
+    r[5]  = frame[2];                    /* r2 */
+    r[6]  = frame[3];                    /* r3 */
+    r[7]  = frame[7];                    /* xpsr */
+    r[8]  = (uint32_t)frame;
+    r[9]  = now;                         /* the byte the write left */
+    r[10] = FRANK_CPUID_SIO;             /* which core did it */
+    r[11] = time_us_32();
+    r[12] = frame[4];                    /* r12 */
+    r[13] = FRANK_DFSR;
+    r[14] = n;                           /* hit number, so a wrapped ring reads */
+    r[15] = addr;
+
+    FRANK_DFSR = FRANK_DFSR;             /* the trap bit is write-one-to-clear */
+    FRANK_DIAG->mon_head = n + 1u;
+    FRANK_DIAG->mon_hits = n + 1u;
+
+    /*
+     * Freeze only on the write that actually breaks the guest.  Everything
+     * else - the loader putting the program image down, the game keeping a
+     * variable next door - re-arms and costs one exception.
+     */
+    uint32_t bad = FRANK_DIAG->mon_bad;
+    if (bad && now == bad) {
+        FRANK_DIAG->ud_reason = 6u;
+        FRANK_DIAG->ud_hit = 1u;
+        return;                          /* left disarmed: this was the one */
+    }
+    FRANK_DWT_FUNC0 = (1u << 4) | 0x6u;
+#endif
+}
+
+void __attribute__((naked)) isr_debugmonitor(void) {
+    __asm volatile(
+        "tst  lr, #4        \n"
+        "ite  eq            \n"
+        "mrseq r0, msp      \n"
+        "mrsne r0, psp      \n"
+        "b    frank_mon_record\n");
+}
+
+void frank_mon_arm(uint32_t addr) {
+    /*
+     * DebugMonitor to the highest configurable priority.  At the SDK default
+     * it sits below the audio and video interrupts, and a write made inside
+     * one of those would only be reported after that handler returned, with
+     * a stacked frame belonging to whatever ran next.  That is exactly the
+     * shape of the one hard-fault record this investigation already had to
+     * throw away as untrustworthy.
+     */
+    FRANK_SHPR3 = (FRANK_SHPR3 & 0xffffff00u) | 0x00u;
+    *(volatile uint32_t *)0xE000EDFCu |= (1u << 24) | (1u << 16); /* TRCENA, MON_EN */
+    FRANK_DWT_COMP0 = addr;
+    FRANK_DWT_MASK0 = 0;
+    FRANK_DWT_FUNC0 = (1u << 4) | 0x6u;   /* debug event on a data write */
+}
+
+void __attribute__((naked)) isr_hardfault(void) {
+    __asm volatile(
+        "tst  lr, #4        \n"
+        "ite  eq            \n"
+        "mrseq r0, msp      \n"
+        "mrsne r0, psp      \n"
+        "b    frank_fault_record\n");
+}
+
 static uint32_t tp_steps;
 static uint64_t tp_t0;
 static uint64_t tp_t_start;
@@ -338,6 +651,191 @@ static void vga_redraw(void *opaque, int x, int y, int w, int h) {
     // No action needed - VGA updates are handled in the main loop
 }
 
+#if PC_SAMPLE
+/*
+ * Lightweight profiler control for real-hardware Z2 testing.
+ *
+ * Win+F10 resets all sampling state and starts a fresh 10 kHz PC sample.
+ * Win+F9 stops sampling and writes 386/profile.txt to the SD card.
+ *
+ * Nothing is written while the workload is running, so the benchmark is
+ * not distorted by FatFS/SD traffic.  The dump contains the hottest host
+ * PC buckets (for addr2line against the ELF) and, when BB_PROFILE is also
+ * enabled, the hottest guest basic-block start addresses.
+ */
+#define PROFILE_TOP_N 32
+
+/*
+ * Win+F10 is handled in the USB-HID keyboard path, which the SWD key ring
+ * does not feed: driving the board from the debug probe there is no way to
+ * start a measurement.  This word is polled once per outer loop iteration so
+ * a probe can start and stop sampling with a single mww, which is what makes
+ * the profiler usable without a human at the keyboard.
+ */
+volatile uint32_t g_ps_trigger = 0;
+
+static void profile_reset_runtime(void) {
+    ps_stop();
+
+    memset(ps_hist, 0, sizeof(ps_hist));
+    ps_total = 0;
+    ps_outside = 0;
+
+#if BB_PROFILE
+    memset(bb_tab, 0, sizeof(bb_tab));
+    bb_entries = 0;
+    bb_collisions = 0;
+    bb_report();
+#endif
+
+    /* Align the built-in throughput figures with the new measurement. */
+    g_mips = 0;
+    g_mips_avg = 0;
+    g_mips_clk = 0;
+    tp_steps = 0;
+    tp_t0 = 0;
+    tp_t_start = 0;
+    tp_cyc_start = 0;
+    tp_cyc0 = 0;
+
+    ps_init(clock_get_hz(clk_sys), 10000u);
+    printf("Profiler: reset/start (Win+F9 to save 386/profile.txt)\n");
+}
+
+static bool profile_write(FIL *fp, const char *s) {
+    UINT bw = 0;
+    const UINT len = (UINT)strlen(s);
+    return f_write(fp, s, len, &bw) == FR_OK && bw == len;
+}
+
+static bool profile_dump_runtime(void) {
+    ps_stop();
+
+#if BB_PROFILE
+    bb_report();
+#endif
+
+    FIL fp;
+    if (f_open(&fp, "386/profile.txt", FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+        printf("Profiler: failed to open 386/profile.txt\n");
+        return false;
+    }
+
+    char line[192];
+    snprintf(line, sizeof(line),
+             "FRANK 386 profiler\n"
+             "clk_sys_mhz=%lu\n"
+             "mips_window_x1000=%lu\n"
+             "mips_average_x1000=%lu\n"
+             "pc_samples=%lu\n"
+             "pc_samples_outside=%lu\n",
+             (unsigned long)(clock_get_hz(clk_sys) / 1000000u),
+             (unsigned long)g_mips,
+             (unsigned long)g_mips_avg,
+             (unsigned long)ps_total,
+             (unsigned long)ps_outside);
+    if (!profile_write(&fp, line)) goto write_error;
+
+    uint32_t top_count[PROFILE_TOP_N] = {0};
+    uint32_t top_bucket[PROFILE_TOP_N] = {0};
+
+    for (uint32_t i = 0; i < PS_BUCKETS; ++i) {
+        const uint32_t count = ps_hist[i];
+        if (!count) continue;
+
+        for (uint32_t p = 0; p < PROFILE_TOP_N; ++p) {
+            if (count <= top_count[p]) continue;
+            for (uint32_t q = PROFILE_TOP_N - 1; q > p; --q) {
+                top_count[q] = top_count[q - 1];
+                top_bucket[q] = top_bucket[q - 1];
+            }
+            top_count[p] = count;
+            top_bucket[p] = i;
+            break;
+        }
+    }
+
+    if (!profile_write(&fp,
+        "\n[host_pc_samples]\n"
+        "; range_start range_end samples percent\n")) goto write_error;
+
+    for (uint32_t p = 0; p < PROFILE_TOP_N && top_count[p]; ++p) {
+        const uint32_t start = PS_BASE + (top_bucket[p] << PS_SHIFT);
+        const uint32_t end = start + (1u << PS_SHIFT) - 1u;
+        const uint32_t pct100 = ps_total
+            ? (uint32_t)(((uint64_t)top_count[p] * 10000ull) / ps_total)
+            : 0;
+
+        snprintf(line, sizeof(line),
+                 "0x%08lx 0x%08lx %lu %lu.%02lu%%\n",
+                 (unsigned long)start,
+                 (unsigned long)end,
+                 (unsigned long)top_count[p],
+                 (unsigned long)(pct100 / 100u),
+                 (unsigned long)(pct100 % 100u));
+        if (!profile_write(&fp, line)) goto write_error;
+    }
+
+#if BB_PROFILE
+    uint32_t bb_top_hits[PROFILE_TOP_N] = {0};
+    uint32_t bb_top_tag[PROFILE_TOP_N] = {0};
+    uint64_t bb_total_hits = 0;
+
+    for (uint32_t i = 0; i < BB_SLOTS; ++i) {
+        const uint32_t hits = bb_tab[i].hits;
+        if (!bb_tab[i].tag || !hits) continue;
+        bb_total_hits += hits;
+
+        for (uint32_t p = 0; p < PROFILE_TOP_N; ++p) {
+            if (hits <= bb_top_hits[p]) continue;
+            for (uint32_t q = PROFILE_TOP_N - 1; q > p; --q) {
+                bb_top_hits[q] = bb_top_hits[q - 1];
+                bb_top_tag[q] = bb_top_tag[q - 1];
+            }
+            bb_top_hits[p] = hits;
+            bb_top_tag[p] = bb_tab[i].tag;
+            break;
+        }
+    }
+
+    snprintf(line, sizeof(line),
+             "\n[basic_blocks]\n"
+             "block_entries=%lu\n"
+             "collisions=%lu\n"
+             "tracked_hits=%llu\n"
+             "; guest_linear_ip hits percent_of_tracked_hits\n",
+             (unsigned long)bb_entries,
+             (unsigned long)bb_collisions,
+             (unsigned long long)bb_total_hits);
+    if (!profile_write(&fp, line)) goto write_error;
+
+    for (uint32_t p = 0; p < PROFILE_TOP_N && bb_top_hits[p]; ++p) {
+        const uint32_t pct100 = bb_total_hits
+            ? (uint32_t)(((uint64_t)bb_top_hits[p] * 10000ull) / bb_total_hits)
+            : 0;
+        snprintf(line, sizeof(line),
+                 "0x%08lx %lu %lu.%02lu%%\n",
+                 (unsigned long)bb_top_tag[p],
+                 (unsigned long)bb_top_hits[p],
+                 (unsigned long)(pct100 / 100u),
+                 (unsigned long)(pct100 % 100u));
+        if (!profile_write(&fp, line)) goto write_error;
+    }
+#endif
+
+    f_sync(&fp);
+    f_close(&fp);
+    printf("Profiler: saved 386/profile.txt (%lu PC samples)\n",
+           (unsigned long)ps_total);
+    return true;
+
+write_error:
+    f_close(&fp);
+    printf("Profiler: write error while saving 386/profile.txt\n");
+    return false;
+}
+#endif /* PC_SAMPLE */
+
 //=============================================================================
 // Keyboard Polling
 //=============================================================================
@@ -345,13 +843,601 @@ static void vga_redraw(void *opaque, int x, int y, int w, int h) {
 // Track modifier key state for Win+F12 hotkey
 static bool win_key_pressed = false;
 
+/* FRANK_NJIT_STATS_HOTKEYS
+ *
+ * Zero-overhead during emulation: these counters are only touched when the
+ * user presses the hotkey. They let us distinguish "JIT is slower" from
+ * "the intended hot loop was never compiled/executed".
+ *
+ * Left Win + F7 = reset counters
+ * Left Win + F8 = write 386/jitstats.txt
+ */
+#if NATIVE_JIT
+extern volatile uint32_t g_njit_hits;
+extern volatile uint32_t g_njit_misses;
+extern volatile uint32_t g_njit_compiles;
+extern volatile uint32_t g_njit_insns;
+extern volatile uint32_t g_njit_native_iters;
+extern volatile uint32_t g_njit_invalidations;
+extern volatile uint32_t g_njit_hotwait;
+extern volatile uint32_t g_njit_rejects;
+extern volatile uint32_t g_njit_flushes;
+extern volatile uint32_t g_njit_rej_reason[9];
+extern volatile uint32_t g_njit_rej_last_ip;
+extern volatile uint32_t g_njit_rej_last_pos;
+extern volatile uint32_t g_njit_rej_last_opcode;
+extern volatile uint32_t g_njit_rej_last_body_insns;
+extern volatile uint32_t g_njit_rej_op[8];
+extern volatile uint32_t g_njit_rej_op_count[8];
+/* FRANK_NATIVE_JIT_V8_10_DIAG: see the enum comment in i386.c.  The sizes are
+ * spelled out here so a mismatch with NJBP_COUNT/NJCH_COUNT is a build error
+ * rather than a silently truncated record. */
+#define NJBP_SLOTS 16
+#define NJCH_SLOTS 13
+extern volatile uint32_t g_njit_bp[NJBP_SLOTS];
+extern volatile uint32_t g_njit_ch[NJCH_SLOTS];
+extern volatile uint32_t g_wl_tlb_refills;
+extern volatile uint32_t g_wl_tlb_clears;
+extern volatile uint32_t g_wl_exc_pf;
+extern volatile uint32_t g_wl_exc_gp;
+extern volatile uint32_t g_wl_exc_other;
+extern volatile uint32_t g_wl_hw_irq;
+extern void cpui386_diag_mode(CPUI386 *cpu, uint32_t out[5]);
+extern void njit_diag_reset_hot(void);
+extern unsigned njit_diag_reject_snapshot(uint32_t *linear, uint32_t *ip,
+                                          uint32_t *hits, uint8_t *bytes,
+                                          uint8_t *lens, unsigned cap);
+extern unsigned njit_diag_block_snapshot(uint32_t *linear, uint32_t *insns,
+                                         uint32_t *entries, uint8_t *ninsns,
+                                         uint8_t *flags, unsigned cap);
+
+/*
+ * FRANK_WORKLOAD_PROFILE_V88 window origin.
+ *
+ * g_mips_avg is cumulative since emulation start and is NOT reset by
+ * Win+F7, so every jitstats capture in this sequence reported an average
+ * diluted by DOS boot and idle time.  native_guest_insns, by contrast, IS
+ * window-scoped.  The two were therefore never comparable, which is why no
+ * capture so far states what fraction of the measured workload the JIT
+ * actually executed.  These two values close that gap.
+ */
+static uint64_t njs_win_t0;
+static uint32_t njs_win_cyc0;
+
+/*
+ * One file per measurement window.
+ *
+ * Win+F7 claims the next unused "386/jitstatsNNN.txt" and Win+F8 writes it,
+ * so a session can take run after run without rebooting or renaming
+ * anything between them.  The name is chosen by probing the card rather
+ * than from a counter, which means a power cycle continues after the
+ * highest file already on the card instead of overwriting from 000 again.
+ *
+ * Pressing Win+F7 twice without a dump in between keeps the same name:
+ * nothing was written, so the same slot is still free.  Pressing Win+F8
+ * twice rewrites the same file, which is the right behaviour for one
+ * window measured once.
+ */
+#define NJS_CAPTURE_MAX 1000u
+static char njs_capture_path[24];
+static unsigned njs_capture_seq;
+
+static void njit_stats_pick_path(void) {
+    /*
+     * Automatic, and deliberately only ever called from Win+F7, whose frame
+     * is shallow.  With FF_USE_LFN=1 and FF_MAX_LFN=255 a FILINFO carries a
+     * 256-character name buffer; njit_stats_dump() already holds about
+     * 1.9 KB of locals against a 2 KB main stack, so it must not reach here,
+     * and a static copy would cost 288 bytes of the malloc heap instead.
+     */
+    FILINFO fno;
+
+    for (unsigned i = njs_capture_seq; i < NJS_CAPTURE_MAX; ++i) {
+        snprintf(njs_capture_path, sizeof(njs_capture_path),
+                 "386/jitstats%03u.txt", i);
+        if (f_stat(njs_capture_path, &fno) != FR_OK) {
+            njs_capture_seq = i;
+            return;
+        }
+    }
+
+    /* 1000 captures on one card: stop inventing names and reuse the
+     * original fixed one rather than silently writing nothing. */
+    snprintf(njs_capture_path, sizeof(njs_capture_path), "386/jitstats.txt");
+}
+
+static const char *njit_stats_path(void) {
+    /* Never probes: see njit_stats_pick_path().  Without a preceding
+     * Win+F7 the window is "since boot" anyway, so the original fixed
+     * name is the honest one to use. */
+    return njs_capture_path[0] ? njs_capture_path : "386/jitstats.txt";
+}
+
+static void njit_stats_reset(void) {
+    njit_diag_reset_hot();
+
+    njit_stats_pick_path();
+
+    /*
+     * Clear the audio and disk counters as well.
+     *
+     * Without this the first capture of a session reports everything since
+     * boot, and the boot sequence dominates: the 44.1 kHz mixer starts on
+     * core 1 as soon as initialized is set, but adlib_core0() only begins
+     * filling when the emulation loop starts, several seconds later - SD
+     * mount, config parsing, and show_welcome_screen()'s 7 second animation.
+     * Every one of those samples was counted as an AdLib underrun, which made
+     * a fixed startup cost look like a steady in-game fault: underruns came
+     * back at 370-412k regardless of whether the window was 41 s or 66 s.
+     */
+    {
+        uint32_t d0, d1, d2, d3;
+        disk_stall_snapshot(&d0, &d1, &d2, &d3);
+        sb16_starve_snapshot(&d0, &d1);
+        { uint32_t sbd0[8]; sb16_diag_snapshot(sbd0); }
+        adlib_gap_snapshot(&d0, &d1, &d2, &d3);
+        if (pc && pc->adlib) (void)adlib_underruns(pc->adlib);
+    }
+
+    njs_win_t0 = time_us_64();
+    njs_win_cyc0 = (pc && pc->cpu)
+                 ? (uint32_t)(unsigned long)cpui386_get_cycle(pc->cpu) : 0u;
+
+    g_wl_tlb_refills = 0;
+    g_wl_tlb_clears = 0;
+    g_wl_exc_pf = 0;
+    g_wl_exc_gp = 0;
+    g_wl_exc_other = 0;
+    g_wl_hw_irq = 0;
+
+    g_njit_hits = 0;
+    g_njit_misses = 0;
+    g_njit_compiles = 0;
+    g_njit_insns = 0;
+    g_njit_native_iters = 0;
+    g_njit_invalidations = 0;
+    g_njit_hotwait = 0;
+    g_njit_rejects = 0;
+    g_njit_flushes = 0;
+    for (int i = 0; i < 9; ++i) g_njit_rej_reason[i] = 0;
+    g_njit_rej_last_ip = 0;
+    g_njit_rej_last_pos = 0;
+    g_njit_rej_last_opcode = 0;
+    g_njit_rej_last_body_insns = 0;
+    for (int i = 0; i < 8; ++i) {
+        g_njit_rej_op[i] = 0;
+        g_njit_rej_op_count[i] = 0;
+    }
+    for (int i = 0; i < NJBP_SLOTS; ++i) g_njit_bp[i] = 0;
+    for (int i = 0; i < NJCH_SLOTS; ++i) g_njit_ch[i] = 0;
+}
+
+static void njit_stats_dump(void) {
+    FIL fp;
+    UINT bw;
+    char buf[1400];
+    uint32_t hot_linear[8], hot_ip[8], hot_hits[8];
+    uint8_t hot_bytes[8][32], hot_len[8];
+    unsigned hot_n = njit_diag_reject_snapshot(
+        hot_linear, hot_ip, hot_hits, &hot_bytes[0][0], hot_len, 8);
+
+    /* Snapshot-and-clear, so every counter below covers the same window. */
+    uint32_t dsk_ops, dsk_max_us, dsk_total_us, dsk_stalls;
+    disk_stall_snapshot(&dsk_ops, &dsk_max_us, &dsk_total_us, &dsk_stalls);
+    uint32_t sb_starves, sb_minfill;
+    sb16_starve_snapshot(&sb_starves, &sb_minfill);
+    uint32_t sbd[8];
+    sb16_diag_snapshot(sbd);
+    uint32_t ad_calls, ad_gap_max, ad_gap_over, ad_gap_lost;
+    adlib_gap_snapshot(&ad_calls, &ad_gap_max, &ad_gap_over, &ad_gap_lost);
+
+    const char *path = njit_stats_path();
+
+    FRESULT fr = f_open(&fp, path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (fr != FR_OK) {
+        printf("JIT stats: f_open %s failed: %d\n", path, (int)fr);
+        return;
+    }
+
+    int n = snprintf(
+        buf, sizeof(buf),
+        "FRANK native JIT stats\n"
+        "hits=%lu\n"
+        "misses=%lu\n"
+        "compiles=%lu\n"
+        "native_guest_insns=%lu\n"
+        "native_loop_iters=%lu\n"
+        "invalidations=%lu\n"
+        "hotwait=%lu\n"
+        "rejects=%lu\n"
+        "flushes=%lu\n"
+        "reject_code_window=%lu\n"
+        "reject_body_opcode=%lu\n"
+        "reject_flag_scratch=%lu\n"
+        "reject_incdec_cf=%lu\n"
+        "reject_no_branch=%lu\n"
+        "reject_empty_body=%lu\n"
+        "reject_jcc_no_flags=%lu\n"
+        "reject_patch=%lu\n"
+        "reject_emit=%lu\n"
+        "last_reject_ip=%08lx\n"
+        "last_reject_pos=%lu\n"
+        "last_reject_opcode=%02lx\n"
+        "last_reject_body_insns=%lu\n"
+        "rejop0=%02lx,%lu\n"
+        "rejop1=%02lx,%lu\n"
+        "rejop2=%02lx,%lu\n"
+        "rejop3=%02lx,%lu\n"
+        "rejop4=%02lx,%lu\n"
+        "rejop5=%02lx,%lu\n"
+        "rejop6=%02lx,%lu\n"
+        "rejop7=%02lx,%lu\n"
+        "mips_window_x1000=%lu\n"
+        "mips_average_x1000=%lu\n"
+        "clk_sys_mhz=%lu\n",
+        (unsigned long)g_njit_hits,
+        (unsigned long)g_njit_misses,
+        (unsigned long)g_njit_compiles,
+        (unsigned long)g_njit_insns,
+        (unsigned long)g_njit_native_iters,
+        (unsigned long)g_njit_invalidations,
+        (unsigned long)g_njit_hotwait,
+        (unsigned long)g_njit_rejects,
+        (unsigned long)g_njit_flushes,
+        (unsigned long)g_njit_rej_reason[0],
+        (unsigned long)g_njit_rej_reason[1],
+        (unsigned long)g_njit_rej_reason[2],
+        (unsigned long)g_njit_rej_reason[3],
+        (unsigned long)g_njit_rej_reason[4],
+        (unsigned long)g_njit_rej_reason[5],
+        (unsigned long)g_njit_rej_reason[6],
+        (unsigned long)g_njit_rej_reason[7],
+        (unsigned long)g_njit_rej_reason[8],
+        (unsigned long)g_njit_rej_last_ip,
+        (unsigned long)g_njit_rej_last_pos,
+        (unsigned long)g_njit_rej_last_opcode,
+        (unsigned long)g_njit_rej_last_body_insns,
+        (unsigned long)g_njit_rej_op[0], (unsigned long)g_njit_rej_op_count[0],
+        (unsigned long)g_njit_rej_op[1], (unsigned long)g_njit_rej_op_count[1],
+        (unsigned long)g_njit_rej_op[2], (unsigned long)g_njit_rej_op_count[2],
+        (unsigned long)g_njit_rej_op[3], (unsigned long)g_njit_rej_op_count[3],
+        (unsigned long)g_njit_rej_op[4], (unsigned long)g_njit_rej_op_count[4],
+        (unsigned long)g_njit_rej_op[5], (unsigned long)g_njit_rej_op_count[5],
+        (unsigned long)g_njit_rej_op[6], (unsigned long)g_njit_rej_op_count[6],
+        (unsigned long)g_njit_rej_op[7], (unsigned long)g_njit_rej_op_count[7],
+        (unsigned long)g_mips,
+        (unsigned long)g_mips_avg,
+        (unsigned long)g_mips_clk
+    );
+
+    if (n < 0) n = 0;
+    if (n > (int)sizeof(buf)) n = (int)sizeof(buf);
+    f_write(&fp, buf, (UINT)n, &bw);
+
+    /*
+     * FRANK_WORKLOAD_PROFILE_V88 window block.
+     *
+     * Written as a second record so the block above stays byte-identical
+     * to the v8.7.3 format and every archived capture still parses.
+     *
+     * window_guest_insns is the only figure that turns native_guest_insns
+     * into a coverage fraction, and native_coverage_ppm states it
+     * directly: it is the hard ceiling on any speedup a JIT coverage
+     * change can produce for this workload.
+     */
+    {
+        const uint64_t win_us = time_us_64() - njs_win_t0;
+        const uint32_t cyc_now = (pc && pc->cpu)
+            ? (uint32_t)(unsigned long)cpui386_get_cycle(pc->cpu) : 0u;
+        /* Unsigned wrap-around subtraction: cpu->cycle is 32-bit here and
+         * rolls over after roughly 35 minutes at 2 MIPS. */
+        const uint32_t win_insns = cyc_now - njs_win_cyc0;
+        const uint32_t win_mips  = win_us
+            ? (uint32_t)(((uint64_t)win_insns * 1000ull) / win_us) : 0u;
+        const uint32_t cov_ppm   = win_insns
+            ? (uint32_t)(((uint64_t)g_njit_insns * 1000000ull) / win_insns) : 0u;
+
+        uint32_t mode[5] = {0, 0, 0, 0, 0};
+        if (pc && pc->cpu) cpui386_diag_mode(pc->cpu, mode);
+
+        int w = snprintf(
+            buf, sizeof(buf),
+            "window_us=%lu\n"
+            "window_guest_insns=%lu\n"
+            "window_mips_x1000=%lu\n"
+            "native_coverage_ppm=%lu\n"
+            "tlb_refills=%lu\n"
+            "tlb_clears=%lu\n"
+            "exc_pf=%lu\n"
+            "exc_gp=%lu\n"
+            "exc_other=%lu\n"
+            "hw_irq=%lu\n"
+            "mode_cr0=%08lx\n"
+            "mode_flags=%08lx\n"
+            "mode_cr3=%08lx\n"
+            "mode_cpl=%lu\n"
+            "mode_code16=%lu\n",
+            (unsigned long)win_us,
+            (unsigned long)win_insns,
+            (unsigned long)win_mips,
+            (unsigned long)cov_ppm,
+            (unsigned long)g_wl_tlb_refills,
+            (unsigned long)g_wl_tlb_clears,
+            (unsigned long)g_wl_exc_pf,
+            (unsigned long)g_wl_exc_gp,
+            (unsigned long)g_wl_exc_other,
+            (unsigned long)g_wl_hw_irq,
+            (unsigned long)mode[0],
+            (unsigned long)mode[1],
+            (unsigned long)mode[2],
+            (unsigned long)mode[3],
+            (unsigned long)mode[4]);
+
+        if (w < 0) w = 0;
+        if (w > (int)sizeof(buf)) w = (int)sizeof(buf);
+        f_write(&fp, buf, (UINT)w, &bw);
+    }
+
+    /*
+     * Audio-starvation block.
+     *
+     * A third record, reusing buf now that it has been flushed, rather than a
+     * bigger buffer: njit_stats_dump() already holds about 1.9 KB of locals
+     * against a 2 KB main stack (see njit_stats_pick_path()), so this frame
+     * has no room to grow.
+     *
+     * Both audio producers run on core 0 - adlib_core0() and, for SB16,
+     * i8257_dma_run() - so a long disk_read() starves both at once. AdLib
+     * holds ADLIB_NBUF x ADLIB_BATCH_SIZE = 256 samples, i.e. 5.8 ms; compare
+     * disk_read_max_us against that. sb16_minfill shows how close to empty
+     * the voice ring runs, and comes back as 0xffffffff if output was never
+     * active in the window. FatFS can issue several disk_read() calls per
+     * guest f_read(), so disk_read_total_us matters as much as the max.
+     */
+    {
+        int m = snprintf(
+            buf, sizeof(buf),
+            "adlib_underruns=%lu\n"
+            "disk_ops=%lu\n"
+            "disk_read_max_us=%lu\n"
+            "disk_read_total_us=%lu\n"
+            "disk_stalls_2ms=%lu\n"
+            "sb16_starves=%lu\n"
+            "sb16_minfill=%lu\n"
+            "adlib_calls=%lu\n"
+            "adlib_gap_max_us=%lu\n"
+            "adlib_gap_over=%lu\n"
+            "adlib_gap_lost_us=%lu\n"
+            "sb16_starve_runs=%lu\n"
+            "sb16_starve_max=%lu\n"
+            "sb16_refills=%lu\n"
+            "sb16_refill_bytes=%lu\n"
+            "sb16_dma_gap_max_us=%lu\n"
+            "sb16_bytes_per_sec=%lu\n"
+            "sb16_freq=%lu\n"
+            "sb16_fmtcode=%lu\n",
+            (unsigned long)(pc && pc->adlib ? adlib_underruns(pc->adlib) : 0),
+            (unsigned long)dsk_ops,
+            (unsigned long)dsk_max_us,
+            (unsigned long)dsk_total_us,
+            (unsigned long)dsk_stalls,
+            (unsigned long)sb_starves,
+            (unsigned long)sb_minfill,
+            (unsigned long)ad_calls,
+            (unsigned long)ad_gap_max,
+            (unsigned long)ad_gap_over,
+            (unsigned long)ad_gap_lost,
+            (unsigned long)sbd[0], (unsigned long)sbd[1],
+            (unsigned long)sbd[2], (unsigned long)sbd[3],
+            (unsigned long)sbd[4], (unsigned long)sbd[5],
+            (unsigned long)sbd[6], (unsigned long)sbd[7]);
+        if (m < 0) m = 0;
+        if (m > (int)sizeof(buf)) m = (int)sizeof(buf);
+        f_write(&fp, buf, (UINT)m, &bw);
+    }
+
+    /*
+     * FRANK_NATIVE_JIT_V8_10_DIAG block.
+     *
+     * A fourth record, again reusing buf now that it has been flushed, so the
+     * three records above stay byte-identical and every archived capture keeps
+     * parsing.
+     *
+     * How to read it:
+     *   bp_matched == 0  the exact Symantec loop was never offered to the
+     *                    compiler at a hot IP in this window.  No guard is at
+     *                    fault and no guard work will help: the loop is not
+     *                    reaching the JIT at all.
+     *   bp_matched > 0   it was offered and refused.  The largest bp_* counter
+     *                    below bp_matched names the guard to attack, and bp_ok
+     *                    says how often one got through.
+     *   ch_brk_partial dominating ch_calls means blocks abandon the chain on a
+     *   guarded side exit; ch_partial_lost is what that costs in guest
+     *   instructions.
+     */
+    {
+        int m = snprintf(
+            buf, sizeof(buf),
+            "bp_attempts=%lu\n"
+            "bp_not_code16=%lu\n"
+            "bp_sp_mask=%lu\n"
+            "bp_code_window=%lu\n"
+            "bp_pattern=%lu\n"
+            "bp_matched=%lu\n"
+            "bp_split_noncontig=%lu\n"
+            "bp_static_m2=%lu\n"
+            "bp_static_m4=%lu\n"
+            "bp_static_m6=%lu\n"
+            "bp_static_stk=%lu\n"
+            "bp_m6_nonadj=%lu\n"
+            "bp_code_overlap=%lu\n"
+            "bp_no_room=%lu\n"
+            "bp_emit=%lu\n"
+            "bp_ok=%lu\n"
+            "ch_calls=%lu\n"
+            "ch_blocks=%lu\n"
+            "ch_brk_zero=%lu\n"
+            "ch_brk_not_single=%lu\n"
+            "ch_brk_partial=%lu\n"
+            "ch_brk_budget=%lu\n"
+            "ch_brk_negcache=%lu\n"
+            "ch_brk_compile=%lu\n"
+            "ch_brk_maxblocks=%lu\n"
+            "ch_partial_lost=%lu\n"
+            "ch_partial_inside=%lu\n"
+            "ch_partial_outside=%lu\n"
+            "ch_partial_ready=%lu\n",
+            (unsigned long)g_njit_bp[0], (unsigned long)g_njit_bp[1],
+            (unsigned long)g_njit_bp[2], (unsigned long)g_njit_bp[3],
+            (unsigned long)g_njit_bp[4], (unsigned long)g_njit_bp[5],
+            (unsigned long)g_njit_bp[6], (unsigned long)g_njit_bp[7],
+            (unsigned long)g_njit_bp[8], (unsigned long)g_njit_bp[9],
+            (unsigned long)g_njit_bp[10], (unsigned long)g_njit_bp[11],
+            (unsigned long)g_njit_bp[12], (unsigned long)g_njit_bp[13],
+            (unsigned long)g_njit_bp[14], (unsigned long)g_njit_bp[15],
+            (unsigned long)g_njit_ch[0], (unsigned long)g_njit_ch[1],
+            (unsigned long)g_njit_ch[2], (unsigned long)g_njit_ch[3],
+            (unsigned long)g_njit_ch[4], (unsigned long)g_njit_ch[5],
+            (unsigned long)g_njit_ch[6], (unsigned long)g_njit_ch[7],
+            (unsigned long)g_njit_ch[8], (unsigned long)g_njit_ch[9],
+            (unsigned long)g_njit_ch[10], (unsigned long)g_njit_ch[11],
+            (unsigned long)g_njit_ch[12]);
+        if (m < 0) m = 0;
+        if (m > (int)sizeof(buf)) m = (int)sizeof(buf);
+        f_write(&fp, buf, (UINT)m, &bw);
+    }
+
+    for (unsigned i = 0; i < hot_n; ++i) {
+        int m = snprintf(buf, sizeof(buf),
+                         "hot%u linear=%08lx ip=%08lx rejected_hits=%lu bytes=",
+                         i,
+                         (unsigned long)hot_linear[i],
+                         (unsigned long)hot_ip[i],
+                         (unsigned long)hot_hits[i]);
+        if (m < 0) m = 0;
+        if (m > (int)sizeof(buf)) m = (int)sizeof(buf);
+        f_write(&fp, buf, (UINT)m, &bw);
+
+        for (unsigned j = 0; j < hot_len[i]; ++j) {
+            m = snprintf(buf, sizeof(buf), "%02x%s",
+                         hot_bytes[i][j],
+                         (j + 1u == hot_len[i]) ? "" : " ");
+            if (m < 0) m = 0;
+            if (m > (int)sizeof(buf)) m = (int)sizeof(buf);
+            f_write(&fp, buf, (UINT)m, &bw);
+        }
+        f_write(&fp, "\n", 1, &bw);
+    }
+
+    /*
+     * FRANK_WORKLOAD_PROFILE_V88: what the JIT compiled and what each
+     * block retired.  "compiles=15" alone never said whether one of those
+     * 15 was the exact 8-instruction Symantec BP-stack loop that carries
+     * the whole real-mode control run, or fifteen short prefix traces.
+     * flags: bit0 single_run, bit1 code16, bit2 exact BP-stack block.
+     */
+    {
+        uint32_t blk_linear[8], blk_insns[8], blk_entries[8];
+        uint8_t blk_ninsns[8], blk_flags[8];
+        unsigned blk_n = njit_diag_block_snapshot(blk_linear, blk_insns,
+                                                  blk_entries, blk_ninsns,
+                                                  blk_flags, 8);
+        for (unsigned i = 0; i < blk_n; ++i) {
+            int m = snprintf(buf, sizeof(buf),
+                             "blk%u linear=%08lx insns=%lu entries=%lu"
+                             " len=%lu flags=%lu\n",
+                             i,
+                             (unsigned long)blk_linear[i],
+                             (unsigned long)blk_insns[i],
+                             (unsigned long)blk_entries[i],
+                             (unsigned long)blk_ninsns[i],
+                             (unsigned long)blk_flags[i]);
+            if (m < 0) m = 0;
+            if (m > (int)sizeof(buf)) m = (int)sizeof(buf);
+            f_write(&fp, buf, (UINT)m, &bw);
+        }
+    }
+
+    f_sync(&fp);
+    f_close(&fp);
+
+    printf("JIT stats written: %s\n", path);
+}
+#endif
+
 // Process a single keycode, handling disk UI and settings UI hotkeys
 // Returns true if key should be passed to emulator, false if consumed
+/*
+ * FRANK_SWD_KEYBOARD
+ *
+ * A keyboard the debugger types on.
+ *
+ * The board has one USB port and it is the guest's keyboard, so driving DOS
+ * and flashing used to be mutually exclusive.  SWD solved the flashing half;
+ * this solves the other one, without a second USB host or any PIO-USB work:
+ * OpenOCD writes keycodes straight into this ring and the main loop feeds
+ * them to the emulated 8042 exactly as a real key press would arrive.
+ *
+ * Each entry is one event, not one character: bit 7 is press/release and
+ * bits 0..6 are the Linux input keycode (every key this emulator handles,
+ * including F1-F12 at 59-88 and Left Meta at 125, is below 128).  Holding a
+ * key down is therefore just a press with no matching release, which is what
+ * driving a game needs.
+ *
+ * The host writes the payload bytes first and bumps g_swdkey_head last; the
+ * firmware is the only writer of g_swdkey_tail, so no locking is needed.
+ * g_swdkey_magic lets the host script check it is talking to a build that
+ * has this, and lets it find the layout it expects.
+ */
+#define SWDKEY_CAP 64u
+#define SWDKEY_MAGIC 0x4b445753u   /* "SWDK" */
+
+volatile uint32_t g_swdkey_magic __attribute__((used)) = SWDKEY_MAGIC;
+volatile uint8_t  g_swdkey_buf[SWDKEY_CAP] __attribute__((used));
+volatile uint32_t g_swdkey_head __attribute__((used));
+volatile uint32_t g_swdkey_tail __attribute__((used));
+/* DOS drops keys pressed faster than it polls.  autotype.c settled on ~90 ms
+ * per event; 50 ms is responsive enough to drive a menu and still safe.  The
+ * host can raise or lower it by writing this word. */
+volatile uint32_t g_swdkey_period_us __attribute__((used)) = 50000u;
+
+static void swdkey_tick(void) {
+    static uint64_t next_us;
+    /* Also the reference that keeps the symbol: --gc-sections drops a
+     * variable nothing in the firmware reads, whatever __attribute__((used))
+     * tells the compiler.  Checking it here both keeps it and refuses to
+     * inject keystrokes if something has scribbled over the ring. */
+    if (g_swdkey_magic != SWDKEY_MAGIC) return;
+    if (g_swdkey_tail == g_swdkey_head) return;
+    const uint64_t now = time_us_64();
+    if (now < next_us) return;
+    next_us = now + g_swdkey_period_us;
+
+    const uint8_t ev = g_swdkey_buf[g_swdkey_tail % SWDKEY_CAP];
+    g_swdkey_tail++;
+    if (pc && pc->kbd)
+        ps2_put_keycode(pc->kbd, (ev & 0x80u) ? 1 : 0, (int)(ev & 0x7fu));
+}
+
 static bool process_keycode(int is_down, int keycode) {
     // Track Win key state
     if (keycode == KEY_LEFTMETA) {
         win_key_pressed = is_down;
     }
+
+#if NATIVE_JIT
+    // Linux input keycodes: F7=65, F8=66.
+    if (is_down && keycode == 65 && win_key_pressed) {
+        njit_stats_reset();
+        printf("JIT stats reset; next dump: %s\n", njit_stats_path());
+        return false;
+    }
+
+    if (is_down && keycode == 66 && win_key_pressed) {
+        njit_stats_dump();
+        return false;
+    }
+#endif
 
     // Check for Win+F12 hotkey to toggle disk UI
     if (is_down && keycode == KEY_F12 && win_key_pressed) {
@@ -392,6 +1478,20 @@ static bool process_keycode(int is_down, int keycode) {
         }
         return false;  // Don't pass to emulator
     }
+
+#if PC_SAMPLE
+    // Win+F10: clear profiler state and begin a clean measurement window.
+    if (is_down && keycode == 68 /* Linux KEY_F10 */ && win_key_pressed) {
+        profile_reset_runtime();
+        return false;
+    }
+
+    // Win+F9: stop sampling and save the current measurement to SD.
+    if (is_down && keycode == 67 /* Linux KEY_F9 */ && win_key_pressed) {
+        profile_dump_runtime();
+        return false;
+    }
+#endif
 
     // When disk UI is open, route all keys to it
     if (diskui_is_open()) {
@@ -689,6 +1789,19 @@ void console_reclock(void) {
 
 // Flash timing configuration for overclocking
 void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int cfg_flash) {
+    /*
+     * Raise the floor on the XIP clock, independently of config.ini.
+     *
+     * Measured on this board with PC_SAMPLE aimed at the flash window while
+     * Doom was rendering: 28.7% of core-0 samples were in code executing from
+     * flash, almost all of it OPL synthesis - 23.5 KB of slot_render
+     * instantiations that are far too large to move into SRAM. flash_freq=66
+     * gives CLKDIV 8, i.e. a 63 MHz QSPI clock at 504 MHz sys, so every one of
+     * those fetches is charged at half the rate the part is rated for.
+     */
+#ifdef FLASH_FREQ_FLOOR_MHZ
+    if (cfg_flash < FLASH_FREQ_FLOOR_MHZ) cfg_flash = FLASH_FREQ_FLOOR_MHZ;
+#endif
     const int clock_hz = cpu_mhz * 1000000;
     const int max_flash_freq = cfg_flash * 1000000;
 
@@ -701,6 +1814,20 @@ void __no_inline_not_in_flash_func(set_flash_timings)(int cpu_mhz, int cfg_flash
     if (clock_hz / divisor > 100000000 && clock_hz >= 166000000) {
         rxdelay += 1;
     }
+
+#ifdef FLASH_RXDELAY_OVERRIDE
+    /*
+     * The working 66 MHz configuration on this board reads back as
+     * M0_TIMING = 0x60007008: CLKDIV 8 with RXDELAY *0*.  Borrowing the PSRAM
+     * driver's 5.25 ns floor gave RXDELAY 6 at CLKDIV 4 and 5, and both hung
+     * at g_diag_stage 0 with POWMAN_CHIP_RESET showing a clean power-on.  If
+     * the board is happy sampling immediately at 63 MHz, six half-cycles is
+     * more likely to be too late than too early, so this makes the delay
+     * directly settable instead of derived.
+     */
+    rxdelay = FLASH_RXDELAY_OVERRIDE;
+    if (rxdelay > 7) rxdelay = 7;
+#endif
 
     qmi_hw->m[0].timing = 0x60007000 |
                         rxdelay << QMI_M0_TIMING_RXDELAY_LSB |
@@ -717,6 +1844,25 @@ static void configure_clocks(void) {
     vreg_disable_voltage_limit();
     vreg_set_voltage(CPU_VOLTAGE);
     sleep_ms(100);  // Stabilization delay
+
+#if NO_BOD
+    /*
+     * Diagnostic build only — -DNO_BOD=ON.
+     *
+     * This board reboots with POWMAN_CHIP_RESET reporting HAD_BOR while the
+     * regulator reads back correctly (VREG 1.65 V, VOUT_OK set, threshold at
+     * 1.10 V) and the die sits at ~40 C. Disabling the detector does NOT fix
+     * a dipping rail; it only stops the chip reacting to one, which is what
+     * separates "the rail genuinely collapses" from "the detector fires
+     * spuriously". If the reboots stop, the dip was not real.
+     *
+     * Do not ship this. Without the detector a genuine undervolt keeps
+     * executing on corrupted state instead of resetting, and this firmware
+     * writes to an SD card.
+     */
+    hw_clear_bits(&powman_hw->bod, POWMAN_PASSWORD_BITS | POWMAN_BOD_EN_BITS);
+    DBG_PRINT("Brownout detector DISABLED (diagnostic build)\n");
+#endif
 
     // Configure flash timing BEFORE changing clock
     set_flash_timings(CPU_CLOCK_MHZ, FLASH_MAX_FREQ_MHZ);
@@ -769,9 +1915,25 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
             vreg_set_voltage(new_voltage);
             sleep_ms(50);  // Stabilization delay
             set_flash_timings(cpu_mhz, cfg_flash);
+            // ...and the PSRAM divisor too, for the same reason: the QMI
+            // still holds the one computed for the old clock, so without this
+            // the part is overclocked from the moment the PLL moves until the
+            // psram_init_with_freq() below lands.
+            psram_set_timings(cpu_mhz, psram_mhz);
             set_sys_clock_khz(cpu_mhz * 1000, false);
         }
         console_reclock();
+    } else {
+        /*
+         * The clock is not moving, but cfg_flash still has to be applied.
+         *
+         * set_flash_timings() used to live only inside the branch above, so a
+         * config.ini that changed flash_freq alone - the CPU frequency
+         * matching what the build baked in - was read, stored, reported, and
+         * then silently ignored. PSRAM never had this problem because
+         * psram_init_with_freq() below runs unconditionally.
+         */
+        set_flash_timings(cpu_mhz, cfg_flash);
     }
 
     // Re-initialize PSRAM with the new frequency
@@ -780,6 +1942,7 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
     // Recalculate VGA PIO clock divider (vga_hw_init ran before this call)
     vga_hw_reclock();
 
+    g_diag_stage = DIAG_CLOCKS;
     DBG_PRINT("Clock reconfiguration complete: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
 }
 
@@ -792,6 +1955,7 @@ static bool init_hardware(void) {
     configure_clocks();
 
     // Initialize PSRAM first
+    g_diag_stage = DIAG_PSRAM_BEGIN;
     DBG_PRINT("Initializing PSRAM...\n");
     uint psram_pin = get_psram_pin();
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
@@ -802,6 +1966,7 @@ static bool init_hardware(void) {
         // Can't show visual error - VGA not ready yet
         return false;
     }
+    g_diag_stage = DIAG_PSRAM_OK;
     DBG_PRINT("  PSRAM test passed (8MB)\n");
 
     // Initialize VGA early so we can show errors on screen
@@ -814,6 +1979,7 @@ static bool init_hardware(void) {
     __dmb();
 
     // Initialize SD card
+    g_diag_stage = DIAG_SD_BEGIN;
     DBG_PRINT("Initializing SD card...\n");
     FRESULT res = f_mount(&fatfs, "", 1);
     if (res != FR_OK) {
@@ -822,6 +1988,7 @@ static bool init_hardware(void) {
         show_error_screen(" SD Card Error ", "Failed to mount SD card.", detail);
         // show_error_screen never returns
     }
+    g_diag_stage = DIAG_SD_MOUNTED;
     DBG_PRINT("  SD card mounted\n");
 
     // Check if 386/ directory exists
@@ -832,6 +1999,7 @@ static bool init_hardware(void) {
         // show_error_screen never returns
     }
     f_closedir(&dir);
+    g_diag_stage = DIAG_386_DIR;
     DBG_PRINT("  386/ directory found\n");
 
     // Load frank-386-specific hardware settings from INI
@@ -886,6 +2054,7 @@ static bool init_hardware(void) {
 
 #ifdef BOARD_HAS_PS2
     // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
+    g_diag_stage = DIAG_INPUT;
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
     DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
     DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
@@ -909,7 +2078,13 @@ static bool init_hardware(void) {
 #endif
 
     // Initialize NES/SNES gamepad (if pins defined for this board)
-#ifdef NESPAD_GPIO_CLK
+    //
+    // -DNO_NESPAD=1 leaves those GPIOs alone. On Z2 the pad sits on GPIO4/6/7
+    // and drives GPIO4 as its clock, which is also the board header's default
+    // UART TX pin — so anything else wired there fights it. Disabling the pad
+    // is the cheapest way to take that out of the picture when chasing
+    // instability; it costs only joystick input.
+#if defined(NESPAD_GPIO_CLK) && !defined(NO_NESPAD)
     DBG_PRINT("Initializing NES gamepad...\n");
     DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d, LATCH: GPIO%d\n",
               NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH);
@@ -927,6 +2102,17 @@ static bool init_hardware(void) {
 //=============================================================================
 // Emulator Initialization
 //=============================================================================
+
+/*
+ * Bytes still obtainable from malloc: what sbrk has not handed out
+ * yet, plus what is already free inside the arena.
+ */
+static size_t heap_free_bytes(void)
+{
+    extern char __StackLimit;   /* top of the heap region */
+    struct mallinfo mi = mallinfo();
+    return (size_t)(&__StackLimit - (char *)sbrk(0)) + mi.fordblks;
+}
 
 static bool init_emulator(void) {
     // Load configuration
@@ -997,13 +2183,30 @@ static bool init_emulator(void) {
      */
     dc_init();
 
+    /*
+     * Heap headroom before the boot's largest allocation burst.
+     *
+     * pc_new() takes ~35 KB out of the malloc heap in one go
+     * (VGAState 17092, TLB 8192, SB16State 4844, PCIBus 1156, ...)
+     * and the image runs at ~92% RAM, so it is repeatedly the first
+     * thing to run out - see the budget notes in i386.c,
+     * bbprofile.h and diskcache.h. The SDK reports that failure as
+     * an "Out of memory" panic and nothing else, so print the
+     * number that explains it before the allocation happens.
+     */
+    g_diag_free_heap = (uint32_t)heap_free_bytes();
+    g_diag_stage = DIAG_PRE_PC_NEW;
+    DBG_PRINT("  Free heap: %u bytes\n", (unsigned)g_diag_free_heap);
+
     // Create PC instance
     DBG_PRINT("\nCreating PC instance...\n");
     pc = pc_new(vga_redraw, platform_poll, NULL, NULL, &config);
     if (!pc) {
+        g_diag_pc_new_failed = 1;
         printf("ERROR: Failed to create PC instance\n");
         return false;
     }
+    g_diag_stage = DIAG_PC_NEW_OK;
 
     // Give ISR direct access to VGA register state.
     // From this point the ISR reads cr[], ar[] at the right moment.
@@ -1107,9 +2310,17 @@ static void __not_in_flash_func(core1_entry)(void) {
     }
     static repeating_timer_t m_timer = { 0 };
     int hz = 44100;
-	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
+    add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
     while(1) {
         repeat_me_often();
+#if FRANK_AUDIO_DIAG
+        /* The DWT comparator is per core, so core 1 has to arm its own.
+         * Video and audio both run here and neither was ever watched. */
+        if (FRANK_DIAG->mon_addr && !FRANK_DIAG->mon_c1) {
+            FRANK_DIAG->mon_c1 = 1u;
+            frank_mon_arm(FRANK_DIAG->mon_addr);
+        }
+#endif
         sleep_us(1);
     }
     __unreachable();
@@ -1259,7 +2470,14 @@ int main(void) {
 
     // Start the core-0 cycle counter before emulation begins.
     prof_init();
-    ps_init(clock_get_hz(clk_sys), 10000u);   /* 10 kHz PC sampling */
+    /*
+     * Sampling is NOT started here.  A 10 kHz SysTick handler running from
+     * boot buys nothing - Win+F10 zeroes the histogram before every real
+     * measurement anyway - and it means the profiler build behaves
+     * differently from the shipping build during SD mount, HDMI bring-up and
+     * the welcome animation.  ps_init() now runs only from
+     * profile_reset_runtime(), i.e. on Win+F10.
+     */
     prof_mem_bench();
 #if defined(SUBSYS_PROFILE) && defined(BOARD_C2) && !REMOTE_MEM
     /* Skipped when REMOTE_MEM is on: init_emulator() has already brought
@@ -1301,6 +2519,7 @@ int main(void) {
     static int last_vga_mode = -1;
 
     // Main emulation loop (Core 0)
+    g_diag_stage = DIAG_MAIN_LOOP;
     while (true) {
         // Skip CPU execution when paused (disk UI or settings UI active)
         if (pc->paused) {
@@ -1319,12 +2538,59 @@ int main(void) {
         }
 
         autotype_tick();
+        swdkey_tick();
+        temp_tick();
+#if PC_SAMPLE
+        if (g_ps_trigger) {
+            uint32_t req = g_ps_trigger;
+            g_ps_trigger = 0;
+            if (req == 1u) profile_reset_runtime();   /* start a clean window */
+            else           ps_stop();                 /* freeze the histogram */
+        }
+#endif
 
         // Run CPU steps - batch multiple steps for efficiency
         for (int i = 0; i < 10; i++) {
             pc_step(pc);
             throughput_tick();
+#if FRANK_AUDIO_DIAG
+            if (FRANK_DIAG->mon_addr && !FRANK_DIAG->mon_armed) {
+                FRANK_DIAG->mon_armed = 1u;
+                frank_mon_arm(FRANK_DIAG->mon_addr);
+            }
+#endif
         }
+
+#if FRANK_AUDIO_DIAG
+        /*
+         * Backstop: read the byte itself now and then.
+         *
+         * The comparator only sees accesses made by a core.  If the byte
+         * turns over while mon_hits is still zero, nothing executing on
+         * either core wrote it, and every remaining explanation lies
+         * outside the emulator - a bus master, or the PSRAM losing it.
+         * That is worth far more than another round of instrumenting store
+         * paths, so it deserves its own answer rather than being inferred
+         * from the watchpoint's silence.
+         *
+         * Once per 64 batches is about 300 us of guest time, and one
+         * uncached byte read costs less than a single guest instruction.
+         */
+        if (FRANK_DIAG->mon_addr && FRANK_DIAG->mon_bad && !FRANK_DIAG->ud_hit) {
+            static uint32_t mon_poll_div;
+            if ((++mon_poll_div & 63u) == 0u) {
+                uint32_t a = (FRANK_DIAG->mon_addr & 0x00ffffffu) | 0x15000000u;
+                uint32_t v = *(volatile uint8_t *)a;
+                FRANK_DIAG->mon_polls = FRANK_DIAG->mon_polls + 1u;
+                FRANK_DIAG->mon_seen = v;
+                if (v == FRANK_DIAG->mon_bad) {
+                    if (!FRANK_DIAG->mon_hits) FRANK_DIAG->mon_nowp = 1u;
+                    FRANK_DIAG->ud_reason = 7u;
+                    FRANK_DIAG->ud_hit = 1u;
+                }
+            }
+        }
+#endif
 
         // Poll keyboard less frequently (every 20 iterations ~5ms)
         // Keyboard events are buffered, so missing a few cycles is fine
@@ -1336,6 +2602,9 @@ int main(void) {
 
         // Check for reset request
         if (pc->reset_request) {
+            /* Guest-initiated reset: reloads the BIOS but leaves the RP2350
+             * running, so counters survive. Counted, not fatal. */
+            watchdog_hw->scratch[3]++;
             pc->reset_request = 0;
             *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
             load_bios_and_reset(pc);
@@ -1352,6 +2621,15 @@ int main(void) {
 
         // Check for shutdown
         if (pc->shutdown_state) {
+            /* FRANK_FAULT_BOX: name the exit before it reboots the board.
+             * A guest shutdown (a triple fault, typically) is answered here by
+             * a full watchdog_reboot(), which looks from the outside exactly
+             * like a hardware fault - .bss wiped, console gone, counters back
+             * to zero. Recording it distinguishes "the emulated CPU gave up"
+             * from "the RP2350 crashed". */
+            watchdog_hw->scratch[0] = 0x53485554u;   /* "SHUT" */
+            watchdog_hw->scratch[1] = (uint32_t)pc->shutdown_state;
+            watchdog_hw->scratch[2] = g_diag_stage;
             break;
         }
 #if THROTTLING

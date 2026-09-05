@@ -9,8 +9,44 @@
 #if PICO_ON_DEVICE
 #include "hardware/interp.h"
 #define SLOT_RENDER_DATA __scratch_x("slot_render_cpp")
+/*
+ * The two tables every operator touches on every sample are logsin_table and
+ * exp_table: an operator's output is exp_table[logsin_table[phase] + env].
+ * logsin_table was already placed in SCRATCH_X; exp_table was left behind and,
+ * because nothing ever writes it, the compiler put it in .rodata - i.e. in
+ * flash, reached through the XIP cache rather than out of SRAM.
+ *
+ * That matters here more than the table's size suggests. Measured on the board
+ * with SUBSYS_PROFILE while Doom was rendering, adlib_core0() was 33% of all
+ * core-0 cycles - 3760 cycles per 44.1 kHz sample - while the guest's own
+ * memory traffic was missing the same XIP cache 900k times a second and
+ * evicting these lines between every OPL call.
+ *
+ * SCRATCH_Y is the right home: it is a separate SRAM bank, so unlike
+ * __not_in_flash_func() it does not come out of the main region, where
+ * pc_new() has under a kilobyte of headroom.
+ */
+#define SLOT_RENDER_DATA_Y __scratch_y("slot_render_cpp")
+/*
+ * Deliberately NOT used for code.
+ *
+ * slot_envelope_loop() is 1380 bytes and SCRATCH_Y had 1504 free, so it fits -
+ * and the board then rebooted the *guest* as soon as Doom started, while the
+ * firmware itself stayed in its main loop. SCRATCH_Y also holds core 0's
+ * stack, and the linker only reserves PICO_STACK_SIZE (2048) for it; until
+ * this the rest of the bank was empty, so an overflow past that reservation
+ * landed in unused space and did no harm. Putting code directly beneath the
+ * stack turns that same overflow into corrupted instructions.
+ *
+ * If the OPL is to run from RAM, it has to come out of the main region - which
+ * means finding the 4.6 KB elsewhere, not borrowing the stack's slack.
+ */
+#define SLOT_RENDER_CODE_Y __scratch_y("slot_render_code")
+
 #else
 #define SLOT_RENDER_DATA
+#define SLOT_RENDER_DATA_Y
+#define SLOT_RENDER_CODE_Y
 #endif
 
 static_assert(PM_DPHASE > 0, "");
@@ -100,7 +136,7 @@ static int8_t pm_table_half[8][PM_PG_WIDTH] = {
 
 /* clang-format off */
 /* exp_table[255-x] = round((exp2((double)x / 256.0) - 1) * 1024) */
-static uint16_t exp_table[256] = {
+static uint16_t SLOT_RENDER_DATA_Y exp_table[256] = {
         1024+1018,  1024+1013,  1024+1007,  1024+1002,   1024+996,   1024+991,   1024+986,   1024+980,   1024+975,   1024+969,   1024+964,   1024+959,   1024+953,   1024+948,   1024+942,   1024+937,
         1024+932,   1024+927,   1024+921,   1024+916,   1024+911,   1024+906,   1024+900,   1024+895,   1024+890,   1024+885,   1024+880,   1024+874,   1024+869,   1024+864,   1024+859,   1024+854,
         1024+849,   1024+844,   1024+839,   1024+834,   1024+829,   1024+824,   1024+819,   1024+814,   1024+809,   1024+804,   1024+799,   1024+794,   1024+789,   1024+784,   1024+779,   1024+774,
@@ -337,19 +373,19 @@ template<bool PM> uint32_t advance_phase(SLOT_RENDER *slot, uint32_t &pm_phase) 
 #endif
 }
 
-template<bool PM> void mod_am1_fb1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template<bool PM> __attribute__((always_inline)) inline void mod_am1_fb1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     int16_t fm = (slot->output[1] + slot->output[0]) >> slot->nine_minus_FB;
     slot->output[1] = slot->output[0];
     uint32_t pg_out = advance_phase<PM>(slot, pm_phase);
     slot->mod_buffer[s] = slot->output[0] = calc_sample(slot, pg_out + fm, slot->lfo_am_buffer_lsl3[s]);
 }
 
-template<bool PM> void mod_am1_fb0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template<bool PM> __attribute__((always_inline)) inline void mod_am1_fb0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     uint32_t pg_out = advance_phase<PM>(slot, pm_phase);
     slot->mod_buffer[s] = calc_sample(slot, pg_out, slot->lfo_am_buffer_lsl3[s]);
 }
 
-template <bool PM> void mod_am0_fb1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template <bool PM> __attribute__((always_inline)) inline void mod_am0_fb1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     int16_t fm = (slot->output[1] + slot->output[0]) >> slot->nine_minus_FB;
     slot->output[1] = slot->output[0];
     uint32_t pg_out = advance_phase<PM>(slot, pm_phase);
@@ -357,13 +393,13 @@ template <bool PM> void mod_am0_fb1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, ui
     slot->mod_buffer[s] = slot->output[0] = calc_sample(slot, pg_out + fm, 0);
 }
 
-template <bool PM> void mod_am0_fb0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template <bool PM> __attribute__((always_inline)) inline void mod_am0_fb0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     uint32_t pg_out = advance_phase<PM>(slot, pm_phase);
     slot->mod_buffer[s] = calc_sample(slot, pg_out, 0);
 
 }
 
-template <bool PM> void alg0_am1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template <bool PM> __attribute__((always_inline)) inline void alg0_am1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     // todo is this masking realy necessary; i doubt it. .. seems to be always even anyway
 //        int32_t fm = 2 * (opl->mod_buffer[s] >> 1);
     int32_t fm = slot->mod_buffer[s];
@@ -372,7 +408,7 @@ template <bool PM> void alg0_am1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint3
     slot->buffer[s] += val;
 }
 
-template <bool PM> void alg0_am0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template <bool PM> __attribute__((always_inline)) inline void alg0_am0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     // todo could reset these when we start a new note
 //    slot->output[1] = slot->output[0];
 
@@ -386,23 +422,88 @@ template <bool PM> void alg0_am0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint3
 }
 
 
-template <bool PM> void alg1_am1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template <bool PM> __attribute__((always_inline)) inline void alg1_am1_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     uint32_t pg_out = advance_phase<PM>(slot, pm_phase);
     int16_t val = calc_sample(slot, pg_out, slot->lfo_am_buffer_lsl3[s]);
     slot->buffer[s] += val + slot->mod_buffer[s];
 }
 
-template <bool PM> void alg1_am0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+template <bool PM> __attribute__((always_inline)) inline void alg1_am0_fn(SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
     uint32_t pg_out = advance_phase<PM>(slot, pm_phase);
     int16_t val = calc_sample(slot, pg_out, 0);
     slot->buffer[s] += val + slot->mod_buffer[s];
 }
 
+/*
+ * GCC ignores section attributes on these template instantiations themselves.
+ * Concrete wrappers give the linker real SRAM functions, while always_inline
+ * above ensures that each wrapper contains the kernel body instead of calling
+ * an XIP-resident template instance.
+ */
+#if PICO_ON_DEVICE && defined(OPL_KERNELS_RAM)
+#define DEFINE_RAM_KERNEL_WRAPPERS(kernel)                                      \
+    static void __not_in_flash_func(kernel##_pm0_ram)(                          \
+            SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {                \
+        kernel<false>(slot, pm_phase, s);                                        \
+    }                                                                            \
+    static void __not_in_flash_func(kernel##_pm1_ram)(                          \
+            SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {                \
+        kernel<true>(slot, pm_phase, s);                                         \
+    }
+
+DEFINE_RAM_KERNEL_WRAPPERS(mod_am1_fb1_fn)
+DEFINE_RAM_KERNEL_WRAPPERS(mod_am1_fb0_fn)
+DEFINE_RAM_KERNEL_WRAPPERS(mod_am0_fb1_fn)
+DEFINE_RAM_KERNEL_WRAPPERS(mod_am0_fb0_fn)
+DEFINE_RAM_KERNEL_WRAPPERS(alg0_am1_fn)
+DEFINE_RAM_KERNEL_WRAPPERS(alg0_am0_fn)
+DEFINE_RAM_KERNEL_WRAPPERS(alg1_am1_fn)
+DEFINE_RAM_KERNEL_WRAPPERS(alg1_am0_fn)
+
+#undef DEFINE_RAM_KERNEL_WRAPPERS
+#define SLOT_KERNEL(kernel, pm) ((pm) ? kernel##_pm1_ram : kernel##_pm0_ram)
+#define SLOT_MOD_AM1_FB0_KERNEL(pm) SLOT_KERNEL(mod_am1_fb0_fn, pm)
+#define SLOT_ALG0_AM0_KERNEL(pm) SLOT_KERNEL(alg0_am0_fn, pm)
+#elif PICO_ON_DEVICE && defined(OPL_HOT_KERNEL_RAM)
+static void __not_in_flash_func(mod_am1_fb0_fn_pm0_ram)(
+        SLOT_RENDER *slot, uint32_t& pm_phase, uint32_t s) {
+    mod_am1_fb0_fn<false>(slot, pm_phase, s);
+}
+#define SLOT_KERNEL(kernel, pm) kernel<pm>
+#define SLOT_MOD_AM1_FB0_KERNEL(pm) \
+    ((pm) ? mod_am1_fb0_fn<true> : mod_am1_fb0_fn_pm0_ram)
+#else
+#define SLOT_KERNEL(kernel, pm) kernel<pm>
+#define SLOT_MOD_AM1_FB0_KERNEL(pm) mod_am1_fb0_fn<pm>
+#endif
+
 #if PICO_ON_DEVICE
 extern "C" uint32_t test_slot_asm(SLOT_RENDER *slot, uint32_t nsamples, uint32_t eg_counter, uint fn);
 #endif
 
-template <int F_NUM, typename F> uint32_t slot_envelope_loop(F&& fn, SLOT_RENDER *slot, uint32_t nsamples, uint32_t eg_counter, uint32_t pm_phase) {
+/*
+ * One function, not sixteen.
+ *
+ * This was `template <int F_NUM, typename F>`, and with eight operator kernels
+ * times two PM values it was instantiated sixteen times at 1200 bytes each -
+ * 19 KB of near-identical code.  Near-identical because F_NUM is used exactly
+ * once in the compiled path, in the `if (F_NUM < 8)` below (the other use is
+ * inside `#if EMU8950_ASM`, which this build does not enable), and because the
+ * kernel is reached through a call rather than inlined - `mod_am1_fb0_fn<false>`
+ * shows up as its own 92-byte symbol holding 6.13% of core 0 in the PC sampler.
+ *
+ * The cost of that duplication is not flash space, it is the XIP cache: 19 KB
+ * of setup code cannot stay resident against the guest's own PSRAM traffic, so
+ * each of the ~12k calls per second re-fetches its copy from flash.  Collapsed
+ * to a single instantiation it is small enough to keep, and small enough to
+ * consider placing in SRAM outright.
+ *
+ * F_NUM becomes a runtime argument, costing one branch per call - not per
+ * sample - and fn becomes a plain pointer, which it effectively already was.
+ */
+typedef void (*slot_render_fn_t)(SLOT_RENDER *, uint32_t &, uint32_t);
+
+static uint32_t __not_in_flash_func(slot_envelope_loop)(slot_render_fn_t fn, int F_NUM, SLOT_RENDER *slot, uint32_t nsamples, uint32_t eg_counter, uint32_t pm_phase) {
     // factored out as it is constant per call
     slot->efix_pg_phase_multiplier = ml_table[slot->patch->ML] << slot->blk;
     uint32_t efix_pg_pm_x_fnum3ff = (slot->fnum & 0x3ff) * slot->efix_pg_phase_multiplier;
@@ -604,16 +705,16 @@ template<bool PM> uint32_t slot_mod_linear(OPL *opl, SLOT_RENDER *slot, uint32_t
     if (slot->patch->AM) {
         if (slot->patch->FB) {
             slot->nine_minus_FB = 9 - slot->patch->FB;
-            return slot_envelope_loop<6+PM>(mod_am1_fb1_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+            return slot_envelope_loop(SLOT_KERNEL(mod_am1_fb1_fn, PM), 6+PM, slot, nsamples, eg_counter, pm_phase);
         } else {
-            return slot_envelope_loop<2+PM>(mod_am1_fb0_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+            return slot_envelope_loop(SLOT_MOD_AM1_FB0_KERNEL(PM), 2+PM, slot, nsamples, eg_counter, pm_phase);
         }
     } else {
         if (slot->patch->FB) {
             slot->nine_minus_FB = 9 - slot->patch->FB;
-            return slot_envelope_loop<4+PM>(mod_am0_fb1_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+            return slot_envelope_loop(SLOT_KERNEL(mod_am0_fb1_fn, PM), 4+PM, slot, nsamples, eg_counter, pm_phase);
         } else {
-            return slot_envelope_loop<0+PM>(mod_am0_fb0_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+            return slot_envelope_loop(SLOT_KERNEL(mod_am0_fb0_fn, PM), 0+PM, slot, nsamples, eg_counter, pm_phase);
         }
     }
 }
@@ -627,9 +728,9 @@ extern "C" uint32_t slot_mod_linear(OPL *opl, SLOT_RENDER *slot, uint32_t nsampl
 
 template<bool PM> uint32_t slot_car_linear_alg0(OPL *opl, SLOT_RENDER *slot, uint32_t nsamples, uint32_t eg_counter, uint32_t pm_phase) {
     if (slot->patch->AM) {
-        return slot_envelope_loop<10+PM>(alg0_am1_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+        return slot_envelope_loop(SLOT_KERNEL(alg0_am1_fn, PM), 10+PM, slot, nsamples, eg_counter, pm_phase);
     } else {
-        return slot_envelope_loop<8+PM>(alg0_am0_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+        return slot_envelope_loop(SLOT_KERNEL(alg0_am0_fn, PM), 8+PM, slot, nsamples, eg_counter, pm_phase);
     }
 }
 
@@ -643,9 +744,9 @@ extern "C" uint32_t slot_car_linear_alg0(OPL *opl, SLOT_RENDER *slot, uint32_t n
 template<bool PM> uint32_t slot_car_linear_alg1(OPL *opl, SLOT_RENDER *slot, uint32_t nsamples, uint32_t eg_counter, uint32_t pm_phase) {
 
     if (slot->patch->AM) {
-        return slot_envelope_loop<14+PM>(alg1_am1_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+        return slot_envelope_loop(SLOT_KERNEL(alg1_am1_fn, PM), 14+PM, slot, nsamples, eg_counter, pm_phase);
     } else {
-        return slot_envelope_loop<12+PM>(alg1_am0_fn<PM>, slot, nsamples, eg_counter, pm_phase);
+        return slot_envelope_loop(SLOT_KERNEL(alg1_am0_fn, PM), 12+PM, slot, nsamples, eg_counter, pm_phase);
     }
 }
 

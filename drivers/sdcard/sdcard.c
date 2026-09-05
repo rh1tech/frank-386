@@ -640,21 +640,56 @@ DRESULT disk_ioctl (
  * fdd.c and disk.c. It measures the card transfer, not FatFS's own
  * bookkeeping on top of it, so treat the figure as a lower bound.
  */
+/*
+ * Windowed disk-stall instrumentation.
+ *
+ * Every guest disk access funnels through here, and it runs on core 0 inside
+ * cpui386_step(). However long it takes is therefore time in which neither
+ * adlib_core0() nor i8257_dma_run() advances, so both audio producers starve
+ * together: AdLib holds only 2.9 ms, and SB16's buffer is topped up
+ * incrementally rather than kept full. A read past a couple of milliseconds
+ * is audible. Cache hits are timed too and cost ~0 us, so ops covers all
+ * traffic. The F7 stats dump reads and clears these.
+ */
+uint32_t g_disk_read_ops;
+uint32_t g_disk_read_max_us;
+uint32_t g_disk_read_total_us;
+uint32_t g_disk_stall_2ms;
+
+void disk_stall_snapshot(uint32_t *ops, uint32_t *max_us,
+			 uint32_t *total_us, uint32_t *stalls)
+{
+	*ops      = g_disk_read_ops;      g_disk_read_ops = 0;
+	*max_us   = g_disk_read_max_us;   g_disk_read_max_us = 0;
+	*total_us = g_disk_read_total_us; g_disk_read_total_us = 0;
+	*stalls   = g_disk_stall_2ms;     g_disk_stall_2ms = 0;
+}
+
 DRESULT disk_read (BYTE drv, BYTE *buff, LBA_t sector, UINT count)
 {
+	const uint32_t t_enter = time_us_32();
+	DRESULT r;
+
 	/* Served from the slave's PSRAM when the whole request is resident;
 	 * roughly 30x faster than the same blocks over SPI. */
-	if (dc_read((uint32_t)sector, (uint32_t)count, (uint8_t *)buff))
-		return RES_OK;
-
-	PROF_T(t_disk);
-	DRESULT r = disk_read_impl(drv, buff, sector, count);
+	if (dc_read((uint32_t)sector, (uint32_t)count, (uint8_t *)buff)) {
+		r = RES_OK;
+	} else {
+		PROF_T(t_disk);
+		r = disk_read_impl(drv, buff, sector, count);
 #if SUBSYS_PROFILE
-	PROF_ADD(t_disk, disk);
-	g_prof.disk_ops++;
+		PROF_ADD(t_disk, disk);
+		g_prof.disk_ops++;
 #endif
-	if (r == RES_OK)
-		dc_fill((uint32_t)sector, (uint32_t)count, (const uint8_t *)buff);
+		if (r == RES_OK)
+			dc_fill((uint32_t)sector, (uint32_t)count, (const uint8_t *)buff);
+	}
+
+	const uint32_t dt = time_us_32() - t_enter;
+	g_disk_read_ops++;
+	g_disk_read_total_us += dt;
+	if (dt > g_disk_read_max_us) g_disk_read_max_us = dt;
+	if (dt >= 2000u) g_disk_stall_2ms++;
 	return r;
 }
 

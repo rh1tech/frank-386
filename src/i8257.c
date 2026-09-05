@@ -22,6 +22,7 @@
  * THE SOFTWARE.
  */
 #include "i8257.h"
+#include "audiodiag.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -76,6 +77,7 @@ static const int channels[8] = {-1, 2, 3, 1, -1, -1, -1, 0};
 
 void i8257_write_page(void *opaque, uint32_t nport, uint32_t data)
 {
+    frank_diag_ev(FRANK_EV_DMA_IO, (uint8_t)(nport & 0xff), 0x80, (uint32_t)data);
     I8257State *d = opaque;
     int ichan;
 
@@ -89,6 +91,7 @@ void i8257_write_page(void *opaque, uint32_t nport, uint32_t data)
 
 void i8257_write_pageh(void *opaque, uint32_t nport, uint32_t data)
 {
+    frank_diag_ev(FRANK_EV_DMA_IO, (uint8_t)(nport & 0xff), 0x480, (uint32_t)data);
     I8257State *d = opaque;
     int ichan;
 
@@ -169,6 +172,7 @@ uint64_t i8257_read_chan(void *opaque, hwaddr nport, unsigned size)
 void i8257_write_chan(void *opaque, hwaddr nport, uint64_t data,
                       unsigned int size)
 {
+    frank_diag_ev(FRANK_EV_DMA_IO, (uint8_t)(nport & 0xff), 0x0, (uint32_t)data);
     I8257State *d = opaque;
     int iport, ichan, nreg;
     I8257Regs *r;
@@ -188,6 +192,7 @@ void i8257_write_chan(void *opaque, hwaddr nport, uint64_t data,
 void i8257_write_cont(void *opaque, hwaddr nport, uint64_t data,
                       unsigned int size)
 {
+    frank_diag_ev(FRANK_EV_DMA_IO, (uint8_t)(nport & 0xff), 0x8, (uint32_t)data);
     I8257State *d = opaque;
     int iport, ichan = 0;
 
@@ -450,6 +455,49 @@ int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
     return len;
 }
 
+/*
+ * Account for a DMA cycle that was performed outside a transfer handler.
+ *
+ * The 8237 advances the channel on every cycle it runs, so a guest can watch
+ * the current-count register move and learn which channel a card is wired to.
+ * i8257_dma_write_memory() moves the bytes but leaves the channel untouched,
+ * which is right for the floppy and for Sound Blaster playback: both are
+ * called from inside a transfer handler, and i8257_channel_run() writes
+ * now[COUNT] from the handler's return value afterwards.
+ *
+ * DSP command 0xe2 is the exception.  It performs exactly one DMA cycle on
+ * its own, and a driver identifies the card's DMA channel by issuing it and
+ * then reading the count back.  With the channel frozen there is nothing to
+ * see, and Supaplex's BLASTER.SND spins on the count register - measured at
+ * forty thousand reads of port 0x13, the 8237 alias of the channel 1 count -
+ * before giving up, masking the channel, uninstalling its interrupt handler
+ * and restarting the application.
+ */
+void i8257_dma_advance(IsaDma *obj, int nchan, int len)
+{
+    I8257State *s = I8257(obj);
+    I8257Regs *r = &s->regs[nchan & 3];
+
+    r->now[COUNT] += len;
+}
+
+/*
+ * How far this channel has already been transferred.
+ *
+ * The memory helpers take the position within the transfer as `pos` and add
+ * it to now[ADDR]; a transfer handler passes the absolute position it was
+ * given, so the two agree.  A caller doing a single cycle of its own has
+ * nothing to pass, and passing 0 makes every such cycle land on the same
+ * byte - which is what let two DSP 0xe2 identification writes both hit
+ * Supaplex's dispatch table entry instead of two consecutive scratch bytes.
+ */
+uint32_t i8257_dma_get_pos(IsaDma *obj, int nchan)
+{
+    I8257State *s = I8257(obj);
+
+    return s->regs[nchan & 3].now[COUNT];
+}
+
 int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
                            int len)
 {
@@ -473,6 +521,9 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
             else
 #endif
                 s->phys_mem[a] = p[i];
+            /* Marked 0xDA00 so a hit is unmistakably a bus-master write and
+             * not a store by the emulated CPU. */
+            frank_diag_wp(a, p[i], 0xda00u, (uint32_t)nchan);
         }
         //cpu_physical_memory_write (addr - pos - len, buf, len);
         /* What about 16bit transfers? */
@@ -491,6 +542,9 @@ int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
             else
 #endif
                 s->phys_mem[a] = p[i];
+            /* Marked 0xDA00 so a hit is unmistakably a bus-master write and
+             * not a store by the emulated CPU. */
+            frank_diag_wp(a, p[i], 0xda00u, (uint32_t)nchan);
         }
         //cpu_physical_memory_write (addr + pos, buf, len);
     }

@@ -382,6 +382,26 @@ void usbhid_init(void) {
 }
 
 void usbhid_task(void) {
+    /*
+     * Rate limit, because of where this is reached from.
+     *
+     * platform_poll() -> poll_keyboard() -> usbkbd_tick() runs once per
+     * pc_step(), so with USB HID compiled in the whole TinyUSB host stack
+     * lands in the emulator's innermost loop. It is flash-resident, so each
+     * call costs its own work plus the XIP cache lines the interpreter was
+     * using - enough to roughly halve emulated throughput against the same
+     * build with USB_HID_ENABLED=OFF.
+     *
+     * Nothing is lost by slowing it down. A USB frame is 1 ms and no HID
+     * endpoint reports faster than that, so polling the host stack at 1 kHz
+     * is already oversampling every keyboard, mouse and gamepad it can see.
+     * Enumeration is driven by the same task and is equally happy at 1 kHz.
+     */
+    static uint32_t last_task_us = 0;
+    const uint32_t now = time_us_32();
+    if ((uint32_t)(now - last_task_us) < 1000u) return;
+    last_task_us = now;
+
     // Process USB events
     tuh_task();
 

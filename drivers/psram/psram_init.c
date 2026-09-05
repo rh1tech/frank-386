@@ -10,6 +10,7 @@
 #include "hardware/structs/xip_ctrl.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include <string.h>
 
@@ -17,6 +18,99 @@
 #ifndef PSRAM_MAX_FREQ_MHZ
 #define PSRAM_MAX_FREQ_MHZ 133
 #endif
+
+/**
+ * Compute and apply the QMI M1 timing for a system clock of clock_hz.
+ * This function MUST run from RAM, not flash, as it retimes the XIP controller.
+ */
+static void __no_inline_not_in_flash_func(psram_write_timing)(int clock_hz, int freq_mhz) {
+    // Calculate optimal clock divisor for target PSRAM frequency
+    const int max_psram_freq = freq_mhz * 1000000;
+
+    int divisor = (clock_hz + max_psram_freq - 1) / max_psram_freq;
+    if (divisor == 1 && clock_hz > 100000000) {
+        divisor = 2;  // Minimum divisor of 2 at high system clocks
+    }
+    if (divisor > 255) divisor = 255;   /* CLKDIV is 8 bits */
+
+    const int clock_period_fs = 1000000000000000ll / clock_hz;
+
+    // RX delay compensation for high-speed operation
+    int rxdelay = divisor;
+    if (clock_hz / divisor > 100000000) {
+        rxdelay += 1;
+    }
+
+    /*
+     * RXDELAY is counted in units of *half* a system clock cycle (see
+     * QMI_M1_TIMING_RXDELAY), but what it has to cover - pad output delay, the
+     * PSRAM's own access time, pad input delay - is a fixed physical time.
+     * Deriving it from the divisor therefore moves the sampling instant
+     * earlier as the system clock rises, and it can walk out of the
+     * data-valid window without the divisor changing at all.
+     *
+     * Measured on Waveshare RP2350-PiZero (Z2), 8 MB APS6404:
+     *
+     *   504 MHz, psram_freq=84   divisor 6  rxdelay 6  5.95 ns   works
+     *   378 MHz, psram_freq=133  divisor 3  rxdelay 4  5.29 ns   works
+     *   504 MHz, psram_freq=133  divisor 4  rxdelay 5  4.96 ns   hangs at boot
+     *
+     * The last two run the PSRAM at the same 126 MHz and differ only in when
+     * the data is sampled, so the requirement is a time, and it lies between
+     * 4.96 and 5.29 ns.  Floor the delay at 5.25 ns and leave the divisor
+     * heuristic alone wherever it already clears that.  This raises only the
+     * failing case: both working configurations above compute what they did
+     * before, so a board that boots today still boots.
+     */
+    const int rx_floor = (2 * 5250000 + clock_period_fs - 1) / clock_period_fs;
+    if (rxdelay < rx_floor) rxdelay = rx_floor;
+    if (rxdelay > 7) rxdelay = 7;   /* QMI_M1_TIMING_RXDELAY is 3 bits */
+
+    // Calculate timing parameters
+    int max_select_val = (125 * 1000000) / clock_period_fs;
+    if (max_select_val > 63) max_select_val = 63;   /* MAX_SELECT is 6 bits */
+    int min_deselect = (18 * 1000000 + (clock_period_fs - 1)) / clock_period_fs - (divisor + 1) / 2;
+    if (min_deselect < 0) min_deselect = 0;
+    if (min_deselect > 31) min_deselect = 31;       /* MIN_DESELECT is 5 bits */
+
+    // Configure M1 (PSRAM) timing
+    qmi_hw->m[1].timing =
+        1 << QMI_M1_TIMING_COOLDOWN_LSB |
+        QMI_M1_TIMING_PAGEBREAK_VALUE_1024 << QMI_M1_TIMING_PAGEBREAK_LSB |
+        max_select_val << QMI_M1_TIMING_MAX_SELECT_LSB |
+        min_deselect << QMI_M1_TIMING_MIN_DESELECT_LSB |
+        rxdelay << QMI_M1_TIMING_RXDELAY_LSB |
+        divisor << QMI_M1_TIMING_CLKDIV_LSB;
+}
+
+/**
+ * Re-time the PSRAM for a system clock of cpu_mhz that has not been applied
+ * yet.
+ *
+ * psram_init_with_freq() derives the divisor from the *live* clk_sys, so it
+ * can only ever be called once the PLL has already moved.  Every caller that
+ * raises the system clock therefore left the PSRAM running with the divisor
+ * computed for the old, lower clock - on the HDMI boost path that is 150 MHz
+ * of divisor against a 504 MHz clock, and the part is driven far out of spec
+ * until the re-init lands.  The QMI documents the cure directly: raise CLKDIV
+ * first, force a dummy access so it takes effect, and only then move the
+ * clock.  This is the PSRAM twin of set_flash_timings().
+ *
+ * Call it *before* set_sys_clock_khz() when raising the clock; when lowering,
+ * the old divisor is merely conservative, so re-time afterwards instead.
+ */
+void __no_inline_not_in_flash_func(psram_set_timings)(int cpu_mhz, int psram_mhz) {
+    psram_write_timing(cpu_mhz * 1000000, psram_mhz);
+
+    /* "If software is increasing CLKDIV in anticipation of an increase in the
+     * system clock frequency, a dummy access to either memory window (and
+     * appropriate processor barriers/fences) must be inserted after the
+     * Mx_TIMING write to ensure the SCK divisor change is in effect _before_
+     * the system clock is changed." - RP2350 datasheet, QMI_M1_TIMING_CLKDIV. */
+    __compiler_memory_barrier();
+    (void)*(volatile uint32_t *)PSRAM_BASE_ADDR;
+    __dmb();
+}
 
 /**
  * Initialize PSRAM hardware with specified frequency.
@@ -39,33 +133,7 @@ void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_m
     qmi_hw->direct_tx = QMI_DIRECT_TX_NOPUSH_BITS | CMD_QPI_EN;
     while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS);
 
-    // Calculate optimal clock divisor for target PSRAM frequency
-    const int max_psram_freq = freq_mhz * 1000000;
-
-    int divisor = (clock_hz + max_psram_freq - 1) / max_psram_freq;
-    if (divisor == 1 && clock_hz > 100000000) {
-        divisor = 2;  // Minimum divisor of 2 at high system clocks
-    }
-
-    // RX delay compensation for high-speed operation
-    int rxdelay = divisor;
-    if (clock_hz / divisor > 100000000) {
-        rxdelay += 1;
-    }
-
-    // Calculate timing parameters
-    const int clock_period_fs = 1000000000000000ll / clock_hz;
-    const int max_select_val = (125 * 1000000) / clock_period_fs;
-    const int min_deselect = (18 * 1000000 + (clock_period_fs - 1)) / clock_period_fs - (divisor + 1) / 2;
-
-    // Configure M1 (PSRAM) timing
-    qmi_hw->m[1].timing =
-        1 << QMI_M1_TIMING_COOLDOWN_LSB |
-        QMI_M1_TIMING_PAGEBREAK_VALUE_1024 << QMI_M1_TIMING_PAGEBREAK_LSB |
-        max_select_val << QMI_M1_TIMING_MAX_SELECT_LSB |
-        min_deselect << QMI_M1_TIMING_MIN_DESELECT_LSB |
-        rxdelay << QMI_M1_TIMING_RXDELAY_LSB |
-        divisor << QMI_M1_TIMING_CLKDIV_LSB;
+    psram_write_timing(clock_hz, freq_mhz);
 
     // Configure read format: Quad mode, 0xEB fast read command, 6 dummy cycles
     qmi_hw->m[1].rfmt =

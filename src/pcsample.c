@@ -28,6 +28,8 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "hardware/structs/systick.h"
+#include "hardware/exception.h"
+#include <stdbool.h>
 
 /* Histogram over the RAM-resident text region. cpu_exec1 lives at
  * ~0x20002c5c and runs 119 KB; 0x20000000..0x20040000 at 64-byte
@@ -53,7 +55,20 @@ void __not_in_flash_func(ps_record)(uint32_t pc) {
  * offset 24 of the eight-word hardware frame. r0-r3/r12 are already
  * stacked by the exception, so ps_record may clobber them freely.
  */
-__attribute__((naked)) void __not_in_flash_func(isr_systick)(void) {
+/*
+ * NOT named isr_systick.
+ *
+ * The SDK resolves the vector table at link time, so defining that symbol
+ * changes the shipping image whether or not sampling is ever armed.  The
+ * v8.10.2/v8.10.3 profiler builds did not boot while the otherwise identical
+ * V8.10.2-DIAG did, with only 2,152 bytes more RAM against a 43 KB heap and
+ * .data still 3,388 bytes clear of the 4 KB .bss boundary - RAM was measured
+ * and ruled out, leaving the vector override as the difference.
+ *
+ * Installed at runtime from ps_init() instead, so the image boots exactly like
+ * the shipping one and only diverges once the user presses Win+F10.
+ */
+__attribute__((naked)) void __not_in_flash_func(ps_systick_handler)(void) {
     __asm volatile(
         "mov   r0, lr            \n"
         "tst   r0, #4            \n"
@@ -69,6 +84,12 @@ __attribute__((naked)) void __not_in_flash_func(isr_systick)(void) {
 }
 
 void ps_init(uint32_t sys_hz, uint32_t sample_hz) {
+    static bool installed = false;
+    if (!installed) {
+        exception_set_exclusive_handler(SYSTICK_EXCEPTION, ps_systick_handler);
+        installed = true;
+    }
+
     memset(ps_hist, 0, sizeof(ps_hist));
     ps_total = 0;
     ps_outside = 0;

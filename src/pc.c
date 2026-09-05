@@ -1,4 +1,5 @@
 #include "pc.h"
+#include "audiodiag.h"
 #include "ide.h"
 #include "dss.h"
 #include "misc.h"
@@ -267,9 +268,22 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	case 0x30c: case 0x30d: case 0x30e: case 0x30f:
 	case 0x310: case 0x31f:
 		return 0xff;
+	/*
+	 * 0x10-0x1f is the 8237's own alias of 0x00-0x0f.  The chip has four
+	 * address inputs and its chip select is decoded from the high bits being
+	 * zero, so on a real PC every port from 0x00 to 0x1f selects DMA
+	 * controller 1 - and drivers use that.  Supaplex's BLASTER.SND reads the
+	 * channel 1 current-count register at 0x13 and waits for it to move;
+	 * measured at forty thousand reads inside the window where the game
+	 * fails.  Undecoded, those reads answered with the bus default, the wait
+	 * never finished, and the driver masked the channel, uninstalled its
+	 * interrupt handler and restarted the application.
+	 */
 	case 0x00: case 0x01: case 0x02: case 0x03:
 	case 0x04: case 0x05: case 0x06: case 0x07:
-		val = i8257_read_chan(pc->isa_dma, addr - 0x00, 1);
+	case 0x10: case 0x11: case 0x12: case 0x13:
+	case 0x14: case 0x15: case 0x16: case 0x17:
+		val = i8257_read_chan(pc->isa_dma, addr & 0x07, 1);
 		return val;
 	case 0xf1f4: {
 		/* emulink: single-byte read (BIOS probes this way too) */
@@ -278,7 +292,9 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 	}
 	case 0x08: case 0x09: case 0x0a: case 0x0b:
 	case 0x0c: case 0x0d: case 0x0e: case 0x0f:
-		val = i8257_read_cont(pc->isa_dma, addr - 0x08, 1);
+	case 0x18: case 0x19: case 0x1a: case 0x1b:
+	case 0x1c: case 0x1d: case 0x1e: case 0x1f:
+		val = i8257_read_cont(pc->isa_dma, addr & 0x07, 1);
 		return val;
 	case 0x81: case 0x82: case 0x83: case 0x87:
 		val = i8257_read_page(pc->isa_dma, addr - 0x80);
@@ -354,6 +370,7 @@ static __always_inline u8 _pc_io_read(void *o, int addr)
 }
 
 static u8 pc_io_read(void *o, int addr) {
+	frank_diag_port((uint32_t)addr, 0);
 	u8 r = _pc_io_read(o, addr);
 	debug_write("R8: %ph <- %02Xh\n", addr, r);
 	return r;
@@ -395,7 +412,17 @@ static __always_inline u16 _pc_io_read16(void *o, int addr)
 			return 0xff00u | gameport_read();
 		return 0xfff0u;
 	default:
-		return 0;
+		/*
+		 * An 8-bit device answers a word cycle on the ISA bus with two
+		 * byte cycles, on addr and addr+1 - the write path below already
+		 * splits that way.  Returning 0 was worse than merely wrong: an
+		 * unclaimed bus reads 0xff, and a value that never changes hangs
+		 * any loop waiting for a port to move.  Skunny times itself with
+		 * exactly such a loop - IN AX, 0x40 twice, spin while the two are
+		 * equal - and waited forever on a counter frozen at zero.
+		 */
+		return (u16)pc_io_read(o, addr) |
+		       ((u16)pc_io_read(o, (addr + 1) & 0xffff) << 8);
 	}
 }
 
@@ -427,11 +454,14 @@ static __always_inline u32 _pc_io_read32(void *o, int addr)
 	case 0xf1f0:
 		return emulink_read32(pc);
 	default:
-		return 0;
+		/* The same split one level up: two word cycles. */
+		return (u32)pc_io_read16(o, addr) |
+		       ((u32)pc_io_read16(o, (addr + 2) & 0xffff) << 16);
 	}
 }
 
 static u32 pc_io_read32(void *o, int addr) {
+	frank_diag_port((uint32_t)addr, 0);
 	u32 r = _pc_io_read32(o, addr);
 	debug_write("R32: %ph <- %08Xh\n", addr, r);
 	return r;
@@ -462,6 +492,7 @@ inline static void out_ems(const uint16_t port, const uint8_t data) {
 
 static void pc_io_write(void *o, int addr, u8 val)
 {
+	frank_diag_port((uint32_t)addr, 1);
 	cp_io_write();
 	debug_write("W8: %ph -> %02Xh\n", addr, val);
 	PC *pc = o;
@@ -539,6 +570,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 		kbd_write_command(pc->i8042, addr, val);
 		return;
 	case 0x61:
+		FRANK_DIAG_COUNT(port61);
 		pcspk_ioport_write(pc->pcspk, val);
 		return;
 	case 0x220: case 0x221: case 0x222: case 0x223:
@@ -572,11 +604,15 @@ static void pc_io_write(void *o, int addr, u8 val)
 		return;
 	case 0x00: case 0x01: case 0x02: case 0x03:
 	case 0x04: case 0x05: case 0x06: case 0x07:
-		i8257_write_chan(pc->isa_dma, addr - 0x00, val, 1);
+	case 0x10: case 0x11: case 0x12: case 0x13:
+	case 0x14: case 0x15: case 0x16: case 0x17:
+		i8257_write_chan(pc->isa_dma, addr & 0x07, val, 1);
 		return;
 	case 0x08: case 0x09: case 0x0a: case 0x0b:
 	case 0x0c: case 0x0d: case 0x0e: case 0x0f:
-		i8257_write_cont(pc->isa_dma, addr - 0x08, val, 1);
+	case 0x18: case 0x19: case 0x1a: case 0x1b:
+	case 0x1c: case 0x1d: case 0x1e: case 0x1f:
+		i8257_write_cont(pc->isa_dma, addr & 0x07, val, 1);
 		return;
 	case 0x81: case 0x82: case 0x83: case 0x87:
 		i8257_write_page(pc->isa_dma, addr - 0x80, val);
@@ -617,6 +653,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 		}
 		return;
 	case 0x226: case 0x22c:
+		FRANK_DIAG_COUNT(sb_dsp);
 		if (pc->sb16_enabled) {
 			sb16_dsp_write(pc->sb16, addr, val);
 		}
@@ -632,6 +669,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 	/* Covox Speech Thing (parallel port DAC)
 	 * 0x278 = LPT2 data. */
 	case 0x278:
+		FRANK_DIAG_COUNT(covox);
 		if (pc->covox_enabled)
 			pc->covox_sample = val;
 		return;
@@ -666,6 +704,7 @@ static void pc_io_write(void *o, int addr, u8 val)
 
 static void pc_io_write16(void *o, int addr, u16 val)
 {
+	frank_diag_port((uint32_t)addr, 1);
 	debug_write("W16: %ph -> %04Xh\n", addr, val);
 	PC *pc = o;
 	switch(addr) {
@@ -675,6 +714,14 @@ static void pc_io_write16(void *o, int addr, u16 val)
 		return;
 	case 0x170:
 		ide_data_writew(pc->ide2, val);
+		return;
+	/* A common AdLib fast path packs the register number in AL and its
+	 * value in AH, then uses one OUT DX,AX.  The YM3812 is an 8-bit device,
+	 * so the ISA word cycle addresses its adjacent index/data ports. */
+	case 0x220: case 0x222: case 0x228:
+	case 0x388: case 0x38a:
+		pc_io_write(o, addr, (uint8_t)val);
+		pc_io_write(o, addr + 1, (uint8_t)(val >> 8));
 		return;
     case 0x260: case 0x261: case 0x262: case 0x263:
 		pc_io_write(o, addr, (uint8_t) val);
@@ -708,6 +755,7 @@ static void pc_io_write16(void *o, int addr, u16 val)
 
 static void pc_io_write32(void *o, int addr, u32 val)
 {
+	frank_diag_port((uint32_t)addr, 1);
 	debug_write("W32: %ph -> %08Xh\n", addr, val);
 	PC *pc = o;
 	switch(addr) {
@@ -769,6 +817,8 @@ void __not_in_flash_func(pc_step)(PC *pc)
 {
 	PROF_T(t_total);
 	PROF_T(t_dev);
+	FRANK_PROF_T(ft_total);
+	FRANK_PROF_T(ft_dev);
 	/* reset_request is handled in main.c via load_bios_and_reset() */
 	int refresh = vga_step(pc->vga);
 	i8254_update_irq(pc->pit);
@@ -778,8 +828,11 @@ void __not_in_flash_func(pc_step)(PC *pc)
 	kbd_step(pc->i8042);
 	i8257_dma_run(pc->isa_dma);
 	i8257_dma_run(pc->isa_hdma);
+	if (pc->sb16_enabled)
+		sb16_poll(pc->sb16);
 	if (pc->fdc) fdc_tick(pc->fdc);
 	PROF_ADD(t_dev, devices);
+	FRANK_PROF_ADD(ft_dev, prof_dev);
 #if !defined(BUILD_ESP32) && !defined(RP2350_BUILD)
 	pc->poll(pc->redraw_data);
 	if (refresh) {
@@ -811,29 +864,165 @@ void __not_in_flash_func(pc_step)(PC *pc)
 #if defined(BUILD_ESP32)
 	cpui386_step(pc->cpu, 512);
 #elif defined(RP2350_BUILD)
+	/* Reload below 16384 means the guest wants faster than ~73 Hz. Read once
+	 * per pc_step(), not per pass - it cannot change underneath us here.
+	 *
+	 * A single fixed polling cadence is not sufficient here.  Prehistorik
+	 * uses a reload of 1066 (~1119 Hz), for which one poll per four 256-insn
+	 * passes is adequate.  Jill 3, Secret Agent and Electro Body can program
+	 * reloads around 196 (~6087 Hz).  Polling those only every fourth pass
+	 * caps delivered IRQ0 edges at roughly 1.8 kHz: the PIC stores an edge as
+	 * one pending bit, so i8254_update_irq() cannot recover the merged edges.
+	 * That made the games' wall clock run about 3.3x slow even though guest
+	 * instruction throughput remained normal.
+	 *
+	 * Select a conservative cadence from the latched reload.  The smallest
+	 * reloads are checked after every 256 guest instructions; slower custom
+	 * ticks retain the cheaper cadence, and the standard DOS tick keeps the
+	 * original single 4096-instruction call below. */
+	const int pit_reload = pit_get_initial_count(pc->pit, 0);
+	const int pit_fast = pit_reload < 16384;
+
+	FRANK_DIAG_COUNT(pc_steps);
+	FRANK_DIAG_SET(pit_ch0_count, (uint32_t)pit_reload);
+	FRANK_DIAG_SET(uticks, get_uticks());
+	const unsigned pit_poll_mask = pit_reload < 1024 ? 0u :
+	                               pit_reload < 4096 ? 3u : 7u;
+	/*
+	 * Below 512 the reload is not a music tick, it is a sample clock, and
+	 * one poll per 256-instruction pass is no longer enough.
+	 *
+	 * Electro Body programs channel 0 to 140 - 8523 Hz - and hands the OPL
+	 * one 6-bit sample per IRQ0.  Polling every 256 instructions delivers
+	 * 7381 edges/s at the 1.76 MIPS this interpreter sustains, measured on
+	 * the board, and the guest actually consumed 6762/s: its music ran at
+	 * 79% speed while nothing in the counters looked wrong, because
+	 * i8254_update_irq() faithfully pulses the line for every period it
+	 * missed and the PIC merges those pulses into the single IRR bit it
+	 * has.  A period that elapses entirely between two polls is not late,
+	 * it is gone.
+	 *
+	 * Splitting the pass four ways puts a poll every 64 instructions, about
+	 * 27 kHz, three times the fastest reload these games ask for.  The cost
+	 * is confined to them: the standard 18.2 Hz tick still takes the single
+	 * 4096-instruction call at the bottom of this function.
+	 */
+	const int pit_subdiv = pit_reload < 512 ? 4 : 1;
+	const int pit_chunk = 256 / pit_subdiv;
+
 	if (pc->adlib_enabled) {
-		/* The OPL2 stream is produced here, ten instructions at a
-		 * time, because core 1 has no room for it. Timing the two
-		 * separately is the whole point of this profile: moving the
-		 * chips to the C2 slave removes the adlib bucket *and* lets
-		 * this collapse back to one 4096-instruction call. */
-		for (int i = 0; i < 409; ++i) {
+		/*
+		 * The OPL2 stream is produced here, interleaved with the
+		 * interpreter, because core 1 has no room for it. Timing the
+		 * two separately is the whole point of this profile: moving
+		 * the chips to the C2 slave removes the adlib bucket *and*
+		 * lets this collapse back to one 4096-instruction call.
+		 *
+		 * The interleave was 409 x 10 instructions, which is far finer
+		 * than the buffer needs and costs twice over:
+		 * OPL_calc_buffer_linear() lives in flash, so every entry
+		 * evicts XIP lines the interpreter is using, and a 10
+		 * instruction dispatch never lets cpui386_step() amortise
+		 * anything. docs/C2_SPLIT_PLAN.md measures AdLib at 5-7% of
+		 * core 0 directly but 12.2% end to end, and attributes the gap
+		 * to exactly this interleave.
+		 *
+		 * What the buffer actually needs: ADLIB_BATCH_SIZE (64)
+		 * samples at 44.1 kHz is 1.45 ms, and ADLIB_NBUF of them
+		 * give 5.8 ms of slack. 4096 guest instructions at the
+		 * measured ~1.8 MIPS is ~2.3 ms, so 16 refill attempts is
+		 * one every ~140 us - a 10x margin. adlib_core0() returns
+		 * immediately when the whole ring is full, so the spare
+		 * calls cost nothing.
+		 *
+		 * Device and IRQ timing do not change: those are serviced once
+		 * per pc_step() either way, and the adlib-disabled path below
+		 * already runs the whole 4096 in a single call.
+		 */
+		for (int i = 0; i < 16; ++i) {
 			PROF_T(t_cpu);
-			cpui386_step(pc->cpu, 10);
+			FRANK_PROF_T(ft_cpu);
+			for (int j = 0; j < pit_subdiv; ++j) {
+				cpui386_step(pc->cpu, pit_chunk);
+				if (pit_subdiv > 1)
+					i8254_update_irq(pc->pit);
+			}
 			PROF_ADD(t_cpu, cpu);
+			FRANK_PROF_ADD(ft_cpu, prof_cpu);
 			PROF_T(t_adlib);
+			FRANK_PROF_T(ft_adlib);
 			adlib_core0(pc->adlib);
 			PROF_ADD(t_adlib, adlib);
+			FRANK_PROF_ADD(ft_adlib, prof_adlib);
+			/*
+			 * Poll the PIT here too, not just once per pc_step().
+			 *
+			 * i8254_update_irq() pulses the IRQ line up to ten
+			 * times in a row to catch up, but pic_set_irq1() is
+			 * edge triggered into a *bitmask*: ten edges with no
+			 * guest instructions in between set one IRR bit, so
+			 * the guest services one interrupt, not ten. The
+			 * catch-up counter advances regardless, which is why
+			 * the delivered rate reads as correct while the guest
+			 * is starved - the defect is invisible to the counters.
+			 *
+			 * So the serviced rate was capped at one interrupt per
+			 * pc_step(): about 427 Hz at 1.8 MIPS over a 4096
+			 * instruction budget. Prehistorik reprograms channel 0
+			 * to 1066 (1119 Hz) for its music, measured live on the
+			 * board, and ran ~2.6x slow - matching the reported
+			 * "should be 3-4x faster", with the game slowed by the
+			 * same factor because its pacing rides the same tick.
+			 *
+			 * Only when the guest has actually asked for a fast tick.
+			 *
+			 * Polling here unconditionally cost more than it was
+			 * worth: Prince of Persia lost its AdLib music and Duke
+			 * Nukem 3D had trouble with both SB and AdLib, because
+			 * every game paid the extra interrupt servicing whether
+			 * it needed it or not. A standard DOS tick is 18.2 Hz
+			 * (reload 65536) and is serviced perfectly well once per
+			 * pc_step(); only the games that reprogram channel 0 for
+			 * music need finer granularity - Prehistorik asks for
+			 * 1066, i.e. 1119 Hz.
+			 *
+			 * Below the threshold the cadence is selected from the
+			 * programmed reload (every 1st, 4th, or 8th pass). At or
+			 * above it, nothing extra runs and the behaviour is exactly
+			 * what it was.
+			 */
+			if (pit_fast && pit_subdiv == 1 &&
+			    ((unsigned)i & pit_poll_mask) == pit_poll_mask)
+				i8254_update_irq(pc->pit);
 		}
 	} else {
-		PROF_T(t_cpu);
-		cpui386_step(pc->cpu, 4096);
-		PROF_ADD(t_cpu, cpu);
+		if (pit_fast) {
+			/* Games using PC speaker or digital sound may request the same
+			 * fast IRQ0 cadence without enabling the AdLib producer. */
+			for (int i = 0; i < 16; ++i) {
+				PROF_T(t_cpu);
+				for (int j = 0; j < pit_subdiv; ++j) {
+					cpui386_step(pc->cpu, pit_chunk);
+					if (pit_subdiv > 1)
+						i8254_update_irq(pc->pit);
+				}
+				PROF_ADD(t_cpu, cpu);
+				if (pit_subdiv == 1 &&
+				    ((unsigned)i & pit_poll_mask) == pit_poll_mask)
+					i8254_update_irq(pc->pit);
+			}
+		} else {
+			PROF_T(t_cpu);
+			cpui386_step(pc->cpu, 4096);
+			PROF_ADD(t_cpu, cpu);
+		}
 	}
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif
 #endif
+	FRANK_PROF_ADD(ft_total, prof_total);
+	FRANK_DIAG_COUNT(prof_steps);
 #if SUBSYS_PROFILE
 	PROF_ADD(t_total, total);
 	if (++g_prof.steps >= PROF_REPORT_STEPS)
@@ -977,7 +1166,7 @@ static void pc_reset_request(void *p)
 	pc->reset_request = 1;
 }
 
-extern uint8_t gfx_buffer[256ul << 10];
+extern uint8_t gfx_buffer[];   /* size comes from vga_hw.c / EMU_VGA_MEM_SIZE_KB */
 
 static CMOS *_pc_cmos_for_floppy = NULL;
 static void cmos_floppy_update(uint8_t ta, uint8_t tb) {
@@ -1027,6 +1216,7 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
     char *mem = (uint8_t*)0x11000000;
 	CPU_CB *cb = NULL;
 	memset(mem, 0, conf->mem_size);
+	frank_diag_arm();
 #ifdef BUILD_ESP32
 	extern char *pcram;
 	extern long pcram_len;
@@ -1143,12 +1333,21 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	pc->boot_start_time = 0;
 
-	/* gfx_buffer is always 256 KB — always use exactly that, ignoring
-	 * whatever vga_mem the config says.  This ensures Wolf3D's three video
-	 * pages (dword offsets 0 / 16640 / 33280, up to byte 133120) are never
-	 * dropped.  Old SD-card configs with vga_mem=128K would otherwise leave
-	 * the third page zeroed (black) due to the size check in vga_mem_write. */
-	pc->vga_mem_size = 256u << 10;   /* fixed: gfx_buffer is always 256 KB */
+	/* Use the whole of gfx_buffer, ignoring whatever vga_mem the config says.
+	 * This ensures Wolf3D's three video pages (dword offsets 0 / 16640 /
+	 * 33280, up to byte 133120) are never dropped; old SD-card configs with
+	 * vga_mem=128K would otherwise leave the third page zeroed (black) due to
+	 * the size check in vga_mem_write.
+	 *
+	 * Take the size from the same macro the buffer is declared with rather
+	 * than repeating 256 KB here.  When the two disagreed - the buffer built
+	 * at 128 KB, this constant still 256 - the memset below ran off the end
+	 * and zeroed 128 KB of whatever followed it in .bss, which showed up as a
+	 * boot loop faulting inside the SDK's alarm pool handler. */
+#ifndef EMU_VGA_MEM_SIZE_KB
+#define EMU_VGA_MEM_SIZE_KB 256
+#endif
+	pc->vga_mem_size = (uword)EMU_VGA_MEM_SIZE_KB << 10;
 	pc->vga_mem = gfx_buffer;
 	memset(pc->vga_mem, 0, pc->vga_mem_size);
 	pc->vga = vga_init(pc->vga_mem, pc->vga_mem_size,

@@ -14,7 +14,19 @@
 #include <string.h>
 #include <assert.h>
 
-#define SAMPLE_BUF_SIZE 1024
+/*
+ * Largest batch OPL_calc_buffer_linear() will ever be asked for.
+ *
+ * This was 1024, which cost 3072 bytes of SRAM in the three static buffers
+ * below while the only live caller asks for at most ADLIB_RS_MAX samples -
+ * 38 - because adlib.c renders in ADLIB_RENDER_CHUNK-sized pieces.  On this
+ * board that SRAM is not spare: pc_new() needs about 40 KB of heap in one
+ * burst and the firmware comes up with a black screen when it does not get
+ * it, so 2880 bytes here is the difference between the native JIT having
+ * room for a bigger block cache and not.  adlib.c carries a _Static_assert
+ * against this number so raising the render chunk cannot silently overrun.
+ */
+#define SAMPLE_BUF_SIZE 64
 
 #ifndef INLINE
 #if defined(_MSC_VER)
@@ -1186,16 +1198,10 @@ INLINE static int16_t mix_output_raw(OPL *opl) {
 
 ***********************************************************/
 
-OPL *OPL_new(uint32_t clk, uint32_t rate) {
-    OPL *opl;
-
+static OPL *OPL_init_zeroed(OPL *opl, uint32_t clk, uint32_t rate) {
     if (!table_initialized) {
         initializeTables();
     }
-
-    opl = (OPL *) calloc(sizeof(OPL), 1);
-    if (opl == NULL)
-        return NULL;
 
     opl->clk = clk;
     opl->rate = rate;
@@ -1215,6 +1221,22 @@ OPL *OPL_new(uint32_t clk, uint32_t rate) {
     OPL_reset(opl);
 
     return opl;
+}
+
+OPL *OPL_new(uint32_t clk, uint32_t rate) {
+    OPL *opl = (OPL *) calloc(sizeof(OPL), 1);
+    if (opl == NULL)
+        return NULL;
+    return OPL_init_zeroed(opl, clk, rate);
+}
+
+OPL *OPL_init_inplace(void *storage, uint32_t storage_bytes,
+                      uint32_t clk, uint32_t rate) {
+    if (storage == NULL || storage_bytes < sizeof(OPL) ||
+        ((uintptr_t)storage & (sizeof(uint32_t) - 1u)) != 0)
+        return NULL;
+    memset(storage, 0, sizeof(OPL));
+    return OPL_init_zeroed((OPL *)storage, clk, rate);
 }
 
 void OPL_delete(OPL *opl) {

@@ -996,8 +996,17 @@ static void vga_graphic_refresh(VGAState *s,
                     break;
                 }
                 default:
-                    fprintf(stderr, "vga bpp is %d\n", bpp);
-                    abort();
+                    /*
+                     * An unexpected depth is a reason to draw black, not to
+                     * kill the machine.  abort() here reaches _exit(), which
+                     * is an infinite loop: the board shows a black screen,
+                     * the guest is frozen mid-instruction, nothing is logged
+                     * and no reset happens.  The identical mistake in
+                     * i8254.c cost a long SWD hunt before Aladdin's real
+                     * cause - a legal PIT mode - turned up behind it.
+                     */
+                    color = 0;
+                    break;
                 }
             }
             int i = (BPP / 8) * (y * fb_dev->width + x) + i0;
@@ -1034,8 +1043,17 @@ static void vga_graphic_refresh(VGAState *s,
                     break;
                 }
                 default:
-                    fprintf(stderr, "vga bpp is %d\n", bpp);
-                    abort();
+                    /*
+                     * An unexpected depth is a reason to draw black, not to
+                     * kill the machine.  abort() here reaches _exit(), which
+                     * is an infinite loop: the board shows a black screen,
+                     * the guest is frozen mid-instruction, nothing is logged
+                     * and no reset happens.  The identical mistake in
+                     * i8254.c cost a long SWD hunt before Aladdin's real
+                     * cause - a legal PIT mode - turned up behind it.
+                     */
+                    color = 0;
+                    break;
                 }
             }
 #if defined(SCALE_3_2) || defined(SWAPXY)

@@ -64,6 +64,8 @@ void i8257_dma_hold_DREQ(IsaDma *obj, int nchan);
 void i8257_dma_release_DREQ(IsaDma *obj, int nchan);
 int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
                           int len);
+void i8257_dma_advance(IsaDma *obj, int nchan, int len);
+uint32_t i8257_dma_get_pos(IsaDma *obj, int nchan);
 int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
                            int len);
 

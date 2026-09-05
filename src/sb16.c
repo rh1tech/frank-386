@@ -23,12 +23,15 @@
  */
 
 #include "sb16.h"
+#include "audiodiag.h"
 #include <pico.h>
+#include <pico/time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include "i8257.h"
+#include <hardware/sync.h>
 
 #if defined(BUILD_ESP32) || defined(RP2350_BUILD)
 void *pcmalloc(long size);
@@ -121,7 +124,13 @@ struct SB16State {
     void *voice;
     int active_out;
 
-//    QEMUTimer *aux_ts;
+    /* Deadline for the DSP 0x80 silence period, in time_us_32() units.
+     * QEMU arms a QEMUTimer here; this port has no timer infrastructure, so
+     * the deadline is polled from pc_step() instead - see sb16_poll(). */
+    uint32_t aux_deadline_us;
+    int      aux_pending;
+    volatile uint8_t irq_raise_pending;   /* core 1 asked for a rising edge */
+
     /* mixer state */
     int mixer_nreg;
     uint8_t mixer_regs[256];
@@ -130,8 +139,84 @@ struct SB16State {
     uint8_t e2_valxor;
 };
 
+/* FRANK_SB16_DIAG_V8_10_1: defined further down, next to write_audio(). */
+void sb16_diag_playback_start(void);
+
+/* All interrupt raises and drops funnel through here so the diagnostic trace
+ * shows them in order with the DSP command and the DMA run that caused them -
+ * which is the only way to tell "the card never interrupted" apart from "the
+ * guest never got the interrupt". */
+static inline void sb_set_irq(SB16State *s, int level)
+{
+    frank_diag_ev(FRANK_EV_IRQ, (uint8_t)s->irq, 0, (uint32_t)level);
+
+    /*
+     * The interrupt controller belongs to core 0, and only core 0 may touch
+     * it.
+     *
+     * Every other interrupt source in this machine - the PIT, the keyboard,
+     * the IDE channels, the RTC - is driven from pc_step(), so the 8259's
+     * IRR, ISR and last_irr are private to core 0.  The Sound Blaster is the
+     * exception: the block-completion interrupt is raised from
+     * sb16_getsample(), which runs in the 44.1 kHz timer callback on core 1.
+     * Nothing guards those registers, so that raise could land in the middle
+     * of core 0 acknowledging an interrupt - pic_intack() clears IRR, sets
+     * ISR and hands back a vector - and the guest then took a far transfer
+     * through the wrong interrupt vector.
+     *
+     * That is what breaks Supaplex, and the two shapes it takes are just the
+     * same bad transfer seen from either side of a memory manager: with
+     * EMM386 loaded the V86 monitor catches the runaway and the program
+     * restarts to its copy-protection screen, and without it the guest runs
+     * into unwritten memory and spins on #UD - measured at twenty-two million
+     * of them.  It is only the Sound Blaster because it is the only device
+     * that interrupts from the other core, and it is intermittent because it
+     * is a race.
+     *
+     * Core 1 therefore only ever *asks*, and pc_step() does the raising.  It
+     * only ever asks for a rising edge - lowering happens when the guest
+     * acknowledges at base+0x0e, which is core 0 by definition - so a single
+     * flag loses nothing.
+     */
+    if (level && get_core_num() != 0) {
+        s->irq_raise_pending = 1;
+        __dmb();
+        return;
+    }
+    s->set_irq(s->pic, s->irq, level);
+}
+
+/*
+ * How far the DMA engine may run ahead of what core 1 has actually played.
+ *
+ * Expressed as a span of time rather than a byte count, because that is what
+ * the hardware constraint is: a real card moves one DMA byte per sample
+ * period, so the transfer - and therefore the block-completion interrupt -
+ * is paced by the sample clock and by nothing else.  Twenty milliseconds
+ * rides out the core 0 stalls that matter here (FatFS issues eight ~475 us
+ * reads for one cluster) while staying well short of the block sizes games
+ * actually use, so a block still takes a block's worth of time to finish.
+ */
+#define SB16_LEAD_MS 20
+
+static int sb16_lead_bytes (SB16State *s)
+{
+    int lead = (s->bytes_per_second / 1000) * SB16_LEAD_MS;
+    if (lead < 64) lead = 64;
+    if (lead > AUDIO_BUF_LEN / 2) lead = AUDIO_BUF_LEN / 2;
+    return lead & ~s->align;
+}
+
 static void AUD_set_active_out (SB16State *s, int i)
 {
+    /*
+     * Capture 016 measured sb16_dma_gap_max_us = 17.4 s on a 36 s window,
+     * because Draci historie plays short effects and the "gap" spanned the
+     * silence between two of them.  A gap is only meaningful inside one
+     * continuous playback episode, so restart the clock whenever playback
+     * begins.
+     */
+    if (i && !s->active_out) sb16_diag_playback_start();
     s->active_out = i;
 }
 
@@ -218,7 +303,7 @@ static void aux_timer (void *opaque)
 {
     SB16State *s = opaque;
     s->can_write = 1;
-    s->set_irq(s->pic, s->irq, 1);
+    sb_set_irq(s, 1);
 }
 #endif
 
@@ -269,6 +354,8 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
 
     s->left_till_irq = s->block_size;
     s->bytes_per_second = (s->freq << s->fmt_stereo);
+    frank_diag_ev(FRANK_EV_DSP_CMD, 0x14, (uint16_t)s->block_size,
+                  (uint32_t)s->freq);
     /* s->highspeed = (mask & DMA8_HIGH) != 0; */
     s->dma_auto = (mask & DMA8_AUTO) != 0;
     s->align = (1 << s->fmt_stereo) - 1;
@@ -283,9 +370,24 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
             s->freq, s->fmt_stereo, s->fmt_signed, s->fmt_bits,
             s->block_size, s->dma_auto, s->fifo, s->highspeed);
 
-    /* Flush audio buffer for single-shot mode to prevent replaying old samples */
+    /*
+     * Drop anything older than the look-ahead before a new single-shot block.
+     *
+     * This used to discard the whole pending buffer, which was only necessary
+     * because an unpaced transfer could leave up to 4 KB of stale audio
+     * queued.  With the DMA paced by playback the buffer never holds more than
+     * SB16_LEAD_MS of audio, and that much is not stale - it is what a real
+     * card would still be clocking out of the previous block - so discarding
+     * it only puts a gap between two blocks a game meant to run back to back.
+     * The clamp stays as a guard for a game that reprograms the rate
+     * mid-stream, where the queued lead is suddenly worth more milliseconds
+     * than it was when it was queued.
+     */
     if (!s->dma_auto) {
-        s->audio_p = s->audio_q;
+        int lead = sb16_lead_bytes (s);
+        if ((int)(s->audio_q - s->audio_p) > lead) {
+            s->audio_p = s->audio_q - lead;
+        }
     }
 
     continue_dma8 (s);
@@ -294,6 +396,7 @@ static void dma_cmd8 (SB16State *s, int mask, int dma_len)
 
 static void dma_cmd (SB16State *s, uint8_t cmd, uint8_t d0, int dma_len)
 {
+    frank_diag_ev(FRANK_EV_DSP_CMD, cmd, (uint16_t)dma_len, (uint32_t)d0);
     s->use_hdma = cmd < 0xc0;
     s->fifo = (cmd >> 1) & 1;
     s->dma_auto = (cmd >> 2) & 1;
@@ -368,9 +471,24 @@ static void dma_cmd (SB16State *s, uint8_t cmd, uint8_t d0, int dma_len)
         s->voice = s;
     }
 
-    /* Flush audio buffer for single-shot mode to prevent replaying old samples */
+    /*
+     * Drop anything older than the look-ahead before a new single-shot block.
+     *
+     * This used to discard the whole pending buffer, which was only necessary
+     * because an unpaced transfer could leave up to 4 KB of stale audio
+     * queued.  With the DMA paced by playback the buffer never holds more than
+     * SB16_LEAD_MS of audio, and that much is not stale - it is what a real
+     * card would still be clocking out of the previous block - so discarding
+     * it only puts a gap between two blocks a game meant to run back to back.
+     * The clamp stays as a guard for a game that reprograms the rate
+     * mid-stream, where the queued lead is suddenly worth more milliseconds
+     * than it was when it was queued.
+     */
     if (!s->dma_auto) {
-        s->audio_p = s->audio_q;
+        int lead = sb16_lead_bytes (s);
+        if ((int)(s->audio_q - s->audio_p) > lead) {
+            s->audio_p = s->audio_q - lead;
+        }
     }
 
     control (s, 1);
@@ -613,7 +731,7 @@ static void command (SB16State *s, uint8_t cmd)
         case 0xf3:
             dsp_out_data (s, 0xaa);
             s->mixer_regs[0x82] |= (cmd == 0xf2) ? 1 : 2;
-            s->set_irq(s->pic, s->irq, 1);
+            sb_set_irq(s, 1);
             break;
 
         case 0xf9:
@@ -809,10 +927,17 @@ static void complete (SB16State *s)
                 samples = dsp_get_lohi (s) + 1;
                 bytes = samples << s->fmt_stereo << (s->fmt_bits == 16);
                 ticks = muldiv64(bytes, NANOSECONDS_PER_SECOND, freq);
+                s->mixer_regs[0x82] |= 1;
                 if (ticks < NANOSECONDS_PER_SECOND / 1024) {
-                    s->set_irq(s->pic, s->irq, 1);
+                    sb_set_irq(s, 1);
                 } else {
-                    dolog("TODO: aux_ts\n");
+                    /* Arm the deadline instead of dropping the request on
+                     * the floor, which is what the missing timer used to
+                     * mean: any silence period longer than a millisecond
+                     * simply never interrupted. */
+                    s->aux_deadline_us = time_us_32() +
+                                         (uint32_t)(ticks / 1000);
+                    s->aux_pending = 1;
                 }
 //                else {
 //                    if (s->aux_ts) {
@@ -837,7 +962,12 @@ static void complete (SB16State *s)
             d0 = dsp_get_data (s);
             s->e2_valadd += ((uint8_t) d0) ^ s->e2_valxor;
             s->e2_valxor = (s->e2_valxor >> 2) | (s->e2_valxor << 6);
-            i8257_dma_write_memory(s->isa_dma, s->dma, &(s->e2_valadd), 0, 1);
+            i8257_dma_write_memory(s->isa_dma, s->dma, &(s->e2_valadd),
+                                   (int)i8257_dma_get_pos(s->isa_dma, s->dma), 1);
+            /* One real DMA cycle, so the channel has to move with it:
+             * this command exists so a driver can find the DMA channel by
+             * watching the count register change. */
+            i8257_dma_advance(s->isa_dma, s->dma, 1);
             break;
 
         case 0xe4:
@@ -892,13 +1022,25 @@ static void legacy_reset (SB16State *s)
 
 static void reset (SB16State *s)
 {
-    s->set_irq(s->pic, s->irq, 0);
+    sb_set_irq(s, 0);
     if (s->dma_auto) {
-        s->set_irq(s->pic, s->irq, 1);
-        s->set_irq(s->pic, s->irq, 0);
+        sb_set_irq(s, 1);
+        sb_set_irq(s, 0);
     }
 
     s->mixer_regs[0x82] = 0;
+    /*
+     * A reset also cancels an interrupt that DSP command 0x80 armed but has
+     * not delivered yet.  Leaving it armed is what broke Supaplex: its
+     * BLASTER.SND resets the DSP several times while probing the card, and a
+     * deadline that survives one of those fires afterwards with
+     * mixer_regs[0x82] already cleared.  The driver acknowledges at
+     * base+0x0e, that acknowledge is gated on the very bit the reset wiped,
+     * so the interrupt line is never lowered - and because the 8259 is edge
+     * triggered, no further Sound Blaster interrupt is ever delivered.  The
+     * card goes deaf and the driver waits for a completion that cannot come.
+     */
+    s->aux_pending = 0;
     s->dma_auto = 0;
     s->in_index = 0;
     s->out_data_len = 0;
@@ -926,6 +1068,8 @@ void sb16_dsp_write(void *opaque, uint32_t nport, uint32_t val)
     int iport;
 
     iport = nport - s->port;
+
+    frank_diag_ev(FRANK_EV_DSP_W, (uint8_t)iport, 0, val);
 
     ldebug ("write %#x <- %#x\n", nport, val);
     switch (iport) {
@@ -1054,7 +1198,7 @@ uint32_t sb16_dsp_read(void *opaque, uint32_t nport)
         if (s->mixer_regs[0x82] & 1) {
             ack = 1;
             s->mixer_regs[0x82] &= ~1;
-            s->set_irq(s->pic, s->irq, 0);
+            sb_set_irq(s, 0);
         }
         break;
 
@@ -1063,7 +1207,7 @@ uint32_t sb16_dsp_read(void *opaque, uint32_t nport)
         if (s->mixer_regs[0x82] & 2) {
             ack = 1;
             s->mixer_regs[0x82] &= ~2;
-            s->set_irq(s->pic, s->irq, 0);
+            sb_set_irq(s, 0);
         }
         break;
 
@@ -1075,11 +1219,57 @@ uint32_t sb16_dsp_read(void *opaque, uint32_t nport)
         ldebug ("read %#x -> %#x\n", nport, retval);
     }
 
+    frank_diag_ev(FRANK_EV_DSP_R, (uint8_t)iport, 0, (uint32_t)retval);
     return retval;
 
  error:
     dolog ("warning: dsp_read %#x error\n", nport);
     return 0xff;
+}
+
+/*
+ * Finish a DSP 0x80 silence period.
+ *
+ * Command 0x80 asks the card to output silence for a given number of samples
+ * and to raise its interrupt when that period is over.  QEMU arms a timer for
+ * it; this port has no timer infrastructure, so the arm was left behind as a
+ * `dolog("TODO: aux_ts")` and every silence period longer than a millisecond
+ * simply never interrupted.
+ *
+ * That is not an obscure corner.  It is exactly how Tyrian 2000 tests the
+ * card's interrupt line: it asks for 17 samples of silence - 1.5 ms at the
+ * 11025 Hz default - waits for IRQ5, spins some 65000 times on the status
+ * port, gives up after 200 ms, resets the DSP and tries once more, and then
+ * refuses the card with "ERROR 253: Sound Effects disabled" even though
+ * playback itself works perfectly.
+ *
+ * Polling a deadline from pc_step() costs a compare per step and lands within
+ * one emulation step, about 2.3 ms - the same order as the period being
+ * timed, and far inside any driver's timeout.
+ */
+void sb16_poll (SB16State *s)
+{
+    /* Raise on core 0 what core 1 asked for.  pc_step() calls this, so this
+     * is the right side of the machine to be touching the 8259 from. */
+    if (s->irq_raise_pending) {
+        s->irq_raise_pending = 0;
+        __dmb();
+        s->set_irq(s->pic, s->irq, 1);
+    }
+
+    if (!s->aux_pending) {
+        return;
+    }
+    if ((int32_t)(time_us_32() - s->aux_deadline_us) < 0) {
+        return;
+    }
+    s->aux_pending = 0;
+    s->can_write = 1;
+    /* Raise the status bit together with the line: the acknowledge path at
+     * base+0x0e refuses to lower an interrupt whose bit is clear, so one
+     * raised without it could never be dismissed. */
+    s->mixer_regs[0x82] |= 1;
+    sb_set_irq (s, 1);
 }
 
 static void reset_mixer (SB16State *s)
@@ -1121,6 +1311,8 @@ void sb16_mixer_write_indexb(void *opaque, uint32_t nport, uint32_t val)
 
 void sb16_mixer_write_datab(void *opaque, uint32_t nport, uint32_t val)
 {
+    frank_diag_ev(FRANK_EV_MIX_W, (uint8_t)((SB16State *)opaque)->mixer_nreg,
+                  0, val);
     SB16State *s = opaque;
 
     (void) nport;
@@ -1191,6 +1383,60 @@ uint32_t sb16_mixer_read(void *opaque, uint32_t nport)
     return s->mixer_regs[s->mixer_nreg];
 }
 
+/*
+ * FRANK_SB16_DIAG_V8_10_1
+ *
+ * sb16_starves counts 44.1 kHz mixer ticks that found the ring empty, and it
+ * cannot distinguish 7000 isolated one-sample clicks from a handful of long
+ * dropouts.  Only the second is audible as stutter, and the two have opposite
+ * causes, so the raw count has never been actionable.
+ *
+ * starve_runs / starve_max split it: runs is how many separate dropouts there
+ * were, max is the longest one in mixer samples (divide by 44.1 for ms).
+ *
+ * The producer side is measured symmetrically.  refills and refill_bytes say
+ * whether data is arriving at all and at what rate; gap_max_us is the longest
+ * interval between two refills, which is a direct measure of how long core 0
+ * went without servicing the DMA - the same quantity adlib_gap_max_us reports
+ * for the OPL, and in capture 012 that was 18 ms.
+ *
+ * freq / fmtcode / rate are the missing denominators.  AUDIO_BUF_LEN is 4096
+ * bytes, but that is 186 ms of 22 kHz 8-bit mono and only 23 ms of 44 kHz
+ * 16-bit stereo.  Without the stream format no capture can say whether an
+ * 18 ms core 0 gap is harmless or fatal, which is why the existing starve
+ * count could never be diagnosed.
+ */
+uint32_t g_sb16_starve_runs;
+uint32_t g_sb16_starve_max;
+uint32_t g_sb16_refills;
+uint32_t g_sb16_refill_bytes;
+uint32_t g_sb16_gap_max_us;
+uint32_t g_sb16_rate;
+uint32_t g_sb16_freq;
+uint32_t g_sb16_fmtcode;      /* fmt | stereo << 8 */
+static uint32_t sb16_run_len;
+static uint32_t sb16_last_fill_us;
+
+void sb16_diag_playback_start(void)
+{
+    sb16_last_fill_us = time_us_32();
+}
+
+void sb16_diag_snapshot(uint32_t *out)
+{
+    out[0] = g_sb16_starve_runs;  g_sb16_starve_runs = 0;
+    out[1] = g_sb16_starve_max;   g_sb16_starve_max = 0;
+    out[2] = g_sb16_refills;      g_sb16_refills = 0;
+    out[3] = g_sb16_refill_bytes; g_sb16_refill_bytes = 0;
+    out[4] = g_sb16_gap_max_us;   g_sb16_gap_max_us = 0;
+    /* Stream parameters are state, not events: reported, never cleared. */
+    out[5] = g_sb16_rate;
+    out[6] = g_sb16_freq;
+    out[7] = g_sb16_fmtcode;
+    sb16_last_fill_us = time_us_32();
+    sb16_run_len = 0;
+}
+
 static int write_audio (SB16State *s, int nchan, int dma_pos,
                         int dma_len, int len)
 {
@@ -1250,6 +1496,20 @@ static int write_audio (SB16State *s, int nchan, int dma_pos,
             break;
         }
     }
+
+    if (net) {
+        const uint32_t now = time_us_32();
+        const uint32_t gap = now - sb16_last_fill_us;
+        sb16_last_fill_us = now;
+        g_sb16_refills++;
+        g_sb16_refill_bytes += (uint32_t)net;
+        if (gap > g_sb16_gap_max_us) g_sb16_gap_max_us = gap;
+        g_sb16_rate = (uint32_t)s->bytes_per_second;
+        g_sb16_freq = (uint32_t)s->freq;
+        g_sb16_fmtcode = (uint32_t)s->fmt |
+                         ((uint32_t)(s->fmt_stereo ? 1 : 0) << 8);
+    }
+
     return net;
 }
 
@@ -1269,6 +1529,16 @@ static int SB_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
         s->left_till_irq = s->block_size;
     }
 
+    /*
+     * The previous call may have stopped exactly at terminal count and left
+     * the position there on purpose, so that the guest's current-count
+     * register would read 0xffff.  Wrap it here, on the way into the next
+     * pass, which is the only place where wrapping is unambiguous.
+     */
+    if (dma_len > 0 && dma_pos >= dma_len) {
+        dma_pos = 0;
+    }
+
     if (s->voice) {
         // RP2350/ESP32: Ignore audio_free, fill buffer as much as possible
 #if !defined(RP2350_BUILD) && !defined(BUILD_ESP32)
@@ -1277,7 +1547,31 @@ static int SB_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
             return dma_pos;
         }
 #else
-        free = dma_len;
+        /*
+         * Pace the transfer by playback rather than by buffer space.
+         *
+         * This was `free = dma_len`: take the whole block in one call.  The
+         * block-completion interrupt then fired as soon as the bytes had been
+         * *copied*, not played.  Tyrian 2000 programs single-cycle 384-byte
+         * blocks at 10989 Hz - 34.9 ms of audio - and was getting its
+         * interrupt 1.4 ms later, so it queued the next block twenty-five
+         * times too fast, and dma_cmd8()'s single-shot flush then threw away
+         * the nine tenths of each block that had not been played yet.  What
+         * came out of the speakers was a rattle at the block rate, and the
+         * game's own timing check refused the card outright with "ERROR 253:
+         * Sound Effects disabled".
+         *
+         * Limiting the transfer to a fixed look-ahead makes audio_p the
+         * clock: the DMA can only advance as fast as core 1 consumes, which
+         * is what the card's sample clock does on real hardware.
+         * i8257_dma_run() is called once per pc_step(), roughly every 2.3 ms,
+         * so a 20 ms budget is topped up nearly ten times over.
+         */
+        free = sb16_lead_bytes (s) - (int)(s->audio_q - s->audio_p);
+        free &= ~s->align;
+        if ((free <= 0) || !dma_len) {
+            return dma_pos;
+        }
 #endif
     }
     else {
@@ -1297,12 +1591,43 @@ static int SB_read_DMA (void *opaque, int nchan, int dma_pos, int dma_len)
     }
 
     written = write_audio (s, nchan, dma_pos, dma_len, copy);
-    dma_pos = (dma_pos + written) % dma_len;
+    frank_diag_ev(FRANK_EV_DMA_RUN, (uint8_t)nchan, (uint16_t)written,
+                  (uint32_t)dma_pos);
+    /*
+     * A transfer that ends exactly at the end of the buffer must be left
+     * AT the end, not folded back to zero.
+     *
+     * i8257_channel_run() stores what this returns in regs[n].now[COUNT] and
+     * declares terminal count when it equals the programmed length, and
+     * i8257_read_chan() reports the guest's current-count register as
+     * base[COUNT] - now[COUNT].  Real hardware counts down and reads 0xffff
+     * once the last byte has moved; folding the position to 0 instead makes
+     * that register read "full" and leaves the terminal-count status bit
+     * clear forever - because a single-cycle Sound Blaster block always ends
+     * exactly at the end of the buffer, the DSP block size and the DMA count
+     * being programmed to the same length.
+     *
+     * Dune II is the game that shows it.  Its IRQ5 handler decides whether
+     * the interrupt is really its own block completing by reading the DMA
+     * count register and comparing it against 0xffff; getting 0x3b80 back it
+     * concludes the transfer is still running and returns without reading
+     * base+0x0e.  The card's interrupt line therefore stays asserted, the
+     * edge-triggered 8259 can never see another Sound Blaster edge, and the
+     * one second of speech that had already been queued is the last digital
+     * audio of the session - while the FM music, which needs no DMA, plays
+     * on.  That is the whole "only the first voice is heard" symptom.
+     *
+     * The position is normalised back to zero on the way in instead (see
+     * above), which is what an auto-init transfer needs to keep going.
+     */
+    dma_pos += written;
+    while (dma_pos > dma_len)
+        dma_pos -= dma_len;
     s->left_till_irq -= written;
 
     if (s->left_till_irq <= 0) {
         s->mixer_regs[0x82] |= (nchan & 4) ? 2 : 1;
-        s->set_irq(s->pic, s->irq, 1);
+        sb_set_irq(s, 1);
         /* Signal DSP busy on port 0x22C so polling loops detect the
          * block completion.  Cleared on next read of port 0x22C. */
         if (s->dma_auto == 0) {
@@ -1633,6 +1958,25 @@ SB16State *sb16_new(
 }
 
 // call sb16_getsample 44100 times per second
+/*
+ * Playback starvation, sampled in the 44.1 kHz mixer callback on core 1.
+ *
+ * When active_out is set but the ring is empty, advance clamps to zero and the
+ * previous sample is emitted again - the voice does not go silent, it sticks.
+ * The ring is 4096 bytes but it is refilled incrementally by i8257_dma_run()
+ * on core 0, so it runs near-empty rather than full and a core 0 stall shows
+ * up here. minfill is the low-water mark of the same window.
+ */
+uint32_t g_sb16_starves;
+uint32_t g_sb16_minfill = 0xffffffffu;
+
+
+void sb16_starve_snapshot(uint32_t *starves, uint32_t *minfill)
+{
+    *starves = g_sb16_starves; g_sb16_starves = 0;
+    *minfill = g_sb16_minfill; g_sb16_minfill = 0xffffffffu;
+}
+
 void __not_in_flash_func(sb16_getsample)(SB16State *s, int* r_v, int* l_v) {
     if (!s->active_out && s->audio_q == s->audio_p)
         return;
@@ -1641,6 +1985,19 @@ void __not_in_flash_func(sb16_getsample)(SB16State *s, int* r_v, int* l_v) {
     if (len > AUDIO_BUF_LEN) {
         s->audio_p = s->audio_q;
         return;
+    }
+
+    if (s->active_out) {
+        if (len == 0) {
+            g_sb16_starves++;
+            if (sb16_run_len == 0) g_sb16_starve_runs++;
+            sb16_run_len++;
+            if (sb16_run_len > g_sb16_starve_max)
+                g_sb16_starve_max = sb16_run_len;
+        } else {
+            sb16_run_len = 0;
+        }
+        if (len < g_sb16_minfill) g_sb16_minfill = len;
     }
 
     static uint32_t phase = 0;

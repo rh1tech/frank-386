@@ -1,4 +1,5 @@
 #include "i386.h"
+#include "audiodiag.h"
 #include "remote_mem.h"
 #include "codeprofile.h"
 #include "bbprofile.h"
@@ -22,6 +23,25 @@
 #endif
 
 #define I386_ENABLE_FPU 1
+
+#if BLOCK_JIT
+/* FRANK_BLOCK_JIT_V1: forward declarations for write/TLB invalidation. */
+static inline void bj_note_write(CPUI386 *cpu, uword addr, unsigned len);
+static void bj_flush(void);
+#endif
+
+#if NATIVE_JIT
+/* FRANK_NATIVE_JIT_V3: native Thumb-2 hot-block cache. */
+/* FRANK_NATIVE_JIT_V5_CONSOLIDATED: productive-loop first, low-tax dispatch. */
+/* FRANK_NATIVE_JIT_V6_HYBRID_TRACE: general native-prefix trace JIT with interpreter fallback. */
+/* FRANK_NATIVE_JIT_V8_4_1_BRANCHFIX: corrected fall-through state for terminal backward Jcc/LOOP; 2-way low-RAM cache retained. */
+/* FRANK_NATIVE_JIT_V8_5_PAGED_BPSTACK: Symantec exact BP-stack loop safely enabled under EMM386 paging. */
+/* FRANK_NATIVE_JIT_V8_5_1_IRAMFIX: keep paged BP-stack validation out of always-inline IRAM lookup expansion. */
+/* FRANK_NATIVE_JIT_V8_6_PAGED_WALK: validate exact BP-stack mappings from current page tables, independent of direct-mapped TLB residency. */
+/* FRANK_NATIVE_JIT_V8_7_3_V86_MICROLOOP: v8.7.2 plus VM86+paging-only page-bounded byte micro-loop. */
+static inline void nj_note_write(CPUI386 *cpu, uword addr, unsigned len);
+static void nj_flush(void);
+#endif
 #ifdef I386_ENABLE_FPU
 #include "fpu.h"
 #else
@@ -75,12 +95,16 @@ void dolog(const char *fmt, ...)
 #define THROW(ex, err) do { \
     dolog("THROW ex=%d err=%x eip=%08x cs=%04x %s:%d\n", \
           (ex), (unsigned)(err), cpu->ip, cpu->seg[SEG_CS].sel,  __func__, __LINE__); \
+    frank_diag_exc(cpu->seg[SEG_CS].base, cpu->ip, (uint32_t)(ex), \
+                   (uint32_t)(err), (uint32_t)cpu->flags); \
     cpu->excno = (ex); cpu->excerr = (err); \
 	return false; \
 } while(0)
 #define THROW0(ex) do { \
     dolog("THROW0 ex=%d eip=%08x cs=%04x op=%02x %s:%d\n", (ex), cpu->ip, cpu->seg[SEG_CS].sel, \
           opcode, __func__, __LINE__); \
+	frank_diag_exc(cpu->seg[SEG_CS].base, cpu->ip, (uint32_t)(ex), \
+	               0u /* opcode is not in scope at every THROW0 site */, (uint32_t)cpu->flags); \
 	cpu->excno = (ex); \
 	return false; \
 } while(0)
@@ -285,8 +309,109 @@ static inline u32 pload32(CPUI386 *cpu, uword addr)
 	return pload32_local(cpu, addr);
 }
 
+/*
+ * The system BIOS is ROM on a PC, and a store to it has to be dropped rather
+ * than land in RAM.
+ *
+ * Prehistorik 2 looks for a debugger by reading the INT 3 vector, poking the
+ * byte it points at, and folding the result into an opcode of its own:
+ *
+ *      lds  bx, [000c]        ; the INT 3 vector - F000:06F4 under SeaBIOS
+ *      mov  al, [bx]
+ *      xor  byte [bx], 55     ; a no-op on a real machine: that is ROM
+ *      sub  al, [bx]          ; so al comes out zero
+ *      add  cs:[62b8], al     ; and the opcode is left alone
+ *
+ * With the BIOS sitting in plain writable RAM the xor sticks instead, al comes
+ * out 0x00 - 0x55 = 0xab, and the game's own `push ax` at 10BB:62B8 becomes
+ * `sti`.  That routine then pops four registers against three pushes, returns
+ * two bytes off, and runs away into the interrupt vector table until it hits
+ * an invalid opcode.  The corruption happens once, while the level loads; the
+ * game only dies later, when it first calls the routine - which is why this
+ * looked for two sessions like an intermittent fault caused by moving or by
+ * touching an enemy.
+ *
+ * Only the last 64 KB is protected.  A 256 KB BIOS image also occupies
+ * 0xc0000-0xeffff, but so do the upper memory blocks EMM386 hands out and DOS
+ * loads drivers into, and blocking writes there would break far more than it
+ * fixes.  0xf0000-0xfffff is ROM on every PC and nothing legitimately writes
+ * to it - the BIOS image itself is put there by load_rom(), which memcpy()s
+ * into phys_mem and never comes through here.
+ */
+/* GUEST_ prefixed: the SDK already defines ROM_BASE for the RP2350. */
+#define GUEST_ROM_BASE 0xf0000u
+#define GUEST_ROM_SIZE 0x10000u
+
+static inline bool __attribute__((always_inline)) in_rom(uword addr)
+{
+	return (addr - GUEST_ROM_BASE) < GUEST_ROM_SIZE;
+}
+
+/*
+ * Blocking the region outright stops the machine booting, because SeaBIOS
+ * keeps mutable globals in the F segment and writes them during POST - just
+ * as a real chipset allows while the PAM registers hold the window open.
+ * Every one of the nine writes a boot makes was measured, and they agree:
+ *
+ *   0xf7f28 <- 1          from cs_base 0, ip 0x0f365d
+ *   0xf30c8 <- 0x800000   from cs_base 0, ip 0x0ef0cd
+ *   0xf7304, 0xf7320..0xf7330                cs_base 0, ip 0x0e974a..0x0e9777
+ *
+ * All of them come from a flat 32-bit code segment with an EIP far above
+ * 0xffff, which is only reachable in protected mode: this is POST, before the
+ * BIOS would have closed PAM again.  Everything from DOS onwards runs in real
+ * or V86 mode, where a real machine has ROM there and nothing can write to it.
+ *
+ * Emulating PAM properly would be the exact answer, but this emulator never
+ * registers the i440FX host bridge at all (see the commented-out
+ * pci_register_device() in i440fx_init), so the guest's PAM writes reach no
+ * config space and there is nothing to read back.  The mode test costs one
+ * compare on a path that is already off the hot road - only addresses inside
+ * the 64 KB reach it - and separates the two cases exactly as observed.
+ */
+static inline bool __attribute__((always_inline)) rom_write_allowed(CPUI386 *cpu)
+{
+	return (cpu->cr0 & 1) && !(cpu->flags & VM);
+}
+
+/*
+ * The writes that were dropped, so a regression is visible rather than
+ * silent: 32 entries of {address, value, CS base, IP} at guest 0xb4800, in
+ * the gap between the shadow copy and the port histograms, with the running
+ * total just past the end of the ring.
+ */
+#define ROMLOG_RING ((volatile uint32_t *)(0x11000000u + 0x000b4800u))
+#define ROMLOG_N    32u
+static uint32_t romlog_head;
+
+static inline void __attribute__((always_inline))
+rom_write_log(CPUI386 *cpu, uword addr, uint32_t val)
+{
+	uint32_t n = romlog_head++;
+	if (n < ROMLOG_N) {
+		volatile uint32_t *e = ROMLOG_RING + n * 4u;
+		e[0] = addr;
+		e[1] = val;
+		e[2] = cpu->seg[SEG_CS].base;
+		e[3] = cpu->ip;
+	}
+	/* The count keeps going past the ring so the total is readable too. */
+	ROMLOG_RING[ROMLOG_N * 4u] = romlog_head;
+}
+
 static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
 {
+	if (unlikely(in_rom(addr)) && !rom_write_allowed(cpu)) {
+		rom_write_log(cpu, addr, val);
+		return;
+	}
+	frank_diag_wp(addr, val, cpu->seg[SEG_CS].base, cpu->ip);
+#if NATIVE_JIT
+	nj_note_write(cpu, addr, 1);
+#endif
+#if BLOCK_JIT
+	bj_note_write(cpu, addr, 1);
+#endif
 #if REMOTE_MEM
 	if (unlikely(is_remote(addr))) { remote_write8(addr, val); return; }
 #endif
@@ -295,6 +420,17 @@ static inline void pstore8(CPUI386 *cpu, uword addr, u8 val)
 
 static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
 {
+	if (unlikely(in_rom(addr)) && !rom_write_allowed(cpu)) {
+		rom_write_log(cpu, addr, val);
+		return;
+	}
+	frank_diag_wp(addr, val, cpu->seg[SEG_CS].base, cpu->ip);
+#if NATIVE_JIT
+	nj_note_write(cpu, addr, 2);
+#endif
+#if BLOCK_JIT
+	bj_note_write(cpu, addr, 2);
+#endif
 #if REMOTE_MEM
 	if (unlikely(is_remote(addr))) { remote_write16(addr, val); return; }
 #endif
@@ -303,6 +439,17 @@ static inline void pstore16(CPUI386 *cpu, uword addr, u16 val)
 
 static inline void pstore32(CPUI386 *cpu, uword addr, u32 val)
 {
+	if (unlikely(in_rom(addr)) && !rom_write_allowed(cpu)) {
+		rom_write_log(cpu, addr, val);
+		return;
+	}
+	frank_diag_wp(addr, val, cpu->seg[SEG_CS].base, cpu->ip);
+#if NATIVE_JIT
+	nj_note_write(cpu, addr, 4);
+#endif
+#if BLOCK_JIT
+	bj_note_write(cpu, addr, 4);
+#endif
 #if REMOTE_MEM
 	if (unlikely(is_remote(addr))) { remote_write32(addr, val); return; }
 #endif
@@ -523,18 +670,132 @@ static void IRAM_ATTR refresh_flags(CPUI386 *cpu)
 	 * defined to return the current cpu->flags bit, so skipping it
 	 * cannot change the result.
 	 */
-	SET_BIT(cpu->flags, get_CF(cpu), CF);
-	SET_BIT(cpu->flags, get_PF(cpu), PF);
-	SET_BIT(cpu->flags, get_AF(cpu), AF);
-	SET_BIT(cpu->flags, get_ZF(cpu), ZF);
-	SET_BIT(cpu->flags, get_SF(cpu), SF);
-	SET_BIT(cpu->flags, get_OF(cpu), OF);
+	uword mask = cpu->cc.mask;
+	if (mask & CF) SET_BIT(cpu->flags, get_CF(cpu), CF);
+	if (mask & PF) SET_BIT(cpu->flags, get_PF(cpu), PF);
+	if (mask & AF) SET_BIT(cpu->flags, get_AF(cpu), AF);
+	if (mask & ZF) SET_BIT(cpu->flags, get_ZF(cpu), ZF);
+	if (mask & SF) SET_BIT(cpu->flags, get_SF(cpu), SF);
+	if (mask & OF) SET_BIT(cpu->flags, get_OF(cpu), OF);
 }
 
 static inline int get_IOPL(CPUI386 *cpu)
 {
 	return (cpu->flags & IOPL) >> 12;
 }
+
+/*
+ * FRANK_WORKLOAD_PROFILE_V88
+ *
+ * Window-scoped workload counters for the Win+F7 .. Win+F8 capture.
+ *
+ * v8.7.3 compiled the single hottest entry of the v8.7.2 JIT reject list
+ * (the F000:8E15 byte-clear micro-loop) and the Symantec-under-EMM386 score
+ * did not move at all, while v8.5.1 -> v8.6 produced byte-identical counters.
+ * Two consecutive A/Bs therefore say the reject list is not where the EMM386
+ * time is.  Choosing the next optimisation needs numbers no previous capture
+ * contained:
+ *
+ *   - guest instructions retired inside the window, so native_guest_insns
+ *     becomes a real coverage fraction instead of a guess;
+ *   - how much of the window is VM86+paging at all;
+ *   - what the paging path itself costs: TLB refills and full TLB flushes are
+ *     page-table traffic against PSRAM, measured by this project at ~182 core
+ *     cycles per uncached access (see the remote-memory note above pload8());
+ *   - how much of the window is service work (software INT, hardware IRQ,
+ *     faults) rather than benchmark compute.
+ *
+ * Every counter below is incremented only on a path that is already far more
+ * expensive than an SRAM increment - TLB refill, TLB flush, exception entry,
+ * software interrupt - or once per taken backward branch, which already calls
+ * the JIT dispatcher.  None of them sits on the per-instruction decode path,
+ * and none of them changes emulated behaviour.
+ */
+volatile u32 g_wl_tlb_refills __attribute__((used));
+volatile u32 g_wl_tlb_clears __attribute__((used));
+volatile u32 g_wl_exc_pf __attribute__((used));
+volatile u32 g_wl_exc_gp __attribute__((used));
+volatile u32 g_wl_exc_other __attribute__((used));
+volatile u32 g_wl_hw_irq __attribute__((used));
+/*
+ * FRANK_WL_RAM_BUDGET_V89_1
+ *
+ * Counters that land inside a RAM-resident function are far more
+ * expensive than they look.  cpu_exec1(), nj_exec_loop(), tlb_refill()
+ * and translate*() are all __not_in_flash(), so their code sits in
+ * .data, and at v8.7.3 .data ended exactly 8 bytes below the 4 KB
+ * boundary that .bss is aligned to.  Any growth there therefore costs a
+ * further 4096 bytes of link padding on top of the code itself, taken
+ * straight out of the malloc heap that pc_new() draws on.
+ *
+ * The v8.9 build did exactly that: three counters inlined at the 13
+ * NJ_HOT_BACKEDGE sites pushed RAM from 91.66% to 92.50%, and the board
+ * came up with no HDMI signal.  codeprofile.h already records the same
+ * failure mode from the other direction - .bss growth leaving pc_new()
+ * with nothing, the emulator reaching vga_initialized and never
+ * finishing init.
+ *
+ * So the backedge counters are gone.  They did their job: they are what
+ * proved 99.5% of backedges were being dropped at the TF guard.  What is
+ * kept below costs nothing in RAM-resident code, or is small enough to
+ * measure and stay under the boundary.
+ */
+
+/*
+ * FRANK_TF_V88
+ *
+ * Single-step debug exceptions are not implemented by this emulator.
+ * EX_DB is declared in the exception enum and never thrown; cpu->dr[] is
+ * zeroed at reset and otherwise only moved in and out by MOV DR.  TF is
+ * therefore stored, pushed, popped and cleared on interrupt entry, but it
+ * never causes a trap, and no guest single-step handler ever runs to
+ * clear it again.  Once some guest sets it, it stays set for the rest of
+ * the session.
+ *
+ * That is exactly what happens under HIMEM + EMM386.  In the
+ * jitstats001 capture (Symantec under M602 + EMM386, score 8.7) the CPU
+ * mode at dump time is flags=00023347, i.e. VM | IOPL=3 | IF | TF, and
+ * the counters say the same thing independently:
+ *
+ *   window_backedges                       = 2338872
+ *   hits                                   =    6842
+ *   misses * 256 (sampled discovery)       =    4864
+ *   ------------------------------------------------
+ *   backedges that got past the TF test    =   11706  (0.5%)
+ *
+ * so 99.5% of all taken backward branches returned at the TF guard and
+ * the JIT was switched off for the whole run: native_coverage_ppm=4070,
+ * against 745770 for the identical benchmark without EMM386, which
+ * scores 345 instead of 8.7.
+ *
+ * The guard exists to preserve single-step semantics that the
+ * interpreter does not implement, so it protects nothing while costing
+ * the entire JIT.  A JIT block executes exactly what the interpreter
+ * would have executed, so running one with TF set is indistinguishable
+ * from interpreting with TF set - which is what already happens today.
+ *
+ * If TF -> #DB is ever implemented, set this back to 1 and both guards
+ * below become live again.
+ */
+#define NJ_SINGLE_STEP_IMPLEMENTED 0
+
+/*
+ * Runtime form of the guard rather than #if.
+ *
+ * Deleting the test outright cost 408 bytes of .data: nj_try_execute()
+ * is always_inline at 13 NJ_HOT_BACKEDGE sites inside cpu_exec1(), which
+ * is __not_in_flash(), and losing the early return let GCC materialise
+ * more of the body at each one.  .data ended 8 bytes below the 4 KB
+ * boundary .bss is aligned to, so those 408 bytes pulled in a further
+ * 4096 of link padding and the board came up with no HDMI signal - the
+ * failure mode codeprofile.h already records, where pc_new() cannot get
+ * its heap and vga_hw_set_vga_state() is therefore never reached.
+ *
+ * Keeping the branch and testing a variable the compiler cannot fold
+ * preserves the generated shape, so the size stays where it was.  The
+ * flag is 0, so the guard never fires; it also makes the whole change
+ * A/B-testable on one firmware image if that is ever wanted.
+ */
 
 /* MMU */
 #define CR0_PG (1<<31)
@@ -555,11 +816,25 @@ typedef struct {
 
 static void tlb_clear(CPUI386 *cpu)
 {
+	g_wl_tlb_clears++;
 	for (int i = 0; i < tlb_size; i++) {
 		cpu->tlb.tab[i].lpgno = -1;
 	}
 	cpu->ifetch.laddr = -1;
 	cpu->prefetch_base = (u32)-1;
+#if NATIVE_JIT
+	/*
+	 * FRANK_NATIVE_JIT_V8_SUPERTRACE:
+	 * TLB invalidation is not native-code invalidation.  A paged block is
+	 * guarded against the current linear->physical code mapping before it can
+	 * execute, and dynamic memory operations use the live guest TLB at runtime.
+	 * Keeping translated ARM code across CR3 reloads/INVLPG avoids the massive
+	 * DPMI/Doom recompile churn seen in v6.
+	 */
+#endif
+#if BLOCK_JIT
+	bj_flush();
+#endif
 }
 
 static int pte_lookup[2][4][2][2] = { //[wp != 0][(pte >> 1) & 3][cpl > 0][rwm > 1]
@@ -579,6 +854,8 @@ static int pte_lookup[2][4][2][2] = { //[wp != 0][(pte >> 1) & 3][cpl > 0][rwm >
 
 static bool IRAM_ATTR tlb_refill(CPUI386 *cpu, struct tlb_entry *ent, uword lpgno)
 {
+	g_wl_tlb_refills++;
+
 	uword base_addr = cpu->cr3 & ~0xfff;
 	uword i = lpgno >> 10;
 	uword j = lpgno & 1023;
@@ -633,9 +910,18 @@ static bool IRAM_ATTR translate_lpgno(CPUI386 *cpu, int rwm, uword lpgno, uword 
 	}
 	*paddr = ent->xaddr ^ laddr;
 	if (rwm & 2) {
-		*(ent->ppte) |= 1 << 6; // dirty
-//		pstore8(cpu, ent->ppte,
-//			pload8(cpu, ent->ppte) | (1 << 6)); // dirty
+		/*
+		 * Set the PTE dirty bit only when it is actually clear.
+		 *
+		 * This is a read-modify-write of guest memory, and guest memory is
+		 * PSRAM: the unconditional OR turned every guest write into an extra
+		 * store, on a page that is almost always dirty already after the
+		 * first write to it.  Testing first keeps the load - which the cache
+		 * serves - and drops the store.
+		 */
+		u8 *ppte = ent->ppte;
+		if (unlikely(!(*ppte & (1 << 6))))
+			*ppte |= 1 << 6;
 	}
 	return true;
 }
@@ -677,14 +963,78 @@ static bool IRAM_ATTR segcheck(CPUI386 *cpu, int rwm, int seg, uword addr, int s
 	return true;
 }
 
-static bool IRAM_ATTR translate(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr, int size, int cpl)
+/*
+ * Everything translate() does not want inline: the segment-limit rejection,
+ * a TLB miss and its refill, a page fault, and an access that straddles two
+ * pages and therefore needs two translations.
+ */
+static bool __attribute__((noinline)) IRAM_ATTR
+translate_out_of_line(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr,
+		      int size, int cpl)
 {
-	assert(seg != -1);
 	uword laddr = cpu->seg[seg].base + addr;
 
 	TRYL(segcheck(cpu, rwm, seg, addr, size));
 
 	return translate_laddr(cpu, res, rwm, laddr, size, cpl);
+}
+
+/*
+ * Address translation, with the case that actually happens kept in one
+ * function.
+ *
+ * This used to be four nested out-of-line calls for a plain TLB hit -
+ * translate() called segcheck(), then translate_laddr(), which called
+ * translate_lpgno() - and every instruction with a memory operand pays for
+ * all of them.  None of the four is expensive; the call sequences are, and on
+ * a machine spending 252 host cycles per guest instruction they are a
+ * measurable share of the whole interpreter.  `translate` plus
+ * `translate_laddr` alone were 9.4% of core 0 in the DRACIHIS profile, and the
+ * register spills the calls force on cpu_exec1() land in *its* 41.4%.
+ *
+ * So the hit path - segment check passes, paging on, TLB entry present and
+ * permitted, access inside one page - is straight-line code here, and
+ * everything else is one call to translate_out_of_line().  This is the same
+ * shape as the instruction-fetch change that was worth 12.9%: a small inline
+ * test, a noinline miss.  Crucially it does *not* inline into the ~200 call
+ * sites, so it costs almost nothing in SRAM, which is 90.85% full.
+ *
+ * The behaviour is unchanged, including the order in which exceptions are
+ * raised: a segment rejection is tested before anything paging-related, and
+ * every case the fast path declines is re-done from scratch by the slow one.
+ */
+static bool IRAM_ATTR translate(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uword addr, int size, int cpl)
+{
+	assert(seg != -1);
+	uword laddr = cpu->seg[seg].base + addr;
+
+	/* segcheck()'s only rejection, tested here so its call disappears. */
+	if (unlikely((cpu->cr0 & 1) && !(cpu->flags & VM) &&
+		     cpu->seg[seg].limit == 0 && (cpu->seg[seg].sel & ~0x3) == 0))
+		return translate_out_of_line(cpu, res, rwm, seg, addr, size, cpl);
+
+	if (likely(cpu->cr0 & CR0_PG)) {
+		uword lpgno = laddr >> 12;
+		struct tlb_entry *ent = &(cpu->tlb.tab[lpgno % tlb_size]);
+
+		if (unlikely(ent->lpgno != lpgno) ||
+		    unlikely(ent->pte_lookup[cpl > 0][rwm > 1]) ||
+		    unlikely((laddr & 0xfff) > 0x1000 - size))
+			return translate_out_of_line(cpu, res, rwm, seg, addr, size, cpl);
+
+		if (rwm & 2) {
+			u8 *ppte = ent->ppte;
+			if (unlikely(!(*ppte & (1 << 6))))
+				*ppte |= 1 << 6;
+		}
+		res->res = ADDR_OK1;
+		res->addr1 = ent->xaddr ^ laddr;
+		return true;
+	}
+
+	res->res = ADDR_OK1;
+	res->addr1 = laddr;
+	return true;
 }
 
 static bool IRAM_ATTR translate8r(CPUI386 *cpu, OptAddr *res, int seg, uword addr)
@@ -743,8 +1093,14 @@ static inline bool translate32(CPUI386 *cpu, OptAddr *res, int rwm, int seg, uwo
 
 static inline bool __attribute__((always_inline)) in_iomem(uword addr)
 {
-	/* one unsigned-subtract trick replaces two comparisons for VGA window */
-	return ((addr - 0xa0000u) < 0x20000u) || addr >= 0xe0000000u;
+	/*
+	 * Almost every DOS RAM access is below the VGA aperture.  Reject that
+	 * common case with one ordered comparison; only the uncommon high address
+	 * needs the second half of the aperture/device test.
+	 */
+	if (likely(addr < 0xa0000u))
+		return false;
+	return addr < 0xc0000u || addr >= 0xe0000000u;
 }
 
 static u8 IRAM_ATTR load8(CPUI386 *cpu, OptAddr *res)
@@ -878,9 +1234,16 @@ LOADSTORE(16)
 LOADSTORE(32)
 
 /*
- * Instruction prefetch buffer: 16 bytes loaded as four 32-bit reads from a
- * 16-byte-aligned physical address.  cpu->prefetch_base holds that physical base
- * address (always a multiple of 16), or (u32)-1 when invalid.
+ * Instruction prefetch buffer: 32 bytes loaded as eight 32-bit reads from a
+ * 32-byte-aligned physical address.  cpu->prefetch_base holds that physical base
+ * address (always a multiple of 32), or (u32)-1 when invalid.
+ *
+ * The width is the XIP cache's line size deliberately.  A 16-byte fill took
+ * one PSRAM miss and used half of what that miss brought in, so the next
+ * refill sixteen bytes later was free anyway - the cost was the refill path
+ * itself, and peek8_slow() was 8.9% of core 0 in the DRACIHIS profile.  A
+ * 32-byte line never straddles a 4 KB page either, since 4096 divides evenly
+ * by 32, so nothing about the paging checks changes.
  *
  * Invalidation is implicit: any jump/call/ret changes next_ip so that the
  * resulting paddr falls outside [cpu->prefetch_base, cpu->prefetch_base+16), causing
@@ -890,25 +1253,40 @@ LOADSTORE(32)
  * cpu->prefetch[] is aligned to 4 bytes so the four pload32 calls are natural.
  */
 
-/* Refill: load 16 bytes (4 x u32) from the 16-byte-aligned block that
+/* Refill: load 32 bytes (8 x u32) from the 32-byte-aligned block that
  * contains paddr.  Caller guarantees paddr is in plain RAM and within the
  * current ifetch page. */
 static inline void __attribute__((always_inline))
-prefetch_fill(CPUI386 *cpu, uword paddr)
+prefetch_fill(CPUI386 *cpu, uword laddr, uword paddr)
 {
-	u32 base = paddr & ~(u32)15;
-	cp_note(base);
-	cpu->prefetch_base = base;
+	u32 pbase = paddr & ~(u32)31;
+	cp_note(pbase);
+
+	/*
+	 * Tag the 32-byte instruction-prefetch line by linear address.
+	 * Paging preserves the low 12 address bits, so laddr and paddr have
+	 * the same offset within a 32-byte line.  The physical address is
+	 * still used for the actual PSRAM reads below.
+	 *
+	 * This removes the ifetch page test + physical-address XOR from the
+	 * FAST_FETCH hit path, which is one of the hottest paths on Z2.
+	 */
+	cpu->prefetch_base = laddr & ~(u32)31;
+
 	u32* prefetch = (u32*)cpu->prefetch;
-	*prefetch++ = pload32(cpu, base);
-	*prefetch++ = pload32(cpu, base + 4);
-	*prefetch++ = pload32(cpu, base + 8);
-	*prefetch++ = pload32(cpu, base + 12);
+	*prefetch++ = pload32(cpu, pbase);
+	*prefetch++ = pload32(cpu, pbase + 4);
+	*prefetch++ = pload32(cpu, pbase + 8);
+	*prefetch++ = pload32(cpu, pbase + 12);
+	*prefetch++ = pload32(cpu, pbase + 16);
+	*prefetch++ = pload32(cpu, pbase + 20);
+	*prefetch++ = pload32(cpu, pbase + 24);
+	*prefetch++ = pload32(cpu, pbase + 28);
 }
 
-/* True if paddr is covered by the current prefetch buffer. */
-#define PREFETCH_HIT(paddr) \
-	(likely(((uword)(paddr) - cpu->prefetch_base) < 16u))
+/* True if laddr is covered by the current prefetch buffer. */
+#define PREFETCH_HIT(laddr) \
+	(likely(((uword)(laddr) - cpu->prefetch_base) < 32u))
 
 /*
  * Instruction fetch is 21% of core-0 time, and peek8 was being called
@@ -919,17 +1297,44 @@ prefetch_fill(CPUI386 *cpu, uword paddr)
  *
  * The split below inlines only the hit path: two compares and a byte
  * load, ~20 bytes per site. Everything else — prefetch refill, page
- * miss, the full TLB walk — stays out of line in peek8_slow, which is
- * the original function unchanged.
+ * miss, the full TLB walk — stays out of line.
  */
+static bool __attribute__((noinline)) IRAM_ATTR
+peek8_miss(CPUI386 *cpu, u8 *val);
+
 static bool IRAM_ATTR peek8_slow(CPUI386 *cpu, u8 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
+
+	/*
+	 * The prefetch line is tagged by linear address, so a hit is valid without
+	 * consulting the cached translation first.  Test it before ifetch.laddr:
+	 * this is the common path and avoids a page-tag load/XOR/compare for every
+	 * interpreted instruction byte.  FAST_FETCH already relies on the same
+	 * invariant; keeping it here gives Z2 most of that hot-path win without
+	 * duplicating the test at hundreds of call sites.
+	 */
+	if (PREFETCH_HIT(laddr)) {
+		*val = cpu->prefetch[laddr & 31];
+		return true;
+	}
+
+	/* Keep the overwhelmingly common hit path small; the noinline miss helper
+	 * also prevents its large register-save set from infecting every hit. */
+	return peek8_miss(cpu, val);
+}
+
+static bool __attribute__((noinline)) IRAM_ATTR
+peek8_miss(CPUI386 *cpu, u8 *val)
+{
+	/* One recomputation per 32-byte refill is cheaper than carrying laddr into
+	 * the helper and forcing another callee-saved register on every hit. */
+	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
+
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
 		uword paddr = cpu->ifetch.xaddr ^ laddr;
-		if (!PREFETCH_HIT(paddr))
-			prefetch_fill(cpu, paddr);
-		*val = cpu->prefetch[paddr & 15];
+		prefetch_fill(cpu, laddr, paddr);
+		*val = cpu->prefetch[laddr & 31];
 		return true;
 	}
 	/* ifetch page miss: full TLB translate */
@@ -937,9 +1342,9 @@ static bool IRAM_ATTR peek8_slow(CPUI386 *cpu, u8 *val)
 	TRY(translate8r(cpu, &res, SEG_CS, cpu->next_ip));
 	cpu->ifetch.laddr = laddr & (~4095ul);
 	cpu->ifetch.xaddr = res.addr1 ^ laddr;
-	if (!in_iomem(res.addr1) && res.addr1 + 15 < cpu->phys_mem_size) {
-		prefetch_fill(cpu, res.addr1);
-		*val = cpu->prefetch[res.addr1 & 15];
+	if (!in_iomem(res.addr1) && res.addr1 + 31 < cpu->phys_mem_size) {
+		prefetch_fill(cpu, laddr, res.addr1);
+		*val = cpu->prefetch[laddr & 31];
 	} else {
 		cpu->prefetch_base = (u32)-1;
 		*val = load8(cpu, &res);
@@ -964,12 +1369,9 @@ static inline __attribute__((always_inline))
 bool peek8(CPUI386 *cpu, u8 *val)
 {
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
-	if (likely((laddr ^ cpu->ifetch.laddr) < 4096)) {
-		uword paddr = cpu->ifetch.xaddr ^ laddr;
-		if (likely(PREFETCH_HIT(paddr))) {
-			*val = cpu->prefetch[paddr & 15];
-			return true;
-		}
+	if (likely(PREFETCH_HIT(laddr))) {
+		*val = cpu->prefetch[laddr & 31];
+		return true;
 	}
 	return peek8_slow(cpu, val);
 }
@@ -989,16 +1391,16 @@ static bool IRAM_ATTR fetch16(CPUI386 *cpu, u16 *val)
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4095)) {
 		uword paddr = cpu->ifetch.xaddr ^ laddr;
-		if (!PREFETCH_HIT(paddr))
-			prefetch_fill(cpu, paddr);
-		unsigned off = paddr & 15;
-		if (likely(off <= 14)) {
+		if (!PREFETCH_HIT(laddr))
+			prefetch_fill(cpu, laddr, paddr);
+		unsigned off = laddr & 31;
+		if (likely(off <= 30)) {
 			/* Both bytes inside the buffer */
 			*val = cpu->prefetch[off] | ((u16)cpu->prefetch[off + 1] << 8);
 		} else {
 			/* Byte 1 is last byte of current block; byte 0 already in buffer.
 			 * Read second byte via pload (still within ifetch page). */
-			u8 lo = cpu->prefetch[15];
+			u8 lo = cpu->prefetch[31];
 			u8 hi = pload8(cpu, paddr + 1);
 			*val = lo | ((u16)hi << 8);
 		}
@@ -1017,17 +1419,17 @@ static bool IRAM_ATTR fetch32(CPUI386 *cpu, u32 *val)
 	uword laddr = cpu->seg[SEG_CS].base + cpu->next_ip;
 	if (likely((laddr ^ cpu->ifetch.laddr) < 4093)) {
 		uword paddr = cpu->ifetch.xaddr ^ laddr;
-		if (!PREFETCH_HIT(paddr))
-			prefetch_fill(cpu, paddr);
-		unsigned off = paddr & 15;
-		if (likely(off <= 12)) {
+		if (!PREFETCH_HIT(laddr))
+			prefetch_fill(cpu, laddr, paddr);
+		unsigned off = laddr & 31;
+		if (likely(off <= 28)) {
 			/* All 4 bytes inside the buffer */
 			*val = cpu->prefetch[off]
 			     | ((u32)cpu->prefetch[off + 1] << 8)
 			     | ((u32)cpu->prefetch[off + 2] << 16)
 			     | ((u32)cpu->prefetch[off + 3] << 24);
 		} else {
-			/* Spans two 16-byte blocks: read the remaining bytes
+			/* Spans two prefetch lines: read the remaining bytes
 			 * directly and let the next fetch refill. */
 			*val = pload32(cpu, paddr);
 			cpu->prefetch_base = (u32)-1;
@@ -1157,6 +1559,17 @@ static bool read_desc(CPUI386 *cpu, int sel, uword *w1, uword *w2)
 
 static bool __not_in_flash_func(set_seg)(CPUI386 *cpu, int seg, int sel)
 {
+	if (seg == SEG_CS) {
+		/* The stack is read straight out of physical memory: every guest
+		 * that gets here runs the low megabyte identity-mapped, and a
+		 * diagnostic read must never fault or walk page tables itself. */
+		uint32_t ssp = cpu->seg[SEG_SS].base +
+			(REGi(4) & (uint32_t)cpu->sp_mask);
+		const uint8_t *stk = (ssp + 8 <= (uint32_t)cpu->phys_mem_size) ?
+			cpu->phys_mem + ssp : 0;
+		frank_diag_cs(cpu->seg[SEG_CS].base, cpu->ip, (uint32_t)sel,
+			      ssp, (uint32_t)cpu->flags, stk);
+	}
 	sel = sel & 0xffff;
 	if (!(cpu->cr0 & 1) || (cpu->flags & VM)) {
 		cpu->seg[seg].sel = sel;
@@ -2336,9 +2749,34 @@ static inline void clear_segs(CPUI386 *cpu)
 	} else if (reg == 4) { \
 	} else THROW0(EX_UD);
 
+/*
+ * INT3 has to take the same route as INT n in virtual-8086 mode.
+ *
+ * Throwing #BP straight away bypassed the IOPL check that INT() does, so a
+ * guest running under EMM386 got a breakpoint exception delivered to the
+ * monitor instead of a software interrupt to reflect.  EMM386 does not
+ * reflect an unexpected #BP - it halts with "has detected error #83 in an
+ * application" - which is why several games (Summer Challenge among them)
+ * died the moment EMM386 was loaded and were fine without it: in real mode
+ * IVT[3] points at an IRET and the call is harmless.  They call INT 3 on
+ * purpose, with arguments in SI/DI, as a hook for a resident program.
+ *
+ * The #GP is a fault, so cpu->ip must still point at the INT3 itself; only
+ * the #BP path, a trap, advances to the next instruction.
+ */
 #define INT3() \
-	cpu->ip = cpu->next_ip; \
-	THROW0(EX_BP);
+	if (cpu->flags & VM) { \
+		if (get_IOPL(cpu) < 3) THROW(EX_GP, 0); \
+		uword oldip = cpu->ip; \
+		cpu->ip = cpu->next_ip; \
+		if (!call_isr(cpu, 3, false, 0)) { \
+			cpu->ip = oldip; \
+			return false; \
+		} \
+	} else { \
+		cpu->ip = cpu->next_ip; \
+		THROW0(EX_BP); \
+	}
 
 #define INTO() \
 	if (get_OF(cpu)) { \
@@ -2952,6 +3390,8 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 				cpu->cb.io, lreg16(2), \
 				cpu->phys_mem + memld.addr1, dir, count); \
 			if (count1 > 0) { \
+				frank_diag_wp_range(memld.addr1, \
+					count1 * (BIT / 8), 0x1451u, lreg16(2)); \
 				count = count1; \
 				sreg ## ABIT(7, lreg ## ABIT(7) + count * dir); \
 				sreg ## ABIT(1, cx - count); \
@@ -3051,42 +3491,61 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 #define OUTSb() OUTS_helper(8)
 #define OUTS() if (opsz16) { OUTS_helper(16) } else { OUTS_helper(32) }
 
+/*
+ * Native JIT dispatch is attached to actual taken backward branches instead
+ * of the cpu_exec1 loop head.  This is the key difference from v3:
+ * sequential instructions pay exactly zero JIT-dispatch instructions.
+ *
+ * stepcount is cpu_exec1's remaining instruction budget and is intentionally
+ * referenced by this macro at its expansion sites.
+ */
+#if NATIVE_JIT
+#define NJ_HOT_BACKEDGE(d) do { \
+	if ((sword)(d) < 0 && stepcount > 0) { \
+		int _nj_done = nj_try_execute(cpu, stepcount); \
+		if (_nj_done > 0) stepcount -= _nj_done; \
+	} \
+} while (0)
+#else
+#define NJ_HOT_BACKEDGE(d) do { (void)(d); } while (0)
+#endif
+
 #define JCXZb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
-		if (lreg16(1) == 0) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg16(1) == 0) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	} else { \
-		if (lreg32(1) == 0) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg32(1) == 0) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	}
 
 #define LOOPb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
 		sreg16(1, lreg16(1) - 1); \
-		if (lreg16(1)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg16(1)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	} else { \
 		sreg32(1, lreg32(1) - 1); \
-		if (lreg32(1)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg32(1)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	}
 
 #define LOOPEb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
 		sreg16(1, lreg16(1) - 1); \
-		if (lreg16(1) && get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg16(1) && get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	} else { \
 		sreg32(1, lreg32(1) - 1); \
-		if (lreg32(1) && get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg32(1) && get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	}
 
 #define LOOPNEb(i, li, _) \
 	sword d = sext8(li(i)); \
 	if (adsz16) { \
 		sreg16(1, lreg16(1) - 1); \
-		if (lreg16(1) && !get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg16(1) && !get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	} else { \
 		sreg32(1, lreg32(1) - 1); \
-		if (lreg32(1) && !get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; } \
+		if (lreg32(1) && !get_ZF(cpu)) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); } \
 	}
 
 #define COND() \
@@ -3112,7 +3571,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define JCC_common(d) \
 	COND() \
-	if (cond) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; }
+	if (cond) { cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d); }
 
 #define SETCCb(a, la, sa) \
 	COND() \
@@ -3132,15 +3591,15 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 
 #define JMPb(i, li, _) \
 	sword d = sext8(li(i)); \
-	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d);
 
 #define JMPw(i, li, _) \
 	sword d = sext16(li(i)); \
-	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d);
 
 #define JMPd(i, li, _) \
 	sword d = sext32(li(i)); \
-	cpu->next_ip += d; cpu->prefetch_base = (u32)-1;
+	cpu->next_ip += d; cpu->prefetch_base = (u32)-1; NJ_HOT_BACKEDGE(d);
 
 #define JMPABSw(i, li, _) \
 	cpu->next_ip = li(i); cpu->prefetch_base = (u32)-1;
@@ -3213,17 +3672,29 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 	saddr32(&meml, cpu->next_ip); \
 	cpu->next_ip = nip; cpu->prefetch_base = (u32)-1;
 
+#define FRANK_RET_WATCH() \
+	{ \
+		uint32_t dssp = cpu->seg[SEG_SS].base + (sp & sp_mask); \
+		const uint8_t *dstk = (dssp >= 32 && \
+			dssp + 32 <= (uint32_t)cpu->phys_mem_size) ? \
+			cpu->phys_mem + dssp - 32 : 0; \
+		frank_diag_ret(cpu->next_ip, cpu->seg[SEG_CS].base, cpu->ip, \
+			       dssp, dstk); \
+	}
+
 #define RETw(i, li, _) \
 	if (opsz16) { \
 		uword sp = lreg32(4); \
 		TRY(translate16(cpu, &meml, 1, SEG_SS, sp & sp_mask)); \
 		set_sp(sp + 2 + li(i), sp_mask); \
 		cpu->next_ip = laddr16(&meml); \
+		FRANK_RET_WATCH() \
 	} else { \
 		uword sp = lreg32(4); \
 		TRY(translate32(cpu, &meml, 1, SEG_SS, sp & sp_mask)); \
 		set_sp(sp + 4 + li(i), sp_mask); \
 		cpu->next_ip = laddr32(&meml); \
+		FRANK_RET_WATCH() \
 	} \
 	cpu->prefetch_base = (u32)-1;
 
@@ -3973,6 +4444,7128 @@ static bool verbose;
 #define C_16(_1, ...) CX(_1) C_15(__VA_ARGS__)
 #define C(...) PASTE(C_, ARGCOUNT(__VA_ARGS__))(__VA_ARGS__)
 
+
+#if BLOCK_JIT
+/* -------------------------------------------------------------------------
+ * FRANK_BLOCK_JIT_V1
+ *
+ * Small hot-block dynamic translator for RP2350.
+ *
+ * Cache footprint is intentionally tiny (~1.3 KB) so Z2 can keep FAST_FETCH.
+ * The previous BB profile showed that a handful of guest blocks dominate, so
+ * a large cache is not required for the first hardware test.
+ *
+ * Supported in v1:
+ *   - NOP
+ *   - MOV r16/r32, imm
+ *   - MOV r16/r32, r16/r32 (ModR/M register form)
+ *   - XCHG AX/EAX, r16/r32 and XCHG reg,reg
+ *   - ADD/SUB/AND/OR/XOR/CMP/TEST register forms
+ *   - ADD/SUB/AND/OR/XOR/CMP immediate register forms
+ *   - INC/DEC register
+ *   - short/near Jcc, short/near JMP
+ *   - LOOP/LOOPE/LOOPNE/JCXZ/JECXZ
+ *
+ * Unsupported, memory, I/O, stack, far-control-flow, REP and flag-consuming
+ * arithmetic fall back to the existing interpreter. No guest-visible state is
+ * changed by the compiler itself.
+ * ------------------------------------------------------------------------- */
+
+/* FRANK_BLOCK_JIT_V2 */
+#define BJ_CACHE_BITS  4
+#define BJ_CACHE_SLOTS (1u << BJ_CACHE_BITS)
+#define BJ_HOT_BITS    5
+#define BJ_HOT_SLOTS   (1u << BJ_HOT_BITS)
+#define BJ_HOT_THRESHOLD 3u
+#define BJ_MAX_UOPS    8
+#define BJ_TRACK_PAGES 2048u       /* 8 MiB / 4 KiB */
+#define BJ_PAGE_BYTES  (BJ_TRACK_PAGES / 8u)
+
+enum {
+	BJ_NOP = 1,
+	BJ_MOV_RI,
+	BJ_MOV_RR,
+	BJ_XCHG_RR,
+	BJ_ADD_RR,
+	BJ_SUB_RR,
+	BJ_OR_RR,
+	BJ_AND_RR,
+	BJ_XOR_RR,
+	BJ_CMP_RR,
+	BJ_TEST_RR,
+	BJ_ADD_RI,
+	BJ_SUB_RI,
+	BJ_OR_RI,
+	BJ_AND_RI,
+	BJ_XOR_RI,
+	BJ_CMP_RI,
+	BJ_INC_R,
+	BJ_DEC_R,
+	BJ_JCC,
+	BJ_JMP,
+	BJ_LOOP
+};
+
+typedef struct {
+	u32 imm;
+	u8 op;
+	u8 dst;
+	u8 src;
+	u8 width;
+	u8 len;
+	u8 aux;
+	u8 _pad0;
+	u8 _pad1;
+} bj_uop_t;
+
+typedef struct {
+	uword linear;
+	uword cs_base;
+	uword mmu_key;
+	uword start_ip;
+	u16 byte_len;
+	u16 last_off;
+	u16 phys_page;
+	u8 count;
+	u8 code16;
+	u8 valid;
+	u8 has_branch;
+	bj_uop_t u[BJ_MAX_UOPS];
+} bj_block_t;
+
+static bj_block_t bj_cache[BJ_CACHE_SLOTS];
+static u8 bj_page_bits[BJ_PAGE_BYTES];
+
+typedef struct {
+	uword key;
+	u8 seen;
+	u8 _pad[3];
+} bj_hot_t;
+static bj_hot_t bj_hot[BJ_HOT_SLOTS];
+
+volatile u32 g_bjit_hits __attribute__((used));
+volatile u32 g_bjit_misses __attribute__((used));
+volatile u32 g_bjit_compiles __attribute__((used));
+volatile u32 g_bjit_uops __attribute__((used));
+volatile u32 g_bjit_invalidations __attribute__((used));
+volatile u32 g_bjit_skips __attribute__((used));
+volatile u32 g_bjit_hotwait __attribute__((used));
+volatile u32 g_bjit_rejects __attribute__((used));
+
+static inline __attribute__((always_inline))
+unsigned bj_hash_block(uword linear)
+{
+	return (unsigned)((linear * 2654435761u) >> (32 - BJ_CACHE_BITS));
+}
+
+static inline __attribute__((always_inline))
+unsigned bj_hash_hot(uword key)
+{
+	return (unsigned)((key * 2654435761u) >> (32 - BJ_HOT_BITS));
+}
+
+static inline __attribute__((always_inline))
+uword bj_context_key(CPUI386 *cpu, uword linear)
+{
+	return linear ^ cpu->cr3 ^ (cpu->cr0 & 0x80000001u) ^ cpu->a20_mask ^
+	       ((uword)cpu->code16 << 30);
+}
+
+static inline __attribute__((always_inline))
+bool bj_hot_enough(CPUI386 *cpu, uword linear)
+{
+	uword key = bj_context_key(cpu, linear);
+	bj_hot_t *h = &bj_hot[bj_hash_hot(key)];
+
+	if (h->key != key) {
+		h->key = key;
+		h->seen = 1;
+		return false;
+	}
+	if (h->seen == 0xff)
+		return false;
+	if (h->seen < BJ_HOT_THRESHOLD) {
+		h->seen++;
+		return false;
+	}
+	return true;
+}
+
+static inline __attribute__((always_inline))
+void bj_hot_reject(CPUI386 *cpu, uword linear)
+{
+	uword key = bj_context_key(cpu, linear);
+	bj_hot_t *h = &bj_hot[bj_hash_hot(key)];
+	h->key = key;
+	h->seen = 0xff;
+	g_bjit_rejects++;
+}
+
+static inline bool bj_page_marked(unsigned page)
+{
+	return page < BJ_TRACK_PAGES &&
+	       (bj_page_bits[page >> 3] & (1u << (page & 7)));
+}
+
+static inline void bj_page_mark(unsigned page)
+{
+	if (page < BJ_TRACK_PAGES)
+		bj_page_bits[page >> 3] |= (u8)(1u << (page & 7));
+}
+
+static void bj_rebuild_pages(void)
+{
+	memset(bj_page_bits, 0, sizeof(bj_page_bits));
+	for (unsigned i = 0; i < BJ_CACHE_SLOTS; ++i)
+		if (bj_cache[i].valid)
+			bj_page_mark(bj_cache[i].phys_page);
+}
+
+static void bj_flush(void)
+{
+	memset(bj_cache, 0, sizeof(bj_cache));
+	memset(bj_page_bits, 0, sizeof(bj_page_bits));
+	memset(bj_hot, 0, sizeof(bj_hot));
+}
+
+static void bj_invalidate_page(unsigned page)
+{
+	bool changed = false;
+	for (unsigned i = 0; i < BJ_CACHE_SLOTS; ++i) {
+		if (bj_cache[i].valid && bj_cache[i].phys_page == page) {
+			bj_cache[i].valid = 0;
+			changed = true;
+		}
+	}
+	if (changed) {
+		g_bjit_invalidations++;
+		bj_rebuild_pages();
+		memset(bj_hot, 0, sizeof(bj_hot));
+	}
+}
+
+static inline void bj_note_write(CPUI386 *cpu, uword addr, unsigned len)
+{
+	(void)cpu;
+	unsigned p0 = addr >> 12;
+	unsigned p1 = (addr + len - 1u) >> 12;
+	if (unlikely(bj_page_marked(p0)))
+		bj_invalidate_page(p0);
+	if (p1 != p0 && unlikely(bj_page_marked(p1)))
+		bj_invalidate_page(p1);
+}
+
+static inline u32 bj_get_reg(CPUI386 *cpu, unsigned r, unsigned width)
+{
+	u32 v = REGi(r);
+	return width == 2 ? (u16)v : v;
+}
+
+static inline void bj_set_reg(CPUI386 *cpu, unsigned r, unsigned width, u32 v)
+{
+	if (width == 2)
+		REGi(r) = (REGi(r) & 0xffff0000u) | (u16)v;
+	else
+		REGi(r) = v;
+}
+
+static inline uword bj_sext(u32 v, unsigned width)
+{
+	return width == 2 ? (uword)(sword)(s16)(u16)v
+	                  : (uword)(sword)(s32)v;
+}
+
+static inline void bj_cc_arith(CPUI386 *cpu, int op, unsigned width,
+                               u32 a, u32 b, u32 result)
+{
+	cpu->cc.src1 = bj_sext(a, width);
+	cpu->cc.src2 = bj_sext(b, width);
+	cpu->cc.dst  = bj_sext(result, width);
+	cpu->cc.op   = op;
+	cpu->cc.mask = CF | PF | AF | ZF | SF | OF;
+}
+
+static inline void bj_cc_logic(CPUI386 *cpu, int op, unsigned width, u32 result)
+{
+	cpu->cc.dst  = bj_sext(result, width);
+	cpu->cc.op   = op;
+	cpu->cc.mask = CF | PF | ZF | SF | OF;
+}
+
+static inline bool bj_cond(CPUI386 *cpu, unsigned c)
+{
+	switch (c & 15u) {
+	case 0x0: return get_OF(cpu);
+	case 0x1: return !get_OF(cpu);
+	case 0x2: return get_CF(cpu);
+	case 0x3: return !get_CF(cpu);
+	case 0x4: return get_ZF(cpu);
+	case 0x5: return !get_ZF(cpu);
+	case 0x6: return get_CF(cpu) || get_ZF(cpu);
+	case 0x7: return !get_CF(cpu) && !get_ZF(cpu);
+	case 0x8: return get_SF(cpu);
+	case 0x9: return !get_SF(cpu);
+	case 0xa: return get_PF(cpu);
+	case 0xb: return !get_PF(cpu);
+	case 0xc: return get_SF(cpu) != get_OF(cpu);
+	case 0xd: return get_SF(cpu) == get_OF(cpu);
+	case 0xe: return get_ZF(cpu) || (get_SF(cpu) != get_OF(cpu));
+	default:  return !get_ZF(cpu) && (get_SF(cpu) == get_OF(cpu));
+	}
+}
+
+static inline u16 bj_rd16(const u8 *p)
+{
+	return (u16)p[0] | ((u16)p[1] << 8);
+}
+
+static inline u32 bj_rd32(const u8 *p)
+{
+	return (u32)p[0] | ((u32)p[1] << 8) |
+	       ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+static int bj_code_window(CPUI386 *cpu, uword ip,
+                          const u8 **out, unsigned *avail,
+                          unsigned *phys_page)
+{
+	if (cpu->code16)
+		ip &= 0xffffu;
+
+	OptAddr res;
+	if (!translate8r(cpu, &res, SEG_CS, ip))
+		return 0;
+
+	if (in_iomem(res.addr1) || res.addr1 >= (uword)cpu->phys_mem_size)
+		return 0;
+
+	uword linear = cpu->seg[SEG_CS].base + ip;
+	unsigned n = 4096u - (unsigned)(linear & 4095u);
+	unsigned pn = 4096u - (unsigned)(res.addr1 & 4095u);
+	if (pn < n) n = pn;
+
+	unsigned memn = (unsigned)((uword)cpu->phys_mem_size - res.addr1);
+	if (memn < n) n = memn;
+
+	if (cpu->code16) {
+		unsigned wrapn = 0x10000u - (unsigned)(ip & 0xffffu);
+		if (wrapn < n) n = wrapn;
+	}
+
+	*out = cpu->phys_mem + res.addr1;
+	*avail = n;
+	*phys_page = (unsigned)(res.addr1 >> 12);
+	return n != 0;
+}
+
+static int bj_decode_one(CPUI386 *cpu, const u8 *p, unsigned max,
+                         bj_uop_t *u, bool *terminator)
+{
+	if (!max) return 0;
+
+	unsigned pos = 0;
+	bool opsz16 = cpu->code16;
+	bool adsz16 = cpu->code16;
+
+	for (;;) {
+		if (pos >= max || pos >= 8) return 0;
+		u8 x = p[pos];
+		switch (x) {
+		case 0x26: case 0x2e: case 0x36: case 0x3e:
+		case 0x64: case 0x65:
+			pos++;
+			continue;
+		case 0x66:
+			opsz16 = !cpu->code16;
+			pos++;
+			continue;
+		case 0x67:
+			adsz16 = !cpu->code16;
+			pos++;
+			continue;
+		case 0xf0: case 0xf2: case 0xf3:
+			return 0;
+		default:
+			break;
+		}
+		break;
+	}
+
+	if (pos >= max) return 0;
+	u8 op = p[pos++];
+	unsigned width = opsz16 ? 2u : 4u;
+
+	memset(u, 0, sizeof(*u));
+	u->width = (u8)width;
+	*terminator = false;
+
+#define BJ_NEED(n) do { if (pos + (unsigned)(n) > max) return 0; } while (0)
+#define BJ_MODRM_REGS(m, regv, rmv) do { \
+	if (((m) >> 6) != 3) return 0; \
+	(regv) = ((m) >> 3) & 7; \
+	(rmv) = (m) & 7; \
+} while (0)
+
+	if (op == 0x90) {
+		u->op = BJ_NOP;
+	} else if (op >= 0x91 && op <= 0x97) {
+		u->op = BJ_XCHG_RR;
+		u->dst = 0;
+		u->src = op & 7;
+	}
+	else if (op >= 0xb8 && op <= 0xbf) {
+		u->op = BJ_MOV_RI;
+		u->dst = op & 7;
+		BJ_NEED(width);
+		u->imm = width == 2 ? bj_rd16(p + pos) : bj_rd32(p + pos);
+		pos += width;
+	}
+	else if (op >= 0x40 && op <= 0x47) {
+		u->op = BJ_INC_R;
+		u->dst = op & 7;
+	} else if (op >= 0x48 && op <= 0x4f) {
+		u->op = BJ_DEC_R;
+		u->dst = op & 7;
+	}
+	else if (op == 0x05 || op == 0x0d || op == 0x25 ||
+	         op == 0x2d || op == 0x35 || op == 0x3d) {
+		BJ_NEED(width);
+		u->dst = 0;
+		u->imm = width == 2 ? bj_rd16(p + pos) : bj_rd32(p + pos);
+		pos += width;
+		switch (op) {
+		case 0x05: u->op = BJ_ADD_RI; break;
+		case 0x0d: u->op = BJ_OR_RI;  break;
+		case 0x25: u->op = BJ_AND_RI; break;
+		case 0x2d: u->op = BJ_SUB_RI; break;
+		case 0x35: u->op = BJ_XOR_RI; break;
+		default:   u->op = BJ_CMP_RI; break;
+		}
+	}
+	else if (op == 0x01 || op == 0x03 || op == 0x09 || op == 0x0b ||
+	         op == 0x21 || op == 0x23 || op == 0x29 || op == 0x2b ||
+	         op == 0x31 || op == 0x33 || op == 0x39 || op == 0x3b ||
+	         op == 0x85 || op == 0x87 || op == 0x89 || op == 0x8b) {
+		BJ_NEED(1);
+		u8 m = p[pos++];
+		unsigned reg, rm;
+		BJ_MODRM_REGS(m, reg, rm);
+
+		if (op == 0x89) {
+			u->op = BJ_MOV_RR; u->dst = rm; u->src = reg;
+		} else if (op == 0x8b) {
+			u->op = BJ_MOV_RR; u->dst = reg; u->src = rm;
+		} else if (op == 0x87) {
+			u->op = BJ_XCHG_RR; u->dst = rm; u->src = reg;
+		} else if (op == 0x85) {
+			u->op = BJ_TEST_RR; u->dst = rm; u->src = reg;
+		} else {
+			bool dir = (op & 2) != 0;
+			u->dst = dir ? reg : rm;
+			u->src = dir ? rm : reg;
+			switch (op & 0xf8) {
+			case 0x00: u->op = BJ_ADD_RR; break;
+			case 0x08: u->op = BJ_OR_RR;  break;
+			case 0x20: u->op = BJ_AND_RR; break;
+			case 0x28: u->op = BJ_SUB_RR; break;
+			case 0x30: u->op = BJ_XOR_RR; break;
+			case 0x38: u->op = BJ_CMP_RR; break;
+			default: return 0;
+			}
+		}
+	}
+	else if (op == 0x81 || op == 0x83) {
+		BJ_NEED(1);
+		u8 m = p[pos++];
+		if ((m >> 6) != 3) return 0;
+		unsigned sub = (m >> 3) & 7;
+		u->dst = m & 7;
+
+		if (sub == 2 || sub == 3) return 0;
+
+		if (op == 0x83) {
+			BJ_NEED(1);
+			s32 simm = (s8)p[pos++];
+			u->imm = width == 2 ? (u16)simm : (u32)simm;
+		} else {
+			BJ_NEED(width);
+			u->imm = width == 2 ? bj_rd16(p + pos) : bj_rd32(p + pos);
+			pos += width;
+		}
+
+		switch (sub) {
+		case 0: u->op = BJ_ADD_RI; break;
+		case 1: u->op = BJ_OR_RI;  break;
+		case 4: u->op = BJ_AND_RI; break;
+		case 5: u->op = BJ_SUB_RI; break;
+		case 6: u->op = BJ_XOR_RI; break;
+		case 7: u->op = BJ_CMP_RI; break;
+		default: return 0;
+		}
+	}
+	else if (op == 0xc7) {
+		BJ_NEED(1);
+		u8 m = p[pos++];
+		if (((m >> 6) != 3) || (((m >> 3) & 7) != 0)) return 0;
+		u->op = BJ_MOV_RI;
+		u->dst = m & 7;
+		BJ_NEED(width);
+		u->imm = width == 2 ? bj_rd16(p + pos) : bj_rd32(p + pos);
+		pos += width;
+	}
+	else if (op >= 0x70 && op <= 0x7f) {
+		BJ_NEED(1);
+		u->op = BJ_JCC;
+		u->aux = op & 15;
+		u->imm = (u32)(s32)(s8)p[pos++];
+		*terminator = true;
+	}
+	else if (op == 0xeb) {
+		BJ_NEED(1);
+		u->op = BJ_JMP;
+		u->imm = (u32)(s32)(s8)p[pos++];
+		*terminator = true;
+	} else if (op == 0xe9) {
+		BJ_NEED(width);
+		u->op = BJ_JMP;
+		u->imm = width == 2
+		       ? (u32)(s32)(s16)bj_rd16(p + pos)
+		       : (u32)(s32)bj_rd32(p + pos);
+		pos += width;
+		*terminator = true;
+	}
+	else if (op >= 0xe0 && op <= 0xe3) {
+		BJ_NEED(1);
+		u->op = BJ_LOOP;
+		u->aux = op;
+		u->width = adsz16 ? 2 : 4;
+		u->imm = (u32)(s32)(s8)p[pos++];
+		*terminator = true;
+	}
+	else if (op == 0x0f) {
+		BJ_NEED(1);
+		u8 op2 = p[pos++];
+		if (op2 < 0x80 || op2 > 0x8f) return 0;
+		BJ_NEED(width);
+		u->op = BJ_JCC;
+		u->aux = op2 & 15;
+		u->imm = width == 2
+		       ? (u32)(s32)(s16)bj_rd16(p + pos)
+		       : (u32)(s32)bj_rd32(p + pos);
+		pos += width;
+		*terminator = true;
+	}
+	else {
+		return 0;
+	}
+
+	if (pos > 15) return 0;
+	u->len = (u8)pos;
+	return (int)pos;
+
+#undef BJ_MODRM_REGS
+#undef BJ_NEED
+}
+
+static inline __attribute__((always_inline))
+bj_block_t *bj_lookup(CPUI386 *cpu, uword ip)
+{
+	uword linear = cpu->seg[SEG_CS].base + ip;
+	uword mmu_key = cpu->cr3 ^ (cpu->cr0 & 0x80000001u) ^ cpu->a20_mask;
+	bj_block_t *b = &bj_cache[bj_hash_block(linear)];
+
+	if (likely(b->valid &&
+	           b->linear == linear &&
+	           b->cs_base == cpu->seg[SEG_CS].base &&
+	           b->mmu_key == mmu_key &&
+	           b->code16 == (u8)cpu->code16))
+		return b;
+
+	return NULL;
+}
+
+static bj_block_t *bj_compile(CPUI386 *cpu, uword ip)
+{
+	const u8 *code;
+	unsigned avail, phys_page;
+	if (!bj_code_window(cpu, ip, &code, &avail, &phys_page))
+		return NULL;
+
+	bj_block_t tmp;
+	memset(&tmp, 0, sizeof(tmp));
+	tmp.linear = cpu->seg[SEG_CS].base + ip;
+	tmp.cs_base = cpu->seg[SEG_CS].base;
+	tmp.mmu_key = cpu->cr3 ^ (cpu->cr0 & 0x80000001u) ^ cpu->a20_mask;
+	tmp.start_ip = ip;
+	tmp.phys_page = (u16)phys_page;
+	tmp.code16 = (u8)cpu->code16;
+
+	unsigned pos = 0;
+	for (unsigned i = 0; i < BJ_MAX_UOPS && pos < avail; ++i) {
+		bool term = false;
+		int n = bj_decode_one(cpu, code + pos, avail - pos, &tmp.u[i], &term);
+		if (n <= 0) break;
+		tmp.last_off = (u16)pos;
+		pos += (unsigned)n;
+		tmp.count++;
+		if (term) {
+			tmp.has_branch = 1;
+			break;
+		}
+	}
+
+	if (tmp.count < 2)
+		return NULL;
+
+	tmp.byte_len = (u16)pos;
+	tmp.valid = 1;
+
+	/* Direct-mapped cache. */
+	bj_block_t *dst = &bj_cache[bj_hash_block(tmp.linear)];
+	*dst = tmp;
+	bj_rebuild_pages();
+	g_bjit_compiles++;
+	return dst;
+}
+
+static int IRAM_ATTR bj_exec(CPUI386 *cpu, const bj_block_t *b, int max_steps)
+{
+	if (!b || b->count == 0 || b->count > max_steps)
+		return 0;
+
+	uword ip = cpu->next_ip;
+	if (cpu->code16) ip &= 0xffffu;
+
+	for (unsigned i = 0; i < b->count; ++i) {
+		const bj_uop_t *u = &b->u[i];
+		cpu->ip = ip;
+
+		u32 a, v, r;
+
+		switch (u->op) {
+		case BJ_NOP:
+			break;
+
+		case BJ_MOV_RI:
+			bj_set_reg(cpu, u->dst, u->width, u->imm);
+			break;
+
+		case BJ_MOV_RR:
+			bj_set_reg(cpu, u->dst, u->width,
+			           bj_get_reg(cpu, u->src, u->width));
+			break;
+
+		case BJ_XCHG_RR:
+			a = bj_get_reg(cpu, u->dst, u->width);
+			v = bj_get_reg(cpu, u->src, u->width);
+			bj_set_reg(cpu, u->dst, u->width, v);
+			bj_set_reg(cpu, u->src, u->width, a);
+			break;
+
+		case BJ_ADD_RR:
+			a = bj_get_reg(cpu, u->dst, u->width);
+			v = bj_get_reg(cpu, u->src, u->width);
+			r = a + v;
+			bj_cc_arith(cpu, CC_ADD, u->width, a, v, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_SUB_RR:
+			a = bj_get_reg(cpu, u->dst, u->width);
+			v = bj_get_reg(cpu, u->src, u->width);
+			r = a - v;
+			bj_cc_arith(cpu, CC_SUB, u->width, a, v, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_OR_RR:
+			r = bj_get_reg(cpu, u->dst, u->width) |
+			    bj_get_reg(cpu, u->src, u->width);
+			bj_cc_logic(cpu, CC_OR, u->width, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_AND_RR:
+			r = bj_get_reg(cpu, u->dst, u->width) &
+			    bj_get_reg(cpu, u->src, u->width);
+			bj_cc_logic(cpu, CC_AND, u->width, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_XOR_RR:
+			r = bj_get_reg(cpu, u->dst, u->width) ^
+			    bj_get_reg(cpu, u->src, u->width);
+			bj_cc_logic(cpu, CC_XOR, u->width, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_CMP_RR:
+			a = bj_get_reg(cpu, u->dst, u->width);
+			v = bj_get_reg(cpu, u->src, u->width);
+			r = a - v;
+			bj_cc_arith(cpu, CC_SUB, u->width, a, v, r);
+			break;
+
+		case BJ_TEST_RR:
+			r = bj_get_reg(cpu, u->dst, u->width) &
+			    bj_get_reg(cpu, u->src, u->width);
+			bj_cc_logic(cpu, CC_AND, u->width, r);
+			break;
+
+		case BJ_ADD_RI:
+			a = bj_get_reg(cpu, u->dst, u->width);
+			v = u->width == 2 ? (u16)u->imm : u->imm;
+			r = a + v;
+			bj_cc_arith(cpu, CC_ADD, u->width, a, v, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_SUB_RI:
+			a = bj_get_reg(cpu, u->dst, u->width);
+			v = u->width == 2 ? (u16)u->imm : u->imm;
+			r = a - v;
+			bj_cc_arith(cpu, CC_SUB, u->width, a, v, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_OR_RI:
+			r = bj_get_reg(cpu, u->dst, u->width) | u->imm;
+			bj_cc_logic(cpu, CC_OR, u->width, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_AND_RI:
+			r = bj_get_reg(cpu, u->dst, u->width) & u->imm;
+			bj_cc_logic(cpu, CC_AND, u->width, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_XOR_RI:
+			r = bj_get_reg(cpu, u->dst, u->width) ^ u->imm;
+			bj_cc_logic(cpu, CC_XOR, u->width, r);
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+
+		case BJ_CMP_RI:
+			a = bj_get_reg(cpu, u->dst, u->width);
+			v = u->width == 2 ? (u16)u->imm : u->imm;
+			r = a - v;
+			bj_cc_arith(cpu, CC_SUB, u->width, a, v, r);
+			break;
+
+		case BJ_INC_R: {
+			int cf = get_CF(cpu);
+			a = bj_get_reg(cpu, u->dst, u->width);
+			r = a + 1u;
+			cpu->cc.dst = bj_sext(r, u->width);
+			cpu->cc.op = u->width == 2 ? CC_INC16 : CC_INC32;
+			SET_BIT(cpu->flags, cf, CF);
+			cpu->cc.mask = PF | AF | ZF | SF | OF;
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+		}
+
+		case BJ_DEC_R: {
+			int cf = get_CF(cpu);
+			a = bj_get_reg(cpu, u->dst, u->width);
+			r = a - 1u;
+			cpu->cc.dst = bj_sext(r, u->width);
+			cpu->cc.op = u->width == 2 ? CC_DEC16 : CC_DEC32;
+			SET_BIT(cpu->flags, cf, CF);
+			cpu->cc.mask = PF | AF | ZF | SF | OF;
+			bj_set_reg(cpu, u->dst, u->width, r);
+			break;
+		}
+
+		case BJ_JCC:
+			ip += u->len;
+			if (bj_cond(cpu, u->aux))
+				ip += (s32)u->imm;
+			if (cpu->code16) ip &= 0xffffu;
+			goto block_done;
+
+		case BJ_JMP:
+			ip += u->len;
+			ip += (s32)u->imm;
+			if (cpu->code16) ip &= 0xffffu;
+			goto block_done;
+
+		case BJ_LOOP: {
+			bool take;
+			u32 count = bj_get_reg(cpu, 1, u->width);
+			if (u->aux == 0xe3) {
+				take = (count == 0);
+			} else {
+				count = u->width == 2 ? (u16)(count - 1u) : count - 1u;
+				bj_set_reg(cpu, 1, u->width, count);
+				if (u->aux == 0xe2) take = count != 0;
+				else if (u->aux == 0xe1) take = count != 0 && get_ZF(cpu);
+				else take = count != 0 && !get_ZF(cpu);
+			}
+			ip += u->len;
+			if (take) ip += (s32)u->imm;
+			if (cpu->code16) ip &= 0xffffu;
+			goto block_done;
+		}
+
+		default:
+			return 0;
+		}
+
+		ip += u->len;
+		if (cpu->code16) ip &= 0xffffu;
+	}
+
+block_done:
+	cpu->next_ip = ip;
+	cpu->cycle += b->count;
+	g_bjit_uops += b->count;
+	return b->count;
+}
+
+static inline __attribute__((always_inline))
+int bj_try_execute(CPUI386 *cpu, int max_steps)
+{
+	if (unlikely(cpu->flags & TF))
+		return 0;
+
+	uword ip = cpu->next_ip;
+	if (cpu->code16) ip &= 0xffffu;
+
+	/*
+	 * Ordinary sequential flow advances by 1..15 bytes.
+	 * Do no JIT lookup at all in that overwhelmingly common case.
+	 */
+	uword delta = ip - cpu->ip;
+	if (likely(delta - 1u < 15u)) {
+		g_bjit_skips++;
+		return 0;
+	}
+
+	bj_block_t *b = bj_lookup(cpu, ip);
+	if (likely(b != NULL)) {
+		g_bjit_hits++;
+		return bj_exec(cpu, b, max_steps);
+	}
+
+	g_bjit_misses++;
+
+	/* Avoid compiling one-shot BIOS/DOS control-flow targets. */
+	uword linear = cpu->seg[SEG_CS].base + ip;
+	if (!bj_hot_enough(cpu, linear)) {
+		g_bjit_hotwait++;
+		return 0;
+	}
+
+	b = bj_compile(cpu, ip);
+	if (!b) {
+		bj_hot_reject(cpu, linear);
+		return 0;
+	}
+
+	return bj_exec(cpu, b, max_steps);
+}
+#endif /* BLOCK_JIT */
+
+
+#if NATIVE_JIT
+/* -------------------------------------------------------------------------
+ * FRANK_NATIVE_JIT_V4_LOOPCHAIN
+ * FRANK_NATIVE_JIT_V41_WIDE66
+ * FRANK_NATIVE_JIT_V42_ESABS16
+ * FRANK_NATIVE_JIT_V43_FASTDISPATCH
+ *
+ * Native hot-loop recompiler for Cortex-M33.
+ *
+ * Unlike v3/v3.1, translated x86 registers live in r4-r11 for the entire
+ * native loop.  A taken backward branch is compiled together with its body,
+ * so a hot loop stays in generated Thumb code for many guest iterations and
+ * returns to cpu_exec1 only when the loop exits or the current step budget is
+ * exhausted.
+ *
+ * v4 deliberately accepts only loops whose control flow is proven simple:
+ *   - exactly one backward branch, targeting the first x86 instruction;
+ *   - no memory, I/O, stack, REP, CALL/RET, exceptions, or nested branches;
+ *   - register/immediate 16- or 32-bit ALU/MOV body;
+ *   - JZ/JNZ, JMP, LOOP, or JCXZ back edge.
+ *
+ * Unsupported loops stay entirely in the existing interpreter.
+ * ------------------------------------------------------------------------- */
+
+#include <stddef.h>
+
+/* V8.4 keeps the same 32 compiled / 32 hot low-RAM metadata budget, but
+ * arranges the compiled cache as 16 two-way sets. V8.3 was still direct-mapped:
+ * two genuinely hot PCs hashing to the same slot repeatedly recompiled each
+ * other even while the 16 KiB code arena had room. Two-way lookup removes that
+ * conflict without adding another block or increasing the HDMI-sensitive SRAM
+ * footprint. */
+/*
+ * Cache and hot-table capacity.
+ *
+ * Measured on this board with Tyrian 2000: the compiled-block cache held 32
+ * blocks and the game's fast-path lookup hit 173 times a second against a
+ * sampled miss rate that works out to some 306000 backedges a second - a hit
+ * rate of 0.06%.  Every hot loop it compiled was evicted before it could be
+ * used again, so the JIT executed 0.12% of the guest's instructions no matter
+ * how much the emitter was taught to accept.
+ *
+ * Doubling both tables costs 3328 + 1664 bytes of SRAM, and that was tried on
+ * hardware: it does not boot.  SRAM goes from 91.75% to 92.70%, pc_new()
+ * still succeeds - g_diag_pc_new_failed stayed 0 - but pc_step() never runs
+ * once and the board sits at a black screen.  So the ceiling is somewhere
+ * between 91.75% and 92.70%, and it is not the emulator's own allocation
+ * that hits it.  -DNJIT_BIG_CACHE=ON restores the doubled sizes for anyone
+ * who frees the SRAM first; the default stays at what boots.
+ */
+/*
+ * Per-entry diagnostics for the JIT tables.
+ *
+ * nj_hot_t carries a 32-byte copy of the guest code at every refusal and
+ * nj_block_t two retirement counters; both exist only for
+ * njit_diag_reject_snapshot() and njit_diag_block_snapshot(), the profiler
+ * hotkeys.  They also make nj_hot_t 52 bytes instead of 20 and nj_block_t 104
+ * instead of 96, which is 1024 + 256 bytes of SRAM at the current table sizes
+ * and much more at any larger one.  Off by default; -DNJIT_DIAG=ON restores
+ * the snapshots.
+ */
+#ifndef NJIT_DIAG
+#define NJIT_DIAG 0
+#endif
+
+#ifndef NJ_CACHE_SET_BITS
+#define NJ_CACHE_SET_BITS   4u
+#endif
+#define NJ_CACHE_SETS       (1u << NJ_CACHE_SET_BITS)
+#define NJ_CACHE_WAYS       2u
+#define NJ_CACHE_SLOTS      (NJ_CACHE_SETS * NJ_CACHE_WAYS)
+#ifndef NJ_HOT_BITS
+#define NJ_HOT_BITS         5u
+#endif
+#define NJ_HOT_SLOTS        (1u << NJ_HOT_BITS)
+#define NJ_HOT_THRESHOLD    2u
+#define NJ_DISCOVERY_MASK   255u /* sample one unsupported/uncompiled backedge in 256 */
+/* V8.1 low-RAM hotfix: keep the executable cache at the v7 16 KiB size.
+ * The Z2 HDMI path launches core 1 before guest/JIT execution, and the v8
+ * 32 KiB code cache plus enlarged metadata consumed ~24 KiB more static SRAM.
+ * Restoring the v7 footprint avoids stealing headroom from core1/HDMI stacks
+ * while retaining the v8 supertrace/code-generation improvements. */
+#ifndef NJ_CODE_BYTES
+#define NJ_CODE_BYTES       16384u
+#endif
+#ifndef NJIT_SHARED_GUARD
+#define NJIT_SHARED_GUARD 0
+#endif
+
+#define NJ_MAX_X86_INSNS    16u
+#define NJ_MAX_ARM_BYTES    512u
+/*
+ * Guarded memory operands in a fully-native loop body.
+ *
+ * One costs roughly 250 bytes of Thumb - address arithmetic, the TLB walk,
+ * the range/VGA/code-page guards and the shared fail epilogue - so the
+ * register-only 512-byte reservation could not have held even two.  The cap
+ * and the reservation are sized against each other, and both against the
+ * code arena, which is only 8 KB on this board because SRAM for a larger one
+ * does not exist: four memory operands plus the register work and the
+ * epilogue land near 1200 bytes, leaving six such blocks resident at once.
+ */
+#define NJ_LOOP_MAX_MEM_INSNS 8u
+#define NJ_LOOP_MAX_ARM_BYTES (NJIT_SHARED_GUARD ? 768u : 1280u)
+
+/*
+ * Measured on hardware 2026-09-04 and OFF as a result.
+ *
+ * Doom -timedemo demo3 went 7950 -> 9787 realtics (4.80 -> 3.90 fps) with this
+ * on.  The generated code is not the problem: over ten seconds inside the
+ * renderer NJCH_BRK_NOT_SINGLE did not advance at all, so not one loop block
+ * executed there and the native work was still entirely v6 traces.  Doom's
+ * inner loops are refused for reasons this change does not touch - 0F B6
+ * (MOVZX from a byte in memory), the byte ALU forms 00/02/0a..., PUSH, and a
+ * JGE back edge, none of which nj_decode_backedge()/nj_translate_body_one()
+ * accept.
+ *
+ * What did change is the arena.  nj_compile_loop() asks nj_make_code_room()
+ * for its reservation before every compile attempt, so raising it from 512 to
+ * 1280 bytes evicted live trace blocks out of an 8 KB cache roughly ninety
+ * times a second, and those traces were doing all the work.
+ *
+ * Turning this on again therefore needs the block cache to be able to hold
+ * what it compiles.  SRAM for a bigger arena does not exist (91.75% used,
+ * pc_new() has under 832 bytes of margin), so the way in is to stop inlining
+ * ~250 bytes of guard per memory operand and call one shared out-of-line
+ * guard routine instead.
+ */
+/*
+ * Memory operands in fully-native loop bodies.
+ *
+ * This was measured at -23% on Doom when each one inlined ~250 bytes of guard
+ * into an 8 KB arena.  With NJIT_SHARED_GUARD the guard is one call, so the
+ * reason it lost no longer applies and it follows the guard automatically.
+ */
+#ifndef NJIT_LOOP_MEM
+#define NJIT_LOOP_MEM NJIT_SHARED_GUARD
+#endif
+#define NJ_TRACK_PAGES      2048u
+#define NJ_PAGE_BYTES       (NJ_TRACK_PAGES / 8u)
+
+#define NJ_BRANCH_JZ        1u
+#define NJ_BRANCH_JNZ       2u
+#define NJ_BRANCH_JMP       3u
+#define NJ_BRANCH_LOOP      4u
+#define NJ_BRANCH_JCXZ      5u
+
+#define NJ_FLAG_NONE        0u
+#define NJ_FLAG_ARITH       1u
+#define NJ_FLAG_LOGIC       2u
+#define NJ_FLAG_INCDEC      3u
+
+typedef struct {
+    uword tag;
+    uword mmu_key;
+    uword cs_base;
+    uword ds_base;
+    uword es_base;
+    uword ss_base;
+    uword bp_value;
+    uword sp_value;
+    u16 ds_sel;
+    u16 es_sel;
+    u16 ss_sel;
+    u16 _seg_pad;
+    uword start_ip;
+    uword branch_ip;
+    uword fallthrough_ip;
+    u16 byte_len;
+    u16 phys_page;
+    u16 phys_page2;        /* second physical code page when code_split != 0 */
+    u16 code_split;        /* bytes on phys_page before crossing linear 4K boundary */
+    u8 insns;              /* x86 instructions per loop iteration */
+    u8 code16;
+    u8 valid;
+    u8 needs_refresh_cf;
+    u8 needs_flags_in;
+    u8 single_run;
+    u8 uses_ds_static;
+    u8 uses_es_static;
+    u8 uses_ss_base;
+    u8 uses_ss_static;
+    u8 uses_df_static;
+    u8 df_value;
+    u8 static_write_count;
+    uword static_write_phys[3];
+    u16 *code;
+    u16 arm_halfwords;       /* generated Thumb size; enables zero-SRAM compaction */
+    u16 _arm_pad;
+    /*
+     * FRANK_WORKLOAD_PROFILE_V88: what this block actually retired.
+     *
+     * njit_diag_reject_snapshot() only ever shows blocks that were
+     * REJECTED, so a hot loop that compiled into a short, unprofitable
+     * trace is invisible in every capture in this sequence.  These two
+     * fields make the compiled side visible too, which is what decides
+     * whether the exact Symantec BP-stack block exists under EMM386 at
+     * all or was displaced by a generic 5-instruction prefix trace.
+     */
+#if NJIT_DIAG
+    u32 diag_entries;
+    u32 diag_insns;
+#endif
+} nj_block_t;
+
+/* FRANK_NJIT_HOT_TARGET_PROFILE */
+/* FRANK_NJIT_HOT_TARGET_PROFILE_32B */
+typedef struct {
+    uword key;
+    uword linear;
+    uword start_ip;
+    u32 rejected_hits;
+    u8 seen;               /* 0xff = known unsupported until invalidation */
+#if NJIT_DIAG
+    u8 code_len;
+    u8 code[32];
+    u8 _pad[2];
+#endif
+} nj_hot_t;
+
+static nj_block_t nj_cache[NJ_CACHE_SLOTS];
+static nj_hot_t nj_hot[NJ_HOT_SLOTS];
+static u8 nj_page_bits[NJ_PAGE_BYTES];
+/* One pseudo-LRU/round-robin bit per two-way set; changed only on a true
+ * conflict insertion, never on the hot execution path. */
+static u16 nj_cache_replace_bits;
+
+/* FRANK_NATIVE_JIT_V44_SAMPLED_DISCOVERY
+ *
+ * nj_compiled_bloom is only a positive hint. Bits are deliberately never
+ * cleared on block invalidation; a stale bit merely causes an occasional full
+ * cache lookup, never execution of stale code.
+ *
+ * Unknown/uncompiled backedges enter slow discovery only once every 64
+ * occurrences. This removes the direct-mapped negative-cache lookup from the
+ * normal interpreter path while still discovering genuinely hot loops.
+ */
+/* 128-bit positive bloom filter for compiled backedge heads.  V7's single
+ * 32-bit word becomes almost saturated once a few dozen blocks are resident,
+ * at which point unsupported interpreter backedges pay a pointless full cache
+ * lookup.  Two independently mixed bits over 128 bits keep that false-positive
+ * rate much lower while the hot path still needs only two word tests. */
+#define NJ_BLOOM_BITS 128u
+#define NJ_BLOOM_WORDS (NJ_BLOOM_BITS / 32u)
+static u32 nj_compiled_bloom[NJ_BLOOM_WORDS];
+static u32 nj_discovery_tick;
+
+static inline __attribute__((always_inline))
+void nj_bloom_pos(uword linear, unsigned *b0, unsigned *b1)
+{
+    uword h0 = linear * 0x9e3779b1u;
+    uword h1 = (linear ^ (linear >> 11) ^ 0x85ebca6bu) * 0xc2b2ae35u;
+    h0 ^= h0 >> 16;
+    h1 ^= h1 >> 15;
+    *b0 = (unsigned)(h0 & (NJ_BLOOM_BITS - 1u));
+    *b1 = (unsigned)(h1 & (NJ_BLOOM_BITS - 1u));
+}
+
+static inline __attribute__((always_inline))
+void nj_bloom_add(uword linear)
+{
+    unsigned b0, b1; nj_bloom_pos(linear, &b0, &b1);
+    nj_compiled_bloom[b0 >> 5] |= 1u << (b0 & 31u);
+    nj_compiled_bloom[b1 >> 5] |= 1u << (b1 & 31u);
+}
+
+static inline __attribute__((always_inline))
+bool nj_bloom_maybe(uword linear)
+{
+    unsigned b0, b1; nj_bloom_pos(linear, &b0, &b1);
+    return (nj_compiled_bloom[b0 >> 5] & (1u << (b0 & 31u))) &&
+           (nj_compiled_bloom[b1 >> 5] & (1u << (b1 & 31u)));
+}
+
+/* Executable SRAM, same placement strategy as the abandoned upstream JIT. */
+static u16 __attribute__((section(".data"), aligned(4)))
+nj_code[NJ_CODE_BYTES / 2u];
+static u16 *nj_code_ptr = nj_code;
+
+static void nj_flush(void);
+static void nj_rebuild_pages(void);
+
+/*
+ * V8.2 compacting code arena.
+ *
+ * Generated blocks are position-independent with respect to their own start:
+ * all intra-block Thumb branches are relative and external helper targets are
+ * materialised as absolute immediates. Therefore a whole block can be moved
+ * with memmove() without re-patching it.
+ *
+ * V8.1 appended every recompilation forever and flushed the entire 16 KiB
+ * arena when it reached the end. With longer supertraces Doom accumulated
+ * hundreds of full-cache flushes even though the direct-mapped metadata held
+ * only 16 live blocks. Compacting only the currently-live blocks recycles the
+ * holes left by replacements/invalidations with no additional SRAM.
+ */
+static void nj_compact_code(void)
+{
+    unsigned order[NJ_CACHE_SLOTS];
+    unsigned n = 0;
+
+    for (unsigned i = 0; i < NJ_CACHE_SLOTS; ++i)
+        if (nj_cache[i].valid && nj_cache[i].code && nj_cache[i].arm_halfwords)
+            order[n++] = i;
+
+    /* Sort by old source address so downward memmove cannot overwrite a block
+     * that has not been copied yet. NJ_CACHE_SLOTS is tiny (16). */
+    for (unsigned i = 1; i < n; ++i) {
+        unsigned x = order[i];
+        unsigned j = i;
+        while (j && nj_cache[order[j - 1u]].code > nj_cache[x].code) {
+            order[j] = order[j - 1u];
+            --j;
+        }
+        order[j] = x;
+    }
+
+    u16 *dst = nj_code;
+    for (unsigned k = 0; k < n; ++k) {
+        nj_block_t *b = &nj_cache[order[k]];
+        unsigned hw = b->arm_halfwords;
+        if (b->code != dst)
+            memmove(dst, b->code, hw * sizeof(u16));
+        b->code = dst;
+        dst += hw;
+    }
+    nj_code_ptr = dst;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
+}
+
+static bool nj_make_code_room(unsigned bytes)
+{
+    unsigned need_hw = (bytes + 1u) / 2u;
+    u16 *end = nj_code + (NJ_CODE_BYTES / 2u);
+
+    if ((unsigned)(end - nj_code_ptr) >= need_hw)
+        return true;
+
+    nj_compact_code();
+    if ((unsigned)(end - nj_code_ptr) >= need_hw)
+        return true;
+
+    /* V8.3: never throw away the whole native cache just because the live
+     * working set currently fills the 16 KiB arena. Evict the largest live
+     * block(s) one at a time, rebuild the cheap page/bloom summaries, and
+     * compact again. This keeps the other hot blocks warm and avoids the
+     * compile storm caused by a global flush. */
+    while ((unsigned)(end - nj_code_ptr) < need_hw) {
+        int victim = -1;
+        unsigned largest = 0;
+        for (unsigned i = 0; i < NJ_CACHE_SLOTS; ++i) {
+            if (nj_cache[i].valid && nj_cache[i].arm_halfwords > largest) {
+                largest = nj_cache[i].arm_halfwords;
+                victim = (int)i;
+            }
+        }
+        if (victim < 0)
+            return false;
+        nj_cache[victim].valid = 0;
+        nj_rebuild_pages();
+        nj_compact_code();
+    }
+    return true;
+}
+
+volatile u32 g_njit_hits __attribute__((used));
+volatile u32 g_njit_misses __attribute__((used));
+volatile u32 g_njit_compiles __attribute__((used));
+volatile u32 g_njit_insns __attribute__((used));
+volatile u32 g_njit_native_iters __attribute__((used));
+volatile u32 g_njit_invalidations __attribute__((used));
+volatile u32 g_njit_hotwait __attribute__((used));
+volatile u32 g_njit_rejects __attribute__((used));
+volatile u32 g_njit_flushes __attribute__((used));
+
+/* FRANK_NJIT_REJECT_PROFILE
+ * Why hot candidates fail to become native loops.
+ * Updated only on compilation attempts, not on the guest instruction path.
+ */
+enum {
+    NJR_CODE_WINDOW = 0,
+    NJR_BODY_OPCODE,
+    NJR_FLAG_SCRATCH,
+    NJR_INCDEC_CF,
+    NJR_NO_BRANCH,
+    NJR_EMPTY_BODY,
+    NJR_JCC_NO_FLAGS,
+    NJR_PATCH,
+    NJR_EMIT,
+    NJR_COUNT
+};
+volatile u32 g_njit_rej_reason[NJR_COUNT] __attribute__((used));
+volatile u32 g_njit_rej_last_ip __attribute__((used));
+volatile u32 g_njit_rej_last_pos __attribute__((used));
+volatile u32 g_njit_rej_last_opcode __attribute__((used));
+volatile u32 g_njit_rej_last_body_insns __attribute__((used));
+
+volatile u32 g_njit_rej_op[8] __attribute__((used));
+volatile u32 g_njit_rej_op_count[8] __attribute__((used));
+
+/*
+ * Where the broad v6 trace stops.
+ *
+ * The loop compiler's reject histogram only says why *it* declined; the trace
+ * compiler is the fallback that actually runs, and it ends the trace at the
+ * first instruction it cannot emit.  With native coverage measured at 0.4% of
+ * Doom's instruction stream, what limits the JIT is trace length, so the
+ * useful histogram is the opcode each trace died on.
+ */
+/*
+ * Kept in PSRAM, not SRAM.  A 1 KB array of counters in SRAM was enough to
+ * make pc_new() fail its allocation and the board came up to a black screen -
+ * the failure audiodiag.h warns about.  Guest physical 0xa8000 is inside the
+ * VGA aperture, which the emulator redirects to gfx_buffer, so nothing else
+ * is backed by PSRAM there; FrankDiag lives in the same hole at 0xa1000.
+ *
+ * Slots 0..255 are the opcode histogram, 256 is traces compiled and 257 is
+ * traces that stopped early.  Zero it from the host before a measurement.
+ */
+#define NJ_V6_STOP ((volatile u32 *)(0x11000000u + 0x000a8000u))
+
+/*
+ * FRANK_NJIT_EXIT_RING - the last sixteen native block exits.
+ *
+ * A JIT that returns a wrong next_ip does not fail where the mistake is: the
+ * interpreter fetches from the bad address and takes a bus fault somewhere
+ * else entirely, which is all a boot loop tells you.  This ring lives in the
+ * PSRAM diagnostic hole so it survives the watchdog reboot, and names the
+ * block that produced the bad exit.
+ *
+ * Debug only - four PSRAM writes per block execution is not a shipping cost.
+ */
+/*
+ * FRANK_NJIT_EXIT_CHECK
+ *
+ * Catch a block that leaves a next_ip the machine cannot fetch from, at the
+ * moment it happens rather than wherever the interpreter later faults.
+ *
+ * The evidence for the shared-guard boot loop was a precise bus fault in the
+ * interpreter's prefetch on guest physical 0xF010FF50 - i.e. some block had
+ * already returned nonsense and the fault landed somewhere else entirely.
+ * A block must leave next_ip inside the code segment; anything past the limit
+ * would #GP on real hardware and is far more likely to be our bug.
+ *
+ * On a violation this records the offending block in the watchdog scratch
+ * (which survives a reset) and switches the JIT off, so the board keeps
+ * running on the interpreter and stays available to be read.
+ */
+#ifndef NJIT_EXIT_CHECK
+#define NJIT_EXIT_CHECK 0
+#endif
+#if NJIT_EXIT_CHECK
+#define NJ_BAD_MAGIC 0x4E4A4244u   /* "NJBD" */
+static bool nj_disabled;
+static void nj_note_bad_exit(CPUI386 *cpu, const nj_block_t *b, uword nip)
+{
+    /* RP2350 watchdog scratch[0..3]; the only store that survives a reset.
+     * Addressed directly because i386.c does not include the pico headers. */
+    volatile u32 *scratch = (volatile u32 *)0x400d800cu;
+    scratch[0] = NJ_BAD_MAGIC;
+    scratch[1] = (u32)b->start_ip;
+    scratch[2] = (u32)nip;
+    scratch[3] = (u32)b->byte_len |
+                 ((u32)b->insns << 16) |
+                 ((u32)b->single_run << 24) |
+                 ((u32)cpu->code16 << 25);
+    nj_flush();
+    nj_disabled = true;
+}
+static inline bool nj_exit_sane(CPUI386 *cpu, const nj_block_t *b)
+{
+    uword nip = cpu->next_ip;
+    if (cpu->code16) nip &= 0xffffu;
+    if (unlikely(nip > cpu->seg[SEG_CS].limit)) {
+        nj_note_bad_exit(cpu, b, nip);
+        return false;
+    }
+    return true;
+}
+#endif
+
+#ifndef NJIT_EXIT_RING
+#define NJIT_EXIT_RING 0
+#endif
+#if NJIT_EXIT_RING
+#define NJ_XR ((volatile u32 *)(0x11000000u + 0x000a9000u))
+#define NJ_XR_SLOTS 16u
+static unsigned nj_xr_idx;
+static inline void nj_xr_note(const nj_block_t *b, uword nip, int done)
+{
+    if (unlikely(NJ_XR[NJ_XR_SLOTS * 4u + 1u] == 0x46524F5Au))
+        return;                    /* frozen by a fault - keep the evidence */
+    volatile u32 *r = NJ_XR + (nj_xr_idx & (NJ_XR_SLOTS - 1u)) * 4u;
+    r[0] = (u32)b->start_ip;
+    r[1] = (u32)nip;
+    r[2] = (u32)done;
+    r[3] = (u32)b->byte_len | ((u32)b->insns << 16) |
+           ((u32)b->single_run << 24);
+    NJ_XR[NJ_XR_SLOTS * 4u] = ++nj_xr_idx;
+}
+#else
+#define nj_xr_note(b, nip, done) do { } while (0)
+#endif
+#define NJ_V6_STOP_TRACES  256
+#define NJ_V6_STOP_STOPPED 257
+
+/*
+ * FRANK_NATIVE_JIT_V8_10_DIAG
+ *
+ * Two blind spots that eleven captures could not see through.
+ *
+ * 1. nj_compile_v45_bpstack() is the only compiler that ever produced a
+ *    flags=6 block, and that one block is the whole difference between
+ *    5.96 MIPS (jitstats001/002, no EMM386) and 1.90 MIPS (jitstats004-010,
+ *    V86).  It has nine unconditional "return NULL" exits and not one of
+ *    them touches a counter, so no capture can say whether the loop is
+ *    never seen at a hot IP at all, or seen and refused by a guard.
+ *    NJBP_MATCHED is the pivot: below it the address was simply wrong,
+ *    above it the bytes were the exact Symantec loop and a specific guard
+ *    turned it down.
+ *
+ * 2. nj_exec_chain() breaks for five different reasons and reports none.
+ *    The 0x1075e3 block retires 2.25 of its 7 instructions across ~52k
+ *    entries, which can only happen if the chain breaks on the partial
+ *    side-exit test every single time.  NJCH_BRK_PARTIAL and
+ *    NJCH_PARTIAL_LOST measure that directly.
+ *
+ * Diagnostics only: no guard, no emitted code and no dispatcher decision
+ * changes in this build.  The counters live in .bss, are written only on
+ * the compile path and once per chained block, and are reset by Win+F7
+ * with every other window counter.
+ */
+enum {
+    NJBP_ATTEMPTS = 0,     /* every nj_compile_v45_bpstack() call */
+    NJBP_NOT_CODE16,
+    NJBP_SP_MASK,
+    NJBP_CODE_WINDOW,
+    NJBP_PATTERN,          /* window read, bytes are not the exact loop */
+    NJBP_MATCHED,          /* bytes ARE the exact loop: everything past
+                              this point is a guard refusal, not a miss */
+    NJBP_SPLIT_NONCONTIG,
+    NJBP_STATIC_M2,
+    NJBP_STATIC_M4,
+    NJBP_STATIC_M6,
+    NJBP_STATIC_STK,
+    NJBP_M6_NONADJ,
+    NJBP_CODE_OVERLAP,
+    NJBP_NO_ROOM,
+    NJBP_EMIT,
+    NJBP_OK,
+    NJBP_COUNT
+};
+volatile u32 g_njit_bp[NJBP_COUNT] __attribute__((used));
+
+static inline nj_block_t *nj_bp_rej(unsigned why)
+{
+    g_njit_bp[why]++;
+    return NULL;
+}
+
+enum {
+    NJCH_CALLS = 0,        /* nj_exec_chain() calls */
+    NJCH_BLOCKS,           /* blocks executed across all chains */
+    NJCH_BRK_ZERO,         /* nj_exec_loop() retired nothing */
+    NJCH_BRK_NOT_SINGLE,   /* loop block: chaining does not apply */
+    NJCH_BRK_PARTIAL,      /* done != nominal: guarded side exit */
+    NJCH_BRK_BUDGET,       /* max_steps consumed */
+    NJCH_BRK_NEGCACHE,     /* continuation head known unsupported */
+    NJCH_BRK_COMPILE,      /* continuation would not compile */
+    NJCH_BRK_MAXBLOCKS,    /* hit NJ_V8_CHAIN_MAX_BLOCKS */
+    NJCH_PARTIAL_LOST,     /* sum of (nominal - done) over partial exits */
+    /*
+     * FRANK_NATIVE_JIT_V8_10_1_DIAG.
+     *
+     * Captures 012 and 015 both put 94-96% of every chain break on the
+     * partial side exit, but "partial" fuses two opposite events.
+     *
+     * A memory guard (nj_v8_finish_guard) reports the instruction as NOT
+     * retired and leaves next_ip on that instruction, which is inside the
+     * block's own bytes.  The interpreter must run it once; breaking is
+     * correct.
+     *
+     * A compiled branch exit (nj_v8_exit_stub_imm) reports the branch as
+     * retired and sets next_ip to its target, normally outside the block.
+     * There breaking is pure waste: the chain discards a continuation for
+     * no reason, and PARTIAL_READY counts the ones where a compiled block
+     * for that target already exists.
+     *
+     * A backward branch into the same block lands INSIDE too, so INSIDE is
+     * an upper bound on guard exits, not an exact count.  OUTSIDE is exact.
+     */
+    NJCH_PARTIAL_INSIDE,   /* next_ip within the block: guard, or back-branch */
+    NJCH_PARTIAL_OUTSIDE,  /* next_ip beyond the block: ordinary control flow */
+    NJCH_PARTIAL_READY,    /* ...and a compiled block for it probably exists */
+    NJCH_COUNT
+};
+volatile u32 g_njit_ch[NJCH_COUNT] __attribute__((used));
+
+/* main.c declares these with literal sizes so the record it prints can never
+ * silently drift out of step with the enums above. */
+_Static_assert(NJBP_COUNT == 16, "NJBP_SLOTS in main.c must match NJBP_COUNT");
+_Static_assert(NJCH_COUNT == 13, "NJCH_SLOTS in main.c must match NJCH_COUNT");
+
+
+/*
+ * Full rejection histogram, one u16 per opcode.
+ *
+ * The 8-slot table below evicts by lowest count, which hides the shape of the
+ * problem: implementing MOV r/m16,Sreg (0x8c) removed 1593 refusals and
+ * immediately exposed 0x0f with 990, invisible until then because commoner
+ * entries kept pushing it out. Deciding whether broad opcode coverage is
+ * reachable at all needs the whole distribution, not its top eight.
+ *
+ * It lives in SCRATCH_X deliberately. Two earlier attempts put it in .bss and
+ * both killed the board: the firmware panicked inside pc_new() and stopped at
+ * DIAG_PRE_PC_NEW with no video, which looks exactly like dead hardware. The
+ * second attempt did that with *more* free heap than the working build had
+ * (47,248 vs 43,600 bytes), so plain heap exhaustion was not the mechanism and
+ * this image is simply intolerant of changes to its main RAM layout.
+ *
+ * SCRATCH_X is a separate 4 KB region that the heap never sees, and it was 75%
+ * used, so 512 bytes fit. Better still, overflowing it is a *link* error
+ * rather than a board that boots into a panic - which is the whole point after
+ * breaking the display twice.
+ */
+volatile u16 g_njit_rej_hist[256]
+    __attribute__((section(".scratch_x.rejhist"), used));
+
+/*
+ * ModRM byte of refused instructions.
+ *
+ * This slot previously held the second byte of 0x0f opcodes, which did its job:
+ * it showed that the 37.7% hiding behind the 0x0f escape was almost entirely
+ * 0F B7, MOVZX r,r/m16. Implementing that for register sources then changed
+ * nothing at all (1024 refusals -> 1022), which says the real operand is
+ * memory, not a register.
+ *
+ * That is the question this histogram now answers, because it decides how much
+ * work the remaining refusals actually are. The top two bits of ModRM give the
+ * addressing form:
+ *
+ *   mod=11  register operand      - already cheap
+ *   mod=00 rm=110  [disp16]       - absolute, offset known at compile time, so
+ *                                   nj_v45_static_word() and the existing
+ *                                   nj_block_matches() guard cover it
+ *   anything else                 - address depends on runtime registers, and
+ *                                   needs a TLB probe inside generated code
+ *
+ * Reusing the same 256 bytes keeps SCRATCH_X exactly where it is; .bss is not
+ * an option on this image, which panics in pc_new() if it grows.
+ */
+volatile u8 g_njit_rej_modrm[256]
+    __attribute__((section(".scratch_x.rejmodrm"), used));
+
+/* Skip prefixes, skip the opcode (two bytes for 0x0f), record the ModRM. */
+static void nj_rej_note_modrm(const u8 *p, unsigned max)
+{
+    unsigned i = 0;
+    while (i < max && i < 8u) {
+        u8 b = p[i];
+        if (b == 0x26u || b == 0x2eu || b == 0x36u || b == 0x3eu ||
+            b == 0x64u || b == 0x65u || b == 0x66u || b == 0x67u) {
+            i++;
+            continue;
+        }
+        break;
+    }
+    if (i >= max) return;
+    i += (p[i] == 0x0fu) ? 2u : 1u;
+    if (i >= max) return;
+    if (g_njit_rej_modrm[p[i]] != 0xffu) g_njit_rej_modrm[p[i]]++;
+}
+
+static void nj_rej_note_opcode(u8 op)
+{
+    int empty = -1, min_i = 0;
+    u32 min_n = 0xffffffffu;
+
+    if (g_njit_rej_hist[op] != 0xffffu) g_njit_rej_hist[op]++;
+
+
+
+    for (int i = 0; i < 8; ++i) {
+        if (g_njit_rej_op_count[i] && (u8)g_njit_rej_op[i] == op) {
+            g_njit_rej_op_count[i]++;
+            return;
+        }
+        if (!g_njit_rej_op_count[i] && empty < 0) empty = i;
+        if (g_njit_rej_op_count[i] < min_n) {
+            min_n = g_njit_rej_op_count[i];
+            min_i = i;
+        }
+    }
+
+    int i = empty >= 0 ? empty : min_i;
+    g_njit_rej_op[i] = op;
+    g_njit_rej_op_count[i] = 1;
+}
+
+static void nj_rej_note(unsigned reason, uword ip, unsigned pos,
+                        unsigned opcode, unsigned body_insns)
+{
+    if (reason < NJR_COUNT) g_njit_rej_reason[reason]++;
+    g_njit_rej_last_ip = ip;
+    g_njit_rej_last_pos = pos;
+    g_njit_rej_last_opcode = opcode;
+    g_njit_rej_last_body_insns = body_insns;
+    if (reason == NJR_BODY_OPCODE)
+        nj_rej_note_opcode((u8)opcode);
+}
+
+static inline __attribute__((always_inline))
+unsigned nj_hash(uword v, unsigned bits)
+{
+    return (unsigned)((v * 2654435761u) >> (32u - bits));
+}
+
+static inline __attribute__((always_inline))
+uword nj_mmu_key(CPUI386 *cpu)
+{
+    /*
+     * V8 deliberately does NOT key generated code by CR3. Dynamic memory is
+     * translated through the live guest TLB at run time and code fetch is
+     * validated against the currently mapped physical code page(s) before
+     * every native entry. A CR3 reload therefore does not make otherwise
+     * identical ARM code stale. CPL remains part of the key because the
+     * generated permission-row lookup is specialized for user/supervisor.
+     */
+    return (cpu->cr0 & 0x80000001u) ^ cpu->a20_mask ^
+           ((uword)cpu->code16 << 30) ^ ((uword)(cpu->cpl & 3) << 27);
+}
+
+static inline __attribute__((always_inline))
+uword nj_context_key(CPUI386 *cpu, uword linear)
+{
+    return linear ^ nj_mmu_key(cpu);
+}
+
+static inline __attribute__((always_inline))
+uword nj_hot_context_key(CPUI386 *cpu, uword linear)
+{
+    /* Negative/discovery entries describe code bytes not generated ARM. Keep
+     * CR3 here so an unsupported head in one address space cannot poison a
+     * different mapping at the same linear address. Compiled blocks themselves
+     * remain CR3-independent and are protected by physical mapping guards. */
+    uword key=nj_context_key(cpu,linear);
+    if(cpu->cr0 & CR0_PG) key ^= cpu->cr3;
+    return key;
+}
+
+static inline __attribute__((always_inline))
+unsigned nj_cache_set(CPUI386 *cpu, uword linear)
+{
+    return nj_hash(nj_context_key(cpu, linear), NJ_CACHE_SET_BITS);
+}
+
+/* Choose an insertion victim only after the new block has been emitted. An
+ * invalid way is always preferred; otherwise alternate the two ways. The old
+ * block's code becomes a harmless hole reclaimed by the existing compactor. */
+static nj_block_t *nj_cache_insert_slot(CPUI386 *cpu, uword linear)
+{
+    unsigned set = nj_cache_set(cpu, linear);
+    unsigned base = set * NJ_CACHE_WAYS;
+    for (unsigned w = 0; w < NJ_CACHE_WAYS; ++w)
+        if (!nj_cache[base + w].valid)
+            return &nj_cache[base + w];
+
+    unsigned way = (nj_cache_replace_bits >> set) & 1u;
+    nj_cache_replace_bits ^= (u16)(1u << set);
+    nj_cache[base + way].valid = 0;
+    return &nj_cache[base + way];
+}
+
+static inline bool nj_page_marked(unsigned p)
+{
+    return p < NJ_TRACK_PAGES &&
+           (nj_page_bits[p >> 3] & (1u << (p & 7)));
+}
+
+static inline void nj_page_mark(unsigned p)
+{
+    if (p < NJ_TRACK_PAGES)
+        nj_page_bits[p >> 3] |= (u8)(1u << (p & 7));
+}
+
+static void nj_rebuild_pages(void)
+{
+    memset(nj_page_bits, 0, sizeof(nj_page_bits));
+    memset(nj_compiled_bloom, 0, sizeof(nj_compiled_bloom));
+    for (unsigned i = 0; i < NJ_CACHE_SLOTS; ++i) {
+        if (nj_cache[i].valid) {
+            nj_page_mark(nj_cache[i].phys_page);
+            if (nj_cache[i].code_split) nj_page_mark(nj_cache[i].phys_page2);
+            nj_bloom_add(nj_cache[i].tag);
+        }
+    }
+}
+
+static void nj_flush(void)
+{
+    memset(nj_cache, 0, sizeof(nj_cache));
+    memset(nj_hot, 0, sizeof(nj_hot));
+    memset(nj_page_bits, 0, sizeof(nj_page_bits));
+    nj_cache_replace_bits = 0;
+    memset(nj_compiled_bloom, 0, sizeof(nj_compiled_bloom));
+    nj_code_ptr = nj_code;
+    g_njit_flushes++;
+}
+
+static void nj_invalidate_page(unsigned page)
+{
+    bool changed = false;
+    for (unsigned i = 0; i < NJ_CACHE_SLOTS; ++i) {
+        if (nj_cache[i].valid &&
+            (nj_cache[i].phys_page == page ||
+             (nj_cache[i].code_split && nj_cache[i].phys_page2 == page))) {
+            nj_cache[i].valid = 0;
+            changed = true;
+        }
+    }
+    if (changed) {
+        g_njit_invalidations++;
+        nj_rebuild_pages();
+        memset(nj_hot, 0, sizeof(nj_hot));
+    }
+}
+
+/*
+ * Exact invalidation used by native blocks that write to statically-known
+ * guest RAM.  The normal interpreter invalidates per 4 KiB page, which is
+ * deliberately conservative.  A native stack loop may legitimately keep
+ * data and code on the same guest page, so page-wide invalidation would throw
+ * away the block on every entry.  Here we can use the exact write ranges.
+ */
+static void nj_invalidate_exact_range(uword addr, unsigned len,
+                                      const nj_block_t *except)
+{
+    if (!len) return;
+    uword end = addr + len;
+    if (end < addr) end = (uword)-1;
+
+    bool changed = false;
+    for (unsigned i = 0; i < NJ_CACHE_SLOTS; ++i) {
+        nj_block_t *b = &nj_cache[i];
+        if (!b->valid || b == except) continue;
+
+        uword bs = ((uword)b->phys_page << 12) | (b->tag & 0xfffu);
+        unsigned first_len = b->code_split ? b->code_split : b->byte_len;
+        uword be = bs + first_len;
+        bool overlap = addr < be && bs < end;
+
+        if (!overlap && b->code_split && b->byte_len > b->code_split) {
+            uword bs2 = (uword)b->phys_page2 << 12;
+            uword be2 = bs2 + (b->byte_len - b->code_split);
+            overlap = addr < be2 && bs2 < end;
+        }
+        if (overlap) {
+            b->valid = 0;
+            changed = true;
+        }
+    }
+
+    if (changed) {
+        g_njit_invalidations++;
+        nj_rebuild_pages();
+        memset(nj_hot, 0, sizeof(nj_hot));
+    }
+}
+
+/*
+ * FRANK_NATIVE_JIT_V51_EXACT_WRITE_INVALIDATION
+ *
+ * Interpreter writes arrive here with a guest *physical* address.  The old
+ * path invalidated every translated block on the whole 4 KiB page.  That is
+ * correct but disastrous for DOS code where stack/data and code commonly
+ * share a page: the productive Symantec block was compiled, executed once,
+ * then discarded by an unrelated stack/data store on the same page.
+ *
+ * We already have an exact physical-range overlap checker for native static
+ * stores. Reuse it here.  This keeps self-modifying-code correctness while
+ * preserving a cached block when a write touches unrelated bytes on its page.
+ */
+static inline void nj_note_write(CPUI386 *cpu, uword addr, unsigned len)
+{
+    (void)cpu;
+    if (unlikely(!len))
+        return;
+
+    unsigned p0 = addr >> 12;
+    unsigned p1 = (addr + len - 1u) >> 12;
+
+    /*
+     * The page bitmap remains a very cheap rejection filter.  If neither page
+     * contains translated code there cannot be an overlap.
+     */
+    if (likely(!nj_page_marked(p0) &&
+               (p1 == p0 || !nj_page_marked(p1))))
+        return;
+
+    nj_invalidate_exact_range(addr, len, NULL);
+}
+
+static int nj_code_window(CPUI386 *cpu, uword ip,
+                          const u8 **out, unsigned *avail,
+                          unsigned *phys_page);
+
+/*
+ * FRANK_NJIT_REJECT_RETRY — let a blacklisted head back in occasionally.
+ *
+ * nj_reject() writes seen=0xff and nothing ever clears it except the slot
+ * being evicted by a different key. That is correct for a *structural*
+ * refusal: an opcode the emitter does not support will not become supported.
+ * It is wrong for a *state-dependent* one, where the guest page simply was not
+ * resident at the moment the guard looked, and would have been a millisecond
+ * later.
+ *
+ * v8.10-diag measured what that costs on the Symantec Overall Performance
+ * Index run: 138,806 of 144,469 nj_exec_chain() calls (96.1%) ended at the
+ * negative cache, and chains averaged 1.00 blocks per call - the chaining
+ * mechanism never extended past its first block at all. Only 7 of those
+ * refusals came from a compile that actually failed in this window, so the
+ * rest were decisions made long before and never revisited.
+ *
+ * Letting a head retry every NJ_REJECT_RETRY executions bounds the cost: a
+ * structural refusal fails again and pays one compile attempt per that many
+ * executions, while a state-dependent one finally gets the second look it
+ * never had. Set NJ_REJECT_RETRY to 0 to restore the permanent blacklist.
+ */
+#ifndef NJ_REJECT_RETRY
+#define NJ_REJECT_RETRY 256u
+#endif
+
+volatile u32 g_njit_retry_admitted __attribute__((used));
+
+static inline bool nj_reject_retry_due(nj_hot_t *h)
+{
+    h->rejected_hits++;
+#if NJ_REJECT_RETRY
+    if (h->rejected_hits >= NJ_REJECT_RETRY) {
+        h->rejected_hits = 0;
+        h->seen = NJ_HOT_THRESHOLD;     /* eligible again on this pass */
+        g_njit_retry_admitted++;
+        return true;
+    }
+#endif
+    return false;
+}
+
+static inline bool nj_hot_enough(CPUI386 *cpu, uword linear)
+{
+    uword key = nj_hot_context_key(cpu, linear);
+    nj_hot_t *h = &nj_hot[nj_hash(key, NJ_HOT_BITS)];
+    if (h->key != key) {
+        memset(h, 0, sizeof(*h));
+        h->key = key;
+        h->linear = linear;
+        h->seen = 1;
+        return false;
+    }
+    if (h->seen == 0xff) {
+        return nj_reject_retry_due(h);
+    }
+    if (h->seen < NJ_HOT_THRESHOLD) {
+        h->seen++;
+        return false;
+    }
+    return true;
+}
+
+static inline void nj_reject(CPUI386 *cpu, uword linear, uword start_ip)
+{
+    uword key = nj_hot_context_key(cpu, linear);
+    nj_hot_t *h = &nj_hot[nj_hash(key, NJ_HOT_BITS)];
+
+    h->key = key;
+    h->linear = linear;
+    h->start_ip = start_ip;
+    h->seen = 0xff;
+    h->rejected_hits = 1;
+#if NJIT_DIAG
+    h->code_len = 0;
+
+    const u8 *code;
+    unsigned avail, phys_page;
+    if (nj_code_window(cpu, start_ip, &code, &avail, &phys_page)) {
+        unsigned n = avail < sizeof(h->code) ? avail : sizeof(h->code);
+        memcpy(h->code, code, n);
+        h->code_len = (u8)n;
+    }
+#endif
+
+    g_njit_rejects++;
+}
+
+void njit_diag_reset_hot(void)
+{
+    /*
+     * F7 is a benchmark checkpoint, not just a counter reset. Start from a
+     * genuinely cold native cache so boot-time polling loops cannot leak into
+     * the measurement, and make discovery deterministic.
+     */
+    nj_flush();
+    nj_discovery_tick = 0;
+}
+
+unsigned njit_diag_reject_snapshot(u32 *linear, u32 *ip, u32 *hits,
+                                   u8 *bytes, u8 *lens, unsigned cap)
+{
+#if !NJIT_DIAG
+    /* The per-entry copies these report are compiled out; see NJIT_DIAG. */
+    return 0;
+#else
+    if (!linear || !ip || !hits || !bytes || !lens || !cap) return 0;
+
+    for (unsigned i = 0; i < cap; ++i) {
+        linear[i] = 0;
+        ip[i] = 0;
+        hits[i] = 0;
+        lens[i] = 0;
+        memset(bytes + i * 32u, 0, 32u);
+    }
+
+    unsigned used = 0;
+    for (unsigned s = 0; s < NJ_HOT_SLOTS; ++s) {
+        const nj_hot_t *h = &nj_hot[s];
+        if (h->seen != 0xff || h->rejected_hits == 0) continue;
+
+        unsigned pos = 0;
+        while (pos < used && hits[pos] >= h->rejected_hits) pos++;
+        if (pos >= cap) continue;
+
+        unsigned lim = used < cap ? used : cap - 1u;
+        if (used < cap) used++;
+
+        for (unsigned j = lim; j > pos; --j) {
+            linear[j] = linear[j - 1u];
+            ip[j] = ip[j - 1u];
+            hits[j] = hits[j - 1u];
+            lens[j] = lens[j - 1u];
+            memcpy(bytes + j * 32u, bytes + (j - 1u) * 32u, 32u);
+        }
+
+        linear[pos] = h->linear;
+        ip[pos] = h->start_ip;
+        hits[pos] = h->rejected_hits;
+        lens[pos] = h->code_len;
+        memcpy(bytes + pos * 32u, h->code, 32u);
+    }
+
+    return used;
+#endif
+}
+
+/*
+ * FRANK_WORKLOAD_PROFILE_V88: the compiled counterpart of
+ * njit_diag_reject_snapshot().  Returns the live cache slots ordered by
+ * the guest instructions they actually retired, which is the only ranking
+ * that says where native execution time went.
+ */
+unsigned njit_diag_block_snapshot(u32 *linear, u32 *insns, u32 *entries,
+                                  u8 *ninsns, u8 *flags, unsigned cap)
+{
+#if !NJIT_DIAG
+    /* The per-block counters these report are compiled out; see NJIT_DIAG. */
+    return 0;
+#else
+    if (!linear || !insns || !entries || !ninsns || !flags || !cap) return 0;
+
+    for (unsigned i = 0; i < cap; ++i) {
+        linear[i] = 0; insns[i] = 0; entries[i] = 0;
+        ninsns[i] = 0; flags[i] = 0;
+    }
+
+    unsigned used = 0;
+    for (unsigned s = 0; s < NJ_CACHE_SLOTS; ++s) {
+        const nj_block_t *b = &nj_cache[s];
+        if (!b->valid || b->diag_entries == 0) continue;
+
+        unsigned pos = 0;
+        while (pos < used && insns[pos] >= b->diag_insns) pos++;
+        if (pos >= cap) continue;
+
+        unsigned lim = used < cap ? used : cap - 1u;
+        if (used < cap) used++;
+
+        for (unsigned j = lim; j > pos; --j) {
+            linear[j] = linear[j - 1u];
+            insns[j] = insns[j - 1u];
+            entries[j] = entries[j - 1u];
+            ninsns[j] = ninsns[j - 1u];
+            flags[j] = flags[j - 1u];
+        }
+
+        linear[pos] = (u32)b->tag;
+        insns[pos] = b->diag_insns;
+        entries[pos] = b->diag_entries;
+        ninsns[pos] = b->insns;
+        /* bit0 single_run, bit1 code16, bit2 exact BP-stack block */
+        flags[pos] = (u8)((b->single_run ? 1u : 0u) |
+                          (b->code16 ? 2u : 0u) |
+                          (b->static_write_count == 3u ? 4u : 0u));
+    }
+
+    return used;
+#endif
+}
+
+/* ----------------------------- Thumb emitter ----------------------------- */
+
+typedef struct {
+    u16 *p;
+    u16 *start;
+    u16 *limit;
+    bool failed;
+} nj_emit_t;
+
+typedef struct {
+    unsigned pos;
+    bool op16;
+    bool addr16;
+    int seg;
+} nj_v6_pfx_t;
+
+typedef struct {
+    int base;
+    int index;
+    unsigned scale;
+    s32 disp;
+    int seg;
+    unsigned used;
+    bool addr16;
+} nj_v6_ea_t;
+
+typedef struct {
+    u16 *at[8];
+    unsigned cond[8];
+    unsigned n;
+} nj_v6_guard_t;
+
+
+static inline void nj_e16(nj_emit_t *e, u16 v)
+{
+    if (unlikely(e->p >= e->limit)) { e->failed = true; return; }
+    *e->p++ = v;
+}
+
+static inline void nj_e32(nj_emit_t *e, u32 v)
+{
+    if (unlikely(e->p + 2 > e->limit)) { e->failed = true; return; }
+    *e->p++ = (u16)(v >> 16);
+    *e->p++ = (u16)v;
+}
+
+static inline void nj_mov_imm(nj_emit_t *e, unsigned rd, u32 imm)
+{
+    u16 lo = (u16)imm;
+    u16 hi = (u16)(imm >> 16);
+    u32 w = 0xF2400000u;
+    w |= ((u32)(lo >> 12) & 0xfu) << 16;
+    w |= ((u32)(lo >> 11) & 1u) << 26;
+    w |= ((u32)(lo >> 8) & 7u) << 12;
+    w |= (u32)(rd & 0xfu) << 8;
+    w |= lo & 0xffu;
+    nj_e32(e, w);
+    if (hi) {
+        u32 t = 0xF2C00000u;
+        t |= ((u32)(hi >> 12) & 0xfu) << 16;
+        t |= ((u32)(hi >> 11) & 1u) << 26;
+        t |= ((u32)(hi >> 8) & 7u) << 12;
+        t |= (u32)(rd & 0xfu) << 8;
+        t |= hi & 0xffu;
+        nj_e32(e, t);
+    }
+}
+
+/* MOV (register), T1/T2 16-bit form; does not change APSR. */
+static inline void nj_mov_reg(nj_emit_t *e, unsigned rd, unsigned rm)
+{
+    u16 v = 0x4600u;
+    v |= (u16)(rd & 7u);
+    v |= (u16)(((rd >> 3) & 1u) << 7);
+    v |= (u16)((rm & 15u) << 3);
+    nj_e16(e, v);
+}
+
+static inline void nj_ldr32(nj_emit_t *e, unsigned rt, unsigned rn, unsigned off)
+{
+    if (unlikely(off >= 4096u)) { e->failed = true; return; }
+    nj_e32(e, 0xF8D00000u | ((u32)rn << 16) | ((u32)rt << 12) | off);
+}
+
+static inline void nj_str32(nj_emit_t *e, unsigned rt, unsigned rn, unsigned off)
+{
+    if (unlikely(off >= 4096u)) { e->failed = true; return; }
+    nj_e32(e, 0xF8C00000u | ((u32)rn << 16) | ((u32)rt << 12) | off);
+}
+
+static inline void nj_ldrh(nj_emit_t *e, unsigned rt, unsigned rn, unsigned off)
+{
+    if (unlikely(off >= 4096u)) { e->failed = true; return; }
+    nj_e32(e, 0xF8B00000u | ((u32)rn << 16) | ((u32)rt << 12) | off);
+}
+
+static inline void nj_strh(nj_emit_t *e, unsigned rt, unsigned rn, unsigned off)
+{
+    if (unlikely(off >= 4096u)) { e->failed = true; return; }
+    nj_e32(e, 0xF8A00000u | ((u32)rn << 16) | ((u32)rt << 12) | off);
+}
+
+/* v6 byte and shift primitives used by the general trace fast path. */
+static inline void nj_ldrb(nj_emit_t *e, unsigned rt, unsigned rn, unsigned off)
+{
+    if (unlikely(off >= 4096u)) { e->failed = true; return; }
+    nj_e32(e, 0xF8900000u | ((u32)rn << 16) | ((u32)rt << 12) | off);
+}
+
+static inline void nj_strb(nj_emit_t *e, unsigned rt, unsigned rn, unsigned off)
+{
+    if (unlikely(off >= 4096u)) { e->failed = true; return; }
+    nj_e32(e, 0xF8800000u | ((u32)rn << 16) | ((u32)rt << 12) | off);
+}
+
+static inline void nj_lsls_imm(nj_emit_t *e, unsigned rd, unsigned rm, unsigned sh)
+{
+    if (unlikely(rd > 7u || rm > 7u || sh > 31u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(((sh & 31u) << 6) | ((rm & 7u) << 3) | (rd & 7u)));
+}
+
+static inline void nj_lsrs_imm(nj_emit_t *e, unsigned rd, unsigned rm, unsigned sh)
+{
+    if (unlikely(rd > 7u || rm > 7u || sh == 0u || sh > 32u)) {
+        e->failed = true; return;
+    }
+    unsigned enc = sh == 32u ? 0u : sh;
+    nj_e16(e, (u16)(0x0800u | ((enc & 31u) << 6) |
+                     ((rm & 7u) << 3) | (rd & 7u)));
+}
+
+static inline void nj_asrs_imm(nj_emit_t *e, unsigned rd, unsigned rm, unsigned sh)
+{
+    if (unlikely(rd > 7u || rm > 7u || sh == 0u || sh > 32u)) {
+        e->failed = true; return;
+    }
+    unsigned enc = sh == 32u ? 0u : sh;
+    nj_e16(e, (u16)(0x1000u | ((enc & 31u) << 6) |
+                     ((rm & 7u) << 3) | (rd & 7u)));
+}
+
+/* LSL (register), 16-bit low-register form: Rdn <<= (Rm & 0xff). */
+static inline void nj_lsl_reg(nj_emit_t *e, unsigned rdn, unsigned rm)
+{
+    if (unlikely(rdn > 7u || rm > 7u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0x4080u | ((rm & 7u) << 3) | (rdn & 7u)));
+}
+
+static inline void nj_uxtb(nj_emit_t *e, unsigned rd, unsigned rm)
+{
+    if (unlikely(rd > 7u || rm > 7u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0xB2C0u | ((rm & 7u) << 3) | (rd & 7u)));
+}
+
+static inline void nj_tst_low(nj_emit_t *e, unsigned rn, unsigned rm)
+{
+    if (unlikely(rn > 7u || rm > 7u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0x4200u | ((rm & 7u) << 3) | (rn & 7u)));
+}
+
+static inline void nj_and_low(nj_emit_t *e, unsigned rdn, unsigned rm)
+{
+    if (unlikely(rdn > 7u || rm > 7u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0x4000u | ((rm & 7u) << 3) | (rdn & 7u)));
+}
+
+static inline void nj_orr_low(nj_emit_t *e, unsigned rdn, unsigned rm)
+{
+    if (unlikely(rdn > 7u || rm > 7u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0x4300u | ((rm & 7u) << 3) | (rdn & 7u)));
+}
+
+static inline void nj_adds3(nj_emit_t *e) { nj_e16(e, 0x188bu); } /* r3=r1+r2 */
+static inline void nj_subs3(nj_emit_t *e) { nj_e16(e, 0x1a8bu); } /* r3=r1-r2 */
+static inline void nj_and1(nj_emit_t *e)  { nj_e16(e, 0x4011u); } /* r1 &= r2 */
+static inline void nj_eor1(nj_emit_t *e)  { nj_e16(e, 0x4051u); } /* r1 ^= r2 */
+static inline void nj_orr1(nj_emit_t *e)  { nj_e16(e, 0x4311u); } /* r1 |= r2 */
+
+static inline void nj_uxth(nj_emit_t *e, unsigned rd, unsigned rm)
+{
+    nj_e16(e, (u16)(0xB280u | ((rm & 7u) << 3) | (rd & 7u)));
+}
+
+static inline void nj_sxth(nj_emit_t *e, unsigned rd, unsigned rm)
+{
+    nj_e16(e, (u16)(0xB200u | ((rm & 7u) << 3) | (rd & 7u)));
+}
+
+static inline void nj_sxtb(nj_emit_t *e, unsigned rd, unsigned rm)
+{
+    if (unlikely(rd > 7u || rm > 7u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0xB240u | ((rm & 7u) << 3) | (rd & 7u)));
+}
+
+/*
+ * Flag-free bitfield moves, for the 8-bit operand forms below.
+ *
+ * Both are 32-bit Thumb-2 encodings that leave APSR alone, which is the whole
+ * reason to use them here: the block compiler carries x86 flags lazily in the
+ * ARM condition flags and in r1-r3, so anything that touches either forces a
+ * refusal.  BFI and UBFX touch neither.
+ *
+ * UBFX<c> Rd, Rn, #lsb, #width   11110 0 111100 Rn : 0 imm3 Rd imm2 0 width-1
+ * BFI<c>  Rd, Rn, #lsb, #width   11110 0 110110 Rn : 0 imm3 Rd imm2 0 msb
+ * with lsb = imm3:imm2 and msb = lsb + width - 1.  BFI with Rn = PC is BFC,
+ * so Rn 15 is refused rather than silently assembled into something else.
+ */
+static inline void nj_ubfx(nj_emit_t *e, unsigned rd, unsigned rn,
+                           unsigned lsb, unsigned width)
+{
+    if (unlikely(rd > 15u || rn > 15u || width == 0u ||
+                 lsb + width > 32u)) { e->failed = true; return; }
+    u32 w = 0xF3C00000u | ((u32)(rn & 15u) << 16);
+    w |= (u32)((lsb >> 2) & 7u) << 12;
+    w |= (u32)(rd & 15u) << 8;
+    w |= (u32)(lsb & 3u) << 6;
+    w |= (u32)((width - 1u) & 31u);
+    nj_e32(e, w);
+}
+
+static inline void nj_bfi(nj_emit_t *e, unsigned rd, unsigned rn,
+                          unsigned lsb, unsigned width)
+{
+    if (unlikely(rd > 15u || rn > 14u || width == 0u ||
+                 lsb + width > 32u)) { e->failed = true; return; }
+    u32 w = 0xF3600000u | ((u32)(rn & 15u) << 16);
+    w |= (u32)((lsb >> 2) & 7u) << 12;
+    w |= (u32)(rd & 15u) << 8;
+    w |= (u32)(lsb & 3u) << 6;
+    w |= (u32)((lsb + width - 1u) & 31u);
+    nj_e32(e, w);
+}
+
+static inline void nj_cmp_imm0(nj_emit_t *e, unsigned rn)
+{
+    nj_e16(e, (u16)(0x2800u | ((rn & 7u) << 8)));
+}
+
+/* High-register CMP encoding; e.g. CMP r0,lr == 0x4570. */
+static inline void nj_cmp_reg(nj_emit_t *e, unsigned rn, unsigned rm)
+{
+    u16 v = 0x4500u;
+    v |= (u16)(rn & 7u);
+    v |= (u16)(((rn >> 3) & 1u) << 7);
+    v |= (u16)((rm & 15u) << 3);
+    nj_e16(e, v);
+}
+
+static inline void nj_adds_imm8(nj_emit_t *e, unsigned rd, unsigned imm)
+{
+    if (unlikely(rd > 7u || imm > 255u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0x3000u | (rd << 8) | imm));
+}
+
+static inline void nj_subs_imm8(nj_emit_t *e, unsigned rd, unsigned imm)
+{
+    if (unlikely(rd > 7u || imm > 255u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0x3800u | (rd << 8) | imm));
+}
+
+/* Thumb-2 ADD{S}/SUB{S}.W Rd,Rd,#imm8, including high registers.
+ * The immediate is deliberately kept to imm8; byte-walk loops only need 1. */
+static inline void nj_addsub_imm_w(nj_emit_t *e, unsigned rd, unsigned imm,
+                                   bool sub, bool setflags)
+{
+    if (unlikely(rd > 15u || imm > 255u)) { e->failed = true; return; }
+    u16 hi = (u16)((sub ? (setflags ? 0xF1B0u : 0xF1A0u)
+                         : (setflags ? 0xF110u : 0xF100u)) | (rd & 15u));
+    u16 lo = (u16)(((rd & 15u) << 8) | (imm & 0xffu));
+    nj_e16(e, hi);
+    nj_e16(e, lo);
+}
+
+static inline u16 *nj_bcond_placeholder(nj_emit_t *e)
+{
+    u16 *at = e->p;
+    nj_e16(e, 0xD000u);
+    return at;
+}
+
+/* PUSH {lr} / POP {lr}.  A BL overwrites lr, and lr is NJ_BUDGET_REG, so
+ * every call site has to bracket the call with these.  The 16-bit POP cannot
+ * name lr, hence the wide form. */
+static inline void nj_push_lr(nj_emit_t *e) { nj_e16(e, 0xB500u); }
+static inline void nj_pop_lr(nj_emit_t *e)  { nj_e32(e, 0xE8BD4000u); }
+
+static inline void nj_bx_lr(nj_emit_t *e)   { nj_e16(e, 0x4770u); }
+
+/*
+ * Call an absolute Thumb address, through a register.
+ *
+ * NOT a plain BL.  BL is PC-relative, and nj_compact_code() moves finished
+ * blocks around the arena - which is safe for the branches inside a block,
+ * because source and target move together, but silently breaks a branch to a
+ * fixed address outside it.  That is what boot-looped the first shared-guard
+ * build: blocks ran correctly until the arena filled and compacted, then every
+ * call into the trampolines landed at an offset that was no longer right, and
+ * the guest jumped into the middle of the interpreter.
+ *
+ * MOVW/MOVT materialise the address itself, so the sequence means the same
+ * thing wherever the block ends up.  Six bytes more than a BL, against ~200
+ * saved by not inlining the guard at all.
+ */
+static inline void nj_blx_abs(nj_emit_t *e, const u16 *target, unsigned rn)
+{
+    nj_mov_imm(e, rn, (u32)(uintptr_t)target | 1u);   /* Thumb bit */
+    nj_e16(e, (u16)(0x4780u | ((rn & 0xfu) << 3)));   /* BLX rn */
+}
+
+static inline u16 *nj_b_placeholder(nj_emit_t *e)
+{
+    u16 *at = e->p;
+    nj_e16(e, 0xE000u);
+    return at;
+}
+
+static bool nj_patch_bcond(u16 *at, u16 *target, unsigned cond)
+{
+    intptr_t off = (u8 *)target - ((u8 *)at + 4);
+    if ((off & 1) || off < -256 || off > 254 || cond > 13u) return false;
+    *at = (u16)(0xD000u | (cond << 8) | (((u32)(off >> 1)) & 0xffu));
+    return true;
+}
+
+static bool nj_patch_b(u16 *at, u16 *target)
+{
+    intptr_t off = (u8 *)target - ((u8 *)at + 4);
+    if ((off & 1) || off < -2048 || off > 2046) return false;
+    *at = (u16)(0xE000u | (((u32)(off >> 1)) & 0x7ffu));
+    return true;
+}
+
+static inline void nj_push_low(nj_emit_t *e, unsigned mask)
+{
+    if (unlikely(mask & ~0xffu)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0xB400u | mask));
+}
+
+static inline void nj_pop_low(nj_emit_t *e, unsigned mask)
+{
+    if (unlikely(mask & ~0xffu)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0xBC00u | mask));
+}
+
+static inline void nj_blx_reg(nj_emit_t *e, unsigned rm)
+{
+    if (unlikely(rm > 15u)) { e->failed = true; return; }
+    nj_e16(e, (u16)(0x4780u | ((rm & 15u) << 3)));
+}
+
+static inline void nj_push_guest(nj_emit_t *e)
+{
+    nj_e32(e, 0xE92D4FF0u); /* push.w {r4-r11,lr} */
+}
+
+/*
+ * PUSH {r0} / POP {r0}.  Neither touches APSR, so they can bracket a memory
+ * sequence without disturbing lazily-held guest flags.  Every path that can
+ * leave the block pops before nj_pop_guest(), so SP is always balanced.
+ */
+static inline void nj_push_r0(nj_emit_t *e) { nj_e16(e, 0xB401u); }
+static inline void nj_pop_r0(nj_emit_t *e)  { nj_e16(e, 0xBC01u); }
+
+static inline void nj_pop_guest(nj_emit_t *e)
+{
+    nj_e32(e, 0xE8BD8FF0u); /* pop.w {r4-r11,pc} */
+}
+
+/*
+ * 8-bit operand forms in the native emitter.  Build with -DNJIT_OP8=OFF to
+ * get exactly the previous behaviour back without touching this file.
+ */
+#ifndef NJIT_OP8
+#define NJIT_OP8 1
+#endif
+
+/* -------------------------- Persistent register map ---------------------- */
+
+#define NJ_CPU_REG       12u
+#define NJ_BUDGET_REG    14u
+#define NJ_ITER_REG      0u
+#define NJ_GUEST_REG(r)  (4u + (unsigned)(r))
+/*
+ * x86 byte registers, 0..7, are AL CL DL BL AH CH DH BH - the low and the
+ * high byte of EAX..EBX.  A byte operand therefore never names a guest
+ * register above EBX, so it never leaves ARM r4..r7 and every byte form below
+ * stays inside the persistent register map with no spill.
+ */
+#define NJ_B8_GUEST(b)   ((unsigned)(b) & 3u)
+#define NJ_B8_SHIFT(b)   ((unsigned)(b) >= 4u ? 8u : 0u)
+
+#define NJ_GPR_OFF(r)    ((unsigned)offsetof(CPUI386, gprx) + ((unsigned)(r) * 4u))
+#define NJ_IP_OFF        ((unsigned)offsetof(CPUI386, ip))
+#define NJ_NEXT_IP_OFF   ((unsigned)offsetof(CPUI386, next_ip))
+#define NJ_PREFETCH_OFF  ((unsigned)offsetof(CPUI386, prefetch_base))
+#define NJ_FLAGS_OFF     ((unsigned)offsetof(CPUI386, flags))
+#define NJ_CC_OP         ((unsigned)offsetof(CPUI386, cc.op))
+#define NJ_CC_DST        ((unsigned)offsetof(CPUI386, cc.dst))
+#define NJ_CC_DST2       ((unsigned)offsetof(CPUI386, cc.dst2))
+#define NJ_CC_SRC1       ((unsigned)offsetof(CPUI386, cc.src1))
+#define NJ_CC_SRC2       ((unsigned)offsetof(CPUI386, cc.src2))
+#define NJ_CC_MASK       ((unsigned)offsetof(CPUI386, cc.mask))
+
+static inline void nj_emit_prologue(nj_emit_t *e, bool code16)
+{
+    nj_push_guest(e);
+    nj_mov_reg(e, NJ_CPU_REG, 0);       /* r12 = CPUI386* */
+    nj_mov_reg(e, NJ_BUDGET_REG, 1);    /* lr = max native iterations */
+    nj_mov_imm(e, NJ_ITER_REG, 0);      /* r0 = iterations executed */
+    for (unsigned r = 0; r < 8; ++r) {
+        if (code16) nj_ldrh(e, NJ_GUEST_REG(r), NJ_CPU_REG, NJ_GPR_OFF(r));
+        else        nj_ldr32(e, NJ_GUEST_REG(r), NJ_CPU_REG, NJ_GPR_OFF(r));
+    }
+}
+
+static inline void nj_emit_store_guest(nj_emit_t *e, bool code16)
+{
+    for (unsigned r = 0; r < 8; ++r) {
+        if (code16) nj_strh(e, NJ_GUEST_REG(r), NJ_CPU_REG, NJ_GPR_OFF(r));
+        else        nj_str32(e, NJ_GUEST_REG(r), NJ_CPU_REG, NJ_GPR_OFF(r));
+    }
+}
+
+static inline void nj_emit_cc_flush(nj_emit_t *e, bool code16,
+                                    unsigned flag_kind, unsigned ccop)
+{
+    if (flag_kind == NJ_FLAG_NONE) return;
+
+    if (flag_kind == NJ_FLAG_ARITH) {
+        if (code16) {
+            nj_sxth(e, 1, 1);
+            nj_sxth(e, 2, 2);
+            nj_sxth(e, 3, 3);
+        }
+        nj_str32(e, 1, NJ_CPU_REG, NJ_CC_SRC1);
+        nj_str32(e, 2, NJ_CPU_REG, NJ_CC_SRC2);
+        nj_str32(e, 3, NJ_CPU_REG, NJ_CC_DST);
+        nj_mov_imm(e, 1, ccop);
+        nj_str32(e, 1, NJ_CPU_REG, NJ_CC_OP);
+        nj_mov_imm(e, 1, CF | PF | AF | ZF | SF | OF);
+        nj_str32(e, 1, NJ_CPU_REG, NJ_CC_MASK);
+    } else if (flag_kind == NJ_FLAG_LOGIC) {
+        if (code16) nj_sxth(e, 3, 3);
+        nj_str32(e, 3, NJ_CPU_REG, NJ_CC_DST);
+        nj_mov_imm(e, 1, ccop);
+        nj_str32(e, 1, NJ_CPU_REG, NJ_CC_OP);
+        nj_mov_imm(e, 1, CF | PF | ZF | SF | OF);
+        nj_str32(e, 1, NJ_CPU_REG, NJ_CC_MASK);
+    } else { /* INC/DEC: CF remains materialised in cpu->flags. */
+        if (code16) nj_sxth(e, 3, 3);
+        nj_str32(e, 3, NJ_CPU_REG, NJ_CC_DST);
+        nj_mov_imm(e, 1, ccop);
+        nj_str32(e, 1, NJ_CPU_REG, NJ_CC_OP);
+        nj_mov_imm(e, 1, PF | AF | ZF | SF | OF);
+        nj_str32(e, 1, NJ_CPU_REG, NJ_CC_MASK);
+    }
+}
+
+static inline void nj_v8_emit_cc_flush_width(nj_emit_t *e, unsigned size,
+                                             unsigned flag_kind, unsigned ccop)
+{
+    if (flag_kind == NJ_FLAG_NONE) return;
+    if (size != 1u && size != 2u && size != 4u) { e->failed = true; return; }
+
+    if (flag_kind == NJ_FLAG_ARITH) {
+        if (size == 1u) { nj_sxtb(e,1,1); nj_sxtb(e,2,2); nj_sxtb(e,3,3); }
+        else if (size == 2u) { nj_sxth(e,1,1); nj_sxth(e,2,2); nj_sxth(e,3,3); }
+        nj_str32(e,1,NJ_CPU_REG,NJ_CC_SRC1);
+        nj_str32(e,2,NJ_CPU_REG,NJ_CC_SRC2);
+        nj_str32(e,3,NJ_CPU_REG,NJ_CC_DST);
+        nj_mov_imm(e,1,ccop); nj_str32(e,1,NJ_CPU_REG,NJ_CC_OP);
+        nj_mov_imm(e,1,CF|PF|AF|ZF|SF|OF); nj_str32(e,1,NJ_CPU_REG,NJ_CC_MASK);
+    } else if (flag_kind == NJ_FLAG_LOGIC) {
+        if (size == 1u) nj_sxtb(e,3,3);
+        else if (size == 2u) nj_sxth(e,3,3);
+        nj_str32(e,3,NJ_CPU_REG,NJ_CC_DST);
+        nj_mov_imm(e,1,ccop); nj_str32(e,1,NJ_CPU_REG,NJ_CC_OP);
+        nj_mov_imm(e,1,CF|PF|ZF|SF|OF); nj_str32(e,1,NJ_CPU_REG,NJ_CC_MASK);
+    } else { /* INC/DEC: preserve materialised CF, lazy-evaluate the rest. */
+        if (size == 1u) nj_sxtb(e,3,3);
+        else if (size == 2u) nj_sxth(e,3,3);
+        nj_str32(e,3,NJ_CPU_REG,NJ_CC_DST);
+        nj_mov_imm(e,1,ccop); nj_str32(e,1,NJ_CPU_REG,NJ_CC_OP);
+        nj_mov_imm(e,1,PF|AF|ZF|SF|OF); nj_str32(e,1,NJ_CPU_REG,NJ_CC_MASK);
+    }
+}
+
+static inline void nj_emit_common_exit(nj_emit_t *e, bool code16,
+                                       unsigned flag_kind, unsigned ccop,
+                                       uword branch_ip)
+{
+    /* LR already contains the desired guest next_ip on every exit path. */
+    nj_emit_cc_flush(e, code16, flag_kind, ccop);
+    nj_str32(e, NJ_BUDGET_REG, NJ_CPU_REG, NJ_NEXT_IP_OFF);
+
+    nj_mov_imm(e, 1, branch_ip);
+    nj_str32(e, 1, NJ_CPU_REG, NJ_IP_OFF);
+    nj_mov_imm(e, 1, 0xffffffffu);
+    nj_str32(e, 1, NJ_CPU_REG, NJ_PREFETCH_OFF);
+
+    nj_emit_store_guest(e, code16);
+    nj_pop_guest(e);
+}
+
+static inline u16 nj_rd16(const u8 *p)
+{
+    return (u16)p[0] | ((u16)p[1] << 8);
+}
+
+static inline u32 nj_rd32(const u8 *p)
+{
+    return (u32)p[0] | ((u32)p[1] << 8) |
+           ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+
+/* Result of translating one non-control-flow body instruction. */
+typedef struct {
+    unsigned flag_kind;
+    unsigned ccop;
+    bool clobbers_flag_scratch;
+    bool uses_es_static;
+    /*
+     * A memory operand embeds the segment base of its effective address as an
+     * immediate, so the block is only valid while that base and selector are
+     * unchanged.  These ride out to nj_block_matches() exactly like the trace
+     * compiler's equivalents.
+     */
+    bool uses_ds_static;
+    bool uses_ss_base;
+    bool used_memory;
+} nj_body_info_t;
+
+/*
+ * Memory operands inside a fully-native loop body.
+ *
+ * The loop compiler had no side-exit path at all: any instruction it could not
+ * emit rejected the entire block.  nj_translate_body_one() was therefore
+ * register-only, and Doom's renderer - which is nothing but memory traffic -
+ * never produced a single native loop.  Every one of its inner loops fell
+ * through to the v6 trace compiler and was cut into ~3-instruction
+ * straight-line pieces.
+ *
+ * The address/guard sequence itself is the one the trace compiler already
+ * uses.  Two things had to be built around it:
+ *
+ *  - r0 carries the loop's live iteration count, and both the paging
+ *    translation and the store's code-page check use r0 as scratch.  It is
+ *    saved on the host stack across the sequence and restored on the success
+ *    path and on the guard-failure path alike, so the count the block returns
+ *    stays exact.
+ *  - a guard failure must leave a consistent guest.  It exits with next_ip at
+ *    the faulting instruction having executed none of it, and returns the
+ *    number of *complete* iterations.  The interpreter then performs that one
+ *    access with the full page-fault and split-access semantics it already
+ *    has, and the next native entry finds a warm TLB.
+ *
+ * mc == NULL means "register operands only", which is what the v6 trace
+ * compiler passes: it has its own memory paths and its own exit-link
+ * machinery, and must not get this one's inline epilogue.
+ */
+typedef struct {
+    bool state16;      /* guest register width of the block's epilogue */
+    uword instr_ip;    /* guest IP of the instruction being translated */
+} nj_loop_mem_t;
+
+static bool nj_v6_decode_ea(const u8 *p, unsigned max, u8 modrm,
+                            bool addr16, int seg_override, nj_v6_ea_t *ea);
+static void nj_v6_emit_ea(CPUI386 *cpu, nj_emit_t *e, const nj_v6_ea_t *ea,
+                          bool add_seg);
+static bool nj_v6_note_seg(CPUI386 *cpu, int seg,
+                           bool *use_ds, bool *use_es, bool *use_ss);
+static void nj_v6_read_r8(nj_emit_t *e, unsigned reg);
+static void nj_v6_write_r8(nj_emit_t *e, unsigned reg);
+static void nj_v6_write_r16(nj_emit_t *e, unsigned reg);
+static int nj_body_mem_open(CPUI386 *cpu, nj_emit_t *e, nj_body_info_t *bi,
+                            const nj_loop_mem_t *mc,
+                            const u8 *p, unsigned max, u8 modrm,
+                            bool addr16, int seg_override,
+                            unsigned size, bool write,
+                            nj_v6_guard_t *g, unsigned *used);
+static bool nj_loop_mem_finish(nj_emit_t *e, nj_v6_guard_t *g,
+                               const nj_loop_mem_t *mc);
+
+/*
+ * A WIDE66 candidate is a 16-bit code block whose first instruction selects
+ * 32-bit operands. Segment prefixes and 0x67 may legally precede 0x66.
+ */
+static bool nj_wide66_candidate(CPUI386 *cpu, const u8 *p, unsigned max)
+{
+    if (!cpu->code16 || !max) return false;
+
+    unsigned pos = 0;
+    while (pos < max && pos < 8u) {
+        switch (p[pos]) {
+        case 0x26: case 0x2e: case 0x36: case 0x3e:
+        case 0x64: case 0x65:
+        case 0x67:
+            pos++;
+            continue;
+        case 0x66:
+            return true;
+        default:
+            return false;
+        }
+    }
+    return false;
+}
+
+
+/* For diagnostics: report the opcode after ordinary prefixes, not the prefix
+ * byte itself. */
+static unsigned nj_effective_opcode(const u8 *p, unsigned max)
+{
+    unsigned pos = 0;
+    while (pos < max && pos < 8u) {
+        switch (p[pos]) {
+        case 0x26: case 0x2e: case 0x36: case 0x3e:
+        case 0x64: case 0x65:
+        case 0x66: case 0x67:
+            pos++;
+            continue;
+        default:
+            return p[pos];
+        }
+    }
+    return 0xffffffffu;
+}
+
+static int nj_translate_body_one(CPUI386 *cpu, nj_emit_t *e,
+                                 const u8 *p, unsigned max,
+                                 bool force32,
+                                 nj_body_info_t *bi,
+                                 const nj_loop_mem_t *mc)
+{
+    if (!max) return 0;
+    unsigned pos = 0;
+    memset(bi, 0, sizeof(*bi));
+
+    bool have66 = false;
+    bool have67 = false;
+    int seg_override = -1;
+
+    for (;;) {
+        if (pos >= max || pos >= 8u) return 0;
+        switch (p[pos]) {
+        case 0x26: seg_override = SEG_ES; pos++; continue;
+        case 0x2e: seg_override = SEG_CS; pos++; continue;
+        case 0x36: seg_override = SEG_SS; pos++; continue;
+        case 0x3e: seg_override = SEG_DS; pos++; continue;
+        case 0x64: seg_override = SEG_FS; pos++; continue;
+        case 0x65: seg_override = SEG_GS; pos++; continue;
+        case 0x67:
+            /* Irrelevant to a register-only form, but it selects the address
+             * size of every memory operand below. */
+            have67 = true;
+            pos++;
+            continue;
+        case 0x66:
+            if (!force32) return 0;
+            have66 = true;
+            pos++;
+            continue;
+        case 0xf0: case 0xf2: case 0xf3:
+            return 0;
+        default:
+            break;
+        }
+        break;
+    }
+
+    if (pos >= max) return 0;
+    u8 op = p[pos++];
+
+    /*
+     * In a WIDE66 block all width-sensitive body instructions must carry
+     * 0x66.  NOP is width-neutral and may appear without it.
+     */
+    if (force32 && !have66 && op != 0x90)
+        return 0;
+
+    unsigned w = force32 ? 4u : (cpu->code16 ? 2u : 4u);
+    bool addr16 = (bool)cpu->code16 != have67;
+
+#define NJ_NEED(n) do { if (pos + (unsigned)(n) > max) return 0; } while (0)
+#define NJ_FINISH_RESULT() do { \
+    if (w == 2u) nj_uxth(e, 3, 3); \
+    nj_cmp_imm0(e, 3); \
+} while (0)
+
+    if (op == 0x90) {
+        /* NOP */
+    }
+    else if (op >= 0x91 && op <= 0x97) {
+        unsigned r = op & 7u;
+        nj_mov_reg(e, 1, NJ_GUEST_REG(0));
+        nj_mov_reg(e, NJ_GUEST_REG(0), NJ_GUEST_REG(r));
+        nj_mov_reg(e, NJ_GUEST_REG(r), 1);
+        bi->clobbers_flag_scratch = true;
+    }
+    else if (op >= 0xb8 && op <= 0xbf) {
+        unsigned r = op & 7u;
+        NJ_NEED(w);
+        u32 imm = w == 2u ? nj_rd16(p + pos) : nj_rd32(p + pos);
+        pos += w;
+        nj_mov_imm(e, NJ_GUEST_REG(r), imm);
+    }
+    else if (op >= 0x40 && op <= 0x4f) {
+        unsigned r = op & 7u;
+        bool dec = op >= 0x48;
+        nj_mov_reg(e, 1, NJ_GUEST_REG(r));
+        nj_mov_imm(e, 2, 1);
+        if (dec) nj_subs3(e); else nj_adds3(e);
+        if (w == 2u) nj_uxth(e, 3, 3);
+        nj_mov_reg(e, NJ_GUEST_REG(r), 3);
+        nj_cmp_imm0(e, 3);
+        bi->flag_kind = NJ_FLAG_INCDEC;
+        bi->ccop = dec ? (w == 2u ? CC_DEC16 : CC_DEC32)
+                       : (w == 2u ? CC_INC16 : CC_INC32);
+    }
+    else if (op == 0x0f) {
+        /*
+         * Two-byte opcodes. 0x0f was the largest single entry in the v8.10-diag
+         * reject histogram - 1024 of 2719 refusals, 37.7% - but 0x0f is an
+         * escape, not an instruction, so that number said nothing on its own.
+         * Splitting it by second byte showed it is almost entirely one
+         * instruction: 0F B7 saturated the counter while everything else under
+         * 0x0f was in single digits.
+         *
+         * MOVZX is the ideal thing to find there. It sets no flags, so it
+         * cannot silently corrupt a later conditional the way an arithmetic
+         * op would, and zero-extending 16 bits into 32 is exactly UXTH, which
+         * the emitter already has.
+         */
+        NJ_NEED(1);
+        u8 op2 = p[pos++];
+
+        if (op2 == 0xb7u) {             /* MOVZX r, r/m16 */
+            NJ_NEED(1);
+            u8 m = p[pos++];
+            unsigned reg = (m >> 3) & 7u;
+            unsigned rm = m & 7u;
+
+            /* Register source only. A memory source needs the load path and
+             * its guards; it stays refused and stays visible in the counters. */
+            if ((m & 0xc0u) != 0xc0u) return 0;
+
+            nj_uxth(e, NJ_GUEST_REG(reg), NJ_GUEST_REG(rm));
+        } else {
+            return 0;
+        }
+    }
+    else if (op == 0x8c) {
+        /*
+         * MOV r/m16, Sreg — store a segment selector.
+         *
+         * v8.10-diag's reject table made this the single most valuable opcode
+         * to add: 1593 of 2868 recorded refusals (55.5%) were this one byte,
+         * more than the next three put together. Every one of those refusals
+         * blacklisted a chain head, and the chain counters showed the result -
+         * 96% of nj_exec_chain() calls stopped at the negative cache and
+         * chains averaged 1.00 blocks, i.e. never extended at all.
+         *
+         * The selector lives at a fixed address inside CPUI386, so it costs a
+         * materialised pointer and one halfword load - no helper call, no
+         * memory guard, nothing that can fault. `sel` is a uword but only the
+         * low 16 bits are the selector, and LDRH on little-endian takes
+         * exactly those.
+         *
+         * Register destinations only. A memory destination would need the
+         * store path and its guards, which is a separate change; it falls
+         * through to the existing refusal and stays visible in the counters.
+         */
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        unsigned sreg = (m >> 3) & 7u;
+        unsigned rm = m & 7u;
+
+        if ((m & 0xc0u) != 0xc0u) return 0;     /* memory destination */
+        if (sreg > SEG_GS) return 0;            /* ES,CS,SS,DS,FS,GS only */
+
+        nj_mov_imm(e, 1, (u32)(uintptr_t)&cpu->seg[sreg].sel);
+        nj_ldrh(e, NJ_GUEST_REG(rm), 1, 0);
+        bi->clobbers_flag_scratch = true;
+    }
+    else if (op == 0x89 || op == 0x8b || op == 0x87) {
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        unsigned reg = (m >> 3) & 7u;
+        unsigned rm = m & 7u;
+
+        /*
+         * v4.2 measured hot path: MOV r16, ES:[disp16].
+         *
+         * Keep this intentionally narrow.  In real mode with paging off,
+         * translate() reduces to ES.base + disp16, and the benchmark target
+         * is ordinary low RAM.  Embedding the host pointer avoids a C helper
+         * call in every spin-loop iteration.
+         */
+        if (op == 0x8b && w == 2u && !force32 &&
+            seg_override == SEG_ES && (m & 0xc7u) == 0x06u) {
+            NJ_NEED(2);
+            uword disp = nj_rd16(p + pos);
+            pos += 2;
+
+            /* Real mode only for this first memory fast-path. */
+            if (cpu->cr0 & 1u) return 0;
+
+            uword paddr = cpu->seg[SEG_ES].base + disp;
+            if (paddr + 1u < paddr ||
+                paddr + 1u >= (uword)cpu->phys_mem_size)
+                return 0;
+            if (in_iomem(paddr) || in_iomem(paddr + 1u))
+                return 0;
+#if REMOTE_MEM
+            if (is_remote(paddr) || is_remote(paddr + 1u))
+                return 0;
+#endif
+
+            u32 host = (u32)(uintptr_t)(cpu->phys_mem + paddr);
+            nj_mov_imm(e, 1, host);
+            nj_ldrh(e, NJ_GUEST_REG(reg), 1, 0);
+            bi->clobbers_flag_scratch = true;
+            bi->uses_es_static = true;
+        }
+        else if ((m >> 6) != 3) {
+            /*
+             * The word/dword load and store.  0x8b was the second largest
+             * give-up in the renderer's stop histogram; with the guarded
+             * sequence it is now the ordinary case rather than the reason a
+             * whole loop is refused.  XCHG with memory is left out: it is
+             * architecturally LOCKed and belongs on the interpreter path.
+             */
+            if (op == 0x87) return 0;
+
+            nj_v6_guard_t g;
+            unsigned used;
+            bool write = (op == 0x89);
+            if (!nj_body_mem_open(cpu, e, bi, mc, p + pos, max - pos, m,
+                                  addr16, seg_override, w, write, &g, &used))
+                return 0;
+
+            if (op == 0x8b) {
+                if (w == 2u) nj_ldrh(e, NJ_GUEST_REG(reg), 3, 0);
+                else         nj_ldr32(e, NJ_GUEST_REG(reg), 3, 0);
+            } else {
+                if (w == 2u) nj_strh(e, NJ_GUEST_REG(reg), 3, 0);
+                else         nj_str32(e, NJ_GUEST_REG(reg), 3, 0);
+            }
+
+            if (!nj_loop_mem_finish(e, &g, mc)) return 0;
+            pos += used;
+        }
+        else {
+            if (op == 0x87) {
+                nj_mov_reg(e, 1, NJ_GUEST_REG(rm));
+                nj_mov_reg(e, NJ_GUEST_REG(rm), NJ_GUEST_REG(reg));
+                nj_mov_reg(e, NJ_GUEST_REG(reg), 1);
+                bi->clobbers_flag_scratch = true;
+            } else {
+                unsigned sr = op == 0x89 ? reg : rm;
+                unsigned dr = op == 0x89 ? rm : reg;
+                nj_mov_reg(e, NJ_GUEST_REG(dr), NJ_GUEST_REG(sr));
+            }
+        }
+    }
+    else if (op == 0x8d) {
+        /*
+         * LEA.  The one memory-form instruction that performs no access at
+         * all, so it needs neither a guard nor a side exit - just the address
+         * arithmetic the guarded path already had to be able to emit.  It is
+         * how the renderer computes every span pointer it then loads through.
+         */
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        if ((m >> 6) == 3u) return 0;       /* LEA with a register source is #UD */
+        if (!mc) return 0;
+
+        nj_v6_ea_t ea;
+        if (!nj_v6_decode_ea(p + pos, max - pos, m, addr16, seg_override, &ea))
+            return 0;
+
+        nj_v6_emit_ea(cpu, e, &ea, false);  /* offset only, no segment base */
+        if (w == 2u) nj_uxth(e, 3, 3);
+        nj_mov_reg(e, NJ_GUEST_REG((m >> 3) & 7u), 3);
+        pos += ea.used;
+        bi->clobbers_flag_scratch = true;
+    }
+    else if (NJIT_OP8 && (op == 0x88 || op == 0x8a)) {
+        /*
+         * MOV r/m8, r8 and MOV r8, r/m8 - register forms.
+         *
+         * Measured on this board while Tyrian 2000 was running, 0x8a was the
+         * single largest entry in the reject histogram at 22.0% and 0x88
+         * added 2.6%; with 0xc6 below them the byte moves were about a third
+         * of every refusal, and the game was executing 0.1% of its
+         * instructions natively as a result.
+         *
+         * They are admitted for the same reason MOVZX was: they set no flags,
+         * so letting them into a block cannot silently corrupt a conditional
+         * that comes later.  A low-byte source needs no extract at all, since
+         * BFI takes its source from the bottom of Rn; only a high-byte source
+         * (AH..BH) needs the scratch register, and that is declared so the
+         * block compiler refuses it while lazy flags are still live.
+         *
+         * Memory forms stay refused - they need the load path and its guards,
+         * and they stay visible in the counters.
+         */
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        unsigned rb = (m >> 3) & 7u;
+        unsigned mb = m & 7u;
+
+        if ((m >> 6) != 3u) {
+            /* The byte load and store the renderer's column loops are made
+             * of - MOV AL,[ESI] / MOV [EDI],AL. */
+            nj_v6_guard_t g;
+            unsigned used;
+            bool write = (op == 0x88);
+            if (!nj_body_mem_open(cpu, e, bi, mc, p + pos, max - pos, m,
+                                  addr16, seg_override, 1u, write, &g, &used))
+                return 0;
+
+            if (op == 0x8a) {
+                nj_ldrb(e, 3, 3, 0);
+                nj_v6_write_r8(e, rb);
+            } else {
+                /* r0 is already saved on the stack, so it is free to hold the
+                 * host pointer while AH-style sources are extracted into r3. */
+                nj_mov_reg(e, 0, 3);
+                nj_v6_read_r8(e, rb);
+                nj_strb(e, 3, 0, 0);
+            }
+
+            if (!nj_loop_mem_finish(e, &g, mc)) return 0;
+            pos += used;
+            goto body_done;
+        }
+
+        unsigned sb = (op == 0x88) ? rb : mb;
+        unsigned db = (op == 0x88) ? mb : rb;
+        unsigned sg = NJ_GUEST_REG(NJ_B8_GUEST(sb));
+        unsigned dg = NJ_GUEST_REG(NJ_B8_GUEST(db));
+
+        if (NJ_B8_SHIFT(sb) == 0u) {
+            nj_bfi(e, dg, sg, NJ_B8_SHIFT(db), 8u);
+        } else {
+            nj_ubfx(e, 1, sg, 8u, 8u);
+            nj_bfi(e, dg, 1, NJ_B8_SHIFT(db), 8u);
+            bi->clobbers_flag_scratch = true;
+        }
+    }
+    else if (NJIT_OP8 && op >= 0xb0 && op <= 0xb7) {
+        /* MOV r8, imm8. No flags, but the immediate has to reach a register
+         * before BFI can insert it, so this always costs the scratch. */
+        NJ_NEED(1);
+        u8 imm = p[pos++];
+        unsigned db = op & 7u;
+        nj_mov_imm(e, 1, imm);
+        nj_bfi(e, NJ_GUEST_REG(NJ_B8_GUEST(db)), 1, NJ_B8_SHIFT(db), 8u);
+        bi->clobbers_flag_scratch = true;
+    }
+    else if (NJIT_OP8 && op == 0xc6) {
+        /* MOV r/m8, imm8, register form - 11.0% of the refusals measured. */
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        if ((m >> 6) != 3u) return 0;
+        if (((m >> 3) & 7u) != 0u) return 0;   /* only /0 is MOV */
+        NJ_NEED(1);
+        u8 imm = p[pos++];
+        unsigned db = m & 7u;
+        nj_mov_imm(e, 1, imm);
+        nj_bfi(e, NJ_GUEST_REG(NJ_B8_GUEST(db)), 1, NJ_B8_SHIFT(db), 8u);
+        bi->clobbers_flag_scratch = true;
+    }
+    else if (op == 0x01 || op == 0x03 || op == 0x09 || op == 0x0b ||
+             op == 0x21 || op == 0x23 || op == 0x29 || op == 0x2b ||
+             op == 0x31 || op == 0x33 || op == 0x39 || op == 0x3b ||
+             op == 0x85) {
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        unsigned reg = (m >> 3) & 7u;
+        unsigned rm = m & 7u;
+        bool dir = (op & 2u) != 0;
+        bool mem = (m >> 6) != 3u;
+        /* CMP and TEST compute flags and discard the result. */
+        bool stores = (op != 0x39 && op != 0x3b && op != 0x85);
+        /* Without the direction bit the r/m operand is the destination, so a
+         * memory r/m makes this a read-modify-write. */
+        bool mem_dst = mem && !dir;
+        unsigned dst = dir ? reg : rm;
+        unsigned sr = dir ? rm : reg;
+        if (op == 0x85) { dst = rm; sr = reg; }
+
+        nj_v6_guard_t g;
+        unsigned used = 0;
+
+        if (mem) {
+            if (!nj_body_mem_open(cpu, e, bi, mc, p + pos, max - pos, m,
+                                  addr16, seg_override, w,
+                                  mem_dst && stores, &g, &used))
+                return 0;
+            /* Park the host pointer in the stacked r0 so the ALU keeps r1-r3
+             * for its operands and its lazily-evaluated result. */
+            nj_mov_reg(e, 0, 3);
+            if (mem_dst) {
+                if (w == 2u) nj_ldrh(e, 1, 0, 0); else nj_ldr32(e, 1, 0, 0);
+                nj_mov_reg(e, 2, NJ_GUEST_REG(reg));
+            } else {
+                nj_mov_reg(e, 1, NJ_GUEST_REG(reg));
+                if (w == 2u) nj_ldrh(e, 2, 0, 0); else nj_ldr32(e, 2, 0, 0);
+            }
+        } else {
+            nj_mov_reg(e, 1, NJ_GUEST_REG(dst));
+            nj_mov_reg(e, 2, NJ_GUEST_REG(sr));
+        }
+
+/* Write the result back to whichever operand the direction bit selected. */
+#define NJ_ALU_STORE() do {     if (mem_dst) {         if (w == 2u) nj_strh(e, 3, 0, 0); else nj_str32(e, 3, 0, 0);     } else {         nj_mov_reg(e, NJ_GUEST_REG(dst), 3);     } } while (0)
+
+        if (op == 0x01 || op == 0x03) {
+            nj_adds3(e);
+            if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_ALU_STORE();
+            nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_ARITH; bi->ccop = CC_ADD;
+        } else if (op == 0x29 || op == 0x2b || op == 0x39 || op == 0x3b) {
+            nj_subs3(e);
+            if (w == 2u) nj_uxth(e, 3, 3);
+            if (op == 0x29 || op == 0x2b) NJ_ALU_STORE();
+            nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_ARITH; bi->ccop = CC_SUB;
+        } else if (op == 0x09 || op == 0x0b) {
+            nj_orr1(e); nj_mov_reg(e, 3, 1);
+            if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_ALU_STORE(); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_OR;
+        } else if (op == 0x21 || op == 0x23 || op == 0x85) {
+            nj_and1(e); nj_mov_reg(e, 3, 1);
+            if (w == 2u) nj_uxth(e, 3, 3);
+            if (op != 0x85) NJ_ALU_STORE();
+            nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_AND;
+        } else {
+            nj_eor1(e); nj_mov_reg(e, 3, 1);
+            if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_ALU_STORE(); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_XOR;
+        }
+
+#undef NJ_ALU_STORE
+
+        if (mem) {
+            if (!nj_loop_mem_finish(e, &g, mc)) return 0;
+            pos += used;
+        }
+    }
+    else if (op == 0x05 || op == 0x0d || op == 0x25 ||
+             op == 0x2d || op == 0x35 || op == 0x3d) {
+        NJ_NEED(w);
+        u32 imm = w == 2u ? nj_rd16(p + pos) : nj_rd32(p + pos);
+        pos += w;
+        nj_mov_reg(e, 1, NJ_GUEST_REG(0));
+        nj_mov_imm(e, 2, imm);
+
+        if (op == 0x05) {
+            nj_adds3(e); if (w == 2u) nj_uxth(e, 3, 3);
+            nj_mov_reg(e, NJ_GUEST_REG(0), 3); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_ARITH; bi->ccop = CC_ADD;
+        } else if (op == 0x2d || op == 0x3d) {
+            nj_subs3(e); if (w == 2u) nj_uxth(e, 3, 3);
+            if (op == 0x2d) nj_mov_reg(e, NJ_GUEST_REG(0), 3);
+            nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_ARITH; bi->ccop = CC_SUB;
+        } else if (op == 0x0d) {
+            nj_orr1(e); nj_mov_reg(e, 3, 1); if (w == 2u) nj_uxth(e, 3, 3);
+            nj_mov_reg(e, NJ_GUEST_REG(0), 3); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_OR;
+        } else if (op == 0x25) {
+            nj_and1(e); nj_mov_reg(e, 3, 1); if (w == 2u) nj_uxth(e, 3, 3);
+            nj_mov_reg(e, NJ_GUEST_REG(0), 3); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_AND;
+        } else {
+            nj_eor1(e); nj_mov_reg(e, 3, 1); if (w == 2u) nj_uxth(e, 3, 3);
+            nj_mov_reg(e, NJ_GUEST_REG(0), 3); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_XOR;
+        }
+    }
+    else if (op == 0x81 || op == 0x83) {
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        unsigned sub = (m >> 3) & 7u;
+        unsigned dst = m & 7u;
+        bool mem = (m >> 6) != 3u;
+        if (sub == 2 || sub == 3) return 0; /* ADC/SBB consume old CF */
+
+        /*
+         * The immediate follows the displacement, so the effective address has
+         * to be sized before the immediate can be read.  nj_v6_decode_ea() is
+         * a pure decode and emits nothing, which makes this peek free.
+         */
+        unsigned ea_used = 0;
+        if (mem) {
+            nj_v6_ea_t pea;
+            if (!mc) return 0;
+            if (!nj_v6_decode_ea(p + pos, max - pos, m, addr16,
+                                 seg_override, &pea))
+                return 0;
+            ea_used = pea.used;
+        }
+
+        unsigned ipos = pos + ea_used;
+        u32 imm;
+        if (op == 0x83) {
+            if (ipos + 1u > max) return 0;
+            s32 si = (s8)p[ipos];
+            imm = w == 2u ? (u16)si : (u32)si;
+            ipos += 1u;
+        } else {
+            if (ipos + w > max) return 0;
+            imm = w == 2u ? nj_rd16(p + ipos) : nj_rd32(p + ipos);
+            ipos += w;
+        }
+
+        nj_v6_guard_t g;
+        unsigned used = 0;
+        if (mem) {
+            /* /7 is CMP: it reads the destination and writes only flags. */
+            if (!nj_body_mem_open(cpu, e, bi, mc, p + pos, max - pos, m,
+                                  addr16, seg_override, w, sub != 7u,
+                                  &g, &used))
+                return 0;
+            nj_mov_reg(e, 0, 3);
+            if (w == 2u) nj_ldrh(e, 1, 0, 0); else nj_ldr32(e, 1, 0, 0);
+        } else {
+            nj_mov_reg(e, 1, NJ_GUEST_REG(dst));
+        }
+        nj_mov_imm(e, 2, imm);
+
+#define NJ_G1_STORE() do {     if (mem) {         if (w == 2u) nj_strh(e, 3, 0, 0); else nj_str32(e, 3, 0, 0);     } else {         nj_mov_reg(e, NJ_GUEST_REG(dst), 3);     } } while (0)
+
+        switch (sub) {
+        case 0:
+            nj_adds3(e); if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_G1_STORE(); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_ARITH; bi->ccop = CC_ADD; break;
+        case 1:
+            nj_orr1(e); nj_mov_reg(e, 3, 1); if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_G1_STORE(); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_OR; break;
+        case 4:
+            nj_and1(e); nj_mov_reg(e, 3, 1); if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_G1_STORE(); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_AND; break;
+        case 5:
+            nj_subs3(e); if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_G1_STORE(); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_ARITH; bi->ccop = CC_SUB; break;
+        case 6:
+            nj_eor1(e); nj_mov_reg(e, 3, 1); if (w == 2u) nj_uxth(e, 3, 3);
+            NJ_G1_STORE(); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_LOGIC; bi->ccop = CC_XOR; break;
+        case 7:
+            nj_subs3(e); if (w == 2u) nj_uxth(e, 3, 3); nj_cmp_imm0(e, 3);
+            bi->flag_kind = NJ_FLAG_ARITH; bi->ccop = CC_SUB; break;
+        default:
+            return 0;
+        }
+
+#undef NJ_G1_STORE
+
+        if (mem) {
+            if (!nj_loop_mem_finish(e, &g, mc)) return 0;
+        }
+        pos = ipos;
+    }
+    else if (op == 0xc7) {
+        NJ_NEED(1);
+        u8 m = p[pos++];
+        if ((m >> 6) != 3 || ((m >> 3) & 7u) != 0) return 0;
+        NJ_NEED(w);
+        u32 imm = w == 2u ? nj_rd16(p + pos) : nj_rd32(p + pos);
+        pos += w;
+        nj_mov_imm(e, NJ_GUEST_REG(m & 7u), imm);
+    }
+    else {
+        return 0;
+    }
+
+body_done:
+    if (e->failed || pos > 15u) return 0;
+    return (int)pos;
+
+#undef NJ_FINISH_RESULT
+#undef NJ_NEED
+}
+
+typedef struct {
+    unsigned type;
+    unsigned len;
+    uword target;
+    uword fallthrough;
+} nj_branch_t;
+
+static bool nj_decode_backedge(CPUI386 *cpu, const u8 *p, unsigned max,
+                               uword ip, uword loop_start, nj_branch_t *br)
+{
+    if (!max) return false;
+    memset(br, 0, sizeof(*br));
+
+    /* Keep v4 branch semantics intentionally narrow and auditable. */
+    u8 op = p[0];
+    sword disp;
+    unsigned len;
+
+    if (op == 0x74 || op == 0x75) { /* JZ/JNZ rel8 */
+        if (max < 2u) return false;
+        disp = (s8)p[1]; len = 2u;
+        br->type = op == 0x74 ? NJ_BRANCH_JZ : NJ_BRANCH_JNZ;
+    } else if (op == 0x0f && max >= 2u && (p[1] == 0x84 || p[1] == 0x85)) {
+        unsigned w = cpu->code16 ? 2u : 4u; /* near JZ/JNZ */
+        if (max < 2u + w) return false;
+        disp = w == 2u ? (s16)nj_rd16(p + 2) : (s32)nj_rd32(p + 2);
+        len = 2u + w;
+        br->type = p[1] == 0x84 ? NJ_BRANCH_JZ : NJ_BRANCH_JNZ;
+    } else if (op == 0xeb) {       /* JMP rel8 */
+        if (max < 2u) return false;
+        disp = (s8)p[1]; len = 2u; br->type = NJ_BRANCH_JMP;
+    } else if (op == 0xe9) {       /* JMP rel16/rel32 */
+        unsigned w = cpu->code16 ? 2u : 4u;
+        if (max < 1u + w) return false;
+        disp = w == 2u ? (s16)nj_rd16(p + 1) : (s32)nj_rd32(p + 1);
+        len = 1u + w; br->type = NJ_BRANCH_JMP;
+    } else if (op == 0xe2) {       /* LOOP rel8 */
+        if (max < 2u) return false;
+        disp = (s8)p[1]; len = 2u; br->type = NJ_BRANCH_LOOP;
+    } else if (op == 0xe3) {       /* JCXZ/JECXZ rel8 */
+        if (max < 2u) return false;
+        disp = (s8)p[1]; len = 2u; br->type = NJ_BRANCH_JCXZ;
+    } else {
+        return false;
+    }
+
+    uword fall = ip + len;
+    uword target = fall + disp;
+    if (cpu->code16) { fall &= 0xffffu; target &= 0xffffu; }
+    if (target != loop_start) return false;
+
+    br->len = len;
+    br->target = target;
+    br->fallthrough = fall;
+    return true;
+}
+
+static int nj_code_window(CPUI386 *cpu, uword ip,
+                          const u8 **out, unsigned *avail,
+                          unsigned *phys_page)
+{
+    if (cpu->code16) ip &= 0xffffu;
+    OptAddr res;
+    if (!translate8r(cpu, &res, SEG_CS, ip)) return 0;
+    if (in_iomem(res.addr1) || res.addr1 >= (uword)cpu->phys_mem_size) return 0;
+
+    uword linear = cpu->seg[SEG_CS].base + ip;
+    unsigned n = 4096u - (unsigned)(linear & 4095u);
+    unsigned pn = 4096u - (unsigned)(res.addr1 & 4095u);
+    if (pn < n) n = pn;
+    unsigned memn = (unsigned)((uword)cpu->phys_mem_size - res.addr1);
+    if (memn < n) n = memn;
+    if (cpu->code16) {
+        unsigned wrapn = 0x10000u - (unsigned)(ip & 0xffffu);
+        if (wrapn < n) n = wrapn;
+    }
+    *out = cpu->phys_mem + res.addr1;
+    *avail = n;
+    *phys_page = (unsigned)(res.addr1 >> 12);
+    return n != 0;
+}
+
+/* V8 compiler staging buffer. A <=192-byte trace can span at most two 4K pages. */
+#define NJ_V8_DECODE_MAX 192u
+static u8 nj_v8_decode_buf[NJ_V8_DECODE_MAX];
+
+static int nj_v8_code_window(CPUI386 *cpu, uword ip,
+                             const u8 **out, unsigned *avail,
+                             unsigned *phys_page, unsigned *phys_page2,
+                             unsigned *code_split)
+{
+    const u8 *p1;
+    unsigned n1, pg1;
+    if (!nj_code_window(cpu, ip, &p1, &n1, &pg1)) return 0;
+
+    *phys_page = pg1;
+    *phys_page2 = 0;
+    *code_split = 0;
+    if (n1 >= NJ_V8_DECODE_MAX) {
+        *out = p1;
+        *avail = n1;
+        return n1 != 0;
+    }
+
+    /* A 16-bit code stream may cross an ordinary 4K page boundary, but do not
+     * speculate across the 64K IP wrap.  The latter needs explicit segmented
+     * wrap semantics and is not relevant to normal DOS hot loops. */
+    if (cpu->code16 && (unsigned)(ip & 0xffffu) + n1 >= 0x10000u) {
+        *out = p1;
+        *avail = n1;
+        return n1 != 0;
+    }
+
+    /* The first window ended at a linear/physical 4K boundary. Try the next
+     * guest code page; if it is absent/MMIO, the first-page prefix is still
+     * perfectly usable. */
+    uword ip2 = ip + n1;
+    uword linear2 = cpu->seg[SEG_CS].base + ip2;
+    uword paddr2;
+
+    /* Do not call translate8r() speculatively for the second page. A refill
+     * here could set PTE accessed state or even leave a guest #PF pending for
+     * code that the current execution path never reaches. Cross-page trace
+     * growth is therefore opportunistic: use a live TLB hit when paging is on,
+     * otherwise stop cleanly at the first page. */
+    if (cpu->cr0 & CR0_PG) {
+        uword lpgno = linear2 >> 12;
+        struct tlb_entry *ent = &cpu->tlb.tab[lpgno % tlb_size];
+        if (ent->lpgno != lpgno || ent->pte_lookup[cpu->cpl > 0][0]) {
+            *out = p1; *avail = n1; return 1;
+        }
+        paddr2 = ent->xaddr ^ linear2;
+    } else {
+        /* Match normal non-paged translation, including the A20 gate. */
+        paddr2 = linear2 & cpu->a20_mask;
+    }
+
+    if (in_iomem(paddr2) || paddr2 >= (uword)cpu->phys_mem_size) {
+        *out = p1; *avail = n1; return 1;
+    }
+
+    unsigned n2 = 4096u - (unsigned)(paddr2 & 4095u);
+    unsigned memn = (unsigned)((uword)cpu->phys_mem_size - paddr2);
+    if (memn < n2) n2 = memn;
+    if (n2 > NJ_V8_DECODE_MAX - n1) n2 = NJ_V8_DECODE_MAX - n1;
+    if (!n2) { *out = p1; *avail = n1; return 1; }
+
+    memcpy(nj_v8_decode_buf, p1, n1);
+    memcpy(nj_v8_decode_buf + n1, cpu->phys_mem + paddr2, n2);
+    *out = nj_v8_decode_buf;
+    *avail = n1 + n2;
+    *phys_page2 = (unsigned)(paddr2 >> 12);
+    *code_split = n1;
+    return 1;
+}
+
+/* A cached paged block survives TLB clears, but it may execute only after
+ * the current TLB confirms that its linear code page still maps to the same
+ * physical page from which the x86 bytes were compiled.  On a TLB miss we
+ * simply return to the interpreter; normal instruction fetch refills the TLB
+ * and the next hot backedge can reuse the block without recompiling it. */
+static inline bool nj_code_page_mapping_valid(CPUI386 *cpu, uword linear,
+                                              unsigned phys_page)
+{
+    uword lpgno = linear >> 12;
+    struct tlb_entry *ent = &cpu->tlb.tab[lpgno % tlb_size];
+    if (unlikely(ent->lpgno != lpgno)) return false;
+    if (unlikely(ent->pte_lookup[cpu->cpl > 0][0])) return false;
+    uword paddr = ent->xaddr ^ linear;
+    return (unsigned)(paddr >> 12) == phys_page;
+}
+
+static inline bool nj_code_mapping_valid(CPUI386 *cpu,
+                                         const nj_block_t *b, uword linear)
+{
+    if (!(cpu->cr0 & CR0_PG)) return true;
+    /* v8.6 exact BP-stack blocks validate code+data together from current
+     * page tables in nj_exec_loop(), so they must not require code TLB
+     * residency here. */
+    if (b->static_write_count == 3u) return true;
+    if (!nj_code_page_mapping_valid(cpu, linear, b->phys_page)) return false;
+    if (b->code_split) {
+        uword linear2 = (linear & ~(uword)0xfffu) + 0x1000u;
+        if (!nj_code_page_mapping_valid(cpu, linear2, b->phys_page2)) return false;
+    }
+    return true;
+}
+
+/*
+ * v8.6 paged BP-stack page-table guard.
+ *
+ * v8.5 used the live direct-mapped guest TLB for the exact Symantec loop's
+ * code/data pages. Under EMM386 code and stack pages can evict each other from
+ * the same TLB slot, so a perfectly valid loop can become impossible to enter.
+ *
+ * The exact BP-stack block therefore walks the current 386 page tables directly
+ * once per native entry.  No guest TLB entry is populated or displaced.  This
+ * is cheap compared with the hundreds of eight-instruction iterations normally
+ * retired by one exact-loop entry.  Accessed/Dirty bits are changed only after
+ * every mapping has validated and native execution is actually about to begin.
+ */
+static __attribute__((noinline)) bool
+nj_v45_paged_walk_addr(CPUI386 *cpu, uword linear, bool write,
+                       uword *out_phys, u8 **out_pde, u8 **out_pte)
+{
+    if (!(cpu->cr0 & CR0_PG))
+        return false;
+
+    uword pd_base = cpu->cr3 & ~(uword)0xfffu;
+    uword pde_addr = pd_base + ((linear >> 22) & 0x3ffu) * 4u;
+    if (pde_addr + 3u < pde_addr ||
+        pde_addr + 3u >= (uword)cpu->phys_mem_size ||
+        in_iomem(pde_addr) || in_iomem(pde_addr + 3u))
+        return false;
+#if REMOTE_MEM
+    if (is_remote(pde_addr) || is_remote(pde_addr + 3u))
+        return false;
+#endif
+
+    uword pde = pload32(cpu, pde_addr);
+    if (!(pde & 1u))
+        return false;
+
+    uword pt_base = pde & ~(uword)0xfffu;
+    uword pte_addr = pt_base + ((linear >> 12) & 0x3ffu) * 4u;
+    if (pte_addr + 3u < pte_addr ||
+        pte_addr + 3u >= (uword)cpu->phys_mem_size ||
+        in_iomem(pte_addr) || in_iomem(pte_addr + 3u))
+        return false;
+#if REMOTE_MEM
+    if (is_remote(pte_addr) || is_remote(pte_addr + 3u))
+        return false;
+#endif
+
+    uword pte_raw = pload32(cpu, pte_addr);
+    if (!(pte_raw & 1u))
+        return false;
+
+    /* Mirror tlb_refill()/translate_lpgno(): PDE R/W and U/S may only remove
+     * rights granted by the PTE, then use the exact same permission table. */
+    uword eff = pte_raw & ((pde & 7u) | 0xfffffff8u);
+    if (pte_lookup[!!(cpu->cr0 & CR0_WP)][(eff >> 1) & 3u]
+                  [cpu->cpl > 0][write ? 1 : 0])
+        return false;
+
+    uword phys = (pte_raw & ~(uword)0xfffu) | (linear & 0xfffu);
+    if (phys >= (uword)cpu->phys_mem_size || in_iomem(phys))
+        return false;
+#if REMOTE_MEM
+    if (is_remote(phys))
+        return false;
+#endif
+
+    if (out_phys) *out_phys = phys;
+    if (out_pde) *out_pde = cpu->phys_mem + pde_addr;
+    if (out_pte) *out_pte = cpu->phys_mem + pte_addr;
+    return true;
+}
+
+static __attribute__((noinline)) bool
+nj_v45_paged_walk_word(CPUI386 *cpu, uword linear, bool write,
+                       uword *out_phys, u8 **out_pde, u8 **out_pte)
+{
+    /* The fast path issues one native halfword access; preserve the emulator's
+     * two-page semantics by rejecting a guest word split across 4K. */
+    if ((linear & 0xfffu) == 0xfffu)
+        return false;
+    uword phys;
+    if (!nj_v45_paged_walk_addr(cpu, linear, write,
+                                &phys, out_pde, out_pte))
+        return false;
+    if (phys + 1u < phys || phys + 1u >= (uword)cpu->phys_mem_size ||
+        in_iomem(phys + 1u))
+        return false;
+#if REMOTE_MEM
+    if (is_remote(phys + 1u))
+        return false;
+#endif
+    if (out_phys) *out_phys = phys;
+    return true;
+}
+
+/* Exact-loop code mapping guard. Generic blocks keep the cheaper live-TLB
+ * guard; only this block pays page-table walks. */
+static __attribute__((noinline)) bool
+nj_v45_paged_code_valid(CPUI386 *cpu, const nj_block_t *b)
+{
+    uword p1;
+    if (!nj_v45_paged_walk_addr(cpu, b->tag, false, &p1, NULL, NULL) ||
+        (unsigned)(p1 >> 12) != b->phys_page)
+        return false;
+    if (b->code_split) {
+        uword linear2 = (b->tag & ~(uword)0xfffu) + 0x1000u;
+        uword p2;
+        if (!nj_v45_paged_walk_addr(cpu, linear2, false, &p2, NULL, NULL) ||
+            (unsigned)(p2 >> 12) != b->phys_page2)
+            return false;
+    }
+    return true;
+}
+
+static __attribute__((noinline)) bool
+nj_v45_paged_static_valid(CPUI386 *cpu, const nj_block_t *b, bool mark_dirty)
+{
+    if (!(cpu->cr0 & CR0_PG) || b->static_write_count != 3u ||
+        !nj_v45_paged_code_valid(cpu, b))
+        return false;
+
+    u16 bp = (u16)b->bp_value;
+    u16 sp = (u16)b->sp_value;
+    uword ss = b->ss_base;
+    uword l_m2  = ss + (uword)(u16)(bp - 2u);
+    uword l_m4  = ss + (uword)(u16)(bp - 4u);
+    uword l_m6  = ss + (uword)(u16)(bp - 6u);
+    uword l_stk = ss + (uword)(u16)(sp - 2u);
+
+    if (b->static_write_phys[1] < 2u)
+        return false;
+    uword expected_m6 = b->static_write_phys[1] - 2u;
+
+    uword p_m2, p_m4, p_m6, p_stk;
+    u8 *pde_m2 = NULL, *pte_m2 = NULL;
+    u8 *pde_m4 = NULL, *pte_m4 = NULL;
+    u8 *pde_m6 = NULL, *pte_m6 = NULL;
+    u8 *pde_stk = NULL, *pte_stk = NULL;
+
+    if (!nj_v45_paged_walk_word(cpu, l_m2, true, &p_m2, &pde_m2, &pte_m2) ||
+        !nj_v45_paged_walk_word(cpu, l_m4, true, &p_m4, &pde_m4, &pte_m4) ||
+        !nj_v45_paged_walk_word(cpu, l_m6, false, &p_m6, &pde_m6, &pte_m6) ||
+        !nj_v45_paged_walk_word(cpu, l_stk, true, &p_stk, &pde_stk, &pte_stk) ||
+        p_m2 != b->static_write_phys[0] ||
+        p_m4 != b->static_write_phys[1] ||
+        p_m6 != expected_m6 ||
+        p_stk != b->static_write_phys[2])
+        return false;
+
+    if (mark_dirty) {
+        *pde_m2  |= 1u << 5;  *pte_m2  |= (1u << 5) | (1u << 6);
+        *pde_m4  |= 1u << 5;  *pte_m4  |= (1u << 5) | (1u << 6);
+        *pde_m6  |= 1u << 5;  *pte_m6  |= 1u << 5;
+        *pde_stk |= 1u << 5;  *pte_stk |= (1u << 5) | (1u << 6);
+    }
+    return true;
+}
+
+static inline __attribute__((always_inline))
+bool nj_block_matches(CPUI386 *cpu, const nj_block_t *b, uword linear, uword key)
+{
+    return b->valid && b->tag == linear && b->mmu_key == key &&
+           b->cs_base == cpu->seg[SEG_CS].base &&
+           (!b->uses_ds_static ||
+            (b->ds_base == cpu->seg[SEG_DS].base &&
+             b->ds_sel == cpu->seg[SEG_DS].sel)) &&
+           (!b->uses_es_static ||
+            (b->es_base == cpu->seg[SEG_ES].base &&
+             b->es_sel == cpu->seg[SEG_ES].sel)) &&
+           (!b->uses_ss_base ||
+            (b->ss_base == cpu->seg[SEG_SS].base &&
+             b->ss_sel == cpu->seg[SEG_SS].sel)) &&
+           (!b->uses_ss_static ||
+            (b->ss_base == cpu->seg[SEG_SS].base &&
+             b->ss_sel == cpu->seg[SEG_SS].sel &&
+             b->bp_value == (uword)cpu->gprx[5].r16 &&
+             b->sp_value == (uword)cpu->gprx[4].r16)) &&
+           (!b->uses_df_static || b->df_value == (u8)!!(cpu->flags & DF)) &&
+           b->code16 == (u8)cpu->code16 &&
+           nj_code_mapping_valid(cpu, b, linear);
+}
+
+static inline __attribute__((always_inline))
+nj_block_t *nj_lookup_linear(CPUI386 *cpu, uword linear)
+{
+    uword key = nj_mmu_key(cpu);
+    unsigned base = nj_hash(linear ^ key, NJ_CACHE_SET_BITS) * NJ_CACHE_WAYS;
+    nj_block_t *b0 = &nj_cache[base];
+    if (likely(nj_block_matches(cpu, b0, linear, key))) return b0;
+    nj_block_t *b1 = &nj_cache[base + 1u];
+    if (likely(nj_block_matches(cpu, b1, linear, key))) return b1;
+    return NULL;
+}
+
+static inline __attribute__((always_inline))
+nj_block_t *nj_lookup(CPUI386 *cpu, uword ip)
+{
+    return nj_lookup_linear(cpu, cpu->seg[SEG_CS].base + ip);
+}
+
+static nj_block_t *nj_compile_loop(CPUI386 *cpu, uword start_ip)
+{
+    const u8 *code;
+    unsigned avail, phys_page, phys_page2, code_split;
+    if (!nj_v8_code_window(cpu, start_ip, &code, &avail,
+                           &phys_page, &phys_page2, &code_split)) {
+        nj_rej_note(NJR_CODE_WINDOW, start_ip, 0, 0xffffffffu, 0);
+        return NULL;
+    }
+
+    /*
+     * BIOS tick polling loop seen by Symantec:
+     *   MOV DX,ES:[046Ch] / CMP AX,DX / JZ back
+     *
+     * Native execution made this loop report enormous MIPS but cannot shorten
+     * the wall-clock wait for the BIOS timer.  Compiling it therefore only
+     * adds dispatch/cache pressure and depresses the actual CPU benchmark.
+     */
+    static const u8 timer_poll[] = {
+        0x26,0x8b,0x16,0x6c,0x04,0x3b,0xc2,0x74,0xf7
+    };
+    if (avail >= sizeof(timer_poll) &&
+        memcmp(code, timer_poll, sizeof(timer_poll)) == 0)
+        return NULL;
+
+    /*
+     * See NJ_LOOP_MAX_ARM_BYTES for why the reservation grew and what bounds
+     * it.
+     */
+    unsigned room = NJIT_LOOP_MEM ? NJ_LOOP_MAX_ARM_BYTES : NJ_MAX_ARM_BYTES;
+    if (!nj_make_code_room(room))
+        return NULL;
+
+    nj_emit_t e = {
+        .p = nj_code_ptr,
+        .start = nj_code_ptr,
+        .limit = nj_code_ptr + (room / 2u),
+        .failed = false
+    };
+
+    bool code16 = cpu->code16;
+    bool wide66 = nj_wide66_candidate(cpu, code, avail);
+    bool state16 = code16 && !wide66;
+
+    nj_emit_prologue(&e, state16);
+    u16 *body_start = e.p;
+
+    unsigned pos = 0;
+    unsigned body_insns = 0;
+    unsigned last_flag_kind = NJ_FLAG_NONE;
+    unsigned last_ccop = 0;
+    bool flag_scratch_live = false;
+    bool cf_dirty = false;
+    bool needs_refresh_cf = false;
+    bool uses_es_static = false;
+    bool uses_ds_static = false;
+    bool uses_ss_base = false;
+    bool have_flag_op = false;
+    unsigned mem_insns = 0;
+    nj_branch_t br;
+    bool have_branch = false;
+    uword branch_ip = 0;
+
+    while (body_insns < NJ_MAX_X86_INSNS && pos < avail) {
+        uword gip = start_ip + pos;
+        if (code16) gip &= 0xffffu;
+
+        if (nj_decode_backedge(cpu, code + pos, avail - pos, gip, start_ip, &br)) {
+            branch_ip = gip;
+            have_branch = true;
+            break;
+        }
+
+        nj_loop_mem_t mc = { .state16 = state16, .instr_ip = gip };
+        const nj_loop_mem_t *mcp = NJIT_LOOP_MEM ? &mc : NULL;
+
+        u16 *before = e.p;
+        nj_body_info_t bi;
+        int n = nj_translate_body_one(cpu, &e, code + pos, avail - pos,
+                                      wide66, &bi, mcp);
+
+        if (n > 0 && !e.failed &&
+            flag_scratch_live && bi.clobbers_flag_scratch) {
+            /*
+             * This instruction wants r1-r3, which still hold the operands of
+             * the last flag-producing instruction for the lazy flush at the
+             * exit.  Rejecting the whole loop here is what kept every memory
+             * operand - and every byte move, MOVZX and XCHG - out of a native
+             * body.  Rewind instead, materialise the pending CC into the
+             * guest, and translate this instruction again onto that state.
+             *
+             * The translator is a pure function of (cpu, code) apart from the
+             * emit buffer, so re-running it after the rewind is exact.
+             */
+            e.p = before;
+            nj_emit_cc_flush(&e, state16, last_flag_kind, last_ccop);
+            last_flag_kind = NJ_FLAG_NONE;
+            last_ccop = 0;
+            flag_scratch_live = false;
+            before = e.p;
+            n = nj_translate_body_one(cpu, &e, code + pos, avail - pos,
+                                      wide66, &bi, mcp);
+        }
+
+        if (n <= 0 || e.failed) {
+            unsigned op = nj_effective_opcode(code + pos, avail - pos);
+            nj_rej_note_modrm(code + pos, avail - pos);
+            nj_rej_note(e.failed ? NJR_EMIT : NJR_BODY_OPCODE,
+                        start_ip, pos, op, body_insns);
+            e.p = before;
+            e.failed = false;
+            return NULL;
+        }
+
+        if (bi.used_memory && ++mem_insns > NJ_LOOP_MAX_MEM_INSNS) {
+            nj_rej_note(NJR_EMIT, start_ip, pos, code[pos], body_insns);
+            return NULL;
+        }
+
+        if (bi.uses_es_static)
+            uses_es_static = true;
+        if (bi.uses_ds_static)
+            uses_ds_static = true;
+        if (bi.uses_ss_base)
+            uses_ss_base = true;
+
+        if (bi.flag_kind != NJ_FLAG_NONE) {
+            if (bi.flag_kind == NJ_FLAG_INCDEC) {
+                if (cf_dirty) {
+                    nj_rej_note(NJR_INCDEC_CF, start_ip, pos, code[pos], body_insns);
+                    return NULL; /* DEC/INC must preserve prior CF. */
+                }
+                needs_refresh_cf = true;
+            } else {
+                cf_dirty = true;
+                needs_refresh_cf = false;
+            }
+            last_flag_kind = bi.flag_kind;
+            last_ccop = bi.ccop;
+            flag_scratch_live = true;
+            have_flag_op = true;
+        }
+
+        pos += (unsigned)n;
+        body_insns++;
+    }
+
+    if (!have_branch) {
+        nj_rej_note(NJR_NO_BRANCH, start_ip, pos,
+                    pos < avail ? code[pos] : 0xffffffffu, body_insns);
+        return NULL;
+    }
+
+    if (wide66 &&
+        (br.type == NJ_BRANCH_LOOP || br.type == NJ_BRANCH_JCXZ)) {
+        /* These use CX in 16-bit address mode; preserve-high-half support is
+         * deliberately deferred until we know the benchmark needs it. */
+        nj_rej_note(NJR_BODY_OPCODE, start_ip, pos,
+                    pos < avail ? code[pos] : 0xffffffffu, body_insns);
+        return NULL;
+    }
+    if (body_insns == 0u) {
+        nj_rej_note(NJR_EMPTY_BODY, start_ip, pos,
+                    pos < avail ? code[pos] : 0xffffffffu, body_insns);
+        return NULL;
+    }
+
+    /* JZ/JNZ needs Z from a translated flag-producing instruction. */
+    if ((br.type == NJ_BRANCH_JZ || br.type == NJ_BRANCH_JNZ) &&
+        !have_flag_op) {
+        nj_rej_note(NJR_JCC_NO_FLAGS, start_ip, pos,
+                    pos < avail ? code[pos] : 0xffffffffu, body_insns);
+        return NULL;
+    }
+
+    unsigned iter_insns = body_insns + 1u; /* include the x86 back-edge */
+
+    /*
+     * Branch-tail layout:
+     *   condition false -> normal_exit
+     *   condition true  -> ++iters, budget?, back to body
+     *   normal_exit     -> ++iters, LR=fallthrough, common_exit
+     *   budget_exit     -> LR=start, common_exit
+     */
+    u16 *to_normal = NULL;
+
+    if ((br.type == NJ_BRANCH_JZ || br.type == NJ_BRANCH_JNZ) &&
+        last_flag_kind == NJ_FLAG_NONE) {
+        /*
+         * The pending CC was materialised mid-body because a later
+         * instruction needed r1-r3, so the host condition flags no longer
+         * describe the last x86 flag-producing instruction.  Every flag form
+         * this translator emits takes ZF from "result == 0", and the flush
+         * stored exactly that result in cc.dst - sign-extended for 16-bit
+         * operands, which preserves zero-ness.
+         *
+         * While a CC is still pending the host flags are guaranteed to be
+         * live: every instruction that could disturb APSR sets
+         * clobbers_flag_scratch and therefore forces the flush above first.
+         */
+        nj_ldr32(&e, 1, NJ_CPU_REG, NJ_CC_DST);
+        nj_cmp_imm0(&e, 1);
+    }
+
+    if (br.type == NJ_BRANCH_JZ) {
+        to_normal = nj_bcond_placeholder(&e); /* patched as BNE */
+    } else if (br.type == NJ_BRANCH_JNZ) {
+        to_normal = nj_bcond_placeholder(&e); /* patched as BEQ */
+    } else if (br.type == NJ_BRANCH_LOOP) {
+        /* Guest ECX is mapped to r5. LOOP itself does not modify x86 flags. */
+        nj_subs_imm8(&e, NJ_GUEST_REG(1), 1);
+        if (code16) nj_uxth(&e, NJ_GUEST_REG(1), NJ_GUEST_REG(1));
+        nj_cmp_imm0(&e, NJ_GUEST_REG(1));
+        to_normal = nj_bcond_placeholder(&e); /* BEQ */
+    } else if (br.type == NJ_BRANCH_JCXZ) {
+        nj_cmp_imm0(&e, NJ_GUEST_REG(1));
+        to_normal = nj_bcond_placeholder(&e); /* BNE */
+    }
+
+    /* Taken path. */
+    nj_adds_imm8(&e, NJ_ITER_REG, 1);
+    nj_cmp_reg(&e, NJ_ITER_REG, NJ_BUDGET_REG);
+    u16 *to_budget = nj_bcond_placeholder(&e); /* BHS */
+    u16 *back = nj_b_placeholder(&e);
+
+    u16 *normal_exit = e.p;
+    if (br.type != NJ_BRANCH_JMP) {
+        nj_adds_imm8(&e, NJ_ITER_REG, 1);
+        nj_mov_imm(&e, NJ_BUDGET_REG, br.fallthrough);
+        u16 *normal_to_common = nj_b_placeholder(&e);
+
+        u16 *budget_exit = e.p;
+        nj_mov_imm(&e, NJ_BUDGET_REG, start_ip);
+        u16 *common_exit = e.p;
+
+        nj_emit_common_exit(&e, state16, last_flag_kind, last_ccop, branch_ip);
+
+        if (!nj_patch_b(back, body_start) ||
+            !nj_patch_b(normal_to_common, common_exit)) {
+            nj_rej_note(NJR_PATCH, start_ip, pos, code[pos], body_insns);
+            return NULL;
+        }
+
+        unsigned invcond;
+        if (br.type == NJ_BRANCH_JZ) invcond = 1u;       /* NE */
+        else if (br.type == NJ_BRANCH_JNZ) invcond = 0u; /* EQ */
+        else if (br.type == NJ_BRANCH_LOOP) invcond = 0u;/* EQ */
+        else invcond = 1u;                               /* JCXZ false = NE */
+        if (!nj_patch_bcond(to_normal, normal_exit, invcond)) {
+            nj_rej_note(NJR_PATCH, start_ip, pos, code[pos], body_insns);
+            return NULL;
+        }
+        if (!nj_patch_bcond(to_budget, budget_exit, 2u)) {
+            nj_rej_note(NJR_PATCH, start_ip, pos, code[pos], body_insns);
+            return NULL; /* HS */
+        }
+    } else {
+        /* Unconditional self-loop: only the budget path can leave native code. */
+        u16 *budget_exit = e.p;
+        nj_mov_imm(&e, NJ_BUDGET_REG, start_ip);
+        nj_emit_common_exit(&e, state16, last_flag_kind, last_ccop, branch_ip);
+        if (!nj_patch_b(back, body_start)) {
+            nj_rej_note(NJR_PATCH, start_ip, pos, code[pos], body_insns);
+            return NULL;
+        }
+        if (!nj_patch_bcond(to_budget, budget_exit, 2u)) {
+            nj_rej_note(NJR_PATCH, start_ip, pos, code[pos], body_insns);
+            return NULL; /* HS */
+        }
+    }
+
+    if (e.failed) {
+        nj_rej_note(NJR_EMIT, start_ip, pos,
+                    pos < avail ? code[pos] : 0xffffffffu, body_insns);
+        return NULL;
+    }
+
+    uword linear = cpu->seg[SEG_CS].base + start_ip;
+    nj_block_t *b = nj_cache_insert_slot(cpu, linear);
+    memset(b, 0, sizeof(*b));
+    b->tag = linear;
+    b->mmu_key = nj_mmu_key(cpu);
+    b->cs_base = cpu->seg[SEG_CS].base;
+    b->ds_base = cpu->seg[SEG_DS].base;
+    b->es_base = cpu->seg[SEG_ES].base;
+    b->ss_base = cpu->seg[SEG_SS].base;
+    b->ds_sel = cpu->seg[SEG_DS].sel;
+    b->es_sel = cpu->seg[SEG_ES].sel;
+    b->ss_sel = cpu->seg[SEG_SS].sel;
+    b->start_ip = start_ip;
+    b->branch_ip = branch_ip;
+    b->fallthrough_ip = br.fallthrough;
+    b->byte_len = (u16)(pos + br.len);
+    b->phys_page = (u16)phys_page;
+    b->code_split = (u16)((code_split && (pos + br.len) > code_split) ? code_split : 0u);
+    b->phys_page2 = b->code_split ? (u16)phys_page2 : 0u;
+    b->insns = (u8)iter_insns;
+    b->code16 = (u8)code16;
+    b->needs_refresh_cf = (u8)needs_refresh_cf;
+    b->needs_flags_in = 0;
+    b->single_run = 0;
+    b->uses_ds_static = (u8)uses_ds_static;
+    b->uses_es_static = (u8)uses_es_static;
+    b->uses_ss_base = (u8)uses_ss_base;
+    b->uses_ss_static = 0;
+    b->static_write_count = 0;
+    b->code = e.start;
+    b->arm_halfwords = (u16)(e.p - e.start);
+    b->valid = 1;
+
+    nj_code_ptr = e.p;
+    nj_page_mark(phys_page);
+    if (b->code_split) nj_page_mark(b->phys_page2);
+    nj_bloom_add(linear);
+    g_njit_compiles++;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
+    return b;
+}
+
+
+/* -------------------------------------------------------------------------
+ * FRANK_NATIVE_JIT_V45_BPSTACK_LOOP
+ *
+ * Exact native compiler for the measured Symantec productive hot loop.
+ *
+ * Safety envelope:
+ *   - 16-bit code and 16-bit stack (real mode, protected mode or VM86);
+ *   - exact 25-byte instruction sequence above;
+ *   - all four touched words must be ordinary local RAM;
+ *   - generated host pointers are guarded by SS.base, BP and SP in the cache;
+ *   - with paging active, current page-table mappings/permissions are guarded
+ *     at every native entry, independent of direct-mapped TLB collisions, and
+ *     guest PDE/PTE Accessed/Dirty bits are preserved.
+ *
+ * PUSH/POP is folded with respect to SP (net zero), but its RAM side effect is
+ * preserved: the pushed word is still written to SS:[SP-2], and the popped
+ * value is written back to SS:[BP-2].
+ * ------------------------------------------------------------------------- */
+
+static bool nj_v45_local_word(CPUI386 *cpu, uword base, u16 off,
+                              u32 *host, uword *phys)
+{
+    uword p = base + (uword)off;
+    if (p + 1u < p || p + 1u >= (uword)cpu->phys_mem_size)
+        return false;
+    if (in_iomem(p) || in_iomem(p + 1u))
+        return false;
+#if REMOTE_MEM
+    if (is_remote(p) || is_remote(p + 1u))
+        return false;
+#endif
+    if (host) *host = (u32)(uintptr_t)(cpu->phys_mem + p);
+    if (phys) *phys = p;
+    return true;
+}
+
+/* Compile-time paged counterpart.  Resolve from the current page tables rather
+ * than from direct-mapped TLB residency.  This is a non-faulting observation:
+ * no TLB entry is populated and no Accessed/Dirty bit is changed here. */
+static bool nj_v45_paged_word(CPUI386 *cpu, uword linear, bool write,
+                              u32 *host, uword *phys)
+{
+    uword p;
+    if (!nj_v45_paged_walk_word(cpu, linear, write, &p, NULL, NULL))
+        return false;
+    if (host) *host = (u32)(uintptr_t)(cpu->phys_mem + p);
+    if (phys) *phys = p;
+    return true;
+}
+
+static bool nj_v45_static_word(CPUI386 *cpu, uword base, u16 off, bool write,
+                               u32 *host, uword *phys)
+{
+    if (cpu->cr0 & CR0_PG)
+        return nj_v45_paged_word(cpu, base + (uword)off, write, host, phys);
+    return nj_v45_local_word(cpu, base, off, host, phys);
+}
+
+/* Read exactly the 25-byte exact-loop pattern without requiring a second code
+ * page to be resident in the direct-mapped TLB. */
+static bool nj_v45_bpstack_code_window(CPUI386 *cpu, uword start_ip,
+                                       const u8 **out, unsigned *avail,
+                                       unsigned *phys_page,
+                                       unsigned *phys_page2,
+                                       unsigned *code_split)
+{
+    if (!(cpu->cr0 & CR0_PG))
+        return nj_v8_code_window(cpu, start_ip, out, avail,
+                                 phys_page, phys_page2, code_split);
+
+    enum { NEED = 25u };
+    if (cpu->code16 && (unsigned)(start_ip & 0xffffu) + NEED > 0x10000u)
+        return false;
+
+    uword linear = cpu->seg[SEG_CS].base + start_ip;
+    uword p1;
+    if (!nj_v45_paged_walk_addr(cpu, linear, false, &p1, NULL, NULL))
+        return false;
+
+    unsigned n1 = 0x1000u - (unsigned)(linear & 0xfffu);
+    if (n1 > NEED) n1 = NEED;
+    if (p1 + n1 < p1 || p1 + n1 > (uword)cpu->phys_mem_size)
+        return false;
+
+    *phys_page = (unsigned)(p1 >> 12);
+    *phys_page2 = 0u;
+    *code_split = 0u;
+    if (n1 == NEED) {
+        *out = cpu->phys_mem + p1;
+        *avail = NEED;
+        return true;
+    }
+
+    uword linear2 = linear + n1;
+    uword p2;
+    if (!nj_v45_paged_walk_addr(cpu, linear2, false, &p2, NULL, NULL))
+        return false;
+    unsigned n2 = NEED - n1;
+    if (p2 + n2 < p2 || p2 + n2 > (uword)cpu->phys_mem_size)
+        return false;
+
+    memcpy(nj_v8_decode_buf, cpu->phys_mem + p1, n1);
+    memcpy(nj_v8_decode_buf + n1, cpu->phys_mem + p2, n2);
+    *out = nj_v8_decode_buf;
+    *avail = NEED;
+    *phys_page2 = (unsigned)(p2 >> 12);
+    *code_split = n1;
+    return true;
+}
+
+static nj_block_t *nj_compile_v45_bpstack(CPUI386 *cpu, uword start_ip)
+{
+    static const u8 pat[] = {
+        0xff,0x76,0xfe,
+        0x8b,0x46,0xfc,
+        0x03,0x46,0xfa,
+        0x89,0x46,0xfc,
+        0x8f,0x46,0xfe,
+        0xff,0x46,0xfe,
+        0x81,0x7e,0xfe,0xd0,0x07,
+        0x7c,0xe7
+    };
+
+    g_njit_bp[NJBP_ATTEMPTS]++;
+
+    if (!cpu->code16)
+        return nj_bp_rej(NJBP_NOT_CODE16);
+
+    /*
+     * Direct host pointers are valid in every non-paged mode.  PE itself is
+     * not a reason to reject: VM86 and 16-bit protected-mode code still use
+     * the already-resolved SS.base exactly as translate() does.  Keep a
+     * 16-bit stack because this exact loop folds PUSH+POP with net-zero SP.
+     */
+    if (cpu->sp_mask != 0xffffu)
+        return nj_bp_rej(NJBP_SP_MASK);
+
+    const u8 *code;
+    unsigned avail, phys_page, phys_page2, code_split;
+    if (!nj_v45_bpstack_code_window(cpu, start_ip, &code, &avail,
+                                  &phys_page, &phys_page2, &code_split))
+        return nj_bp_rej(NJBP_CODE_WINDOW);
+    if (avail < sizeof(pat) || memcmp(code, pat, sizeof(pat)) != 0)
+        return nj_bp_rej(NJBP_PATTERN);
+
+    /* The exact 25 bytes are here.  Every refusal below is a guard saying
+     * "this loop, but not in this machine state" - which is the only thing
+     * that can explain a V86 capture with no flags=6 block in it. */
+    g_njit_bp[NJBP_MATCHED]++;
+    /* This exact fast path embeds direct RAM pointers.  In non-paged mode a
+     * normal 4K crossing is physically contiguous; reject only exotic A20
+     * wrap/non-contiguous cases rather than weakening its alias checks. */
+    if (!(cpu->cr0 & CR0_PG) && code_split && phys_page2 != phys_page + 1u)
+        return nj_bp_rej(NJBP_SPLIT_NONCONTIG);
+
+    u16 bp = cpu->gprx[5].r16;
+    u16 sp = cpu->gprx[4].r16;
+    uword ss = cpu->seg[SEG_SS].base;
+
+    u32 ptr_m2, ptr_m4, ptr_m6, ptr_stk;
+    uword pa_m2, pa_m4, pa_m6, pa_stk;
+
+    /* Kept as four separate tests purely so the counter says which word
+     * failed: BP-2/BP-4/BP-6 are the callee frame, SP-2 is the live stack
+     * top, and under EMM386 those can sit in differently mapped pages. */
+    if (!nj_v45_static_word(cpu, ss, (u16)(bp - 2u), true, &ptr_m2, &pa_m2))
+        return nj_bp_rej(NJBP_STATIC_M2);
+    if (!nj_v45_static_word(cpu, ss, (u16)(bp - 4u), true, &ptr_m4, &pa_m4))
+        return nj_bp_rej(NJBP_STATIC_M4);
+    if (!nj_v45_static_word(cpu, ss, (u16)(bp - 6u), false, &ptr_m6, &pa_m6))
+        return nj_bp_rej(NJBP_STATIC_M6);
+    if (!nj_v45_static_word(cpu, ss, (u16)(sp - 2u), true, &ptr_stk, &pa_stk))
+        return nj_bp_rej(NJBP_STATIC_STK);
+
+    /* Avoid another metadata word for BP-6. The three BP locals are adjacent
+     * in the x86 stack frame; if paging maps the page boundary non-contiguously
+     * just reject this rare layout and use the general JIT/interpreter. */
+    if ((cpu->cr0 & CR0_PG) && pa_m6 + 2u != pa_m4)
+        return nj_bp_rej(NJBP_M6_NONADJ);
+
+    /*
+     * Stack and code may share a guest page (common in small DOS programs).
+     * That is safe as long as the exact words written by this native loop do
+     * not overlap its own x86 bytes.  Other cached blocks are invalidated by
+     * exact range in nj_exec_loop() before native execution.
+     */
+    uword code_phys = ((uword)phys_page << 12) |
+                      ((cpu->seg[SEG_CS].base + start_ip) & 0xfffu);
+    unsigned code_len1 = (code_split && sizeof(pat) > code_split) ? code_split : (unsigned)sizeof(pat);
+    uword code_end1 = code_phys + code_len1;
+    uword code_phys2 = (uword)phys_page2 << 12;
+    unsigned code_len2 = (code_split && sizeof(pat) > code_split)
+                       ? (unsigned)sizeof(pat) - code_split : 0u;
+    const uword writes[] = { pa_m2, pa_m4, pa_stk };
+    for (unsigned i = 0; i < sizeof(writes) / sizeof(writes[0]); ++i) {
+        uword wend = writes[i] + 2u;
+        if ((writes[i] < code_end1 && code_phys < wend) ||
+            (code_len2 && writes[i] < code_phys2 + code_len2 &&
+             code_phys2 < wend))
+            return nj_bp_rej(NJBP_CODE_OVERLAP);
+    }
+
+    if (!nj_make_code_room(NJ_MAX_ARM_BYTES))
+        return nj_bp_rej(NJBP_NO_ROOM);
+
+    nj_emit_t e = {
+        .p = nj_code_ptr,
+        .start = nj_code_ptr,
+        .limit = nj_code_ptr + (NJ_MAX_ARM_BYTES / 2u),
+        .failed = false
+    };
+
+    nj_emit_prologue(&e, true);
+    u16 *body_start = e.p;
+
+    /*
+     * PUSH word [BP-2]
+     *   r3 = value, preserve architectural stack RAM write.
+     * POP word [BP-2] has no net SP change and reads exactly that pushed word.
+     * The intervening instructions do not use SP, so folding SP itself is safe.
+     */
+    nj_mov_imm(&e, 1, ptr_m2);
+    nj_ldrh(&e, 3, 1, 0);
+    nj_mov_imm(&e, 1, ptr_stk);
+    nj_strh(&e, 3, 1, 0);
+
+    /* MOV AX,[BP-4] */
+    nj_mov_imm(&e, 1, ptr_m4);
+    nj_ldrh(&e, NJ_GUEST_REG(0), 1, 0);
+
+    /* ADD AX,[BP-6] */
+    nj_mov_imm(&e, 2, ptr_m6);
+    nj_ldrh(&e, 2, 2, 0);
+    nj_mov_reg(&e, 1, NJ_GUEST_REG(0));
+    nj_adds3(&e);                 /* r3 = AX + mem */
+    nj_uxth(&e, 3, 3);
+    nj_mov_reg(&e, NJ_GUEST_REG(0), 3);
+
+    /* MOV [BP-4],AX */
+    nj_mov_imm(&e, 1, ptr_m4);
+    nj_strh(&e, NJ_GUEST_REG(0), 1, 0);
+
+    /* POP word [BP-2] -- value is still the one pushed at loop start. */
+    nj_mov_imm(&e, 1, ptr_stk);
+    nj_ldrh(&e, 3, 1, 0);
+    nj_mov_imm(&e, 1, ptr_m2);
+    nj_strh(&e, 3, 1, 0);
+
+    /* INC word [BP-2] */
+    nj_adds_imm8(&e, 3, 1);
+    nj_uxth(&e, 3, 3);
+    nj_mov_imm(&e, 1, ptr_m2);
+    nj_strh(&e, 3, 1, 0);
+
+    /*
+     * CMP word [BP-2],07D0h.
+     *
+     * r1/r2/r3 are deliberately left as src1/src2/dst for the existing lazy
+     * CC flush on either native exit.  Signed JL is evaluated from a separate
+     * ARM CMP of sign-extended src1 against +2000, which exactly matches x86
+     * 16-bit signed comparison.
+     */
+    nj_mov_reg(&e, 1, 3);
+    nj_mov_imm(&e, 2, 0x07d0u);
+    nj_subs3(&e);
+    nj_uxth(&e, 3, 3);
+    nj_sxth(&e, 1, 1);
+    nj_cmp_reg(&e, 1, 2);
+
+    /* JL taken => loop. BGE is the normal-exit inverse. */
+    u16 *to_normal = nj_bcond_placeholder(&e);
+
+    /* Taken path: one complete 8-instruction x86 iteration retired. */
+    nj_adds_imm8(&e, NJ_ITER_REG, 1);
+    nj_cmp_reg(&e, NJ_ITER_REG, NJ_BUDGET_REG);
+    u16 *to_budget = nj_bcond_placeholder(&e); /* BHS */
+    u16 *back = nj_b_placeholder(&e);
+
+    /* JL false: branch itself retired, continue after the 25-byte loop. */
+    u16 *normal_exit = e.p;
+    nj_adds_imm8(&e, NJ_ITER_REG, 1);
+    nj_mov_imm(&e, NJ_BUDGET_REG, (start_ip + 25u) & 0xffffu);
+    u16 *normal_to_common = nj_b_placeholder(&e);
+
+    /* Budget exhausted after a taken JL: resume at loop start next call. */
+    u16 *budget_exit = e.p;
+    nj_mov_imm(&e, NJ_BUDGET_REG, start_ip & 0xffffu);
+
+    u16 *common_exit = e.p;
+    nj_emit_common_exit(&e, true, NJ_FLAG_ARITH, CC_SUB,
+                        (start_ip + 23u) & 0xffffu);
+
+    if (!nj_patch_bcond(to_normal, normal_exit, 10u) ||  /* BGE */
+        !nj_patch_bcond(to_budget, budget_exit, 2u) ||    /* BHS */
+        !nj_patch_b(back, body_start) ||
+        !nj_patch_b(normal_to_common, common_exit) ||
+        e.failed)
+        return nj_bp_rej(NJBP_EMIT);
+
+    uword linear = cpu->seg[SEG_CS].base + (start_ip & 0xffffu);
+    nj_block_t *b = nj_cache_insert_slot(cpu, linear);
+    memset(b, 0, sizeof(*b));
+
+    b->tag = linear;
+    b->mmu_key = nj_mmu_key(cpu);
+    b->cs_base = cpu->seg[SEG_CS].base;
+    b->ds_base = cpu->seg[SEG_DS].base;
+    b->es_base = cpu->seg[SEG_ES].base;
+    b->ss_base = ss;
+    b->ds_sel = cpu->seg[SEG_DS].sel;
+    b->es_sel = cpu->seg[SEG_ES].sel;
+    b->ss_sel = cpu->seg[SEG_SS].sel;
+    b->bp_value = bp;
+    b->sp_value = sp;
+    b->start_ip = start_ip & 0xffffu;
+    b->branch_ip = (start_ip + 23u) & 0xffffu;
+    b->fallthrough_ip = (start_ip + 25u) & 0xffffu;
+    b->byte_len = (u16)sizeof(pat);
+    b->phys_page = (u16)phys_page;
+    b->code_split = (u16)((code_split && sizeof(pat) > code_split) ? code_split : 0u);
+    b->phys_page2 = b->code_split ? (u16)phys_page2 : 0u;
+    b->insns = 8u;
+    b->code16 = 1u;
+    b->valid = 1u;
+    b->needs_refresh_cf = 0u;
+    b->needs_flags_in = 0u;
+    b->single_run = 0u;
+    b->uses_ds_static = 0u;
+    b->uses_es_static = 0u;
+    b->uses_ss_base = 0u;
+    b->uses_ss_static = 1u;
+    b->static_write_count = 3u;
+    b->static_write_phys[0] = pa_m2;
+    b->static_write_phys[1] = pa_m4;
+    b->static_write_phys[2] = pa_stk;
+    b->code = e.start;
+    b->arm_halfwords = (u16)(e.p - e.start);
+
+    nj_code_ptr = e.p;
+    nj_page_mark(phys_page);
+    if (b->code_split) nj_page_mark(b->phys_page2);
+    nj_bloom_add(linear);
+    g_njit_compiles++;
+    g_njit_bp[NJBP_OK]++;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
+    return b;
+}
+
+
+/* -------------------------------------------------------------------------
+ * FRANK_NATIVE_JIT_V6_HYBRID_TRACE
+ *
+ * General 32-bit native-prefix trace compiler.
+ *
+ * This is deliberately a HYBRID JIT rather than another all-or-nothing loop
+ * recogniser. A hot backward target is decoded sequentially. Common integer,
+ * ModR/M/SIB memory and shift-double instructions become Thumb-2; when the
+ * trace reaches an instruction that is not yet worth lowering natively, the
+ * generated block exits *before* that instruction and the existing interpreter
+ * resumes with architecturally correct state.
+ *
+ * That gives the whole x86 core a JIT-aware execution path without requiring
+ * every rare/system/FPU opcode to be duplicated in the native backend on day
+ * one. The old v4/v5 loop JIT remains first choice for the small loops it can
+ * chain completely; v6 is the broad fallback for workloads such as Doom.
+ *
+ * v8 dynamic memory uses the live guest TLB when paging is active and direct
+ * linear addressing when it is off. Segment bases and the current paged code
+ * mapping are guarded at dispatch. Dynamic stores still test the translated
+ * code-page bitmap; writes to any page containing JIT code side-exit to the
+ * interpreter, which performs the exact SMC invalidation from v5.1.
+ * ------------------------------------------------------------------------- */
+
+#define NJ_V6_MAX_INSNS  24u
+
+#define NJ_V6_MAX_BYTES  NJ_V8_DECODE_MAX
+#define NJ_V6_MAX_ARM_BYTES 2048u
+
+static bool nj_v6_prefix(CPUI386 *cpu, const u8 *p, unsigned max,
+                         nj_v6_pfx_t *x)
+{
+    memset(x, 0, sizeof(*x));
+    x->op16 = cpu->code16;
+    x->addr16 = cpu->code16;
+    x->seg = -1;
+
+    while (x->pos < max && x->pos < 8u) {
+        switch (p[x->pos]) {
+        case 0x26: x->seg = SEG_ES; x->pos++; continue;
+        case 0x2e: x->seg = SEG_CS; x->pos++; continue;
+        case 0x36: x->seg = SEG_SS; x->pos++; continue;
+        case 0x3e: x->seg = SEG_DS; x->pos++; continue;
+        case 0x64: x->seg = SEG_FS; x->pos++; continue;
+        case 0x65: x->seg = SEG_GS; x->pos++; continue;
+        case 0x66: x->op16 = !x->op16; x->pos++; continue;
+        case 0x67: x->addr16 = !x->addr16; x->pos++; continue;
+        case 0xf0: case 0xf2: case 0xf3:
+            return false; /* interpreter fallback keeps LOCK/REP semantics */
+        default:
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool nj_v6_note_seg(CPUI386 *cpu, int seg,
+                           bool *use_ds, bool *use_es, bool *use_ss)
+{
+    /*
+     * Match the interpreter's currently-enabled protected-mode segcheck:
+     * null data selectors fault before any memory access.
+     */
+    if ((cpu->cr0 & 1u) && !(cpu->flags & VM) &&
+        cpu->seg[seg].limit == 0 &&
+        (cpu->seg[seg].sel & ~3u) == 0)
+        return false;
+
+    switch (seg) {
+    case SEG_DS: *use_ds = true; return true;
+    case SEG_ES: *use_es = true; return true;
+    case SEG_SS: *use_ss = true; return true;
+    case SEG_CS: return true;  /* cs_base is already part of every cache guard */
+    default:
+        return false;          /* FS/GS remain interpreter fallback for now */
+    }
+}
+
+static bool nj_v6_decode_ea(const u8 *p, unsigned max, u8 modrm,
+                            bool addr16, int seg_override, nj_v6_ea_t *ea)
+{
+    memset(ea, 0, sizeof(*ea));
+    ea->base = -1;
+    ea->index = -1;
+    ea->scale = 0;
+    ea->disp = 0;
+    ea->seg = seg_override;
+    ea->addr16 = addr16;
+
+    unsigned mod = modrm >> 6;
+    unsigned rm = modrm & 7u;
+    unsigned pos = 0;
+    if (mod == 3u) return false;
+
+    if (addr16) {
+        if (mod == 0u && rm == 6u) {
+            if (max < 2u) return false;
+            ea->disp = (s32)(u16)nj_rd16(p);
+            pos += 2u;
+            if (ea->seg < 0) ea->seg = SEG_DS;
+        } else {
+            switch (rm) {
+            case 0: ea->base = 3; ea->index = 6; break; /* BX+SI */
+            case 1: ea->base = 3; ea->index = 7; break; /* BX+DI */
+            case 2: ea->base = 5; ea->index = 6; break; /* BP+SI */
+            case 3: ea->base = 5; ea->index = 7; break; /* BP+DI */
+            case 4: ea->base = 6; break;                /* SI */
+            case 5: ea->base = 7; break;                /* DI */
+            case 6: ea->base = 5; break;                /* BP */
+            case 7: ea->base = 3; break;                /* BX */
+            }
+            if (mod == 1u) {
+                if (max < pos + 1u) return false;
+                ea->disp = (s8)p[pos++];
+            } else if (mod == 2u) {
+                if (max < pos + 2u) return false;
+                ea->disp = (s32)(u16)nj_rd16(p + pos);
+                pos += 2u;
+            }
+            if (ea->seg < 0)
+                ea->seg = (rm == 2u || rm == 3u ||
+                           (rm == 6u && mod != 0u)) ? SEG_SS : SEG_DS;
+        }
+    } else {
+        if (rm == 4u) {
+            if (max < 1u) return false;
+            u8 sib = p[pos++];
+            unsigned b = sib & 7u;
+            unsigned i = (sib >> 3) & 7u;
+            ea->scale = sib >> 6;
+            if (i != 4u) ea->index = (int)i;
+
+            if (b == 5u && mod == 0u) {
+                if (max < pos + 4u) return false;
+                ea->disp = (s32)nj_rd32(p + pos);
+                pos += 4u;
+                if (ea->seg < 0) ea->seg = SEG_DS;
+            } else {
+                ea->base = (int)b;
+                if (ea->seg < 0)
+                    ea->seg = (b == 4u || b == 5u) ? SEG_SS : SEG_DS;
+            }
+        } else if (rm == 5u && mod == 0u) {
+            if (max < 4u) return false;
+            ea->disp = (s32)nj_rd32(p);
+            pos += 4u;
+            if (ea->seg < 0) ea->seg = SEG_DS;
+        } else {
+            ea->base = (int)rm;
+            if (ea->seg < 0) ea->seg = rm == 5u ? SEG_SS : SEG_DS;
+        }
+
+        if (mod == 1u) {
+            if (max < pos + 1u) return false;
+            ea->disp += (s8)p[pos++];
+        } else if (mod == 2u) {
+            if (max < pos + 4u) return false;
+            ea->disp += (s32)nj_rd32(p + pos);
+            pos += 4u;
+        }
+    }
+
+    ea->used = pos;
+    return ea->seg >= 0;
+}
+
+/* Emit guest effective/linear address into r3. v7 translates it through the live TLB below. */
+static void nj_v6_emit_ea(CPUI386 *cpu, nj_emit_t *e, const nj_v6_ea_t *ea, bool add_seg)
+{
+    if (ea->base >= 0) {
+        nj_mov_reg(e, 1, NJ_GUEST_REG((unsigned)ea->base));
+        if (ea->addr16) nj_uxth(e, 1, 1);
+    } else {
+        nj_mov_imm(e, 1, 0);
+    }
+
+    if (ea->index >= 0) {
+        nj_mov_reg(e, 2, NJ_GUEST_REG((unsigned)ea->index));
+        if (ea->addr16) nj_uxth(e, 2, 2);
+        if (ea->scale) nj_lsls_imm(e, 2, 2, ea->scale);
+        nj_adds3(e);
+        nj_mov_reg(e, 1, 3);
+    }
+
+    if (ea->disp) {
+        nj_mov_imm(e, 2, (u32)ea->disp);
+        nj_adds3(e);
+        nj_mov_reg(e, 1, 3);
+    }
+
+    if (ea->addr16) nj_uxth(e, 1, 1);
+
+    if (add_seg) {
+        uword sb = cpu->seg[ea->seg].base;
+        if (sb) {
+            nj_mov_imm(e, 2, sb);
+            nj_adds3(e);
+            nj_mov_reg(e, 1, 3);
+        }
+    }
+
+    nj_mov_reg(e, 3, 1);
+}
+
+static void nj_v6_guard_add(nj_emit_t *e, nj_v6_guard_t *g, unsigned cond)
+{
+    if (g->n >= sizeof(g->at) / sizeof(g->at[0])) {
+        e->failed = true;
+        return;
+    }
+    g->at[g->n] = nj_bcond_placeholder(e);
+    g->cond[g->n] = cond;
+    g->n++;
+}
+
+/* RP2350-side offsets used by the generated paged-memory fast path. */
+#define NJ_TLB_TAB_OFF        ((unsigned)offsetof(CPUI386, tlb.tab))
+#define NJ_TLB_LPGNO_OFF      ((unsigned)offsetof(struct tlb_entry, lpgno))
+#define NJ_TLB_XADDR_OFF      ((unsigned)offsetof(struct tlb_entry, xaddr))
+#define NJ_TLB_PTELOOKUP_OFF  ((unsigned)offsetof(struct tlb_entry, pte_lookup))
+#define NJ_TLB_PPTE_OFF       ((unsigned)offsetof(struct tlb_entry, ppte))
+
+/*
+ * v7 runtime paging translation.
+ *
+ * Input:  r3 = guest linear address
+ * Output: r3 = guest physical address on the success path
+ *
+ * We deliberately side-exit instead of calling tlb_refill() from generated
+ * Thumb code.  A miss, protection failure, or cross-page access is executed
+ * once by the interpreter, which already has the exact page-fault and split
+ * access semantics.  Hot TLB hits stay completely native.
+ *
+ * tlb_refill() sets the accessed bit.  For native writes we additionally set
+ * the PTE dirty bit exactly like translate_lpgno().
+ */
+static bool nj_v7_emit_linear_to_phys_inline(CPUI386 *cpu, nj_emit_t *e,
+                                             unsigned size, bool write,
+                                             nj_v6_guard_t *g)
+{
+    if (!(cpu->cr0 & CR0_PG))
+        return true;
+
+    if (!size || size > 4u || !cpu->tlb.tab)
+        return false;
+
+    unsigned ent_size = (unsigned)sizeof(struct tlb_entry);
+    unsigned ent_shift;
+    if (ent_size == 16u) ent_shift = 4u;
+    else if (ent_size == 32u) ent_shift = 5u; /* host-side structural tests */
+    else return false;
+
+    nj_mov_reg(e, 0, 3);                         /* r0 = linear */
+
+    /* Split-page reads/writes retain the interpreter's ADDR_OK2 path. */
+    if (size > 1u) {
+        nj_mov_reg(e, 1, 0);
+        nj_lsls_imm(e, 1, 1, 20);               /* page offset via <<20>>20 */
+        nj_lsrs_imm(e, 1, 1, 20);
+        nj_mov_imm(e, 2, 0x1000u - size);
+        nj_cmp_reg(e, 1, 2);
+        nj_v6_guard_add(e, g, 8u);               /* HI => crosses page */
+    }
+
+    /* r3 = &cpu->tlb.tab[(linear >> 12) & (tlb_size - 1)] */
+    nj_mov_reg(e, 1, 0);
+    nj_lsrs_imm(e, 1, 1, 12);                   /* lpgno */
+    nj_mov_imm(e, 2, (u32)(tlb_size - 1u));
+    nj_and_low(e, 1, 2);                        /* direct-mapped index */
+    nj_lsls_imm(e, 1, 1, ent_shift);            /* byte offset */
+    nj_ldr32(e, 2, NJ_CPU_REG, NJ_TLB_TAB_OFF);
+    nj_adds3(e);                                /* r3 = entry */
+
+    /* Tag mismatch => interpreter refills the TLB. */
+    nj_ldr32(e, 2, 3, NJ_TLB_LPGNO_OFF);
+    nj_mov_reg(e, 1, 0);
+    nj_lsrs_imm(e, 1, 1, 12);
+    nj_cmp_reg(e, 2, 1);
+    nj_v6_guard_add(e, g, 1u);                  /* NE */
+
+    /* pte_lookup[cpl > 0][write] is already precomputed by tlb_refill(). */
+    nj_ldr32(e, 2, 3, NJ_TLB_PTELOOKUP_OFF);
+    unsigned perm_off = (cpu->cpl > 0 ? 2u * (unsigned)sizeof(int) : 0u) +
+                        (write ? (unsigned)sizeof(int) : 0u);
+    nj_ldr32(e, 2, 2, perm_off);
+    nj_cmp_imm0(e, 2);
+    nj_v6_guard_add(e, g, 1u);                  /* NE => protection fault */
+
+    /* Compute physical address while r3 still points at the TLB entry. */
+    nj_ldr32(e, 2, 3, NJ_TLB_XADDR_OFF);
+    nj_mov_reg(e, 1, 0);
+    nj_eor1(e);                                 /* r1 = linear ^ xaddr */
+
+    if (write) {
+        nj_mov_reg(e, 0, 1);                    /* save physical address */
+        nj_ldr32(e, 2, 3, NJ_TLB_PPTE_OFF);
+        nj_ldrb(e, 1, 2, 0);
+        nj_mov_imm(e, 3, 1u << 6);
+        nj_orr_low(e, 1, 3);
+        nj_strb(e, 1, 2, 0);                    /* PTE dirty */
+        nj_mov_reg(e, 3, 0);
+    } else {
+        nj_mov_reg(e, 3, 1);
+    }
+
+    return !e->failed;
+}
+
+/*
+ * r3 = guest physical address. Leave r3 unchanged on the success path.
+ * ARM condition codes: HI=8, CC/LO=3, NE=1.
+ */
+static bool nj_v6_emit_mem_guard_inline(CPUI386 *cpu, nj_emit_t *e,
+                                        unsigned size, bool write,
+                                        nj_v6_guard_t *g)
+{
+    if (!size || size > 4u ||
+        (uword)cpu->phys_mem_size < size)
+        return false;
+
+    uword lim = (uword)cpu->phys_mem_size - size;
+    nj_mov_imm(e, 2, lim);
+    nj_cmp_reg(e, 3, 2);
+    nj_v6_guard_add(e, g, 8u); /* HI: paddr > last valid start */
+
+    /* Side-exit on VGA/MMIO physical aperture 0xA0000..0xBFFFF. */
+    uword vlo = 0xA0000u - (size - 1u);
+    nj_mov_imm(e, 2, vlo);
+    nj_cmp_reg(e, 3, 2);
+    u16 *below_vga = nj_bcond_placeholder(e); /* LO => definitely safe */
+    nj_mov_imm(e, 2, 0xC0000u);
+    nj_cmp_reg(e, 3, 2);
+    nj_v6_guard_add(e, g, 3u); /* LO => overlaps VGA */
+    u16 *after_vga = e->p;
+    if (!nj_patch_bcond(below_vga, after_vga, 3u)) {
+        e->failed = true;
+        return false;
+    }
+
+#if REMOTE_MEM
+    /*
+     * C2 REMOTE_MEM needs the remote accessor and therefore stays on the
+     * interpreter path for v6 dynamic memory accesses.
+     */
+    return false;
+#else
+    if (write) {
+        /*
+         * A direct native write is safe only when its physical page contains
+         * no translated x86 code.  The existing compact page bitmap makes
+         * this check cheap and has no false negatives.
+         *
+         * The v6 direct-store path is enabled only while guest RAM fits in
+         * the bitmap's tracked 8 MiB range.
+         */
+        if ((uword)cpu->phys_mem_size > ((uword)NJ_TRACK_PAGES << 12))
+            return false;
+
+        nj_mov_reg(e, 0, 3);                        /* save paddr */
+
+        nj_mov_reg(e, 1, 3);
+        nj_lsrs_imm(e, 1, 1, 15);                  /* byte index = page >> 3 */
+        nj_mov_imm(e, 2, (u32)(uintptr_t)nj_page_bits);
+        nj_adds3(e);                                /* r3 = &bits[index] */
+        nj_ldrb(e, 2, 3, 0);                       /* r2 = byte bits */
+
+        nj_mov_reg(e, 3, 0);
+        nj_lsrs_imm(e, 3, 3, 12);                  /* page */
+        nj_mov_imm(e, 1, 7u);
+        nj_and_low(e, 3, 1);                       /* r3 = bit index */
+        nj_mov_imm(e, 1, 1u);
+        nj_lsl_reg(e, 1, 3);                       /* r1 = 1 << bit */
+        nj_tst_low(e, 2, 1);
+        nj_v6_guard_add(e, g, 1u);                  /* NE => code page */
+
+        nj_mov_reg(e, 3, 0);                       /* restore paddr */
+    }
+    return !e->failed;
+#endif
+}
+
+/*
+ * Complete one guarded memory instruction.
+ * Success skips the inline fail epilogue. Guard failure returns with
+ * next_ip at this instruction and r0 = number of already-completed guest ops.
+ */
+static bool nj_v6_finish_guard(nj_emit_t *e, nj_v6_guard_t *g,
+                               bool state16, uword instr_ip,
+                               unsigned completed)
+{
+    u16 *skip_fail = nj_b_placeholder(e);
+    u16 *fail = e->p;
+
+    nj_mov_imm(e, NJ_ITER_REG, completed);
+    nj_mov_imm(e, NJ_BUDGET_REG, instr_ip);
+    nj_emit_common_exit(e, state16, NJ_FLAG_NONE, 0, instr_ip);
+
+    u16 *cont = e->p;
+    if (!nj_patch_b(skip_fail, cont)) return false;
+    for (unsigned i = 0; i < g->n; ++i)
+        if (!nj_patch_bcond(g->at[i], fail, g->cond[i]))
+            return false;
+    return !e->failed;
+}
+
+#define NJ_V8_MAX_EXIT_LINKS 64u
+typedef struct {
+    u16 *to_common[NJ_V8_MAX_EXIT_LINKS];
+    unsigned n;
+} nj_v8_exit_links_t;
+
+static bool nj_v8_record_common_branch(nj_emit_t *e, nj_v8_exit_links_t *x)
+{
+    if (x->n >= NJ_V8_MAX_EXIT_LINKS) { e->failed=true; return false; }
+    x->to_common[x->n++]=nj_b_placeholder(e);
+    return !e->failed;
+}
+
+/* Tiny per-exit stub. r0=completed, lr=next_ip, r2=architectural IP;
+ * all paths converge on one full guest-state epilogue appended to the block. */
+static bool nj_v8_exit_stub_imm(nj_emit_t *e, nj_v8_exit_links_t *x,
+                                unsigned completed, uword next_ip,
+                                uword instr_ip)
+{
+    nj_mov_imm(e,NJ_ITER_REG,completed);
+    nj_mov_imm(e,NJ_BUDGET_REG,next_ip);
+    nj_mov_imm(e,2,instr_ip);
+    return nj_v8_record_common_branch(e,x);
+}
+
+/* Same, but LR already contains a dynamic next_ip (RET). */
+static bool nj_v8_exit_stub_lr(nj_emit_t *e, nj_v8_exit_links_t *x,
+                               unsigned completed, uword instr_ip)
+{
+    nj_mov_imm(e,NJ_ITER_REG,completed);
+    nj_mov_imm(e,2,instr_ip);
+    return nj_v8_record_common_branch(e,x);
+}
+
+static void nj_v8_emit_shared_exit(nj_emit_t *e, bool code16)
+{
+    nj_str32(e,NJ_BUDGET_REG,NJ_CPU_REG,NJ_NEXT_IP_OFF);
+    nj_str32(e,2,NJ_CPU_REG,NJ_IP_OFF);
+    nj_mov_imm(e,1,0xffffffffu);
+    nj_str32(e,1,NJ_CPU_REG,NJ_PREFETCH_OFF);
+    nj_emit_store_guest(e,code16);
+    nj_pop_guest(e);
+}
+
+static bool nj_v8_patch_exit_links(nj_v8_exit_links_t *x, u16 *common)
+{
+    for(unsigned i=0;i<x->n;++i)
+        if(!nj_patch_b(x->to_common[i],common)) return false;
+    return true;
+}
+
+/* Guard failure executes zero bytes of the current x86 instruction. The
+ * success path skips a tiny fail stub instead of carrying a full epilogue for
+ * every memory operation. */
+static bool nj_v8_finish_guard(nj_emit_t *e, nj_v6_guard_t *g,
+                               nj_v8_exit_links_t *x, uword instr_ip,
+                               unsigned completed)
+{
+    u16 *skip_fail=nj_b_placeholder(e);
+    u16 *fail=e->p;
+    if(!nj_v8_exit_stub_imm(e,x,completed,instr_ip,instr_ip)) return false;
+    u16 *cont=e->p;
+    if(!nj_patch_b(skip_fail,cont)) return false;
+    for(unsigned i=0;i<g->n;++i)
+        if(!nj_patch_bcond(g->at[i],fail,g->cond[i])) return false;
+    return !e->failed;
+}
+
+static void nj_v6_host_ptr_inline(CPUI386 *cpu, nj_emit_t *e)
+{
+    nj_mov_reg(e, 1, 3);
+    nj_mov_imm(e, 2, (u32)(uintptr_t)cpu->phys_mem);
+    nj_adds3(e); /* r3 = host pointer */
+}
+
+/* -------------------------------------------------------------------------
+ * FRANK_NJIT_SHARED_GUARD
+ *
+ * One out-of-line copy of the memory guard, called instead of inlined.
+ *
+ * Every memory operand used to carry its own copy of the whole sequence -
+ * the TLB walk, the physical range test, the VGA aperture test and the
+ * code-page bitmap test - which is about 250 bytes of Thumb.  In an 8 KB
+ * arena that is unaffordable: measured on this board, letting the loop
+ * compiler emit them cost 23% on Doom purely through eviction, and the trace
+ * compiler's blocks stayed so fat that DRACIHIS ran at 6.3% native coverage
+ * with 3.5-instruction blocks.
+ *
+ * Out of line, a memory operand costs a push/bl/pop, a compare and a branch -
+ * about 50 bytes including the address arithmetic and the access itself.
+ *
+ * The trampolines bake in phys_mem, phys_mem_size, the TLB table pointer, the
+ * paging mode and the CPL, exactly as the inlined copies did.  The first three
+ * are fixed after pc_new(); the last two are part of nj_mmu_key(), and a block
+ * only ever executes while its own mmu_key matches the CPU's - so rebuilding
+ * the trampolines whenever the key changes keeps every runnable block paired
+ * with a trampoline built for its own key.
+ *
+ * They live in their own buffer rather than in the arena so that
+ * nj_compact_code() cannot move them out from under a BL that is already
+ * encoded, and nj_flush() cannot reclaim them.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Sized from what the six trampolines actually emit, not an estimate: the
+ * first guess of 768 halfwords overflowed, and because the patching below ran
+ * before the overflow was checked, nj_patch_bcond() wrote one halfword past
+ * the end - straight into nj_guard_entry, which follows it in .bss.  A
+ * corrupted entry pointer made every block BL into nothing, so no block ever
+ * returned and the board boot-looped with an empty exit ring.
+ *
+ * nj_guard_used records the real figure so it can be read back over SWD.
+ */
+/*
+ * Several sets of trampolines, one per MMU key, each at its own address.
+ *
+ * Rebuilding a single set on every key change meant flushing the whole block
+ * cache each time, because a block carries the absolute address of the set it
+ * was compiled against.  Under EMM386 the guest crosses between real mode and
+ * V86 constantly - 642 flushes in one DRACIHIS run - so the JIT never
+ * accumulated anything.
+ *
+ * One set per key at a stable address keeps blocks valid across a mode switch
+ * and flushes nothing.  A set is about 800 bytes, so four fit the buffer a
+ * single oversized set used to have.  Only running out of slots costs a flush.
+ */
+/* A set measured ~950 bytes with paging on; 400 halfwords was not enough and
+ * silently refused every build.  Three sets cover real mode, V86 and
+ * protected mode, which is what a DOS guest actually cycles through. */
+#define NJ_GUARD_SETS 3u
+#define NJ_GUARD_SET_HW 560u
+static u16 nj_guard_code[NJ_GUARD_SETS * NJ_GUARD_SET_HW];
+static u16 *nj_guard_entry[NJ_GUARD_SETS][6];
+static uword nj_guard_key[NJ_GUARD_SETS];
+static bool nj_guard_set_live[NJ_GUARD_SETS];
+static unsigned nj_guard_cur;
+static unsigned nj_guard_next_victim;
+
+/* read/write x size 1/2/4 */
+static inline unsigned nj_guard_index(unsigned size, bool write)
+{
+    unsigned sz = size == 1u ? 0u : size == 2u ? 1u : 2u;
+    return (write ? 3u : 0u) + sz;
+}
+
+static bool nj_guards_build(CPUI386 *cpu, unsigned slot)
+{
+    u16 *base = nj_guard_code + slot * NJ_GUARD_SET_HW;
+    nj_emit_t e = {
+        .p = base,
+        .start = base,
+        .limit = base + NJ_GUARD_SET_HW,
+        .failed = false
+    };
+
+    nj_guard_set_live[slot] = false;
+    for (unsigned i = 0; i < 6u; ++i) nj_guard_entry[slot][i] = NULL;
+
+    static const unsigned sizes[3] = { 1u, 2u, 4u };
+    for (unsigned w = 0; w < 2u; ++w) {
+        for (unsigned k = 0; k < 3u; ++k) {
+            unsigned size = sizes[k];
+            bool write = (w != 0);
+            u16 *entry = e.p;
+            nj_v6_guard_t g;
+            memset(&g, 0, sizeof(g));
+
+            /*
+             * r3 = guest linear address on entry, host pointer on return, or
+             * zero when the interpreter has to do this one.  r0 carries the
+             * loop compiler's live iteration count, so it is saved here rather
+             * than at every call site.
+             */
+            nj_push_r0(&e);
+            if (!nj_v7_emit_linear_to_phys_inline(cpu, &e, size, write, &g) ||
+                !nj_v6_emit_mem_guard_inline(cpu, &e, size, write, &g))
+                return false;
+            nj_v6_host_ptr_inline(cpu, &e);
+            nj_pop_r0(&e);
+            nj_bx_lr(&e);
+
+            u16 *fail = e.p;
+            nj_pop_r0(&e);
+            nj_mov_imm(&e, 3, 0);
+            nj_bx_lr(&e);
+
+            /* Order matters: a failed emit leaves g.at[] pointing at the
+             * limit, so patching first would write out of bounds. */
+            if (e.failed)
+                return false;
+            for (unsigned i = 0; i < g.n; ++i)
+                if (!nj_patch_bcond(g.at[i], fail, g.cond[i]))
+                    return false;
+
+            nj_guard_entry[slot][nj_guard_index(size, write)] = entry;
+        }
+    }
+
+    nj_guard_key[slot] = nj_mmu_key(cpu);
+    nj_guard_set_live[slot] = true;
+    nj_guard_cur = slot;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
+    return true;
+}
+
+/*
+ * Are the trampolines the ones this mode needs?
+ *
+ * This is a pure test.  Building them is only ever done from
+ * nj_guards_refresh() at a safe point, because a rebuild has to flush the code
+ * arena - the six are laid out end to end and their sizes depend on the mode,
+ * so a rebuild moves them and every BL already encoded into a block becomes
+ * wrong.  Doing that from inside nj_v6_emit_guard_call(), i.e. in the middle
+ * of emitting a block, reset nj_code_ptr underneath the emitter and left the
+ * half-built block registered in free space for the next compile to overwrite.
+ */
+static inline bool nj_guards_ok(CPUI386 *cpu)
+{
+    return nj_guard_set_live[nj_guard_cur] &&
+           nj_guard_key[nj_guard_cur] == nj_mmu_key(cpu);
+}
+
+/* Safe point only: no block is being emitted and the arena may be flushed. */
+/*
+ * Returns void: a set that cannot be built is a reason to refuse memory
+ * operands, not a reason to switch the JIT off.  Reporting failure up to
+ * nj_try_execute() did exactly that and cost all of the JIT's coverage.
+ */
+static void nj_guards_refresh(CPUI386 *cpu)
+{
+    if (!NJIT_SHARED_GUARD)
+        return;
+    if (likely(nj_guards_ok(cpu)))
+        return;
+
+    uword key = nj_mmu_key(cpu);
+    for (unsigned i = 0; i < NJ_GUARD_SETS; ++i) {
+        if (nj_guard_set_live[i] && nj_guard_key[i] == key) {
+            nj_guard_cur = i;      /* built earlier for this mode - no flush */
+            return;
+        }
+    }
+    for (unsigned i = 0; i < NJ_GUARD_SETS; ++i) {
+        if (!nj_guard_set_live[i]) {
+            nj_guards_build(cpu, i);
+            return;
+        }
+    }
+    /* Out of slots: reusing one changes what its address means, so the blocks
+     * compiled against it have to go. */
+    unsigned victim = nj_guard_next_victim++ % NJ_GUARD_SETS;
+    if (nj_code_ptr != nj_code)
+        nj_flush();
+    nj_guards_build(cpu, victim);
+}
+
+/*
+ * Drop-in replacement for the inlined
+ *   nj_v7_emit_linear_to_phys() + nj_v6_emit_mem_guard() + nj_v6_host_ptr()
+ * sequence.  r3 holds the linear address going in and the host pointer coming
+ * out; a refusal is reported through the caller's existing guard list, so the
+ * fail path and nj_v8_finish_guard() plumbing are unchanged.
+ */
+/*
+ * OFF by default.  The out-of-line guard is the right shape - it takes a
+ * memory operand from ~250 bytes of Thumb to ~50 - but the build that enables
+ * it boot-loops, and bisection against an otherwise identical image pins the
+ * fault on this code rather than on anything else in the tree.  It is kept
+ * so the work is not lost, not because it is finished.
+ */
+static bool nj_v6_emit_guard_call(CPUI386 *cpu, nj_emit_t *e,
+                                  unsigned size, bool write,
+                                  nj_v6_guard_t *g)
+{
+    if (!NJIT_SHARED_GUARD) return false;
+    if (size != 1u && size != 2u && size != 4u) return false;
+    if (!nj_guards_ok(cpu)) return false;
+    u16 *target = nj_guard_entry[nj_guard_cur][nj_guard_index(size, write)];
+    if (!target) return false;
+
+    nj_push_lr(e);
+    nj_blx_abs(e, target, 2u);   /* r2 is scratch; the trampoline clobbers it */
+    nj_pop_lr(e);
+    nj_cmp_imm0(e, 3);
+    nj_v6_guard_add(e, g, 0u);      /* EQ: the trampoline refused */
+    return !e->failed;
+}
+
+/*
+ * The seventeen call sites are unchanged: they still ask for a linear-to-
+ * physical translation, then a guard, then a host pointer.  What they get now
+ * is one call that does all three.  Keeping the names means the rewind and
+ * nj_v8_finish_guard() plumbing at every site stays exactly as audited.
+ */
+static bool nj_v7_emit_linear_to_phys(CPUI386 *cpu, nj_emit_t *e,
+                                      unsigned size, bool write,
+                                      nj_v6_guard_t *g)
+{
+    return nj_v6_emit_guard_call(cpu, e, size, write, g);
+}
+
+static inline bool nj_v6_emit_mem_guard(CPUI386 *cpu, nj_emit_t *e,
+                                        unsigned size, bool write,
+                                        nj_v6_guard_t *g)
+{
+    (void)cpu; (void)e; (void)size; (void)write; (void)g;
+    return true;   /* folded into the call above */
+}
+
+static inline void nj_v6_host_ptr(CPUI386 *cpu, nj_emit_t *e)
+{
+    (void)cpu; (void)e;   /* the trampoline returns a host pointer already */
+}
+
+static void nj_v6_read_r8(nj_emit_t *e, unsigned reg)
+{
+    unsigned g = reg & 3u;
+    nj_mov_reg(e, 3, NJ_GUEST_REG(g));
+    if (reg & 4u) nj_lsrs_imm(e, 3, 3, 8u);
+    nj_uxtb(e, 3, 3);
+}
+
+static void nj_v6_write_r8(nj_emit_t *e, unsigned reg)
+{
+    unsigned g = reg & 3u;
+    nj_uxtb(e, 3, 3);
+
+    if (!(reg & 4u)) {
+        nj_mov_reg(e, 1, NJ_GUEST_REG(g));
+        nj_lsrs_imm(e, 1, 1, 8u);
+        nj_lsls_imm(e, 1, 1, 8u);                  /* clear low byte */
+        nj_orr_low(e, 1, 3);
+        nj_mov_reg(e, NJ_GUEST_REG(g), 1);
+    } else {
+        nj_lsls_imm(e, 3, 3, 8u);                  /* new high byte */
+        nj_mov_reg(e, 1, NJ_GUEST_REG(g));
+        nj_uxtb(e, 2, 1);                          /* old low byte */
+        nj_orr_low(e, 2, 3);
+        nj_lsrs_imm(e, 1, 1, 16u);
+        nj_lsls_imm(e, 1, 1, 16u);                 /* old upper 16 */
+        nj_orr_low(e, 1, 2);
+        nj_mov_reg(e, NJ_GUEST_REG(g), 1);
+    }
+}
+
+static void nj_v6_write_r16(nj_emit_t *e, unsigned reg)
+{
+    nj_uxth(e, 3, 3);
+    nj_mov_reg(e, 1, NJ_GUEST_REG(reg));
+    nj_lsrs_imm(e, 1, 1, 16u);
+    nj_lsls_imm(e, 1, 1, 16u);
+    nj_orr_low(e, 1, 3);
+    nj_mov_reg(e, NJ_GUEST_REG(reg), 1);
+}
+
+/* -------------------------------------------------------------------------
+ * Guarded memory operands for the fully-native loop compiler.
+ *
+ * See the nj_loop_mem_t comment for why this exists.  The three pieces are
+ * kept apart so the caller can put the actual load or store between them and
+ * still get one shared guard-failure epilogue.
+ * ------------------------------------------------------------------------- */
+
+/*
+ * Emit: save the iteration count, compute the effective address, translate it
+ * through the live TLB, guard it, and leave a host pointer in r3.
+ *
+ * On a compile-time refusal the caller rewinds e->p, so the PUSH emitted here
+ * is discarded with everything else.
+ */
+static bool nj_loop_mem_begin(CPUI386 *cpu, nj_emit_t *e,
+                              const nj_v6_ea_t *ea, unsigned size, bool write,
+                              nj_v6_guard_t *g)
+{
+    memset(g, 0, sizeof(*g));
+    nj_push_r0(e);
+    nj_v6_emit_ea(cpu, e, ea, true);
+    if (!nj_v7_emit_linear_to_phys(cpu, e, size, write, g) ||
+        !nj_v6_emit_mem_guard(cpu, e, size, write, g))
+        return false;
+    nj_v6_host_ptr(cpu, e);
+    return !e->failed;
+}
+
+/*
+ * Close the sequence.  The success path skips a small inline epilogue rather
+ * than every memory instruction carrying a full one:
+ *
+ *      <access>
+ *      b     cont
+ *  fail:                     <- every guard branches here
+ *      pop   {r0}            ; complete iterations, unchanged by the guards
+ *      mov   lr, #instr_ip   ; next_ip: re-execute this instruction
+ *      <common exit>
+ *  cont:
+ *      pop   {r0}
+ *
+ * Flags are passed as NJ_FLAG_NONE because the loop compiler materialises any
+ * pending lazy CC before it lets a memory instruction clobber r1-r3.
+ */
+static bool nj_loop_mem_finish(nj_emit_t *e, nj_v6_guard_t *g,
+                               const nj_loop_mem_t *mc)
+{
+    u16 *skip_fail = nj_b_placeholder(e);
+    u16 *fail = e->p;
+
+    nj_pop_r0(e);
+    nj_mov_imm(e, NJ_BUDGET_REG, mc->instr_ip);
+    nj_emit_common_exit(e, mc->state16, NJ_FLAG_NONE, 0, mc->instr_ip);
+
+    u16 *cont = e->p;
+    if (!nj_patch_b(skip_fail, cont)) return false;
+    for (unsigned i = 0; i < g->n; ++i)
+        if (!nj_patch_bcond(g->at[i], fail, g->cond[i]))
+            return false;
+
+    nj_pop_r0(e);
+    return !e->failed;
+}
+
+/*
+ * Decode a memory ModR/M, take the segment dependency, and open the guarded
+ * sequence.  Returns 0 (caller refuses the instruction) when the operand is
+ * not one this path can serve - an FS/GS override, a null data selector, or a
+ * configuration in which nj_v6_emit_mem_guard() cannot prove a direct access
+ * is safe.
+ */
+static int nj_body_mem_open(CPUI386 *cpu, nj_emit_t *e, nj_body_info_t *bi,
+                            const nj_loop_mem_t *mc,
+                            const u8 *p, unsigned max, u8 modrm,
+                            bool addr16, int seg_override,
+                            unsigned size, bool write,
+                            nj_v6_guard_t *g, unsigned *used)
+{
+    nj_v6_ea_t ea;
+    bool use_ds = false, use_es = false, use_ss = false;
+
+    if (!mc) return 0;
+    if (!nj_v6_decode_ea(p, max, modrm, addr16, seg_override, &ea)) return 0;
+    if (!nj_v6_note_seg(cpu, ea.seg, &use_ds, &use_es, &use_ss)) return 0;
+    if (!nj_loop_mem_begin(cpu, e, &ea, size, write, g)) return 0;
+
+    if (use_ds) bi->uses_ds_static = true;
+    if (use_es) bi->uses_es_static = true;
+    if (use_ss) bi->uses_ss_base = true;
+    bi->clobbers_flag_scratch = true;
+    bi->used_memory = true;
+    *used = ea.used;
+    return 1;
+}
+
+/* Immediate SHLD/SHRD, register destination, 32-bit operand size. */
+static bool nj_v6_emit_shx32(nj_emit_t *e, unsigned dst, unsigned src,
+                             unsigned count, bool right)
+{
+    count &= 31u;
+    if (!count) return true;
+
+    /* Preserve both original operands; src may alias dst. */
+    nj_mov_reg(e, 1, NJ_GUEST_REG(dst));
+    nj_str32(e, 1, NJ_CPU_REG, NJ_CC_SRC1);
+    nj_mov_reg(e, 2, NJ_GUEST_REG(src));
+    nj_str32(e, 2, NJ_CPU_REG, NJ_CC_SRC2);
+
+    if (!right) {
+        nj_mov_reg(e, 1, NJ_GUEST_REG(dst));
+        nj_lsls_imm(e, 1, 1, count);
+        nj_mov_reg(e, 2, NJ_GUEST_REG(src));
+        nj_lsrs_imm(e, 2, 2, 32u - count);
+        nj_orr_low(e, 1, 2);
+    } else {
+        nj_mov_reg(e, 1, NJ_GUEST_REG(dst));
+        nj_lsrs_imm(e, 1, 1, count);
+        nj_mov_reg(e, 2, NJ_GUEST_REG(src));
+        nj_lsls_imm(e, 2, 2, 32u - count);
+        nj_orr_low(e, 1, 2);
+    }
+
+    nj_mov_reg(e, 3, 1);
+    nj_mov_reg(e, NJ_GUEST_REG(dst), 3);
+    nj_str32(e, 3, NJ_CPU_REG, NJ_CC_DST);
+
+    /* Compute dst2 exactly like the interpreter's SHLD/SHRD helper. */
+    nj_ldr32(e, 1, NJ_CPU_REG, NJ_CC_SRC1);
+    if (count == 1u) {
+        nj_mov_reg(e, 3, 1);
+    } else if (!right) {
+        nj_lsls_imm(e, 1, 1, count - 1u);
+        nj_ldr32(e, 2, NJ_CPU_REG, NJ_CC_SRC2);
+        nj_lsrs_imm(e, 2, 2, 32u - (count - 1u));
+        nj_orr_low(e, 1, 2);
+        nj_mov_reg(e, 3, 1);
+    } else {
+        nj_lsrs_imm(e, 1, 1, count - 1u);
+        nj_ldr32(e, 2, NJ_CPU_REG, NJ_CC_SRC2);
+        nj_lsls_imm(e, 2, 2, 32u - (count - 1u));
+        nj_orr_low(e, 1, 2);
+        nj_mov_reg(e, 3, 1);
+    }
+    nj_str32(e, 3, NJ_CPU_REG, NJ_CC_DST2);
+
+    nj_mov_imm(e, 1, right ? CC_SHRD : CC_SHLD);
+    nj_str32(e, 1, NJ_CPU_REG, NJ_CC_OP);
+    nj_mov_imm(e, 1, CF | PF | ZF | SF | OF);
+    nj_str32(e, 1, NJ_CPU_REG, NJ_CC_MASK);
+    return !e->failed;
+}
+
+/* Full x86 condition evaluator for the less common Jcc conditions.
+ * Z/NZ stay inline below; other conditions use this small helper rather than
+ * terminating the supertrace. Guest GPRs live in callee-saved r4-r11, and the
+ * generated call preserves r12 (CPU pointer) explicitly. */
+static int IRAM_ATTR nj_v8_eval_jcc(CPUI386 *cpu, unsigned cc)
+{
+    switch (cc & 15u) {
+    case 0x0: return get_OF(cpu);
+    case 0x1: return !get_OF(cpu);
+    case 0x2: return get_CF(cpu);
+    case 0x3: return !get_CF(cpu);
+    case 0x4: return get_ZF(cpu);
+    case 0x5: return !get_ZF(cpu);
+    case 0x6: return get_CF(cpu) || get_ZF(cpu);
+    case 0x7: return !get_CF(cpu) && !get_ZF(cpu);
+    case 0x8: return get_SF(cpu);
+    case 0x9: return !get_SF(cpu);
+    case 0xa: return get_PF(cpu);
+    case 0xb: return !get_PF(cpu);
+    case 0xc: return get_SF(cpu) != get_OF(cpu);
+    case 0xd: return get_SF(cpu) == get_OF(cpu);
+    case 0xe: return get_ZF(cpu) || (get_SF(cpu) != get_OF(cpu));
+    default:  return !get_ZF(cpu) && (get_SF(cpu) == get_OF(cpu));
+    }
+}
+
+static bool nj_v8_emit_eval_jcc(nj_emit_t *e, unsigned cc)
+{
+    /* Entry SP is 8-byte aligned; prologue saved 9 regs (36 bytes), so one
+     * low-register push both saves r12 and restores ABI alignment for BLX. */
+    nj_mov_reg(e,0,NJ_CPU_REG);
+    nj_push_low(e,1u << 0);
+    nj_mov_imm(e,1,cc & 15u);
+    nj_mov_imm(e,3,(u32)(uintptr_t)&nj_v8_eval_jcc);
+    nj_blx_reg(e,3);
+    nj_pop_low(e,1u << 3);
+    nj_mov_reg(e,NJ_CPU_REG,3);
+    return !e->failed;
+}
+
+static bool nj_v8_emit_generic_jcc_side_exit(nj_emit_t *e, nj_v8_exit_links_t *x,
+                                              unsigned cc, uword target,
+                                              uword instr_ip, unsigned completed)
+{
+    if (!nj_v8_emit_eval_jcc(e,cc)) return false;
+    nj_cmp_imm0(e,0);
+    u16 *taken_b=nj_bcond_placeholder(e); /* NE => condition true */
+    u16 *cont_b=nj_b_placeholder(e);
+    u16 *taken=e->p;
+    if(!nj_v8_exit_stub_imm(e,x,completed,target,instr_ip)) return false;
+    u16 *cont=e->p;
+    return nj_patch_bcond(taken_b,taken,1u) && nj_patch_b(cont_b,cont) && !e->failed;
+}
+
+/* V8 JZ/JNZ side exit. The fall-through path stays in the same generated
+ * trace. Taken control flow returns architecturally correct state to the C
+ * chain dispatcher, which can immediately enter/compile the target block. */
+static bool nj_v8_emit_jz_side_exit(nj_emit_t *e, nj_v8_exit_links_t *x, bool is_jz,
+                                    uword target, uword instr_ip,
+                                    unsigned completed)
+{
+    nj_ldr32(e, 1, NJ_CPU_REG, NJ_CC_MASK);
+    nj_mov_imm(e, 2, ZF);
+    nj_tst_low(e, 1, 2);
+    u16 *to_flags = nj_bcond_placeholder(e);      /* EQ: ZF is materialized */
+
+    nj_ldr32(e, 1, NJ_CPU_REG, NJ_CC_DST);
+    nj_cmp_imm0(e, 1);
+    u16 *lazy_taken = nj_bcond_placeholder(e);   /* JZ EQ / JNZ NE */
+    u16 *lazy_cont = nj_b_placeholder(e);
+
+    u16 *flags_path = e->p;
+    nj_ldr32(e, 1, NJ_CPU_REG, NJ_FLAGS_OFF);
+    nj_tst_low(e, 1, 2);
+    u16 *flags_cont = nj_bcond_placeholder(e);    /* JZ: EQ cont; JNZ: NE cont */
+
+    u16 *taken = e->p;
+    if(!nj_v8_exit_stub_imm(e,x,completed,target,instr_ip)) return false;
+    u16 *cont = e->p;
+
+    if (!nj_patch_bcond(to_flags, flags_path, 0u) ||
+        !nj_patch_bcond(lazy_taken, taken, is_jz ? 0u : 1u) ||
+        !nj_patch_b(lazy_cont, cont) ||
+        !nj_patch_bcond(flags_cont, cont, is_jz ? 0u : 1u))
+        return false;
+    return !e->failed;
+}
+
+/* LOOP rel8 side exit. ECX is already decremented in the generated code.
+ * Taken branch exits to the chain dispatcher; fall-through remains in trace. */
+static bool nj_v8_emit_loop_side_exit(nj_emit_t *e, nj_v8_exit_links_t *x,
+                                      uword target, uword instr_ip, unsigned completed)
+{
+    nj_cmp_imm0(e, NJ_GUEST_REG(1));
+    u16 *taken_b = nj_bcond_placeholder(e);       /* NE */
+    u16 *cont_b = nj_b_placeholder(e);
+    u16 *taken = e->p;
+    if(!nj_v8_exit_stub_imm(e,x,completed,target,instr_ip)) return false;
+    u16 *cont = e->p;
+    if (!nj_patch_bcond(taken_b, taken, 1u) || !nj_patch_b(cont_b, cont))
+        return false;
+    return !e->failed;
+}
+
+/* Register C1/D1 SHL/SHR/SAR. Mirrors the interpreter lazy-flag formulas. */
+static bool nj_v8_emit_shift_imm32(nj_emit_t *e, unsigned dst,
+                                   unsigned subop, unsigned count)
+{
+    count &= 31u;
+    if (!count) return true;
+    if (subop != 4u && subop != 5u && subop != 7u) return false;
+
+    nj_mov_reg(e, 1, NJ_GUEST_REG(dst));          /* original x */
+    if (subop == 5u) nj_str32(e, 1, NJ_CPU_REG, NJ_CC_SRC1);
+
+    if (subop == 4u) nj_lsls_imm(e, 3, 1, count);
+    else if (subop == 5u) nj_lsrs_imm(e, 3, 1, count);
+    else nj_asrs_imm(e, 3, 1, count);
+    nj_mov_reg(e, NJ_GUEST_REG(dst), 3);
+    nj_str32(e, 3, NJ_CPU_REG, NJ_CC_DST);
+
+    /* Carry is the last bit shifted out. */
+    nj_mov_reg(e, 2, 1);
+    if (subop == 4u) {
+        nj_lsrs_imm(e, 2, 2, 32u - count);
+    } else if (count > 1u) {
+        nj_lsrs_imm(e, 2, 2, count - 1u);
+    } /* count==1: carry is original bit0, so no shift */
+    nj_mov_imm(e, 3, 1u);
+    nj_and_low(e, 2, 3);
+    nj_str32(e, 2, NJ_CPU_REG, NJ_CC_DST2);
+
+    nj_mov_imm(e, 1, subop == 4u ? CC_SHL : (subop == 5u ? CC_SHR : CC_SAR));
+    nj_str32(e, 1, NJ_CPU_REG, NJ_CC_OP);
+    nj_mov_imm(e, 1, CF | PF | ZF | SF | OF);
+    nj_str32(e, 1, NJ_CPU_REG, NJ_CC_MASK);
+    return !e->failed;
+}
+
+/* Initial JZ/JNZ block retained for the old path; V8 supertraces no longer
+ * select it because they can carry JZ/JNZ inline. */
+static nj_block_t *nj_v6_compile_jz_entry(CPUI386 *cpu, uword start_ip,
+                                          const u8 *code, unsigned avail,
+                                          unsigned phys_page)
+{
+    nj_v6_pfx_t px;
+    if (!nj_v6_prefix(cpu, code, avail, &px)) return NULL;
+    if (px.pos >= avail) return NULL;
+    u8 op = code[px.pos];
+    bool is_jz;
+    unsigned jlen;
+    sword d;
+
+    if (op == 0x74 || op == 0x75) {
+        if (avail < px.pos + 2u) return NULL;
+        is_jz = op == 0x74;
+        jlen = 2u;
+        d = (s8)code[px.pos + 1u];
+    } else if (op == 0x0f && avail >= px.pos + 2u &&
+               (code[px.pos + 1u] == 0x84 || code[px.pos + 1u] == 0x85)) {
+        is_jz = code[px.pos + 1u] == 0x84;
+        unsigned dw = px.op16 ? 2u : 4u;
+        if (avail < px.pos + 2u + dw) return NULL;
+        jlen = 2u + dw;
+        d = dw == 2u ? (s16)nj_rd16(code + px.pos + 2u)
+                     : (s32)nj_rd32(code + px.pos + 2u);
+    } else {
+        return NULL;
+    }
+
+    uword fall = start_ip + px.pos + jlen;
+    uword target = fall + d;
+
+    if (!nj_make_code_room(NJ_V6_MAX_ARM_BYTES))
+        return NULL;
+
+    nj_emit_t e = {
+        .p = nj_code_ptr, .start = nj_code_ptr,
+        .limit = nj_code_ptr + (NJ_V6_MAX_ARM_BYTES / 2u), .failed = false
+    };
+    nj_emit_prologue(&e, false);
+
+    nj_ldr32(&e, 1, NJ_CPU_REG, NJ_FLAGS_OFF);
+    nj_mov_imm(&e, 2, ZF);
+    nj_tst_low(&e, 1, 2);
+    u16 *to_taken = nj_bcond_placeholder(&e);
+
+    nj_mov_imm(&e, NJ_ITER_REG, 1u);
+    nj_mov_imm(&e, NJ_BUDGET_REG, fall);
+    u16 *fall_to_exit = nj_b_placeholder(&e);
+
+    u16 *taken = e.p;
+    nj_mov_imm(&e, NJ_ITER_REG, 1u);
+    nj_mov_imm(&e, NJ_BUDGET_REG, target);
+
+    u16 *exit = e.p;
+    nj_emit_common_exit(&e, false, NJ_FLAG_NONE, 0, start_ip);
+
+    unsigned cond = is_jz ? 1u : 0u; /* JZ: bit set => TST NE */
+    if (!nj_patch_bcond(to_taken, taken, cond) ||
+        !nj_patch_b(fall_to_exit, exit) || e.failed)
+        return NULL;
+
+    uword linear = cpu->seg[SEG_CS].base + start_ip;
+    nj_block_t *b = nj_cache_insert_slot(cpu, linear);
+    memset(b, 0, sizeof(*b));
+    b->tag = linear;
+    b->mmu_key = nj_mmu_key(cpu);
+    b->cs_base = cpu->seg[SEG_CS].base;
+    b->ds_base = cpu->seg[SEG_DS].base;
+    b->es_base = cpu->seg[SEG_ES].base;
+    b->ss_base = cpu->seg[SEG_SS].base;
+    b->ds_sel = cpu->seg[SEG_DS].sel;
+    b->es_sel = cpu->seg[SEG_ES].sel;
+    b->ss_sel = cpu->seg[SEG_SS].sel;
+    b->start_ip = start_ip;
+    b->branch_ip = start_ip;
+    b->fallthrough_ip = fall;
+    b->byte_len = (u16)(px.pos + jlen);
+    b->phys_page = (u16)phys_page;
+    b->insns = 1u;
+    b->code16 = 0u;
+    b->valid = 1u;
+    b->needs_flags_in = 1u;
+    b->single_run = 1u;
+    b->code = e.start;
+    b->arm_halfwords = (u16)(e.p - e.start);
+
+    nj_code_ptr = e.p;
+    nj_page_mark(phys_page);
+    nj_bloom_add(linear);
+    g_njit_compiles++;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
+    return b;
+}
+
+/* -------------------------------------------------------------------------
+ * FRANK_NATIVE_JIT_V87_BYTEWALK_LOOP
+ *
+ * Generic page-bounded native compiler for a common DOS/V86 micro-loop shape:
+ *
+ *   INC/DEC reg ; byte memory op ; JZ/JNZ back to the INC/DEC
+ *
+ * Two byte-memory operations are currently admitted:
+ *   C6 /0  MOV r/m8,imm8   (branch observes INC/DEC flags)
+ *   80 /7  CMP r/m8,imm8   (branch observes CMP flags)
+ *
+ * The effective address must change by exactly one byte per iteration because
+ * the modified register occurs exactly once in the EA at scale 1.  Entry code
+ * executes the register update only in the local ARM register file, validates
+ * the first linear page/TLB mapping and caps the native iteration budget at the
+ * 16-bit-address and 4-KiB page boundary.  A failed entry guard returns r0=0
+ * without storing the locally modified guest register, so the interpreter sees
+ * the exact pre-instruction architectural state.
+ *
+ * After a successful entry, all iterations remain inside the validated page;
+ * there is no TLB lookup or C side exit in the native loop body.
+ * ------------------------------------------------------------------------- */
+
+static bool nj_bw_cap_budget(nj_emit_t *e, unsigned safe_reg)
+{
+    nj_cmp_reg(e, NJ_BUDGET_REG, safe_reg);
+    u16 *keep = nj_bcond_placeholder(e); /* LS: existing budget <= safe */
+    nj_mov_reg(e, NJ_BUDGET_REG, safe_reg);
+    return nj_patch_bcond(keep, e->p, 9u) && !e->failed;
+}
+
+static bool nj_bw_finish_entry_guard(nj_emit_t *e, nj_v6_guard_t *g)
+{
+    u16 *skip_fail = nj_b_placeholder(e);
+    u16 *fail = e->p;
+    /* Paging/physical guards use r0 as scratch. The loop ABI requires a
+     * guard failure to report exactly zero completed iterations. */
+    nj_mov_imm(e, NJ_ITER_REG, 0);
+    nj_pop_guest(e);
+    u16 *cont = e->p;
+    if (!nj_patch_b(skip_fail, cont)) return false;
+    for (unsigned i = 0; i < g->n; ++i)
+        if (!nj_patch_bcond(g->at[i], fail, g->cond[i]))
+            return false;
+    return !e->failed;
+}
+
+static bool nj_bw_prefix1_ok(const u8 *p, const nj_v6_pfx_t *px)
+{
+    /* For the register INC/DEC instruction only operand-size override is
+     * useful here.  Keeping this strict avoids treating ignored prefixes as
+     * part of a new optimization class before they are measured. */
+    if (px->pos > 1u) return false;
+    return px->pos == 0u || p[0] == 0x66u;
+}
+
+static bool nj_bw_ea_unit_delta(const nj_v6_ea_t *ea, unsigned reg)
+{
+    unsigned n = 0;
+    if (ea->base == (int)reg) n++;
+    if (ea->index == (int)reg) {
+        if (ea->scale != 0u) return false;
+        n++;
+    }
+    return n == 1u;
+}
+
+static void nj_bw_modify_reg(nj_emit_t *e, unsigned reg, bool dec,
+                             unsigned width)
+{
+    unsigned ar = NJ_GUEST_REG(reg);
+    nj_addsub_imm_w(e, ar, 1u, dec, true);
+    if (width == 2u) {
+        /* UXTH's compact encoding addresses only r0-r7. Guest DI/BP/SI/SP
+         * live in r11/r9/r10/r8, so wrap through a low scratch register. */
+        nj_mov_reg(e, 3, ar);
+        nj_uxth(e, 3, 3);
+        nj_mov_reg(e, ar, 3);
+    }
+}
+
+/* r3 contains an effective offset before segment-base addition.  Cap LR so
+ * repeated +/-1 accesses cannot cross the 16-bit effective-address wrap. */
+static bool nj_bw_cap_addr16(nj_emit_t *e, int dir)
+{
+    nj_mov_reg(e, NJ_ITER_REG, 3); /* temporary save; r0 is architecturally 0 */
+    if (dir > 0) {
+        nj_mov_imm(e, 1, 0x10000u);
+        nj_mov_reg(e, 2, 3);
+        nj_subs3(e);               /* r3 = 0x10000 - first_offset */
+        if (!nj_bw_cap_budget(e, 3)) return false;
+    } else {
+        nj_mov_reg(e, 1, 3);
+        nj_adds_imm8(e, 1, 1u);    /* first_offset + 1 */
+        if (!nj_bw_cap_budget(e, 1)) return false;
+    }
+    nj_mov_reg(e, 3, NJ_ITER_REG);
+    nj_mov_imm(e, NJ_ITER_REG, 0);
+    return !e->failed;
+}
+
+/* r3 contains the first guest linear byte address.  Cap LR to this 4-KiB
+ * linear page so one TLB validation covers every native iteration. */
+static bool nj_bw_cap_page(nj_emit_t *e, int dir)
+{
+    nj_mov_reg(e, NJ_ITER_REG, 3); /* save linear */
+    if (dir > 0) {
+        nj_mov_reg(e, 2, 3);
+        nj_lsls_imm(e, 2, 2, 20u);
+        nj_lsrs_imm(e, 2, 2, 20u); /* r2 = page offset */
+        nj_mov_imm(e, 1, 0x1000u);
+        nj_subs3(e);               /* r3 = 0x1000 - offset */
+        if (!nj_bw_cap_budget(e, 3)) return false;
+    } else {
+        nj_mov_reg(e, 1, 3);
+        nj_lsls_imm(e, 1, 1, 20u);
+        nj_lsrs_imm(e, 1, 1, 20u);
+        nj_adds_imm8(e, 1, 1u);    /* offset + 1 */
+        if (!nj_bw_cap_budget(e, 1)) return false;
+    }
+    nj_mov_reg(e, 3, NJ_ITER_REG);
+    nj_mov_imm(e, NJ_ITER_REG, 0);
+    return !e->failed;
+}
+
+static nj_block_t *nj_compile_bytewalk_loop(CPUI386 *cpu, uword start_ip)
+{
+    /* v8.7.1: this optimization exists solely for measured EMM386 VM86
+     * hotspots. Never let it change BIOS/DOS real-mode startup behavior. */
+    if (!cpu->code16 || !(cpu->flags & VM) || !(cpu->cr0 & CR0_PG))
+        return NULL;
+    /* The broad dynamic-memory helper leaves non-paged addresses linear.
+     * Decline the rare A20-masked case rather than silently bypass the gate. */
+    if (!(cpu->cr0 & CR0_PG) && cpu->a20_mask != 0xffffffffu) return NULL;
+
+    const u8 *code;
+    unsigned avail, phys_page, phys_page2, code_split;
+    if (!nj_v8_code_window(cpu, start_ip, &code, &avail,
+                           &phys_page, &phys_page2, &code_split) || !avail)
+        return NULL;
+
+    nj_v6_pfx_t p1;
+    if (!nj_v6_prefix(cpu, code, avail, &p1) || !nj_bw_prefix1_ok(code, &p1) ||
+        p1.pos >= avail)
+        return NULL;
+
+    u8 op1 = code[p1.pos];
+    if (op1 < 0x40u || op1 > 0x4fu) return NULL;
+    bool dec = op1 >= 0x48u;
+    unsigned modreg = op1 & 7u;
+    unsigned mod_width = p1.op16 ? 2u : 4u;
+    unsigned pos = p1.pos + 1u;
+
+    if (pos >= avail) return NULL;
+    nj_v6_pfx_t p2;
+    if (!nj_v6_prefix(cpu, code + pos, avail - pos, &p2) ||
+        pos + p2.pos >= avail)
+        return NULL;
+
+    u8 op2 = code[pos + p2.pos];
+    bool mem_store = op2 == 0xc6u;
+    bool mem_cmp = op2 == 0x80u;
+    if (!mem_store && !mem_cmp) return NULL;
+
+    unsigned mpos = pos + p2.pos + 1u;
+    if (mpos >= avail) return NULL;
+    u8 m = code[mpos++];
+    unsigned subop = (m >> 3) & 7u;
+    if ((mem_store && subop != 0u) || (mem_cmp && subop != 7u) ||
+        (m >> 6) == 3u)
+        return NULL;
+
+    nj_v6_ea_t ea;
+    if (!nj_v6_decode_ea(code + mpos, avail - mpos, m,
+                         p2.addr16, p2.seg, &ea))
+        return NULL;
+    mpos += ea.used;
+    if (mpos >= avail) return NULL;
+    u8 imm = code[mpos++];
+
+    /* Keep the persistent register representation simple and exact: a 16-bit
+     * modifier is paired with 16-bit addressing; a 32-bit modifier with
+     * 32-bit addressing.  Mixed combinations remain with the broad JIT. */
+    if ((mod_width == 2u) != ea.addr16) return NULL;
+    if (!nj_bw_ea_unit_delta(&ea, modreg)) return NULL;
+
+    uword branch_ip = start_ip + mpos;
+    branch_ip &= 0xffffu;
+    nj_branch_t br;
+    if (!nj_decode_backedge(cpu, code + mpos, avail - mpos,
+                            branch_ip, start_ip, &br) ||
+        (br.type != NJ_BRANCH_JZ && br.type != NJ_BRANCH_JNZ))
+        return NULL;
+
+    bool use_ds = false, use_es = false, use_ss = false;
+    if (!nj_v6_note_seg(cpu, ea.seg, &use_ds, &use_es, &use_ss))
+        return NULL;
+
+    if (!nj_make_code_room(NJ_V6_MAX_ARM_BYTES)) return NULL;
+    nj_emit_t e = {
+        .p = nj_code_ptr,
+        .start = nj_code_ptr,
+        .limit = nj_code_ptr + (NJ_V6_MAX_ARM_BYTES / 2u),
+        .failed = false
+    };
+
+    bool state16 = mod_width == 2u;
+    int dir = dec ? -1 : 1;
+    nj_emit_prologue(&e, state16);
+
+    /* Execute the first INC/DEC speculatively in local ARM registers.  If an
+     * entry memory guard fails, the return-zero stub below never stores it. */
+    nj_bw_modify_reg(&e, modreg, dec, mod_width);
+
+    /* First effective offset after the architectural INC/DEC. */
+    nj_v6_emit_ea(cpu, &e, &ea, false);
+    if (ea.addr16 && !nj_bw_cap_addr16(&e, dir)) return NULL;
+
+    /* Add the statically guarded segment base. */
+    uword sb = cpu->seg[ea.seg].base;
+    if (sb) {
+        nj_mov_reg(&e, 1, 3);
+        nj_mov_imm(&e, 2, sb);
+        nj_adds3(&e);
+        /* nj_adds3 already leaves the linear result in r3. */
+    }
+    if (!nj_bw_cap_page(&e, dir)) return NULL;
+
+    nj_v6_guard_t g = {0};
+    if (!nj_v7_emit_linear_to_phys(cpu, &e, 1u, mem_store, &g) ||
+        !nj_v6_emit_mem_guard(cpu, &e, 1u, mem_store, &g))
+        return NULL;
+    nj_v6_host_ptr(cpu, &e);       /* r3 = host pointer to first byte */
+    if (!nj_bw_finish_entry_guard(&e, &g)) return NULL;
+    /* Translation/guard helpers deliberately borrow r0; start the native
+     * loop's completed-iteration counter from its ABI-defined zero. */
+    nj_mov_imm(&e, NJ_ITER_REG, 0);
+
+    /* Persistent loop temporaries after all entry guards:
+     *   r1 = immediate byte, r2 = current host byte pointer. */
+    nj_mov_reg(&e, 2, 3);
+    nj_mov_imm(&e, 1, imm);
+
+    u16 *body = e.p;
+    if (mem_store) {
+        /* Guards and the 16-bit wrap helper may clobber APSR. JZ/JNZ only
+         * needs INC/DEC's Z here, so derive it from the committed result on
+         * every iteration immediately before the flag-neutral store. */
+        nj_cmp_imm0(&e, NJ_GUEST_REG(modreg));
+        nj_strb(&e, 1, 2, 0);
+    } else {
+        nj_ldrb(&e, 3, 2, 0);
+        nj_cmp_reg(&e, 3, 1);       /* CMP byte,imm8 */
+    }
+
+    /* Condition false leaves the native micro-loop. */
+    u16 *to_normal = nj_bcond_placeholder(&e);
+
+    /* Taken backedge: retire one complete three-instruction iteration. */
+    nj_adds_imm8(&e, NJ_ITER_REG, 1u);
+    nj_cmp_reg(&e, NJ_ITER_REG, NJ_BUDGET_REG);
+    u16 *to_budget = nj_bcond_placeholder(&e); /* HS */
+
+    /* The entry budget guarantees this pointer/register step remains in the
+     * already validated 4-KiB page and (for addr16) before effective wrap. */
+    if (dir > 0) nj_adds_imm8(&e, 2, 1u);
+    else         nj_subs_imm8(&e, 2, 1u);
+    nj_bw_modify_reg(&e, modreg, dec, mod_width); /* also restores INC/DEC Z */
+    u16 *back = nj_b_placeholder(&e);
+
+    u16 *normal_exit = e.p;
+    nj_adds_imm8(&e, NJ_ITER_REG, 1u);
+    nj_mov_imm(&e, NJ_BUDGET_REG, br.fallthrough);
+    u16 *normal_to_common = nj_b_placeholder(&e);
+
+    u16 *budget_exit = e.p;
+    nj_mov_imm(&e, NJ_BUDGET_REG, start_ip);
+    u16 *common_exit = e.p;
+
+    if (mem_store) {
+        nj_mov_reg(&e, 3, NJ_GUEST_REG(modreg));
+        nj_v8_emit_cc_flush_width(&e, mod_width, NJ_FLAG_INCDEC,
+                                  dec ? (mod_width == 2u ? CC_DEC16 : CC_DEC32)
+                                      : (mod_width == 2u ? CC_INC16 : CC_INC32));
+    } else {
+        /* Reconstruct exact byte-CMP lazy operands from the final tested byte. */
+        nj_ldrb(&e, 3, 2, 0);
+        nj_mov_reg(&e, 1, 3);
+        nj_mov_imm(&e, 2, imm);
+        nj_subs3(&e);                /* r3 = src1 - src2 */
+        nj_v8_emit_cc_flush_width(&e, 1u, NJ_FLAG_ARITH, CC_SUB);
+    }
+    nj_str32(&e, NJ_BUDGET_REG, NJ_CPU_REG, NJ_NEXT_IP_OFF);
+    nj_mov_imm(&e, 1, branch_ip);
+    nj_str32(&e, 1, NJ_CPU_REG, NJ_IP_OFF);
+    nj_mov_imm(&e, 1, 0xffffffffu);
+    nj_str32(&e, 1, NJ_CPU_REG, NJ_PREFETCH_OFF);
+    nj_emit_store_guest(&e, state16);
+    nj_pop_guest(&e);
+
+    unsigned invcond = br.type == NJ_BRANCH_JZ ? 1u : 0u; /* NE / EQ */
+    if (!nj_patch_bcond(to_normal, normal_exit, invcond) ||
+        !nj_patch_bcond(to_budget, budget_exit, 2u) ||     /* HS */
+        !nj_patch_b(back, body) ||
+        !nj_patch_b(normal_to_common, common_exit) || e.failed)
+        return NULL;
+
+    unsigned byte_len = mpos + br.len;
+    uword linear = cpu->seg[SEG_CS].base + start_ip;
+    nj_block_t *b = nj_cache_insert_slot(cpu, linear);
+    memset(b, 0, sizeof(*b));
+    b->tag = linear;
+    b->mmu_key = nj_mmu_key(cpu);
+    b->cs_base = cpu->seg[SEG_CS].base;
+    b->ds_base = cpu->seg[SEG_DS].base;
+    b->es_base = cpu->seg[SEG_ES].base;
+    b->ss_base = cpu->seg[SEG_SS].base;
+    b->ds_sel = cpu->seg[SEG_DS].sel;
+    b->es_sel = cpu->seg[SEG_ES].sel;
+    b->ss_sel = cpu->seg[SEG_SS].sel;
+    b->start_ip = start_ip;
+    b->branch_ip = branch_ip;
+    b->fallthrough_ip = br.fallthrough;
+    b->byte_len = (u16)byte_len;
+    b->phys_page = (u16)phys_page;
+    b->code_split = (u16)((code_split && byte_len > code_split) ? code_split : 0u);
+    b->phys_page2 = b->code_split ? (u16)phys_page2 : 0u;
+    b->insns = 3u;
+    b->code16 = 1u;
+    b->needs_refresh_cf = mem_store ? 1u : 0u;
+    b->needs_flags_in = 0u;
+    b->single_run = 0u;
+    b->uses_ds_static = (u8)use_ds;
+    b->uses_es_static = (u8)use_es;
+    b->uses_ss_base = (u8)use_ss;
+    b->uses_ss_static = 0u;
+    b->static_write_count = 0u;
+    b->code = e.start;
+    b->arm_halfwords = (u16)(e.p - e.start);
+    b->valid = 1u;
+
+    nj_code_ptr = e.p;
+    nj_page_mark(phys_page);
+    if (b->code_split) nj_page_mark(b->phys_page2);
+    nj_bloom_add(linear);
+    g_njit_compiles++;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
+    return b;
+}
+
+
+static nj_block_t *nj_compile_v6_trace(CPUI386 *cpu, uword start_ip)
+{
+    /*
+     * V8.2 extends the broad prefix/supertrace fallback to ordinary 16-bit
+     * real-mode/VM86 code.  The old v4/v5 full-loop compiler remains first
+     * choice, but M602's Symantec launch path contains nested Jcc/string and
+     * memory operations that cannot satisfy the old all-or-nothing loop shape.
+     *
+     * Keep 16-bit protected-mode descriptors with arbitrary limits in the
+     * interpreter for now; real mode and VM86 are the measured target.
+     */
+    bool trace16 = cpu->code16;
+    bool mixed_v86 = trace16 && (cpu->flags & VM) && (cpu->cr0 & CR0_PG);
+    if (trace16 && (cpu->cr0 & 1u) && !(cpu->flags & VM))
+        return NULL;
+
+    const u8 *code;
+    unsigned avail, phys_page, phys_page2, code_split;
+    if (!nj_v8_code_window(cpu, start_ip, &code, &avail,
+                           &phys_page, &phys_page2, &code_split))
+        return NULL;
+    if (!avail) return NULL;
+    if (avail > NJ_V6_MAX_BYTES) avail = NJ_V6_MAX_BYTES;
+
+    static const u8 timer_poll[] = {
+        0x26,0x8b,0x16,0x6c,0x04,0x3b,0xc2,0x74,0xf7
+    };
+    if (avail >= sizeof(timer_poll) &&
+        memcmp(code, timer_poll, sizeof(timer_poll)) == 0)
+        return NULL;
+
+    /* V8 keeps JZ/JNZ inside the same supertrace instead of emitting the
+     * old one-instruction branch-entry block. */
+
+    if (!nj_make_code_room(NJ_V6_MAX_ARM_BYTES))
+        return NULL;
+
+    u16 *hard_limit=nj_code_ptr + (NJ_V6_MAX_ARM_BYTES / 2u);
+    nj_emit_t e = {
+        .p = nj_code_ptr, .start = nj_code_ptr,
+        .limit = hard_limit - (96u / 2u), .failed = false
+    };
+    nj_v8_exit_links_t exits; memset(&exits,0,sizeof(exits));
+    nj_emit_prologue(&e, mixed_v86 ? false : trace16);
+
+    unsigned pos = 0;
+    unsigned insns = 0;
+    uword last_ip = start_ip;
+    bool needs_refresh_cf = false;
+    bool use_ds = false, use_es = false, use_ss = false;
+    bool use_df = false;
+    u8 df_value = 0;
+    bool cf_dirty = false; /* lazy CF exists in cpu->cc, not cpu->flags */
+    bool terminal_exit = false;
+    uword continuation_ip = 0;
+
+    u8 nj_stop_op = 0;
+    while (insns < NJ_V6_MAX_INSNS && pos < avail) {
+        unsigned ipos = pos;
+        u16 *emit_before = e.p;
+        unsigned exits_before = exits.n;
+        uword gip = start_ip + pos;
+        if (trace16) gip &= 0xffffu;
+        nj_v6_pfx_t px;
+        if (!nj_v6_prefix(cpu, code + pos, avail - pos, &px))
+            break;
+        if (px.pos >= avail - pos) break;
+
+        /* Startup-safe split: outside EMM386 VM86+paging use the exact v8.6
+         * 16-bit broad-JIT envelope.  66/67 remain interpreter-owned there. */
+        if (trace16 && !mixed_v86 && (!px.op16 || !px.addr16))
+            break;
+
+        unsigned op_pos = pos + px.pos;
+        nj_stop_op = code[op_pos];
+        u8 op = code[op_pos];
+
+        /* ---- All Jcc stay inside the supertrace. Z/NZ use a tiny inline
+         * lazy-Z evaluator; the other 14 conditions call the exact existing
+         * flag helpers and side-exit only when the branch is taken. ---- */
+        unsigned jcc_cc = 0xffffffffu;
+        unsigned jcc_len = 0;
+        sword jcc_disp = 0;
+        if (op >= 0x70 && op <= 0x7f) {
+            if (op_pos + 2u > avail) break;
+            jcc_cc = op & 15u; jcc_len = 2u;
+            jcc_disp = (s8)code[op_pos + 1u];
+        } else if (op == 0x0f && op_pos + 4u <= avail &&
+                   code[op_pos + 1u] >= 0x80 && code[op_pos + 1u] <= 0x8f) {
+            unsigned dw = px.op16 ? 2u : 4u;
+            if (op_pos + 2u + dw > avail) break;
+            jcc_cc = code[op_pos + 1u] & 15u; jcc_len = 2u + dw;
+            jcc_disp = dw == 2u ? (s16)nj_rd16(code + op_pos + 2u)
+                                : (s32)nj_rd32(code + op_pos + 2u);
+        }
+        if (jcc_cc != 0xffffffffu) {
+            uword fall = start_ip + op_pos + jcc_len;
+            uword target = fall + jcc_disp;
+            /* Short Jcc and native 16-bit near Jcc update IP modulo 16 bits.
+             * A 66h near Jcc in a 16-bit code segment has a 32-bit target;
+             * do not silently wrap it.  V86/16-bit CS still has a 64K limit,
+             * so let the interpreter raise the architectural fault if the
+             * computed EIP is outside the segment. */
+            bool near32 = (op == 0x0f && !px.op16);
+            if (trace16 && !near32) { fall &= 0xffffu; target &= 0xffffu; }
+            else if (trace16 && target > cpu->seg[SEG_CS].limit) {
+                e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break;
+            }
+            bool ok;
+            if (jcc_cc == 4u || jcc_cc == 5u)
+                ok = nj_v8_emit_jz_side_exit(&e, &exits, jcc_cc == 4u, target, gip, insns + 1u);
+            else
+                ok = nj_v8_emit_generic_jcc_side_exit(&e, &exits, jcc_cc, target, gip, insns + 1u);
+            if (!ok) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+            pos = op_pos + jcc_len; last_ip=gip; insns++;
+            /* V8.4: a backward conditional branch ends the current native
+             * block. Both outcomes have now completed exactly b->insns, so
+             * nj_exec_chain can immediately enter the taken target (usually
+             * the loop head) or the fall-through without bouncing through the
+             * interpreter. V8.3 kept decoding fall-through instructions, which
+             * made a taken backedge a partial side-exit and killed chaining. */
+            if (jcc_disp < 0) {
+                /* V8.4.1 correctness fix: stop decoding here, but this is NOT
+                 * an unconditional terminal exit. The not-taken/fall-through
+                 * path reaches the normal block epilogue and must initialize
+                 * r0=completed, LR=fall-through next_ip and r2=architectural
+                 * branch IP before the shared exit. V8.4 set terminal_exit,
+                 * skipped those writes and returned stale control state. */
+                continuation_ip = fall;
+                break;
+            }
+            continue;
+        }
+
+        /* LOOP rel8 (32-bit address size). Decrement ECX natively and keep
+         * fall-through in-trace; taken iterations chain back to the target. */
+        if (px.pos == 0u && op == 0xe2 && op_pos + 2u <= avail) {
+            sword d = (s8)code[op_pos + 1u];
+            uword target = start_ip + op_pos + 2u + d;
+            if (trace16) target &= 0xffffu;
+            nj_mov_reg(&e, 1, NJ_GUEST_REG(1));
+            if (px.addr16) nj_uxth(&e,1,1);
+            nj_mov_imm(&e, 2, 1u); nj_subs3(&e);
+            if (px.addr16) {
+                nj_uxth(&e,3,3);
+                if (trace16 && !mixed_v86) nj_mov_reg(&e,NJ_GUEST_REG(1),3);
+                else nj_v6_write_r16(&e,1);
+            } else {
+                nj_mov_reg(&e,NJ_GUEST_REG(1),3);
+            }
+            if (!nj_v8_emit_loop_side_exit(&e, &exits, target, gip, insns + 1u)) {
+                e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break;
+            }
+            pos = op_pos + 2u; last_ip=gip; insns++;
+            if (d < 0) {
+                /* V8.4.1: like backward Jcc, the taken path already has its
+                 * side-exit stub, while fall-through must use the normal exit
+                 * state setup below. Stop trace growth without marking the
+                 * block as an unconditional terminal. */
+                continuation_ip = start_ip + op_pos + 2u;
+                if (trace16) continuation_ip &= 0xffffu;
+                break;
+            }
+            continue;
+        }
+
+        /* Unconditional relative branches are cheap terminal native blocks;
+         * the C chain dispatcher immediately continues at their target. */
+        if (px.pos == 0u && (op == 0xe9 || op == 0xeb)) {
+            unsigned dw = px.op16 ? 2u : 4u;
+            unsigned blen = op == 0xeb ? 2u : 1u + dw;
+            if (op_pos + blen > avail) break;
+            sword d = op == 0xeb ? (s8)code[op_pos + 1u]
+                                 : (dw == 2u ? (s16)nj_rd16(code + op_pos + 1u)
+                                             : (s32)nj_rd32(code + op_pos + 1u));
+            uword target = start_ip + op_pos + blen + d;
+            if (trace16 && (op == 0xeb || px.op16)) target &= 0xffffu;
+            else if (trace16 && target > cpu->seg[SEG_CS].limit) {
+                e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break;
+            }
+            if(!nj_v8_exit_stub_imm(&e,&exits,insns+1u,target,gip)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+            pos = op_pos + blen; last_ip = gip; insns++;
+            terminal_exit = true; continuation_ip = target;
+            break;
+        }
+
+        /* Near CALL rel16/rel32. Mixed-width prototype also supports
+         * a 16-bit stack address size, preserving upper ESP. */
+        if (op == 0xe8 &&
+            (cpu->sp_mask == 0xffffffffu || (mixed_v86 && cpu->sp_mask == 0xffffu)) &&
+            ((cpu->sp_mask == 0xffffffffu && cpu->seg[SEG_SS].limit == 0xffffffffu) ||
+             (mixed_v86 && cpu->sp_mask == 0xffffu && cpu->seg[SEG_SS].limit >= 0xffffu)) &&
+            nj_v6_note_seg(cpu,SEG_SS,&use_ds,&use_es,&use_ss)) {
+            bool stack16=mixed_v86 && cpu->sp_mask==0xffffu;
+            unsigned sw=px.op16?2u:4u;
+            unsigned ilen=1u+sw;
+            if(op_pos+ilen>avail) break;
+            sword d=sw==2u?(s16)nj_rd16(code+op_pos+1u):(s32)nj_rd32(code+op_pos+1u);
+            uword fall=start_ip+op_pos+ilen;
+            uword target=fall+d;
+            if(px.op16) target&=0xffffu;
+            else if(trace16 && target>cpu->seg[SEG_CS].limit){
+                e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;
+            }
+            nj_v6_guard_t g;memset(&g,0,sizeof(g));
+            if(stack16){
+                nj_mov_reg(&e,1,NJ_GUEST_REG(4));nj_uxth(&e,1,1);
+                nj_mov_imm(&e,2,sw);nj_cmp_reg(&e,1,2);
+                nj_v6_guard_add(&e,&g,3u); /* LO => wrapped push */
+            }
+            nj_v6_ea_t sea={.base=4,.index=-1,.scale=0,.disp=-(s32)sw,
+                              .seg=SEG_SS,.used=0,.addr16=stack16};
+            nj_v6_emit_ea(cpu,&e,&sea,true);
+            if(!nj_v7_emit_linear_to_phys(cpu,&e,sw,true,&g)||
+               !nj_v6_emit_mem_guard(cpu,&e,sw,true,&g)){
+                e.p=emit_before;e.failed=false;pos=ipos;break;
+            }
+            nj_v6_host_ptr(cpu,&e);nj_mov_imm(&e,1,fall);
+            if(sw==2u)nj_strh(&e,1,3,0);else nj_str32(&e,1,3,0);
+            if(!nj_v8_finish_guard(&e,&g,&exits,gip,insns)){e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;}
+            nj_mov_reg(&e,1,NJ_GUEST_REG(4));if(stack16)nj_uxth(&e,1,1);
+            nj_mov_imm(&e,2,sw);nj_subs3(&e);
+            if(stack16){nj_uxth(&e,3,3);nj_v6_write_r16(&e,4);}else nj_mov_reg(&e,NJ_GUEST_REG(4),3);
+            if(!nj_v8_exit_stub_imm(&e,&exits,insns+1u,target,gip)){e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;}
+            pos=op_pos+ilen;last_ip=gip;insns++;terminal_exit=true;continuation_ip=target;
+            break;
+        }
+
+        /* RET/RET imm16 with 16/32-bit operand size, flat 32-bit stack. */
+        if ((op==0xc3 || op==0xc2) && cpu->sp_mask==0xffffffffu &&
+            cpu->seg[SEG_SS].limit==0xffffffffu &&
+            (op!=0xc2 || op_pos+3u<=avail) &&
+            nj_v6_note_seg(cpu,SEG_SS,&use_ds,&use_es,&use_ss)) {
+            unsigned sw=px.op16?2u:4u;
+            unsigned extra=op==0xc2?nj_rd16(code+op_pos+1u):0u;
+            nj_v6_ea_t sea={.base=4,.index=-1,.scale=0,.disp=0,.seg=SEG_SS,.used=0,.addr16=false};
+            nj_v6_emit_ea(cpu,&e,&sea,true);
+            nj_v6_guard_t g;memset(&g,0,sizeof(g));
+            if(!nj_v7_emit_linear_to_phys(cpu,&e,sw,false,&g)||
+               !nj_v6_emit_mem_guard(cpu,&e,sw,false,&g)){
+                e.p=emit_before;e.failed=false;pos=ipos;break;
+            }
+            nj_v6_host_ptr(cpu,&e);
+            if(sw==2u)nj_ldrh(&e,2,3,0);else nj_ldr32(&e,2,3,0);
+            if(!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+            nj_mov_reg(&e,NJ_BUDGET_REG,2);
+            nj_mov_reg(&e,1,NJ_GUEST_REG(4));nj_mov_imm(&e,2,sw+extra);nj_adds3(&e);
+            nj_mov_reg(&e,NJ_GUEST_REG(4),3);
+            if(!nj_v8_exit_stub_lr(&e,&exits,insns+1u,gip)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+            pos=op_pos+(op==0xc2?3u:1u);last_ip=gip;insns++;terminal_exit=true;continuation_ip=0;
+            break;
+        }
+
+        /* Register PUSH/POP and immediate PUSH. Support 16- or 32-bit
+         * stack address size; for stack16 preserve upper ESP and side-exit
+         * instead of attempting wrapped multi-byte accesses. */
+        if (((op>=0x50 && op<=0x5f)||op==0x68||op==0x6a) &&
+            (cpu->sp_mask==0xffffffffu || (mixed_v86 && cpu->sp_mask==0xffffu)) &&
+            ((cpu->sp_mask==0xffffffffu && cpu->seg[SEG_SS].limit==0xffffffffu) ||
+             (mixed_v86 && cpu->sp_mask==0xffffu && cpu->seg[SEG_SS].limit>=0xffffu)) &&
+            nj_v6_note_seg(cpu,SEG_SS,&use_ds,&use_es,&use_ss)) {
+            bool stack16=mixed_v86 && cpu->sp_mask==0xffffu;
+            bool stack_done=false;bool pop=op>=0x58&&op<=0x5f;unsigned reg=op&7u;
+            unsigned sw=px.op16?2u:4u;
+            if(pop && reg==4u){
+                /* POP ESP/SP ordering stays interpreter-owned. */
+            }else if(pop){
+                nj_v6_guard_t g;memset(&g,0,sizeof(g));
+                if(stack16 && sw>1u){
+                    nj_mov_reg(&e,1,NJ_GUEST_REG(4));nj_uxth(&e,1,1);
+                    nj_mov_imm(&e,2,0xffffu-(sw-1u));nj_cmp_reg(&e,1,2);
+                    nj_v6_guard_add(&e,&g,8u); /* HI => crosses SS limit */
+                }
+                nj_v6_ea_t sea={.base=4,.index=-1,.scale=0,.disp=0,.seg=SEG_SS,.used=0,.addr16=stack16};
+                nj_v6_emit_ea(cpu,&e,&sea,true);
+                if(!nj_v7_emit_linear_to_phys(cpu,&e,sw,false,&g)||!nj_v6_emit_mem_guard(cpu,&e,sw,false,&g)){e.p=emit_before;e.failed=false;pos=ipos;break;}
+                nj_v6_host_ptr(cpu,&e);if(sw==2u)nj_ldrh(&e,0,3,0);else nj_ldr32(&e,0,3,0);
+                if(!nj_v8_finish_guard(&e,&g,&exits,gip,insns)){e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;}
+                nj_mov_reg(&e,1,NJ_GUEST_REG(4));if(stack16)nj_uxth(&e,1,1);nj_mov_imm(&e,2,sw);nj_adds3(&e);
+                if(stack16){nj_uxth(&e,3,3);nj_v6_write_r16(&e,4);}else nj_mov_reg(&e,NJ_GUEST_REG(4),3);
+                if(sw==2u){nj_mov_reg(&e,3,0);nj_v6_write_r16(&e,reg);}else nj_mov_reg(&e,NJ_GUEST_REG(reg),0);
+                pos=op_pos+1u;stack_done=true;
+            }else{
+                unsigned ilen=1u;u32 imm=0;bool imm_push=false;
+                if(op==0x68){if(op_pos+1u+sw>avail)break;imm=sw==2u?nj_rd16(code+op_pos+1u):nj_rd32(code+op_pos+1u);ilen=1u+sw;imm_push=true;}
+                else if(op==0x6a){if(op_pos+2u>avail)break;s32 si=(s8)code[op_pos+1u];imm=sw==2u?(u16)si:(u32)si;ilen=2u;imm_push=true;}
+                nj_v6_guard_t g;memset(&g,0,sizeof(g));
+                if(stack16){nj_mov_reg(&e,1,NJ_GUEST_REG(4));nj_uxth(&e,1,1);nj_mov_imm(&e,2,sw);nj_cmp_reg(&e,1,2);nj_v6_guard_add(&e,&g,3u);}
+                nj_v6_ea_t sea={.base=4,.index=-1,.scale=0,.disp=-(s32)sw,.seg=SEG_SS,.used=0,.addr16=stack16};
+                nj_v6_emit_ea(cpu,&e,&sea,true);
+                if(!nj_v7_emit_linear_to_phys(cpu,&e,sw,true,&g)||!nj_v6_emit_mem_guard(cpu,&e,sw,true,&g)){e.p=emit_before;e.failed=false;pos=ipos;break;}
+                nj_v6_host_ptr(cpu,&e);
+                if(imm_push){nj_mov_imm(&e,1,imm);if(sw==2u)nj_strh(&e,1,3,0);else nj_str32(&e,1,3,0);}
+                else{if(sw==2u)nj_strh(&e,NJ_GUEST_REG(reg),3,0);else nj_str32(&e,NJ_GUEST_REG(reg),3,0);}
+                if(!nj_v8_finish_guard(&e,&g,&exits,gip,insns)){e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;}
+                nj_mov_reg(&e,1,NJ_GUEST_REG(4));if(stack16)nj_uxth(&e,1,1);nj_mov_imm(&e,2,sw);nj_subs3(&e);
+                if(stack16){nj_uxth(&e,3,3);nj_v6_write_r16(&e,4);}else nj_mov_reg(&e,NJ_GUEST_REG(4),3);
+                pos=op_pos+ilen;stack_done=true;
+            }
+            if(stack_done){last_ip=gip;insns++;continue;}
+        }
+
+        /* LEAVE = ESP<-EBP; POP EBP. */
+        if(px.pos==0u && op==0xc9 && cpu->sp_mask==0xffffffffu &&
+           cpu->seg[SEG_SS].limit==0xffffffffu &&
+           nj_v6_note_seg(cpu,SEG_SS,&use_ds,&use_es,&use_ss)) {
+            nj_v6_ea_t sea={.base=5,.index=-1,.scale=0,.disp=0,.seg=SEG_SS,.used=0,.addr16=false};
+            nj_v6_emit_ea(cpu,&e,&sea,true);nj_v6_guard_t g;memset(&g,0,sizeof(g));
+            if(!nj_v7_emit_linear_to_phys(cpu,&e,4u,false,&g)||
+               !nj_v6_emit_mem_guard(cpu,&e,4u,false,&g)){
+                e.p=emit_before;e.failed=false;pos=ipos;break;
+            }
+            nj_v6_host_ptr(cpu,&e);nj_ldr32(&e,0,3,0);
+            if(!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+            nj_mov_reg(&e,1,NJ_GUEST_REG(5));nj_mov_imm(&e,2,4u);nj_adds3(&e);
+            nj_mov_reg(&e,NJ_GUEST_REG(4),3);nj_mov_reg(&e,NJ_GUEST_REG(5),0);
+            pos=op_pos+1u;last_ip=gip;insns++;continue;
+        }
+
+        /* Other control flow remains interpreter fallback. */
+        if ((op >= 0x70 && op <= 0x7f) || op == 0xe8 || op == 0xe9 ||
+            op == 0xeb || op == 0xc2 || op == 0xc3 || op == 0xca ||
+            op == 0xcb || op == 0xcf)
+            break;
+
+        bool done = false;
+
+        /* ---- LODSB/LODSW/LODSD: hot scan/checksum loops ------------- */
+        if (!done && (op == 0xac || op == 0xad)) {
+            unsigned size = op == 0xac ? 1u : (px.op16 ? 2u : 4u);
+            int seg = px.seg >= 0 ? px.seg : SEG_DS;
+            if ((cpu->cr0 & 1u) && !(cpu->flags & VM) &&
+                cpu->seg[seg].limit != 0xffffffffu) break;
+            if (!nj_v6_note_seg(cpu,seg,&use_ds,&use_es,&use_ss)) break;
+            nj_v6_ea_t ea={.base=6,.index=-1,.scale=0,.disp=0,
+                            .seg=seg,.used=0,.addr16=px.addr16};
+            nj_v6_emit_ea(cpu,&e,&ea,true);
+            nj_v6_guard_t g; memset(&g,0,sizeof(g));
+            if (!nj_v7_emit_linear_to_phys(cpu,&e,size,false,&g) ||
+                !nj_v6_emit_mem_guard(cpu,&e,size,false,&g)) {
+                e.p=emit_before;e.failed=false;pos=ipos;break;
+            }
+            nj_v6_host_ptr(cpu,&e);
+            if (size == 1u) {
+                nj_ldrb(&e,3,3,0);
+                nj_v6_write_r8(&e,0);
+            } else if (size == 2u) {
+                nj_ldrh(&e,3,3,0);
+                nj_v6_write_r16(&e,0);
+            } else {
+                nj_ldr32(&e,3,3,0);
+                nj_mov_reg(&e,NJ_GUEST_REG(0),3);
+            }
+            if (!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) {
+                e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;
+            }
+            use_df=true; df_value=(u8)!!(cpu->flags & DF);
+            nj_mov_reg(&e,1,NJ_GUEST_REG(6));
+            if (px.addr16) nj_uxth(&e,1,1);
+            nj_mov_imm(&e,2,size);
+            if (df_value) nj_subs3(&e); else nj_adds3(&e);
+            if (px.addr16) {
+                nj_uxth(&e,3,3);
+                if (trace16 && !mixed_v86) nj_mov_reg(&e,NJ_GUEST_REG(6),3);
+                else nj_v6_write_r16(&e,6);
+            } else {
+                nj_mov_reg(&e,NJ_GUEST_REG(6),3);
+            }
+            pos=op_pos+1u; done=true;
+        }
+
+        /* ---- 0F A4/AC: immediate SHLD/SHRD r32,r32,imm8 ------------ */
+        if (op == 0x0f && !px.op16 && op_pos + 3u < avail) {
+            u8 op2 = code[op_pos + 1u];
+            if (op2 == 0xa4 || op2 == 0xac) {
+                u8 m = code[op_pos + 2u];
+                if ((m >> 6) == 3u) {
+                    unsigned dst = m & 7u;
+                    unsigned src = (m >> 3) & 7u;
+                    unsigned cnt = code[op_pos + 3u] & 31u;
+                    if (nj_v6_emit_shx32(&e, dst, src, cnt, op2 == 0xac)) {
+                        pos = op_pos + 4u;
+                        if (cnt) cf_dirty = true;
+                        done = true;
+                    }
+                }
+            }
+        }
+
+        /* ---- MOV/LEA with memory ModR/M ----------------------------- */
+        if (!done && (op == 0x88 || op == 0x8a || op == 0x89 ||
+                      op == 0x8b || op == 0x8d)) {
+            if (op_pos + 1u >= avail) break;
+            u8 m = code[op_pos + 1u];
+            unsigned mod = m >> 6;
+            unsigned reg = (m >> 3) & 7u;
+
+            if (mod == 3u && op != 0x8d) {
+                unsigned rm = m & 7u;
+                if (op == 0x8a) {
+                    nj_v6_read_r8(&e, rm);
+                    nj_v6_write_r8(&e, reg);
+                } else if (op == 0x88) {
+                    nj_v6_read_r8(&e, reg);
+                    nj_v6_write_r8(&e, rm);
+                } else if (op == 0x8b) {
+                    if (px.op16) { nj_mov_reg(&e, 3, NJ_GUEST_REG(rm)); nj_v6_write_r16(&e, reg); }
+                    else nj_mov_reg(&e, NJ_GUEST_REG(reg), NJ_GUEST_REG(rm));
+                } else if (op == 0x89) {
+                    if (px.op16) { nj_mov_reg(&e, 3, NJ_GUEST_REG(reg)); nj_v6_write_r16(&e, rm); }
+                    else nj_mov_reg(&e, NJ_GUEST_REG(rm), NJ_GUEST_REG(reg));
+                }
+                pos = op_pos + 2u;
+                done = true;
+            } else if (mod != 3u) {
+                nj_v6_ea_t ea;
+                if (!nj_v6_decode_ea(code + op_pos + 2u,
+                                     avail - (op_pos + 2u), m,
+                                     px.addr16, px.seg, &ea))
+                    break;
+                if (!nj_v6_note_seg(cpu, ea.seg, &use_ds, &use_es, &use_ss))
+                    break;
+
+                unsigned ilen = px.pos + 2u + ea.used;
+
+                if (op == 0x8d) {
+                    /* LEA uses offset only, not the segment base. */
+                    nj_v6_emit_ea(cpu, &e, &ea, false);
+
+                    if (px.op16) nj_v6_write_r16(&e, reg);
+                    else nj_mov_reg(&e, NJ_GUEST_REG(reg), 3);
+                    pos += ilen;
+                    done = true;
+                } else {
+                    unsigned size = (op == 0x88 || op == 0x8a) ? 1u :
+                                    (px.op16 ? 2u : 4u);
+                    bool write = (op == 0x88 || op == 0x89);
+
+                    nj_v6_emit_ea(cpu, &e, &ea, true);
+                    nj_v6_guard_t g;
+                    memset(&g, 0, sizeof(g));
+                    if (!nj_v7_emit_linear_to_phys(cpu, &e, size, write, &g) ||
+                        !nj_v6_emit_mem_guard(cpu, &e, size, write, &g)) {
+                        e.p = emit_before; e.failed = false; pos = ipos;
+                        break;
+                    }
+                    nj_v6_host_ptr(cpu, &e);
+
+                    if (op == 0x8a) {
+                        nj_ldrb(&e, 3, 3, 0);
+                        nj_v6_write_r8(&e, reg);
+                    } else if (op == 0x88) {
+                        /* Preserve host pointer while extracting AL/AH-style source. */
+                        nj_mov_reg(&e, 0, 3);
+                        nj_v6_read_r8(&e, reg);
+                        nj_strb(&e, 3, 0, 0);
+                    } else if (op == 0x8b) {
+                        if (size == 2u) nj_ldrh(&e, 3, 3, 0);
+                        else nj_ldr32(&e, 3, 3, 0);
+                        if (size == 2u) nj_v6_write_r16(&e, reg);
+                        else nj_mov_reg(&e, NJ_GUEST_REG(reg), 3);
+                    } else { /* 89 */
+                        if (size == 2u)
+                            nj_strh(&e, NJ_GUEST_REG(reg), 3, 0);
+                        else
+                            nj_str32(&e, NJ_GUEST_REG(reg), 3, 0);
+                    }
+
+                    if (!nj_v8_finish_guard(&e, &g, &exits, gip, insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+                    pos += ilen;
+                    done = true;
+                }
+            }
+        }
+
+        /* ---- byte accumulator immediate ALU (04/0C/24/2C/34/3C) ---- */
+        if (!done && (op==0x04 || op==0x0c || op==0x24 ||
+                      op==0x2c || op==0x34 || op==0x3c)) {
+            if (op_pos + 2u > avail) break;
+            u8 imm=code[op_pos+1u];
+            nj_v6_read_r8(&e,0); nj_mov_reg(&e,1,3);
+            nj_mov_imm(&e,2,imm);
+            bool write_result = op != 0x3c;
+            unsigned fk,ccop;
+            if(op==0x04){nj_adds3(&e);fk=NJ_FLAG_ARITH;ccop=CC_ADD;}
+            else if(op==0x2c || op==0x3c){nj_subs3(&e);fk=NJ_FLAG_ARITH;ccop=CC_SUB;}
+            else if(op==0x0c){nj_orr1(&e);nj_mov_reg(&e,3,1);fk=NJ_FLAG_LOGIC;ccop=CC_OR;}
+            else if(op==0x24){nj_and1(&e);nj_mov_reg(&e,3,1);fk=NJ_FLAG_LOGIC;ccop=CC_AND;}
+            else {nj_eor1(&e);nj_mov_reg(&e,3,1);fk=NJ_FLAG_LOGIC;ccop=CC_XOR;}
+            nj_uxtb(&e,3,3);
+            if(write_result) nj_v6_write_r8(&e,0);
+            nj_v8_emit_cc_flush_width(&e,1u,fk,ccop);
+            cf_dirty=true;
+            pos=op_pos+2u;done=true;
+        }
+
+        /* ---- byte CMP/TEST (38/3A/84), including memory ------------ */
+        if (!done && (op == 0x38 || op == 0x3a || op == 0x84)) {
+            if (op_pos + 1u >= avail) break;
+            u8 m = code[op_pos + 1u];
+            unsigned mod = m >> 6;
+            unsigned reg = (m >> 3) & 7u;
+            unsigned rm = m & 7u;
+            bool testop = op == 0x84;
+
+            if (mod == 3u) {
+                unsigned dst = op == 0x3a ? reg : rm;
+                unsigned src = op == 0x3a ? rm : reg;
+                nj_v6_read_r8(&e,dst); nj_mov_reg(&e,1,3);
+                nj_v6_read_r8(&e,src); nj_mov_reg(&e,2,3);
+                if (testop) { nj_and1(&e); nj_mov_reg(&e,3,1); }
+                else nj_subs3(&e);
+                nj_uxtb(&e,3,3);
+                nj_v8_emit_cc_flush_width(&e,1u,
+                    testop ? NJ_FLAG_LOGIC : NJ_FLAG_ARITH,
+                    testop ? CC_AND : CC_SUB);
+                cf_dirty=true;
+                pos=op_pos+2u; done=true;
+            } else {
+                nj_v6_ea_t ea;
+                if (!nj_v6_decode_ea(code+op_pos+2u,avail-(op_pos+2u),m,
+                                     px.addr16,px.seg,&ea)) break;
+                if (!nj_v6_note_seg(cpu,ea.seg,&use_ds,&use_es,&use_ss)) break;
+                unsigned ilen=px.pos+2u+ea.used;
+                nj_v6_emit_ea(cpu,&e,&ea,true);
+                nj_v6_guard_t g; memset(&g,0,sizeof(g));
+                if (!nj_v7_emit_linear_to_phys(cpu,&e,1u,false,&g) ||
+                    !nj_v6_emit_mem_guard(cpu,&e,1u,false,&g)) {
+                    e.p=emit_before;e.failed=false;pos=ipos;break;
+                }
+                nj_v6_host_ptr(cpu,&e);
+                nj_ldrb(&e,0,3,0);
+                if (!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) {
+                    e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;
+                }
+                if (op == 0x3a) {
+                    nj_v6_read_r8(&e,reg); nj_mov_reg(&e,1,3);
+                    nj_mov_reg(&e,2,0);
+                } else {
+                    nj_mov_reg(&e,1,0);
+                    nj_v6_read_r8(&e,reg); nj_mov_reg(&e,2,3);
+                }
+                if (testop) { nj_and1(&e); nj_mov_reg(&e,3,1); }
+                else nj_subs3(&e);
+                nj_uxtb(&e,3,3);
+                nj_v8_emit_cc_flush_width(&e,1u,
+                    testop ? NJ_FLAG_LOGIC : NJ_FLAG_ARITH,
+                    testop ? CC_AND : CC_SUB);
+                cf_dirty=true;
+                pos += ilen; done=true;
+            }
+        }
+
+        /* ---- FE/FF memory INC/DEC ----------------------------------- */
+        if (!done && (op == 0xfe || op == 0xff) && op_pos + 1u < avail) {
+            u8 m=code[op_pos+1u];
+            unsigned sub=(m>>3)&7u;
+            if ((m>>6)!=3u && (sub==0u || sub==1u)) {
+                if (cf_dirty) break; /* INC/DEC must preserve the old CF. */
+                unsigned size=op==0xfe?1u:(px.op16?2u:4u);
+                nj_v6_ea_t ea;
+                if (!nj_v6_decode_ea(code+op_pos+2u,avail-(op_pos+2u),m,
+                                     px.addr16,px.seg,&ea)) break;
+                if (!nj_v6_note_seg(cpu,ea.seg,&use_ds,&use_es,&use_ss)) break;
+                unsigned ilen=px.pos+2u+ea.used;
+                nj_v6_emit_ea(cpu,&e,&ea,true);
+                nj_v6_guard_t g; memset(&g,0,sizeof(g));
+                if (!nj_v7_emit_linear_to_phys(cpu,&e,size,true,&g) ||
+                    !nj_v6_emit_mem_guard(cpu,&e,size,true,&g)) {
+                    e.p=emit_before;e.failed=false;pos=ipos;break;
+                }
+                nj_v6_host_ptr(cpu,&e);
+                nj_mov_reg(&e,0,3); /* host pointer */
+                if(size==1u) nj_ldrb(&e,1,0,0);
+                else if(size==2u) nj_ldrh(&e,1,0,0);
+                else nj_ldr32(&e,1,0,0);
+                nj_mov_imm(&e,2,1u);
+                if(sub==0u) nj_adds3(&e); else nj_subs3(&e);
+                if(size==1u) { nj_uxtb(&e,3,3); nj_strb(&e,3,0,0); }
+                else if(size==2u) { nj_uxth(&e,3,3); nj_strh(&e,3,0,0); }
+                else nj_str32(&e,3,0,0);
+                if (!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) {
+                    e.p=emit_before;e.failed=false;exits.n=exits_before;pos=ipos;break;
+                }
+                unsigned ccop = sub==0u
+                    ? (size==1u?CC_INC8:(size==2u?CC_INC16:CC_INC32))
+                    : (size==1u?CC_DEC8:(size==2u?CC_DEC16:CC_DEC32));
+                nj_v8_emit_cc_flush_width(&e,size,NJ_FLAG_INCDEC,ccop);
+                needs_refresh_cf=true;
+                pos += ilen; done=true;
+            }
+        }
+
+        /* ---- common word/dword ALU with one memory operand ---------- */
+        if (!done && (op == 0x01 || op == 0x03 || op == 0x09 || op == 0x0b ||
+                      op == 0x21 || op == 0x23 || op == 0x29 || op == 0x2b ||
+                      op == 0x31 || op == 0x33 || op == 0x39 || op == 0x3b ||
+                      op == 0x85)) {
+            if (op_pos + 1u >= avail) break;
+            u8 m = code[op_pos + 1u];
+            unsigned mod = m >> 6;
+            unsigned reg = (m >> 3) & 7u;
+
+            if (mod == 3u) {
+                unsigned rm = m & 7u;
+                bool reg_dst = (op & 2u) != 0u;
+                bool cmpop = op == 0x39 || op == 0x3b;
+                bool testop = op == 0x85;
+                unsigned dst = reg_dst ? reg : rm;
+                unsigned src = reg_dst ? rm : reg;
+                if (testop) { dst = rm; src = reg; }
+                nj_mov_reg(&e, 1, NJ_GUEST_REG(dst));
+                nj_mov_reg(&e, 2, NJ_GUEST_REG(src));
+                if (px.op16) { nj_uxth(&e, 1, 1); nj_uxth(&e, 2, 2); }
+                unsigned fk = NJ_FLAG_NONE, ccop = 0;
+                bool write_result = !cmpop && !testop;
+                if (op == 0x01 || op == 0x03) { nj_adds3(&e); fk=NJ_FLAG_ARITH; ccop=CC_ADD; }
+                else if (op == 0x29 || op == 0x2b || cmpop) { nj_subs3(&e); fk=NJ_FLAG_ARITH; ccop=CC_SUB; }
+                else if (op == 0x09 || op == 0x0b) { nj_orr1(&e); nj_mov_reg(&e,3,1); fk=NJ_FLAG_LOGIC; ccop=CC_OR; }
+                else if (op == 0x21 || op == 0x23 || testop) { nj_and1(&e); nj_mov_reg(&e,3,1); fk=NJ_FLAG_LOGIC; ccop=CC_AND; }
+                else { nj_eor1(&e); nj_mov_reg(&e,3,1); fk=NJ_FLAG_LOGIC; ccop=CC_XOR; }
+                if (px.op16) nj_uxth(&e, 3, 3);
+                if (write_result) {
+                    if (px.op16) nj_v6_write_r16(&e, dst);
+                    else nj_mov_reg(&e, NJ_GUEST_REG(dst), 3);
+                }
+                nj_emit_cc_flush(&e, px.op16, fk, ccop);
+                cf_dirty = true;
+                pos = op_pos + 2u; done = true;
+            } else {
+                nj_v6_ea_t ea;
+                if (!nj_v6_decode_ea(code + op_pos + 2u,
+                                     avail - (op_pos + 2u), m,
+                                     px.addr16, px.seg, &ea))
+                    break;
+                if (!nj_v6_note_seg(cpu, ea.seg, &use_ds, &use_es, &use_ss))
+                    break;
+
+                bool reg_dst = (op & 2u) != 0u;
+                bool cmpop = op == 0x39 || op == 0x3b;
+                bool testop = op == 0x85;
+                bool mem_write = !reg_dst && !cmpop && !testop;
+                unsigned size = px.op16 ? 2u : 4u;
+                unsigned ilen = px.pos + 2u + ea.used;
+
+                nj_v6_emit_ea(cpu, &e, &ea, true);
+                nj_v6_guard_t g;
+                memset(&g, 0, sizeof(g));
+                if (!nj_v7_emit_linear_to_phys(cpu, &e, size, mem_write, &g) ||
+                    !nj_v6_emit_mem_guard(cpu, &e, size, mem_write, &g)) {
+                    e.p = emit_before; e.failed = false; pos = ipos;
+                    break;
+                }
+                nj_v6_host_ptr(cpu, &e);
+
+                if (reg_dst) {
+                    if (size == 2u) nj_ldrh(&e, 2, 3, 0);
+                    else nj_ldr32(&e, 2, 3, 0);
+                    if (!nj_v8_finish_guard(&e, &g, &exits, gip, insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+
+                    nj_mov_reg(&e, 1, NJ_GUEST_REG(reg));
+                    if (size == 2u) nj_uxth(&e, 1, 1);
+                } else {
+                    /* Preserve host pointer for an optional RMW store. */
+                    nj_mov_reg(&e, 0, 3);
+                    if (size == 2u) nj_ldrh(&e, 1, 3, 0);
+                    else nj_ldr32(&e, 1, 3, 0);
+                    nj_mov_reg(&e, 2, NJ_GUEST_REG(reg));
+                    if (size == 2u) nj_uxth(&e, 2, 2);
+                    if (!nj_v8_finish_guard(&e, &g, &exits, gip, insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+                }
+
+                unsigned fk = NJ_FLAG_NONE, ccop = 0;
+                bool write_result = !cmpop && !testop;
+
+                if (op == 0x01 || op == 0x03) {
+                    nj_adds3(&e); fk = NJ_FLAG_ARITH; ccop = CC_ADD;
+                } else if (op == 0x29 || op == 0x2b ||
+                           op == 0x39 || op == 0x3b) {
+                    nj_subs3(&e); fk = NJ_FLAG_ARITH; ccop = CC_SUB;
+                } else if (op == 0x09 || op == 0x0b) {
+                    nj_orr1(&e); nj_mov_reg(&e, 3, 1);
+                    fk = NJ_FLAG_LOGIC; ccop = CC_OR;
+                } else if (op == 0x21 || op == 0x23 || op == 0x85) {
+                    nj_and1(&e); nj_mov_reg(&e, 3, 1);
+                    fk = NJ_FLAG_LOGIC; ccop = CC_AND;
+                } else {
+                    nj_eor1(&e); nj_mov_reg(&e, 3, 1);
+                    fk = NJ_FLAG_LOGIC; ccop = CC_XOR;
+                }
+
+                if (size == 2u) nj_uxth(&e, 3, 3);
+
+                if (write_result) {
+                    if (reg_dst) {
+                        if (size == 2u) nj_v6_write_r16(&e, reg);
+                        else nj_mov_reg(&e, NJ_GUEST_REG(reg), 3);
+                    } else {
+                        if (size == 2u) nj_strh(&e, 3, 0, 0);
+                        else nj_str32(&e, 3, 0, 0);
+                    }
+                }
+
+                nj_emit_cc_flush(&e, size == 2u, fk, ccop);
+                pos += ilen;
+                done = true;
+            }
+        }
+
+        /* ---- 80/81/83 immediate ALU, register or memory ----------- */
+        if (!done && (op == 0x80 || op == 0x81 || op == 0x83) &&
+            op_pos + 2u <= avail) {
+            u8 m=code[op_pos+1u];
+            unsigned mod=m>>6, sub=(m>>3)&7u, rm=m&7u;
+            if (sub==0u || sub==1u || sub==4u || sub==5u || sub==6u || sub==7u) {
+                unsigned size = op==0x80 ? 1u : (px.op16 ? 2u : 4u);
+                unsigned immbytes = op==0x81 ? size : 1u;
+                unsigned immpos = op_pos + 2u;
+                nj_v6_ea_t ea;
+                if (mod != 3u) {
+                    if (!nj_v6_decode_ea(code+op_pos+2u,avail-(op_pos+2u),m,
+                                         px.addr16,px.seg,&ea)) break;
+                    if (!nj_v6_note_seg(cpu,ea.seg,&use_ds,&use_es,&use_ss)) break;
+                    immpos += ea.used;
+                }
+                if (immpos + immbytes > avail) break;
+                u32 imm;
+                if (op==0x83) {
+                    s32 si=(s8)code[immpos];
+                    imm = size==2u ? (u16)si : (u32)si;
+                } else if (size==1u) imm=code[immpos];
+                else if (size==2u) imm=nj_rd16(code+immpos);
+                else imm=nj_rd32(code+immpos);
+
+                bool write_result=sub!=7u;
+                nj_v6_guard_t g; memset(&g,0,sizeof(g));
+                if (mod==3u) {
+                    if (size==1u) { nj_v6_read_r8(&e,rm); nj_mov_reg(&e,1,3); }
+                    else { nj_mov_reg(&e,1,NJ_GUEST_REG(rm)); if(size==2u) nj_uxth(&e,1,1); }
+                } else {
+                    nj_v6_emit_ea(cpu,&e,&ea,true);
+                    if (!nj_v7_emit_linear_to_phys(cpu,&e,size,write_result,&g) ||
+                        !nj_v6_emit_mem_guard(cpu,&e,size,write_result,&g)) {
+                        e.p=emit_before;e.failed=false;pos=ipos;break;
+                    }
+                    nj_v6_host_ptr(cpu,&e);
+                    if (write_result) nj_mov_reg(&e,0,3); /* host pointer */
+                    if(size==1u) nj_ldrb(&e,1,3,0);
+                    else if(size==2u) nj_ldrh(&e,1,3,0);
+                    else nj_ldr32(&e,1,3,0);
+                }
+                nj_mov_imm(&e,2,imm);
+                unsigned fk,ccop;
+                if(sub==0u){nj_adds3(&e);fk=NJ_FLAG_ARITH;ccop=CC_ADD;}
+                else if(sub==1u){nj_orr1(&e);nj_mov_reg(&e,3,1);fk=NJ_FLAG_LOGIC;ccop=CC_OR;}
+                else if(sub==4u){nj_and1(&e);nj_mov_reg(&e,3,1);fk=NJ_FLAG_LOGIC;ccop=CC_AND;}
+                else if(sub==5u || sub==7u){nj_subs3(&e);fk=NJ_FLAG_ARITH;ccop=CC_SUB;}
+                else {nj_eor1(&e);nj_mov_reg(&e,3,1);fk=NJ_FLAG_LOGIC;ccop=CC_XOR;}
+                if(size==1u) nj_uxtb(&e,3,3); else if(size==2u) nj_uxth(&e,3,3);
+                nj_v8_emit_cc_flush_width(&e,size,fk,ccop);
+                cf_dirty=true;
+                if(write_result) {
+                    if(mod==3u) {
+                        if(size==1u) nj_v6_write_r8(&e,rm);
+                        else if(size==2u) nj_v6_write_r16(&e,rm);
+                        else nj_mov_reg(&e,NJ_GUEST_REG(rm),3);
+                    } else {
+                        if(size==1u) nj_strb(&e,3,0,0);
+                        else if(size==2u) nj_strh(&e,3,0,0);
+                        else nj_str32(&e,3,0,0);
+                    }
+                }
+                if(mod!=3u && !nj_v8_finish_guard(&e,&g,&exits,gip,insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+                pos=immpos+immbytes;done=true;
+            }
+        }
+
+        /* ---- F6/F7 /0 TEST immediate, register or memory ------------- */
+        if (!done && (op==0xf6 || op==0xf7) && op_pos+2u<=avail) {
+            u8 m=code[op_pos+1u]; unsigned mod=m>>6,sub=(m>>3)&7u,rm=m&7u;
+            if(sub==0u) {
+                unsigned size=op==0xf6?1u:(px.op16?2u:4u);
+                unsigned immpos=op_pos+2u; nj_v6_ea_t ea;
+                if(mod!=3u) {
+                    if(!nj_v6_decode_ea(code+op_pos+2u,avail-(op_pos+2u),m,
+                                        px.addr16,px.seg,&ea)) break;
+                    if(!nj_v6_note_seg(cpu,ea.seg,&use_ds,&use_es,&use_ss)) break;
+                    immpos+=ea.used;
+                }
+                if(immpos+size>avail) break;
+                u32 imm=size==1u?code[immpos]:(size==2u?nj_rd16(code+immpos):nj_rd32(code+immpos));
+                nj_v6_guard_t g;memset(&g,0,sizeof(g));
+                if(mod==3u) {
+                    if(size==1u){nj_v6_read_r8(&e,rm);nj_mov_reg(&e,1,3);}
+                    else{nj_mov_reg(&e,1,NJ_GUEST_REG(rm));if(size==2u)nj_uxth(&e,1,1);}
+                } else {
+                    nj_v6_emit_ea(cpu,&e,&ea,true);
+                    if(!nj_v7_emit_linear_to_phys(cpu,&e,size,false,&g)||
+                       !nj_v6_emit_mem_guard(cpu,&e,size,false,&g)){
+                        e.p=emit_before;e.failed=false;pos=ipos;break;
+                    }
+                    nj_v6_host_ptr(cpu,&e);
+                    if(size==1u)nj_ldrb(&e,1,3,0);else if(size==2u)nj_ldrh(&e,1,3,0);else nj_ldr32(&e,1,3,0);
+                }
+                nj_mov_imm(&e,2,imm);nj_and1(&e);nj_mov_reg(&e,3,1);
+                if(size==1u)nj_uxtb(&e,3,3);else if(size==2u)nj_uxth(&e,3,3);
+                nj_v8_emit_cc_flush_width(&e,size,NJ_FLAG_LOGIC,CC_AND);cf_dirty=true;
+                if(mod!=3u&&!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+                pos=immpos+size;done=true;
+            }
+        }
+
+        /* ---- word/dword MOV immediate B8-BF ------------------------ */
+        if(!done && mixed_v86 && op>=0xb8 && op<=0xbf){
+            unsigned sz=px.op16?2u:4u;
+            if(op_pos+1u+sz>avail) break;
+            u32 imm=sz==2u?nj_rd16(code+op_pos+1u):nj_rd32(code+op_pos+1u);
+            nj_mov_imm(&e,3,imm);
+            if(sz==2u)nj_v6_write_r16(&e,op&7u);else nj_mov_reg(&e,NJ_GUEST_REG(op&7u),3);
+            pos=op_pos+1u+sz;done=true;
+        }
+
+        /* ---- byte MOV immediate B0-B7 ------------------------------- */
+        if(!done && op>=0xb0 && op<=0xb7 && op_pos+2u<=avail){
+            nj_mov_imm(&e,3,code[op_pos+1u]);nj_v6_write_r8(&e,op&7u);
+            pos=op_pos+2u;done=true;
+        }
+
+        /* ---- prefixed/unprefixed INC/DEC register ------------------- */
+        if(!done && op>=0x40 && op<=0x4f){
+            if(cf_dirty) break;
+            unsigned r=op&7u;bool dec=op>=0x48;
+            nj_mov_reg(&e,1,NJ_GUEST_REG(r));if(px.op16)nj_uxth(&e,1,1);
+            nj_mov_imm(&e,2,1u);if(dec)nj_subs3(&e);else nj_adds3(&e);
+            if(px.op16)nj_uxth(&e,3,3);
+            if(px.op16)nj_v6_write_r16(&e,r);else nj_mov_reg(&e,NJ_GUEST_REG(r),3);
+            nj_emit_cc_flush(&e,px.op16,NJ_FLAG_INCDEC,
+                             dec?(px.op16?CC_DEC16:CC_DEC32):(px.op16?CC_INC16:CC_INC32));
+            needs_refresh_cf=true;pos=op_pos+1u;done=true;
+        }
+
+        /* ---- MOVZX/MOVSX 0F B6/B7/BE/BF ------------------------- */
+        if (!done && op == 0x0f && op_pos + 2u < avail) {
+            u8 op2 = code[op_pos + 1u];
+            if (op2 == 0xb6 || op2 == 0xb7 || op2 == 0xbe || op2 == 0xbf) {
+                u8 m = code[op_pos + 2u];
+                unsigned mod = m >> 6, reg = (m >> 3) & 7u, rm = m & 7u;
+                unsigned ssize = (op2 == 0xb6 || op2 == 0xbe) ? 1u : 2u;
+                bool sign = op2 == 0xbe || op2 == 0xbf;
+                unsigned ilen = px.pos + 3u;
+
+                if (mod == 3u) {
+                    if (ssize == 1u) nj_v6_read_r8(&e, rm);
+                    else { nj_mov_reg(&e, 3, NJ_GUEST_REG(rm)); nj_uxth(&e,3,3); }
+                    if (sign) { if (ssize == 1u) nj_sxtb(&e,3,3); else nj_sxth(&e,3,3); }
+                    if (px.op16) nj_v6_write_r16(&e, reg);
+                    else nj_mov_reg(&e, NJ_GUEST_REG(reg), 3);
+                    pos = op_pos + 3u; done = true;
+                } else {
+                    nj_v6_ea_t ea;
+                    if (!nj_v6_decode_ea(code + op_pos + 3u, avail - (op_pos + 3u),
+                                         m, px.addr16, px.seg, &ea)) break;
+                    if (!nj_v6_note_seg(cpu, ea.seg, &use_ds, &use_es, &use_ss)) break;
+                    ilen += ea.used;
+                    nj_v6_emit_ea(cpu, &e, &ea, true);
+                    nj_v6_guard_t g; memset(&g,0,sizeof(g));
+                    if (!nj_v7_emit_linear_to_phys(cpu,&e,ssize,false,&g) ||
+                        !nj_v6_emit_mem_guard(cpu,&e,ssize,false,&g)) {
+                        e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break;
+                    }
+                    nj_v6_host_ptr(cpu,&e);
+                    if (ssize == 1u) nj_ldrb(&e,3,3,0); else nj_ldrh(&e,3,3,0);
+                    if (sign) { if (ssize == 1u) nj_sxtb(&e,3,3); else nj_sxth(&e,3,3); }
+                    if (px.op16) nj_v6_write_r16(&e,reg);
+                    else nj_mov_reg(&e,NJ_GUEST_REG(reg),3);
+                    if (!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+                    pos = op_pos + 3u + ea.used; done=true;
+                }
+            }
+        }
+
+        /* ---- C1/D1 register shifts: SHL/SHR/SAR --------------------- */
+        if (!done && (op == 0xc1 || op == 0xd1) && !px.op16 && op_pos + 2u <= avail) {
+            u8 m = code[op_pos + 1u];
+            if ((m >> 6) == 3u) {
+                unsigned sub = (m >> 3) & 7u;
+                unsigned count = op == 0xd1 ? 1u :
+                                 (op_pos + 3u <= avail ? code[op_pos + 2u] : 0u);
+                if ((op == 0xd1 || op_pos + 3u <= avail) &&
+                    nj_v8_emit_shift_imm32(&e, m & 7u, sub, count)) {
+                    if (count & 31u) cf_dirty = true;
+                    pos = op_pos + (op == 0xd1 ? 2u : 3u); done=true;
+                }
+            }
+        }
+
+        /* ---- C6/C7 MOV immediate to register/memory ------------------ */
+        if (!done && (op == 0xc6 || op == 0xc7) && op_pos + 2u <= avail) {
+            u8 m = code[op_pos + 1u];
+            unsigned mod=m>>6, sub=(m>>3)&7u, rm=m&7u;
+            unsigned size = op == 0xc6 ? 1u : (px.op16 ? 2u : 4u);
+            if (sub == 0u) {
+                if (mod == 3u) {
+                    if (op_pos + 2u + size > avail) break;
+                    u32 imm = size==1u ? code[op_pos+2u] :
+                              (size==2u ? nj_rd16(code+op_pos+2u) : nj_rd32(code+op_pos+2u));
+                    if (size==1u) { nj_mov_imm(&e,3,imm); nj_v6_write_r8(&e,rm); }
+                    else if (size==2u) { nj_mov_imm(&e,3,imm); nj_v6_write_r16(&e,rm); }
+                    else nj_mov_imm(&e,NJ_GUEST_REG(rm),imm);
+                    pos=op_pos+2u+size; done=true;
+                } else {
+                    nj_v6_ea_t ea;
+                    if (!nj_v6_decode_ea(code+op_pos+2u,avail-(op_pos+2u),m,
+                                         px.addr16,px.seg,&ea)) break;
+                    if (!nj_v6_note_seg(cpu,ea.seg,&use_ds,&use_es,&use_ss)) break;
+                    unsigned immpos=op_pos+2u+ea.used;
+                    if (immpos+size>avail) break;
+                    u32 imm=size==1u?code[immpos]:(size==2u?nj_rd16(code+immpos):nj_rd32(code+immpos));
+                    nj_v6_emit_ea(cpu,&e,&ea,true);
+                    nj_v6_guard_t g; memset(&g,0,sizeof(g));
+                    if (!nj_v7_emit_linear_to_phys(cpu,&e,size,true,&g) ||
+                        !nj_v6_emit_mem_guard(cpu,&e,size,true,&g)) {
+                        e.p=emit_before;e.failed=false;pos=ipos;break;
+                    }
+                    nj_v6_host_ptr(cpu,&e); nj_mov_imm(&e,1,imm);
+                    if (size==1u) nj_strb(&e,1,3,0); else if(size==2u) nj_strh(&e,1,3,0); else nj_str32(&e,1,3,0);
+                    if (!nj_v8_finish_guard(&e,&g,&exits,gip,insns)) { e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break; }
+                    pos=immpos+size;done=true;
+                }
+            }
+        }
+
+        /* ---- moffs A0-A3 -------------------------------------------- */
+        if (!done && op >= 0xa0 && op <= 0xa3) {
+            unsigned asz = px.addr16 ? 2u : 4u;
+            if (op_pos + 1u + asz > avail) break;
+
+            uword off = asz == 2u ? (uword)nj_rd16(code + op_pos + 1u)
+                                  : (uword)nj_rd32(code + op_pos + 1u);
+            int seg = px.seg >= 0 ? px.seg : SEG_DS;
+            if (!nj_v6_note_seg(cpu, seg, &use_ds, &use_es, &use_ss))
+                break;
+
+            nj_v6_ea_t ea = {
+                .base = -1, .index = -1, .scale = 0, .disp = (s32)off,
+                .seg = seg, .used = asz, .addr16 = px.addr16
+            };
+            unsigned size = (op == 0xa0 || op == 0xa2) ? 1u :
+                            (px.op16 ? 2u : 4u);
+            bool write = op == 0xa2 || op == 0xa3;
+
+            nj_v6_emit_ea(cpu, &e, &ea, true);
+            nj_v6_guard_t g;
+            memset(&g, 0, sizeof(g));
+            if (!nj_v7_emit_linear_to_phys(cpu, &e, size, write, &g) ||
+                !nj_v6_emit_mem_guard(cpu, &e, size, write, &g)) {
+                e.p = emit_before; e.failed = false; pos = ipos;
+                break;
+            }
+            nj_v6_host_ptr(cpu, &e);
+
+            if (op == 0xa0) {
+                nj_ldrb(&e, 3, 3, 0);
+                nj_v6_write_r8(&e, 0);
+            } else if (op == 0xa2) {
+                nj_mov_reg(&e, 0, 3);
+                nj_v6_read_r8(&e, 0);
+                nj_strb(&e, 3, 0, 0);
+            } else if (op == 0xa1) {
+                if (size == 2u) nj_ldrh(&e, 3, 3, 0);
+                else nj_ldr32(&e, 3, 3, 0);
+                if (size == 2u) nj_v6_write_r16(&e, 0);
+                else nj_mov_reg(&e, NJ_GUEST_REG(0), 3);
+            } else {
+                if (size == 2u) nj_strh(&e, NJ_GUEST_REG(0), 3, 0);
+                else nj_str32(&e, NJ_GUEST_REG(0), 3, 0);
+            }
+
+            if (!nj_v8_finish_guard(&e, &g, &exits, gip, insns)) {
+                e.p=emit_before; e.failed=false; exits.n=exits_before; pos=ipos; break;
+            }
+            pos = op_pos + 1u + asz;
+            done = true;
+        }
+
+        /*
+         * Common register/immediate integer instructions use the existing
+         * audited v4 emitter, but v6 flushes lazy CC immediately. That frees
+         * r1-r3 for the next memory guard and lets a trace span arbitrary MOVs.
+         */
+        if (!done && px.pos == 0u && (!trace16 || !mixed_v86)) {
+            nj_body_info_t bi;
+            u16 *before = e.p;
+            int n = nj_translate_body_one(cpu, &e, code + pos, avail - pos,
+                                          false, &bi, NULL);
+            if (n > 0 && !e.failed) {
+                if (bi.uses_es_static) use_es = true;
+                if (bi.flag_kind == NJ_FLAG_INCDEC) {
+                    /* INC/DEC preserves CF. If an earlier native instruction
+                     * left CF lazy, stop here so the next chained block can
+                     * materialize it before executing INC/DEC. */
+                    if (cf_dirty) {
+                        e.p = before; e.failed = false;
+                        n = 0;
+                    } else {
+                        needs_refresh_cf = true;
+                    }
+                } else if (bi.flag_kind != NJ_FLAG_NONE) {
+                    cf_dirty = true;
+                }
+                if (n > 0) {
+                    if (bi.flag_kind != NJ_FLAG_NONE)
+                        nj_emit_cc_flush(&e, trace16, bi.flag_kind, bi.ccop);
+                    pos += (unsigned)n;
+                    done = true;
+                }
+            } else {
+                e.p = before;
+                e.failed = false;
+            }
+        }
+
+        if (!done || e.failed) {
+            e.p = emit_before;
+            e.failed = false;
+            exits.n = exits_before;
+            pos = ipos;
+            break;
+        }
+
+        last_ip = gip;
+        insns++;
+    }
+
+    NJ_V6_STOP[NJ_V6_STOP_TRACES]++;
+    if (insns < NJ_V6_MAX_INSNS && pos < avail) {
+        NJ_V6_STOP[NJ_V6_STOP_STOPPED]++;
+        NJ_V6_STOP[nj_stop_op]++;
+    }
+
+    if (!insns || pos == 0u || e.failed)
+        return NULL;
+
+    /* V8.2 proved that the new real-mode fallback works, but the M602 run
+     * averaged only ~2.4 guest instructions per native entry and was slower
+     * than the interpreter. A single-run 16-bit prefix must therefore retire
+     * at least six instructions to amortize the C<->Thumb dispatcher and
+     * full guest-state prologue/epilogue. V8.3 hardware still averaged only
+     * 2.83 retired guest instructions per broad 16-bit entry at a four-insn
+     * floor. The measured M602 candidates we actually want are 6/7/7-insn
+     * traces, so six rejects the marginal fragments while retaining them.
+     * Fully-native v4/v5 loops are not affected by this filter. */
+    if (trace16 && insns < 6u)
+        return NULL;
+
+    /* Reserve was only for the one shared epilogue; allow it to consume the
+     * remainder of the per-block hard limit now that translation is done. */
+    e.limit=hard_limit;
+    if (!terminal_exit) {
+        /* Normal prefix exit: chain resumes at the first untranslated op. */
+        continuation_ip = start_ip + pos;
+        if (trace16) continuation_ip &= 0xffffu;
+        nj_mov_imm(&e,NJ_ITER_REG,insns);
+        nj_mov_imm(&e,NJ_BUDGET_REG,continuation_ip);
+        nj_mov_imm(&e,2,last_ip);
+    }
+    u16 *common_exit=e.p;
+    nj_v8_emit_shared_exit(&e, mixed_v86 ? false : trace16);
+    if(e.failed || !nj_v8_patch_exit_links(&exits,common_exit)) return NULL;
+
+    uword linear = cpu->seg[SEG_CS].base + start_ip;
+    nj_block_t *b = nj_cache_insert_slot(cpu, linear);
+    memset(b, 0, sizeof(*b));
+    b->tag = linear;
+    b->mmu_key = nj_mmu_key(cpu);
+    b->cs_base = cpu->seg[SEG_CS].base;
+    b->ds_base = cpu->seg[SEG_DS].base;
+    b->es_base = cpu->seg[SEG_ES].base;
+    b->ss_base = cpu->seg[SEG_SS].base;
+    b->ds_sel = cpu->seg[SEG_DS].sel;
+    b->es_sel = cpu->seg[SEG_ES].sel;
+    b->ss_sel = cpu->seg[SEG_SS].sel;
+    b->start_ip = start_ip;
+    b->branch_ip = last_ip;
+    b->fallthrough_ip = continuation_ip;
+    b->byte_len = (u16)pos;
+    b->phys_page = (u16)phys_page;
+    b->code_split = (u16)((code_split && pos > code_split) ? code_split : 0u);
+    b->phys_page2 = b->code_split ? (u16)phys_page2 : 0u;
+    b->insns = (u8)insns;
+    b->code16 = (u8)trace16;
+    b->valid = 1u;
+    b->needs_refresh_cf = (u8)needs_refresh_cf;
+    b->needs_flags_in = 0u;
+    b->single_run = 1u;
+    b->uses_ds_static = use_ds;
+    b->uses_es_static = use_es;
+    b->uses_ss_base = use_ss;
+    b->uses_ss_static = 0u;
+    b->uses_df_static = (u8)use_df;
+    b->df_value = df_value;
+    b->static_write_count = 0u;
+    b->code = e.start;
+    b->arm_halfwords = (u16)(e.p - e.start);
+
+    nj_code_ptr = e.p;
+    nj_page_mark(phys_page);
+    if (b->code_split) nj_page_mark(b->phys_page2);
+    nj_bloom_add(linear);
+    g_njit_compiles++;
+    __asm__ volatile("dsb sy\n\tisb sy" ::: "memory");
+    return b;
+}
+
+static nj_block_t *nj_compile_loop_v45(CPUI386 *cpu, uword start_ip)
+{
+    nj_block_t *b = nj_compile_v45_bpstack(cpu, start_ip);
+    if (b) return b;
+
+    /* v8.7.3: page-bounded native micro-loops are restricted to VM86+paging
+     * inside nj_compile_bytewalk_loop(), so real-mode startup remains exactly
+     * on the proven v8.7.2/v8.6 path. */
+    b = nj_compile_bytewalk_loop(cpu, start_ip);
+    if (b) return b;
+
+    /* Keep fully chained simple loops as the fastest path. */
+    b = nj_compile_loop(cpu, start_ip);
+    if (b) return b;
+
+    /*
+     * Broad v6 fallback: compile as much native prefix as is profitable and
+     * side-exit to the interpreter at the first unsupported instruction.
+     */
+    return nj_compile_v6_trace(cpu, start_ip);
+}
+
+/*
+ * One add pair per native block entry.  A native entry already costs a
+ * cache lookup, a mapping guard and a call into generated code, so this is
+ * noise against it: Doom retires ~3.6 M entries per capture, i.e. well
+ * under 0.05% of that run.
+ */
+static inline __attribute__((always_inline))
+void nj_diag_note(const nj_block_t *b, u32 done)
+{
+    nj_block_t *nb = (nj_block_t *)b;
+#if NJIT_DIAG
+    nb->diag_entries++;
+    nb->diag_insns += done;
+#endif
+}
+
+static int IRAM_ATTR nj_exec_loop(CPUI386 *cpu, const nj_block_t *b, int max_steps)
+{
+    if (unlikely(!b || !b->valid || b->insns == 0 || max_steps < b->insns))
+        return 0;
+
+    /*
+     * INC/DEC needs the old CF materialised; v6 branch-entry blocks need all
+     * lazy flags materialised before reading cpu->flags directly.
+     */
+    if (b->needs_refresh_cf || b->needs_flags_in)
+        refresh_flags(cpu);
+
+    /* v8.5.1: the exact BP-stack block is the only current block with three
+     * static halfword writes.  Under paging, validate its embedded physical
+     * pointers here (not in generic lookup) and set PTE dirty bits once before
+     * native stores.  A TLB miss/remap simply falls back to the interpreter. */
+    if (unlikely((cpu->cr0 & CR0_PG) && b->static_write_count == 3u) &&
+        unlikely(!nj_v45_paged_static_valid(cpu, b, true)))
+        return 0;
+
+    /*
+     * Native static-RAM stores bypass pstore*(), so invalidate only guest code
+     * that actually overlaps those words.  This runs once per native entry,
+     * not once per loop iteration.
+     */
+    for (unsigned i = 0; i < b->static_write_count; ++i)
+        nj_invalidate_exact_range(b->static_write_phys[i], 2u, b);
+
+    typedef u32 (*nj_func_t)(CPUI386 *, u32);
+    nj_func_t fn = (nj_func_t)((uintptr_t)b->code | 1u);
+
+    if (b->single_run) {
+        /*
+         * v6 prefix traces return the exact number of guest instructions that
+         * completed. A memory guard may side-exit before the nominal end.
+         */
+        u32 done = fn(cpu, 1u);
+        nj_xr_note(b, cpu->next_ip, (int)done);
+#if NJIT_EXIT_CHECK
+        if (unlikely(!nj_exit_sane(cpu, b))) return 0;
+#endif
+        if (unlikely(done == 0 || done > (u32)b->insns))
+            return 0;
+        cpu->cycle += done;
+        g_njit_native_iters++;
+        g_njit_insns += done;
+        nj_diag_note(b, done);
+        return (int)done;
+    }
+
+    unsigned max_iters = (unsigned)max_steps / b->insns;
+    if (!max_iters) return 0;
+
+    u32 iters = fn(cpu, max_iters);
+    nj_xr_note(b, cpu->next_ip, (int)iters);
+#if NJIT_EXIT_CHECK
+    if (unlikely(!nj_exit_sane(cpu, b))) return 0;
+#endif
+    if (unlikely(iters == 0 || iters > max_iters))
+        return 0;
+
+    u32 done = iters * (u32)b->insns;
+    cpu->cycle += done;
+    g_njit_native_iters += iters;
+    g_njit_insns += done;
+    nj_diag_note(b, done);
+    return (int)done;
+}
+
+#define NJ_V8_CHAIN_MAX_BLOCKS 32u
+
+/*
+ * Continue directly from one single-run v6/v8 prefix into the next cached (or
+ * on-demand compiled) native block.  nj_try_execute() is still entered only
+ * from a genuinely hot backward branch, so sequential interpreter code keeps
+ * the zero-dispatch-tax property of v4.4.
+ *
+ * Chained blocks intentionally do not increment g_njit_hits: that counter
+ * remains "hot-backedge JIT entries", making native_guest_insns / hits a useful
+ * measure of how much guest work one dispatcher entry now accomplishes.
+ */
+static int IRAM_ATTR nj_exec_chain(CPUI386 *cpu, const nj_block_t *first,
+                                   int max_steps)
+{
+    const nj_block_t *b = first;
+    int total = 0;
+    unsigned n = 0;
+
+    g_njit_ch[NJCH_CALLS]++;
+
+    for (; n < NJ_V8_CHAIN_MAX_BLOCKS && b; ++n) {
+        int left = max_steps - total;
+        if (left <= 0) { g_njit_ch[NJCH_BRK_BUDGET]++; break; }
+
+        bool may_continue = b->single_run != 0;
+        unsigned nominal = b->insns;
+        int done = nj_exec_loop(cpu, b, left);
+        if (done <= 0) { g_njit_ch[NJCH_BRK_ZERO]++; break; }
+        total += done;
+        g_njit_ch[NJCH_BLOCKS]++;
+
+        /* A guarded memory side-exit can complete only a prefix of b.  Let
+         * the interpreter execute the faulting/missing-TLB instruction once
+         * rather than immediately chaining back into another guard.
+         *
+         * V8_10_DIAG: the three conditions are separated only so the counters
+         * can tell them apart.  The break decision is bit-for-bit the same. */
+        if (!may_continue) { g_njit_ch[NJCH_BRK_NOT_SINGLE]++; break; }
+        if ((unsigned)done != nominal) {
+            g_njit_ch[NJCH_BRK_PARTIAL]++;
+            g_njit_ch[NJCH_PARTIAL_LOST] += nominal - (unsigned)done;
+            {
+                uword nip = cpu->next_ip;
+                if (cpu->code16) nip &= 0xffffu;
+                if (nip >= b->start_ip &&
+                    nip < (uword)b->start_ip + b->byte_len) {
+                    g_njit_ch[NJCH_PARTIAL_INSIDE]++;
+                } else {
+                    g_njit_ch[NJCH_PARTIAL_OUTSIDE]++;
+                    /* Bloom, not nj_lookup: two bit tests with no side
+                     * effects.  A full lookup here would roughly double the
+                     * dispatcher's lookup traffic and perturb the very MIPS
+                     * figure this build exists to measure.  False positives
+                     * make READY a slight over-estimate. */
+                    if (nj_bloom_maybe(cpu->seg[SEG_CS].base + nip))
+                        g_njit_ch[NJCH_PARTIAL_READY]++;
+                }
+            }
+            break;
+        }
+        if (total >= max_steps) { g_njit_ch[NJCH_BRK_BUDGET]++; break; }
+        if (NJ_SINGLE_STEP_IMPLEMENTED && (cpu->flags & TF)) break;
+
+        uword ip = cpu->next_ip;
+        if (cpu->code16) ip &= 0xffffu;
+        uword linear = cpu->seg[SEG_CS].base + ip;
+
+        b = nj_lookup(cpu, ip);
+        if (b) continue;
+
+        /* This continuation is downstream of a proven-hot backedge, so it is
+         * profitable to compile immediately.  Remember unsupported heads in
+         * the existing negative hot cache to avoid retrying every iteration. */
+        uword key = nj_hot_context_key(cpu, linear);
+        nj_hot_t *h = &nj_hot[nj_hash(key, NJ_HOT_BITS)];
+        if (h->key == key && h->seen == 0xff &&
+            !nj_reject_retry_due(h)) {
+            g_njit_ch[NJCH_BRK_NEGCACHE]++;
+            b = NULL;
+            break;
+        }
+
+        b = nj_compile_loop_v45(cpu, ip);
+        if (!b) {
+            g_njit_ch[NJCH_BRK_COMPILE]++;
+            nj_reject(cpu, linear, ip);
+            break;
+        }
+    }
+
+    if (n >= NJ_V8_CHAIN_MAX_BLOCKS) g_njit_ch[NJCH_BRK_MAXBLOCKS]++;
+
+    return total;
+}
+
+/*
+ * FRANK_NATIVE_JIT_V44_SAMPLED_DISCOVERY
+ *
+ * v4.3 still paid a direct-mapped negative-cache hash/lookup on every taken
+ * backward branch. v4.4 keeps compiled targets fast, but samples discovery for
+ * everything else.
+ */
+/*
+ * Deliberately NOT IRAM_ATTR: sampled discovery is reached on one backedge
+ * in NJ_DISCOVERY_MASK+1, so executing it from XIP-cached flash costs
+ * almost nothing, and the ~620 bytes it returns to .data are what keep
+ * nj_try_execute() inlined without crossing the 4 KB boundary described
+ * above.
+ */
+static int nj_try_execute_slow(CPUI386 *cpu, int max_steps,
+                               uword ip, uword linear)
+{
+    g_njit_misses++;
+
+    if (!nj_hot_enough(cpu, linear)) {
+        g_njit_hotwait++;
+        return 0;
+    }
+
+    nj_block_t *b = nj_compile_loop_v45(cpu, ip);
+    if (!b) {
+        nj_reject(cpu, linear, ip);
+        return 0;
+    }
+    return nj_exec_chain(cpu, b, max_steps);
+}
+
+/*
+ * always_inline, restored.
+ *
+ * v8.9.2 made this a single out-of-line RAM function to claw back .data,
+ * and it cost real throughput: the deterministic Symantec real-mode
+ * control went 345 -> 322 points and its reported CPU clock 59 -> 49 MHz.
+ * A call and return on a taken backedge is only ~0.2% of the window, so
+ * that is not the cost - what is, is that cpu_exec1() must now spill its
+ * dispatch-loop state around 13 call sites in its hottest loop.
+ *
+ * The .data budget is paid for in nj_try_execute_slow() instead, which is
+ * reached on one backedge in 256 and is therefore the right place to give
+ * up RAM residency.  The note below is kept because the cliff it
+ * describes is still there.
+ *
+ * Previously:
+ *
+ * cpu_exec1() is __not_in_flash(), so all 13 NJ_HOT_BACKEDGE expansions of
+ * this function were sitting in .data, and .data ended 8 bytes below the
+ * 4 KB boundary .bss is aligned to.  That made any growth here cost 4096
+ * bytes of link padding out of the malloc heap, which is what made v8.9
+ * panic with "Out of memory" in pc_new() and never bring HDMI up.
+ *
+ * One RAM-resident copy instead of thirteen removes that cliff entirely.
+ * The cost is a call and return on a taken backward branch only, against
+ * roughly 265 host cycles per guest instruction on this board - far below
+ * the noise floor of the measurements this is used for.
+ */
+static inline __attribute__((always_inline))
+int nj_try_execute(CPUI386 *cpu, int max_steps)
+{
+    /* See FRANK_TF_V88.  An inert TF used to disable the JIT entirely
+     * under EMM386; mode_flags in the stats dump still shows whether the
+     * guest is leaving TF set. */
+#if NJ_SINGLE_STEP_IMPLEMENTED
+    if (unlikely(cpu->flags & TF)) return 0;
+#endif
+
+    /*
+     * Keep the shared guard trampolines paired with the mode they were built
+     * for, before any compiled block can call them.
+     *
+     * They bake in the paging mode and the CPL, which is safe per block
+     * because nj_block_matches() compares mmu_key - but the trampolines are
+     * global.  With EMM386 the guest crosses between real mode and V86
+     * constantly, and an old block becoming valid again would otherwise call
+     * trampolines built for the other mode: a TLB walk over a real-mode
+     * address, a wild pointer, and a guest that triple-faults into a boot
+     * loop.  That is exactly what happened the first time this was flashed.
+     *
+     * Refreshing here is enough: a block cannot change the mode itself (no
+     * far jump or MOV CR0 is ever compiled), so the key cannot move underneath
+     * a block that has already started.
+     */
+#if NJIT_EXIT_CHECK
+    if (unlikely(nj_disabled)) return 0;
+#endif
+    nj_guards_refresh(cpu);
+
+    uword ip = cpu->next_ip;
+    if (cpu->code16) ip &= 0xffffu;
+
+    const uword linear = cpu->seg[SEG_CS].base + ip;
+
+    /*
+     * Full cache lookup only when both 128-bit bloom probes match. This is a cheap
+     * positive filter; stale bits are harmless because the cache entry is
+     * still fully validated below.
+     */
+    if (unlikely(nj_bloom_maybe(linear))) {
+        nj_block_t *b = nj_lookup_linear(cpu, linear);
+        if (likely(b)) {
+            g_njit_hits++;
+            return nj_exec_chain(cpu, b, max_steps);
+        }
+    }
+
+    /*
+     * Discovery is deliberately sparse. A truly hot loop still reaches the
+     * two-step threshold after roughly 768 executions, while unsupported
+     * backedges pay almost no JIT tax.
+     */
+    if (likely(((++nj_discovery_tick) & NJ_DISCOVERY_MASK) != 0u))
+        return 0;
+
+    return nj_try_execute_slow(cpu, max_steps, ip, linear);
+}
+
+#endif /* NATIVE_JIT */
+
 static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 {
 #ifndef I386_OPT2
@@ -3997,12 +11590,22 @@ static bool IRAM_ATTR_CPU_EXEC1 cpu_exec1(CPUI386 *cpu, int stepcount)
 	u8 modrm;
 	OptAddr meml;
 	uword addr;
-	for (; stepcount > 0; stepcount--) {
+	for (; stepcount > 0; ) {
+#if BLOCK_JIT
+	int bj_done = bj_try_execute(cpu, stepcount);
+	if (likely(bj_done > 0)) {
+		stepcount -= bj_done;
+		continue;
+	}
+#endif
+	stepcount--;
 	bool code16 = cpu->code16;
 	uword sp_mask = cpu->sp_mask;
 
 	if (code16) cpu->next_ip &= 0xffff;
 	cpu->ip = cpu->next_ip;
+	frank_diag_ip(cpu->ip, cpu->seg[SEG_CS].base, REGi(4) & (uint32_t)cpu->sp_mask);
+	frank_diag_shadow(cpu->phys_mem);
 #if BB_PROFILE
 	{ static uint32_t bb_prev; bb_note(cpu->ip, bb_prev); bb_prev = cpu->ip; }
 #endif
@@ -5120,10 +12723,12 @@ static bool pmret(CPUI386 *cpu, bool opsz16, int off, bool isiret)
 
 void cpui386_step(CPUI386 *cpu, int stepcount)
 {
+	frank_diag_trace(cpu->seg[SEG_CS].base, cpu->ip);
 	if ((cpu->flags & IF) && cpu->intr) {
 		cpu->intr = false;
 		cpu->halt = false;
 		int no = cpu->cb.pic_read_irq(cpu->cb.pic);
+		g_wl_hw_irq++;
 		cpu->ip = cpu->next_ip;
 		if (!call_isr(cpu, no, false, 1)) {
 			if (!call_isr(cpu, EX_DF, true, 1)) {
@@ -5140,6 +12745,11 @@ void cpui386_step(CPUI386 *cpu, int stepcount)
 
 	if (!cpu_exec1(cpu, stepcount)) {
 		bool pusherr = false;
+		switch (cpu->excno) {
+		case EX_PF: g_wl_exc_pf++; break;
+		case EX_GP: g_wl_exc_gp++; break;
+		default:    g_wl_exc_other++; break;
+		}
 		switch (cpu->excno) {
 		case EX_DF: case EX_TS: case EX_NP: case EX_SS: case EX_GP:
 		case EX_PF:
@@ -5173,6 +12783,8 @@ u16 cpu_getax(CPUI386 *cpu)
 
 void cpu_setexc(CPUI386 *cpu, int excno, uword excerr)
 {
+	frank_diag_exc(cpu->seg[SEG_CS].base, cpu->ip, (uint32_t)excno,
+	               (uint32_t)excerr, (uint32_t)cpu->flags);
 	cpu->excno = excno;
 	cpu->excerr = excerr;
 }
@@ -5275,6 +12887,22 @@ void cpui386_set_gpr(CPUI386 *cpu, int i, u32 val)
 long IRAM_ATTR cpui386_get_cycle(CPUI386 *cpu)
 {
 	return cpu->cycle;
+}
+
+/*
+ * FRANK_WORKLOAD_PROFILE_V88: mode snapshot taken when the stats file is
+ * written.  Together with the backedge split it distinguishes "the guest was
+ * not in VM86+paging during the window" from "it was, and the JIT still saw
+ * nothing worth compiling" - two situations that every previous capture in
+ * this sequence left indistinguishable.
+ */
+void cpui386_diag_mode(CPUI386 *cpu, u32 out[5])
+{
+	out[0] = (u32)cpu->cr0;
+	out[1] = (u32)cpu->flags;
+	out[2] = (u32)cpu->cr3;
+	out[3] = (u32)cpu->cpl;
+	out[4] = (u32)cpu->code16;
 }
 
 CPUI386 *cpui386_new(int gen, char *phys_mem, long phys_mem_size, CPU_CB **cb)

@@ -1,5 +1,11 @@
 # FRANK 386
 
+> This repository is a performance- and compatibility-focused downstream
+> fork of [rh1tech/frank-386](https://github.com/rh1tech/frank-386), developed
+> and hardware-tested primarily on the Waveshare RP2350-PiZero (Z2). The
+> upstream project, original authors and third-party components remain credited
+> in [LICENSE](LICENSE).
+
 Official page: **[frank.rh1.tech](https://frank.rh1.tech/)** — hub for all FRANK boards and firmware.
 
 i386 PC Emulator for RP2350 (Raspberry Pi Pico 2) with VGA/HDMI output, SD card storage, PS/2 and USB keyboard/mouse, NES gamepad, and audio output.

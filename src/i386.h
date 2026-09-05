@@ -117,7 +117,10 @@ struct CPUI386 {
 
 	u8 *phys_mem;
 	u32 prefetch_base;
-	u8  prefetch[16] __attribute__((aligned(4)));
+	/* Instruction prefetch line.  32 bytes, not 16: the RP2350's XIP cache
+	 * line is 32 bytes, so a wider fill costs the same one miss into PSRAM
+	 * and halves how often peek8_slow() has to refill. */
+	u8  prefetch[32] __attribute__((aligned(4)));
 	long phys_mem_size;
 
 	long cycle;

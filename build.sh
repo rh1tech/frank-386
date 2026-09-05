@@ -9,6 +9,7 @@
 #   --vga            Force VGA output (instead of HDMI)
 #   --usb-hid        Enable USB HID keyboard (disables USB CDC)
 #   --debug          Enable debug output
+#   --jit/--no-jit   Native Thumb-2 JIT (NATIVE_JIT), default ON
 #   -clean           Clean build directory first
 #   -h, --help       Show this help
 #
@@ -32,6 +33,7 @@ REMOTE="OFF"
 PINCLK="OFF"
 CODEPROF="OFF"
 PCSAMPLE="OFF"
+NATIVEJIT="ON"
 BBPROF="OFF"
 DISKCACHE="OFF"
 AUTOTYPE=""
@@ -132,6 +134,14 @@ while [[ $# -gt 0 ]]; do
             CODEPROF="ON"
             shift
             ;;
+        --jit)
+            NATIVEJIT="ON"
+            shift
+            ;;
+        --no-jit)
+            NATIVEJIT="OFF"
+            shift
+            ;;
         --pc-sample)
             PCSAMPLE="ON"
             shift
@@ -203,6 +213,7 @@ CMAKE_ARGS+=("-DREMOTE_MEM=$REMOTE")
 CMAKE_ARGS+=("-DPIN_CLOCKS=$PINCLK")
 CMAKE_ARGS+=("-DCODE_PROFILE=$CODEPROF")
 CMAKE_ARGS+=("-DPC_SAMPLE=$PCSAMPLE")
+CMAKE_ARGS+=("-DNATIVE_JIT=$NATIVEJIT")
 CMAKE_ARGS+=("-DBB_PROFILE=$BBPROF")
 CMAKE_ARGS+=("-DDISK_CACHE=$DISKCACHE")
 CMAKE_ARGS+=("-DAUTOTYPE=$AUTOTYPE")
@@ -231,5 +242,9 @@ if [[ $CLEAN -eq 1 ]] || [[ ! -d ./build ]]; then
 fi
 
 cd build
-cmake "${CMAKE_ARGS[@]}" ..
-make -j$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
+CMAKE_ARGS+=(
+    "-Dpioasm_DIR=C:/Users/janbr/.pico-sdk/tools/2.2.0/pioasm"
+    "-Dpicotool_DIR=C:/Users/janbr/.pico-sdk/picotool/2.2.0-a4/picotool"
+)
+cmake -G Ninja "${CMAKE_ARGS[@]}" ..
+cmake --build . --parallel 8
