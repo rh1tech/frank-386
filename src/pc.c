@@ -454,6 +454,7 @@ static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int coun
 
 #if EMULATE_LTEMS
 uint8_t ems_pages[4] = {0};
+uint32_t ems_backing_linear_base = 0;
 
 inline static void out_ems(const uint16_t port, const uint8_t data) {
     ems_pages[port & 3] = data;
@@ -1278,20 +1279,6 @@ void load_bios_and_reset(PC *pc)
 #endif
 }
 
-static long parse_mem_size(const char *value)
-{
-	int len = strlen(value);
-	long a = atol(value);
-	if (len) {
-		switch (value[len - 1]) {
-		case 'G': a *= 1024 * 1024 * 1024; break;
-		case 'M': a *= 1024 * 1024; break;
-		case 'K': a *= 1024; break;
-		}
-	}
-	return a;
-}
-
 int parse_conf_ini(void* user, const char* section,
 		   const char* name, const char* value)
 {
@@ -1305,7 +1292,7 @@ int parse_conf_ini(void* user, const char* section,
 		} else if (NAME("vga_bios")) {
 			conf->vga_bios = strdup(value);
 		} else if (NAME("mem_size") || NAME("mem")) {
-			conf->mem_size = parse_mem_size(value);
+			/* Obsolete: guest RAM follows physically detected QSPI PSRAM. */
 		} else if (NAME("cpu")) {
 			conf->cpu_gen = atoi(value);
 		} else if (NAME("hda")) {

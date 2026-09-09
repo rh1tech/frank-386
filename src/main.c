@@ -59,6 +59,7 @@
 #include "bbprofile.h"
 #include "diskcache.h"
 #include "gameport.h"
+#include "ems.h"
 
 //=============================================================================
 // Version Information
@@ -567,11 +568,18 @@ static void platform_poll(void *opaque) {
 static void load_default_config(void) {
     memset(&config, 0, sizeof(config));
 
-    // Default memory configuration
+    // Guest RAM follows physically detected QSPI PSRAM.
+    size_t detected_psram = psram_detected_size();
 #if EMULATE_LTEMS
-    config.mem_size = (EMU_MEM_SIZE_MB - 2) * 1024 * 1024;
+    if (detected_psram >= (2u << 20)) {
+        config.mem_size = detected_psram - (2u << 20);
+        ems_backing_linear_base = (uint32_t)config.mem_size;
+    } else {
+        config.mem_size = detected_psram;
+        ems_backing_linear_base = 0;
+    }
 #else
-    config.mem_size = EMU_MEM_SIZE_MB * 1024 * 1024;
+    config.mem_size = detected_psram;
 #endif
     config.vga_mem_size = EMU_VGA_MEM_SIZE_KB * 1024;
 
@@ -822,12 +830,14 @@ static bool init_hardware(void) {
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
 
-    if (!psram_test()) {
-        printf("ERROR: PSRAM test failed!\n");
+    size_t detected_psram = psram_detect_size();
+    if (detected_psram < (1u << 20)) {
+        printf("ERROR: QSPI PSRAM not detected or smaller than 1 MiB!\n");
         // Can't show visual error - VGA not ready yet
         return false;
     }
-    DBG_PRINT("  PSRAM test passed (8MB)\n");
+    DBG_PRINT("  QSPI PSRAM detected: %lu MiB\n",
+              (unsigned long)(detected_psram >> 20));
 
     // Mount SD before video/audio so persistent output overrides can be read
     // before either backend claims its pins.
@@ -932,6 +942,17 @@ static bool init_hardware(void) {
 #endif
     }
 
+    /* The configured PSRAM clock is now final. Re-detect at that frequency so
+     * the capacity used by the emulator is validated under the actual runtime
+     * timing rather than only at the build-time default. */
+    detected_psram = psram_detect_size();
+    if (detected_psram < (1u << 20)) {
+        printf("ERROR: QSPI PSRAM failed detection at configured frequency!\n");
+        return false;
+    }
+    DBG_PRINT("  QSPI PSRAM usable: %lu MiB at %d MHz\n",
+              (unsigned long)(detected_psram >> 20), config_get_psram_freq());
+
 #ifdef BOARD_HAS_PS2
     // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
@@ -994,17 +1015,9 @@ static bool init_emulator(void) {
     DBG_PRINT("  Floppy A: %s\n", config.fdd[0] ? config.fdd[0] : "(none)");
     DBG_PRINT("  Floppy B: %s\n", config.fdd[1] ? config.fdd[1] : "(none)");
 
-    // Calculate total PSRAM needed
-    size_t total_psram = config.mem_size;
-    DBG_PRINT("  PSRAM needed: %lu KB (available: %lu KB)\n",
-           (unsigned long)(total_psram / 1024),
-           (unsigned long)(PSRAM_SIZE_BYTES / 1024));
-
-           if (total_psram > PSRAM_SIZE_BYTES) {
-        printf("WARNING: Reducing memory to fit in PSRAM\n");
-        config.mem_size = PSRAM_SIZE_BYTES;
-        DBG_PRINT("  Adjusted memory: %ld MB\n", config.mem_size / (1024 * 1024));
-    }
+    DBG_PRINT("  QSPI PSRAM: %lu KB; guest RAM: %lu KB\n",
+              (unsigned long)(psram_get_size() / 1024),
+              (unsigned long)(config.mem_size / 1024));
 
 #if REMOTE_MEM
     /* Claim a window of the slave's SRAM immediately above local RAM.
@@ -1070,7 +1083,6 @@ static bool init_emulator(void) {
 
     // Initialize config save module with current values from PCConfig
     // (these override INI values if not present in [frank-386] section)
-    config_set_mem_size_mb(config.mem_size / (1024 * 1024));
     config_set_cpu_gen(config.cpu_gen);
     config_set_fpu(config.fpu);
     config_set_redirector(config.redirector);

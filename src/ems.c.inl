@@ -1,8 +1,9 @@
 #if EMULATE_LTEMS
 #include <stdint.h>
 // The Lo-tech EMS board driver is hardcoded to 2MB.
-#define EMS_PSRAM_OFFSET ((EMU_MEM_SIZE_MB * 1024 - 2048ul) << 10)
-#define EMS ((uint8_t*)0x11000000 + EMS_PSRAM_OFFSET)
+// Its backing store starts immediately above detected guest RAM.
+extern uint32_t ems_backing_linear_base;
+#define EMS ((uint8_t*)0x11000000 + ems_backing_linear_base)
 
 #define EMS_START (0xD0000ul)
 #define EMS_END   (0xE0000ul)

@@ -10,6 +10,7 @@
 #include "hardware/structs/xip_ctrl.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 #include <string.h>
 
@@ -103,6 +104,73 @@ void __no_inline_not_in_flash_func(psram_init_with_freq)(uint cs_pin, int freq_m
  */
 void __no_inline_not_in_flash_func(psram_init)(uint cs_pin) {
     psram_init_with_freq(cs_pin, PSRAM_MAX_FREQ_MHZ);
+}
+
+static size_t detected_psram_size;
+
+/* RP2350 XIP M1 (PSRAM) uncached/no-allocate alias.
+ * Cached M1 starts at 0x11000000; the equivalent uncached XIP window is
+ * 0x15000000. Capacity detection must bypass the cache, otherwise aliased
+ * addresses can look independent while their cache lines are resident. */
+#define PSRAM_UNCACHED_BASE_ADDR 0x15000000u
+
+size_t psram_detected_size(void) {
+    return detected_psram_size;
+}
+
+size_t psram_usable_size(void) {
+    return detected_psram_size;
+}
+
+size_t psram_detect_size(void) {
+    volatile uint32_t *base = (volatile uint32_t *)PSRAM_UNCACHED_BASE_ADDR;
+    static const size_t boundaries[] = {
+        1u << 20, 2u << 20, 4u << 20, 8u << 20
+    };
+    const uint32_t mark0 = 0x13579BDFu;
+    const uint32_t mark1 = 0x2468ACE0u;
+    uint32_t old0 = base[0];
+
+    base[0] = mark0;
+    __dmb();
+    if (base[0] != mark0) {
+        base[0] = old0;
+        __dmb();
+        detected_psram_size = 0;
+        return 0;
+    }
+    base[0] = old0;
+    __dmb();
+
+    /* Smaller serial PSRAM devices alias at their capacity boundary.
+     * Checking 1/2/4/8 MiB identifies 1/2/4/8/16 MiB without relying on
+     * a board-specific compile-time capacity. */
+    for (unsigned i = 0; i < sizeof(boundaries) / sizeof(boundaries[0]); ++i) {
+        size_t bytes = boundaries[i];
+        volatile uint32_t *probe =
+            (volatile uint32_t *)((uintptr_t)PSRAM_UNCACHED_BASE_ADDR + bytes);
+        old0 = base[0];
+        uint32_t oldp = probe[0];
+
+        base[0] = mark0;
+        __dmb();
+        probe[0] = mark1;
+        __dmb();
+
+        if (base[0] == mark1) {
+            base[0] = old0;
+            __dmb();
+            detected_psram_size = bytes;
+            return bytes;
+        }
+
+        probe[0] = oldp;
+        base[0] = old0;
+        __dmb();
+    }
+
+    detected_psram_size = 16u << 20;
+    return detected_psram_size;
 }
 
 /**

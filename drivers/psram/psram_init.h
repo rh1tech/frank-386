@@ -44,6 +44,15 @@ void psram_init_with_freq(uint cs_pin, int freq_mhz);
  */
 bool psram_test(void);
 
+/** Detect physical capacity: 1, 2, 4, 8 or 16 MiB; 0 means unusable. */
+size_t psram_detect_size(void);
+
+/** Physical capacity found by the most recent detection. */
+size_t psram_detected_size(void);
+
+/** Physical capacity available to the emulator. */
+size_t psram_usable_size(void);
+
 /**
  * Get pointer to PSRAM memory region.
  *
@@ -59,8 +68,7 @@ static inline void *psram_get_ptr(void) {
  * @return Size of PSRAM in bytes
  */
 static inline size_t psram_get_size(void) {
-    /// TODO: implment real chip size detection
-    return PSRAM_SIZE_BYTES;
+    return psram_usable_size();
 }
 
 #endif // PSRAM_INIT_H

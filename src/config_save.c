@@ -17,7 +17,6 @@
 #include "pc.h"
 
 // Current configuration values (minimal storage)
-static int cfg_mem_mb = 8;
 static int cfg_cpu_gen = 4;
 static int cfg_fpu = 0;
 static int cfg_redirector = 1;
@@ -63,14 +62,6 @@ bool config_ensure_dir(void) {
 void config_init_from_current(void) {
     // These will be set from PCConfig in main.c
     cfg_changed = false;
-}
-
-int config_get_mem_size_mb(void) { return cfg_mem_mb; }
-void config_set_mem_size_mb(int mb) {
-    if (cfg_mem_mb != mb) {
-        cfg_mem_mb = mb;
-        cfg_changed = true;
-    }
 }
 
 int config_get_cpu_gen(void) { return cfg_cpu_gen; }
@@ -272,10 +263,6 @@ bool config_save_all(void) {
 
     // Write [pc] section
     write_line(&fp, "[pc]\n");
-
-    // Memory
-    snprintf(line, sizeof(line), "mem=%dM\n", cfg_mem_mb);
-    write_line(&fp, line);
 
 //    snprintf(line, sizeof(line), "vga_mem=%dK\n", cfg_vga_kb);
 //    write_line(&fp, line);

@@ -24,9 +24,6 @@ bool config_save_all(void);
 bool config_save_disks(void);
 
 // Get/set configuration values (stored in memory until saved)
-int config_get_mem_size_mb(void);
-void config_set_mem_size_mb(int mb);
-
 int config_get_cpu_gen(void);
 void config_set_cpu_gen(int gen);
 
