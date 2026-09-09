@@ -83,6 +83,10 @@ void config_set_voltage(int v);
 int config_get_mouse_invert_y(void);
 void config_set_mouse_invert_y(int enabled);
 
+/* Host mouse speed index: 0..8, default 4 (1x). Applied immediately. */
+int config_get_mouse_sensitivity(void);
+void config_set_mouse_sensitivity(int index);
+
 // Check if hardware settings changed (requires reboot)
 bool config_hw_changed(void);
 

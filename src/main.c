@@ -434,6 +434,37 @@ static bool process_keycode(int is_down, int keycode) {
     return true;  // Pass to emulator
 }
 
+typedef struct {
+    int32_t rem_x, rem_y;
+    int setting;
+} MouseScaleState;
+
+static void mouse_scale_delta(MouseScaleState *st, int16_t *dx, int16_t *dy)
+{
+    static const uint8_t num[9] = { 1, 1, 1, 2, 1, 3, 2, 3, 4 };
+    static const uint8_t den[9] = { 4, 3, 2, 3, 1, 2, 1, 1, 1 };
+    int setting = config_get_mouse_sensitivity();
+
+    if (setting < 0 || setting > 8)
+        setting = 4;
+    if (st->setting != setting) {
+        st->setting = setting;
+        st->rem_x = st->rem_y = 0;
+    }
+
+    if (setting == 4)
+        return;
+
+    int32_t ax = st->rem_x + (int32_t)*dx * num[setting];
+    int32_t ay = st->rem_y + (int32_t)*dy * num[setting];
+    int32_t ox = ax / den[setting];
+    int32_t oy = ay / den[setting];
+    st->rem_x = ax - ox * den[setting];
+    st->rem_y = ay - oy * den[setting];
+    *dx = (int16_t)ox;
+    *dy = (int16_t)oy;
+}
+
 static void poll_keyboard(void) {
     int is_down, keycode;
 
@@ -456,7 +487,9 @@ static void poll_keyboard(void) {
         uint8_t buttons;
         if (ps2_mouse_get_state(&dx, &dy, &dz, &buttons)) {
             if (pc->mouse) {
+                static MouseScaleState mouse_scale = { .setting = -1 };
                 int16_t my = config_get_mouse_invert_y() ? -dy : dy;
+                mouse_scale_delta(&mouse_scale, &dx, &my);
                 ps2_mouse_event(pc->mouse, dx, my, dz, buttons);
             }
         }
@@ -482,6 +515,8 @@ static void poll_keyboard(void) {
         uint8_t buttons;
         if (usbmouse_get_event(&dx, &dy, &dz, &buttons)) {
             if (pc->mouse) {
+                static MouseScaleState mouse_scale = { .setting = -1 };
+                mouse_scale_delta(&mouse_scale, &dx, &dy);
                 ps2_mouse_event(pc->mouse, dx, dy, dz, buttons);
             }
         }
@@ -529,21 +564,44 @@ static void poll_keyboard(void) {
 #ifdef NESPAD_GPIO_CLK
     if (pc && pc->mouse && !pc->paused && config_get_nes_mouse()) {
         static uint8_t prev_buttons = 0;
+        static uint64_t next_move_us = 0;
         nespad_read();
         uint32_t pad = nespad_state;
         int16_t dx = 0, dy = 0;
         uint8_t buttons = 0;
-        // D-pad -> mouse movement (2 pixels per poll)
-        // Note: ps2_mouse_event negates dy, so positive = screen up
-        if (pad & DPAD_LEFT)  dx = -1;
-        if (pad & DPAD_RIGHT) dx =  1;
-        if (pad & DPAD_UP)    dy = -1;
-        if (pad & DPAD_DOWN)  dy =  1;
+
+        /*
+         * A pad is level-sensing, unlike a real mouse which supplies motion
+         * deltas at its own report rate.  Never turn one held D-pad direction
+         * into one mickey per emulator poll: platform_poll() frequency follows
+         * emulation speed and can be thousands of calls per second.
+         *
+         * 60 mickeys/s at 1x keeps NES-mouse motion independent of the
+         * emulator poll rate. The common host sensitivity scaler is applied
+         * afterwards, so 1/4x..4x works for the pad as well.
+         */
+        const uint32_t move_mask = DPAD_LEFT | DPAD_RIGHT | DPAD_UP | DPAD_DOWN;
+        if (pad & move_mask) {
+            uint64_t now = time_us_64();
+            if (!next_move_us || now >= next_move_us) {
+                if (pad & DPAD_LEFT)  dx = -1;
+                if (pad & DPAD_RIGHT) dx =  1;
+                if (pad & DPAD_UP)    dy = -1;
+                if (pad & DPAD_DOWN)  dy =  1;
+                next_move_us = now + 16667u; /* ~60 Hz */
+            }
+        } else {
+            next_move_us = 0;
+        }
+
         // B = left button, A = right button
         if (pad & DPAD_B) buttons |= 0x01;  // left
         if (pad & DPAD_A) buttons |= 0x02;  // right
-        // Send event if there's movement, button press, or button release
-        if (dx || dy || buttons || prev_buttons) {
+
+        // Button transitions stay immediate even between movement ticks.
+        if (dx || dy || buttons != prev_buttons) {
+            static MouseScaleState mouse_scale = { .setting = -1 };
+            mouse_scale_delta(&mouse_scale, &dx, &dy);
             ps2_mouse_event(pc->mouse, dx, dy, 0, buttons);
         }
         prev_buttons = buttons;

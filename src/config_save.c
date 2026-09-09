@@ -40,6 +40,7 @@ static int cfg_flash_freq = FLASH_MAX_FREQ_MHZ;
 static int cfg_volume = 15;
 static int cfg_voltage = -1;  /* -1 = auto (by cpu_freq) */
 static int cfg_mouse_invert_y = 0;
+static int cfg_mouse_sensitivity = 4;  /* 0..8; 4 = 1x */
 static bool cfg_hw_changed = false;
 
 extern PC *pc;
@@ -240,6 +241,16 @@ void config_set_mouse_invert_y(int enabled) {
     }
 }
 
+int config_get_mouse_sensitivity(void) { return cfg_mouse_sensitivity; }
+void config_set_mouse_sensitivity(int index) {
+    if (index < 0) index = 0;
+    if (index > 8) index = 8;
+    if (cfg_mouse_sensitivity != index) {
+        cfg_mouse_sensitivity = index;
+        cfg_changed = true;
+    }
+}
+
 bool config_hw_changed(void) { return cfg_hw_changed; }
 bool config_has_changes(void) { return cfg_changed; }
 void config_clear_changes(void) { cfg_changed = false; cfg_hw_changed = false; }
@@ -343,6 +354,8 @@ bool config_save_all(void) {
     write_line(&fp, line);
     snprintf(line, sizeof(line), "mouse_invert_y=%d\n", cfg_mouse_invert_y);
     write_line(&fp, line);
+    snprintf(line, sizeof(line), "mouse_sensitivity=%d\n", cfg_mouse_sensitivity);
+    write_line(&fp, line);
 
     f_close(&fp);
     cfg_changed = false;
@@ -397,6 +410,9 @@ int parse_frank_386_ini(void* user, const char* section,
         cfg_voltage = atoi(value);
     } else if (strcmp(name, "mouse_invert_y") == 0) {
         cfg_mouse_invert_y = atoi(value);
+    } else if (strcmp(name, "mouse_sensitivity") == 0) {
+        int v = atoi(value);
+        cfg_mouse_sensitivity = v < 0 ? 0 : (v > 8 ? 8 : v);
     }
 
     return 1;  // Success

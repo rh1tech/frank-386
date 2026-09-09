@@ -692,23 +692,32 @@ void ps2_keyboard_set_translation(void *opaque, int mode)
     s->translate = mode;
 }
 
-static void ps2_mouse_send_packet(PS2MouseState *s)
+static int ps2_scale_21(int v)
+{
+    int sign = v < 0 ? -1 : 1;
+    unsigned a = (unsigned)(v < 0 ? -v : v);
+    static const uint8_t small[6] = { 0, 1, 1, 3, 6, 9 };
+    int out = a < 6 ? small[a] : (int)(a << 1);
+    return sign * out;
+}
+
+static void ps2_mouse_send_packet(PS2MouseState *s, bool stream)
 {
     unsigned int b;
-    int dx1, dy1, dz1;
+    int raw_dx, raw_dy, dx1, dy1, dz1;
+    bool scale21 = stream && (s->mouse_status & MOUSE_STATUS_SCALE21);
 
-    dx1 = s->mouse_dx;
-    dy1 = s->mouse_dy;
+    raw_dx = s->mouse_dx;
+    raw_dy = s->mouse_dy;
     dz1 = s->mouse_dz;
-    /* XXX: increase range to 8 bits ? */
-    if (dx1 > 127)
-        dx1 = 127;
-    else if (dx1 < -127)
-        dx1 = -127;
-    if (dy1 > 127)
-        dy1 = 127;
-    else if (dy1 < -127)
-        dy1 = -127;
+    /* Keep the transformed value inside the legacy 8-bit packet range. */
+    int limit = scale21 ? 63 : 127;
+    if (raw_dx > limit) raw_dx = limit;
+    else if (raw_dx < -limit) raw_dx = -limit;
+    if (raw_dy > limit) raw_dy = limit;
+    else if (raw_dy < -limit) raw_dy = -limit;
+    dx1 = scale21 ? ps2_scale_21(raw_dx) : raw_dx;
+    dy1 = scale21 ? ps2_scale_21(raw_dy) : raw_dy;
     b = 0x08 | ((dx1 < 0) << 4) | ((dy1 < 0) << 5) | (s->mouse_buttons & 0x07);
     ps2_queue(&s->common, b);
     ps2_queue(&s->common, dx1 & 0xff);
@@ -735,8 +744,8 @@ static void ps2_mouse_send_packet(PS2MouseState *s)
     }
 
     /* update deltas */
-    s->mouse_dx -= dx1;
-    s->mouse_dy -= dy1;
+    s->mouse_dx -= raw_dx;
+    s->mouse_dy -= raw_dy;
     s->mouse_dz -= dz1;
 }
 
@@ -761,7 +770,7 @@ void ps2_mouse_event(PS2MouseState *s,
         for(;;) {
             /* if not remote, send event. Multiple events are sent if
                too big deltas */
-            ps2_mouse_send_packet(s);
+            ps2_mouse_send_packet(s, true);
             if (s->mouse_dx == 0 && s->mouse_dy == 0 && s->mouse_dz == 0)
                 break;
         }
@@ -826,7 +835,7 @@ void ps2_write_mouse(void *opaque, int val)
             break;
         case AUX_POLL:
             ps2_queue(&s->common, AUX_ACK);
-            ps2_mouse_send_packet(s);
+            ps2_mouse_send_packet(s, false);
             break;
         case AUX_ENABLE_DEV:
             s->mouse_status |= MOUSE_STATUS_ENABLED;
