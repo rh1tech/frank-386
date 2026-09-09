@@ -29,6 +29,8 @@
 
 //#include "cutils.h"
 #include "ide.h"
+#include "guest_mem.h"
+#include "bulk_bounce.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -1586,7 +1588,7 @@ uint32_t ide_data_readl(void *opaque)
     return v;
 }
 
-int ide_data_write_string(void *opaque, uint8_t *buf, int size, int count)
+int ide_data_write_string(void *opaque, uint32_t addr, int size, int count)
 {
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
@@ -1595,16 +1597,23 @@ int ide_data_write_string(void *opaque, uint8_t *buf, int size, int count)
     if (len > s->xfer_left) len = s->xfer_left;
     len -= len % size;
     if (s->drive_kind == IDE_HD) {
-        UINT bw; f_write(s->fp, buf, len, &bw);
+        UINT bw;
+        uint8_t *buf = guest_bulk_buf;
+        for (int i = 0; i < len; i += GUEST_BULK_BUF_SIZE) {
+            UINT l = (UINT)(len - i);
+            if (l > GUEST_BULK_BUF_SIZE) l = GUEST_BULK_BUF_SIZE;
+            guest_read_block(addr + (uint32_t)i, buf, l);
+            f_write(s->fp, buf, l, &bw);
+        }
     } else {
-        memcpy(s->atapi_buf + s->atapi_buf_pos, buf, len);
+        guest_read_block(addr, s->atapi_buf + s->atapi_buf_pos, (size_t)len);
         s->atapi_buf_pos += len;
     }
     xfer_advance(s, len);
     return len / size;
 }
 
-int ide_data_read_string(void *opaque, uint8_t *buf, int size, int count)
+int ide_data_read_string(void *opaque, uint32_t addr, int size, int count)
 {
     IDEIFState *s1 = opaque;
     IDEState *s = s1->cur_drive;
@@ -1613,9 +1622,16 @@ int ide_data_read_string(void *opaque, uint8_t *buf, int size, int count)
     if (len > s->xfer_left) len = s->xfer_left;
     len -= len % size;
     if (xfer_from_file(s)) {
-        UINT br; f_read(s->fp, buf, len, &br);
+        UINT br;
+        uint8_t *buf = guest_bulk_buf;
+        for (int i = 0; i < len; i += GUEST_BULK_BUF_SIZE) {
+            UINT l = (UINT)(len - i);
+            if (l > GUEST_BULK_BUF_SIZE) l = GUEST_BULK_BUF_SIZE;
+            f_read(s->fp, buf, l, &br);
+            guest_write_block(addr + (uint32_t)i, buf, l);
+        }
     } else {
-        memcpy(buf, s->atapi_buf + s->atapi_buf_pos, len);
+        guest_write_block(addr, s->atapi_buf + s->atapi_buf_pos, (size_t)len);
         s->atapi_buf_pos += len;
     }
     xfer_advance(s, len);
@@ -1642,9 +1658,14 @@ static IDEState *ide_hddrive_init(IDEIFState *ide_if, FIL *f, int f_open,
     if (f_open) { s->fp = f; }
 
     if (cylinders && heads && sectors) {
+        int64_t chs_sectors = (int64_t)cylinders * heads * sectors;
         s->cylinders = cylinders;
         s->heads     = heads;
         s->sectors   = sectors;
+        /* Explicit CHS is authoritative. Backing files may have trailing
+         * padding or a VHD footer that must not be advertised by IDENTIFY. */
+        if (chs_sectors > 0 && chs_sectors < s->nb_sectors)
+            s->nb_sectors = chs_sectors;
     } else {
         uint32_t cyls = nb_sectors / (16 * 63);
         if (cyls > 16383) cyls = 16383;

@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ems.h"
+#include "guest_mem.h"
 
 #ifdef BUILD_ESP32
 #include "esp_attr.h"
@@ -313,14 +314,14 @@ void __not_in_flash_func(i8257_dma_hold_DREQ)(IsaDma *obj, int nchan)
     // НЕ вызываем i8257_dma_run — это сделает pc_step
 }
 
-void i8257_dma_release_DREQ(IsaDma *obj, int nchan)
+void __not_in_flash_func(i8257_dma_release_DREQ)(IsaDma *obj, int nchan)
 {
     I8257State *d = I8257(obj);
     int ichan;
 
     ichan = nchan & 3;
     d->status &= ~(1 << (ichan + 4));
-    i8257_dma_run(d);
+    // DMA is serviced from pc_step(), same as hold_DREQ().
 }
 
 static void __not_in_flash_func(i8257_channel_run)(I8257State *d, int ichan)
@@ -404,95 +405,43 @@ static bool i8257_is_verify_transfer(I8257Regs *r)
     return (r->mode & 0x0c) == 0;
 }
 
-int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos,
-                          int len)
+int i8257_dma_read_memory(IsaDma *obj, int nchan, void *buf, int pos, int len)
 {
     I8257State *d = I8257(obj);
     I8257Regs *r = &d->regs[nchan & 3];
     hwaddr addr = ((r->pageh & 0x7f) << 24) | (r->page << 16) | r->now[ADDR];
 
-    if (i8257_is_verify_transfer(r)) {
+    if (i8257_is_verify_transfer(r))
         return len;
-    }
 
     uint8_t *p = buf;
     if (r->mode & 0x20) {
-        /* Decrement mode: guest address runs backwards */
-        hwaddr base = addr - pos - len;
-        for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-            p[i] =
-#if EMULATE_LTEMS
-            ems_in_window(a) ? *ems_host_ptr(a) :
-#endif
-             d->phys_mem[a];
-        }
-        //cpu_physical_memory_read (d->phys_mem + addr - pos - len, buf, len);
-        /* What about 16bit transfers? */
-        for (int i = 0; i < len >> 1; i++) {
-            uint8_t b = p[len - i - 1];
-            p[i] = b;
-        }
+        for (int i = 0; i < len; i++)
+            p[i] = guest_load8((uint32_t)(addr - pos - i));
     } else {
-        /* Normal (increment) mode */
-        hwaddr base = addr + pos;
-        for (hwaddr i = 0; base + i < d->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-            p[i] =
-#if EMULATE_LTEMS
-             ems_in_window(a) ? *ems_host_ptr(a) :
-#endif
-             d->phys_mem[a];
-        }
-        //cpu_physical_memory_read (addr + pos, buf, len);
+        for (int i = 0; i < len; i++)
+            p[i] = guest_load8((uint32_t)(addr + pos + i));
     }
 
     return len;
 }
 
-int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos,
-                           int len)
+int i8257_dma_write_memory(IsaDma *obj, int nchan, void *buf, int pos, int len)
 {
-    I8257State *s = I8257(obj);
-    I8257Regs *r = &s->regs[nchan & 3];
+    I8257State *d = I8257(obj);
+    I8257Regs *r = &d->regs[nchan & 3];
     hwaddr addr = ((r->pageh & 0x7f) << 24) | (r->page << 16) | r->now[ADDR];
 
-    if (i8257_is_verify_transfer(r)) {
+    if (i8257_is_verify_transfer(r))
         return len;
-    }
 
     uint8_t *p = buf;
     if (r->mode & 0x20) {
-        /* Decrement mode */
-        hwaddr base = addr - pos - len;
-        for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-#if EMULATE_LTEMS
-            if (ems_in_window(a))
-                *ems_host_ptr(a) = p[i];
-            else
-#endif
-                s->phys_mem[a] = p[i];
-        }
-        //cpu_physical_memory_write (addr - pos - len, buf, len);
-        /* What about 16bit transfers? */
-        for (int i = 0; i < len; i++) {
-            uint8_t b = p[len - i - 1];
-            p[i] = b;
-        }
+        for (int i = 0; i < len; i++)
+            guest_store8((uint32_t)(addr - pos - i), p[i]);
     } else {
-        /* Normal (increment) mode */
-        hwaddr base = addr + pos;
-        for (hwaddr i = 0; base + i < s->phys_mem_size && i < (hwaddr)len; i++) {
-            uint32_t a = (uint32_t)(base + i);
-#if EMULATE_LTEMS
-            if (ems_in_window(a))
-                *ems_host_ptr(a) = p[i];
-            else
-#endif
-                s->phys_mem[a] = p[i];
-        }
-        //cpu_physical_memory_write (addr + pos, buf, len);
+        for (int i = 0; i < len; i++)
+            guest_store8((uint32_t)(addr + pos + i), p[i]);
     }
 
     return len;

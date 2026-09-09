@@ -280,14 +280,17 @@ static int16_t samples[2] = { 0 };
 // Core 1 Entry Point (Audio processing)
 //=============================================================================
 bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
-    static uint64_t t_dss = 0;
+    static uint32_t dss_phase = 0;
     static int dss_v = 0;
     PC* pc = (PC*)rt->user_data;
-    // Disney Sound Source 7 kHz
+
+    /* Disney Sound Source owns a fixed 7 kHz playback clock. The mixer runs
+     * at 44.1 kHz, so keep the exact 7000/44100 ratio with a phase accumulator
+     * instead of quantizing 1/7000 s to whole microseconds. */
     if (pc->dss_enabled) {
-        uint64_t t = time_us_64();
-        if (t - t_dss >= 1000000 / 7000) { // 142 us for 7 kHz
-            t_dss = t;
+        dss_phase += 7000;
+        if (dss_phase >= 44100) {
+            dss_phase -= 44100;
             dss_v = dss_sample();
         }
     }

@@ -2950,7 +2950,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		    !in_iomem(memld.addr1) && !in_iomem(memld.addr1 | 4095)) { \
 			int count1 = cpu->cb.io_read_string( \
 				cpu->cb.io, lreg16(2), \
-				cpu->phys_mem + memld.addr1, dir, count); \
+				memld.addr1, BIT / 8, count); \
 			if (count1 > 0) { \
 				count = count1; \
 				sreg ## ABIT(7, lreg ## ABIT(7) + count * dir); \
@@ -3013,7 +3013,7 @@ static bool call_isr(CPUI386 *cpu, int no, bool pusherr, int ext);
 		    !in_iomem(memls.addr1) && !in_iomem(memls.addr1 | 4095)) { \
 			int count1 = cpu->cb.io_write_string( \
 				cpu->cb.io, lreg16(2), \
-				cpu->phys_mem + memls.addr1, dir, count); \
+				memls.addr1, BIT / 8, count); \
 			if (count1 > 0) { \
 				count = count1; \
 				sreg ## ABIT(6, lreg ## ABIT(6) + count * dir); \

@@ -27,8 +27,12 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include "pico/time.h"
 #include "adlib.h"
+#include "pc.h"
 #include "emu8950/emu8950.h"
+
+extern PC *pc;
 
 /* __dmb() is a CMSIS intrinsic; pico.h should pull it in transitively,
  * but include cmsis_compiler.h explicitly as a fallback. */
@@ -41,18 +45,27 @@
 #define ADLIB_DESC "Yamaha YM3812 (OPL2)"
 
 /*
- * Double-buffer:
- *   buf[2][ADLIB_BATCH_SIZE] — two batches.
- *   ready[2]  — Core 0 sets ready[i]=1 after filling buf[i],
- *               Core 1 sets ready[i]=0 after consuming buf[i].
- *   play_buf  — which buffer Core 1 is currently reading (0 or 1).
- *   read_pos  — sample index within buf[play_buf].
+ * AdLib is asynchronous with respect to x86 execution.
  *
- * Core 0 fills whichever buffer is NOT ready (i.e. already consumed).
- * Core 1 reads from play_buf; when exhausted, switches to the other one
- * if it's ready, otherwise returns silence.
- * Each ready[i] is written by one core at a time — no contention.
+ * Guest OUT 388h only changes the address latch. OUT 389h publishes a compact
+ * register/value command into an SPSC queue. A 1 kHz native timer on core0 is
+ * the sole owner of the emu8950 state: it drains commands, calls OPL_writeReg()
+ * and refills the PCM double-buffer. Therefore FM generation no longer depends
+ * on pc_step(), pc_service() or native-application yield frequency.
+ *
+ * PCM remains the existing core0->core1 double-buffer:
+ *   ready[2]  — timer/core0 publishes a filled buffer;
+ *               audio/core1 clears it after consumption.
+ *   play_buf  — buffer currently consumed on core1.
+ *   read_pos  — sample index within play_buf.
  */
+#define ADLIB_CMD_COUNT 256u
+#define ADLIB_CMD_MASK  (ADLIB_CMD_COUNT - 1u)
+
+typedef struct {
+    uint8_t reg;
+    uint8_t value;
+} AdlibCommand;
 
 struct AdlibState {
     uint32_t freq;
@@ -60,17 +73,83 @@ struct AdlibState {
     uint8_t  adlibstatus;
     OPL     *opl;
 
-    int32_t  buf[2][ADLIB_BATCH_SIZE];
+    /*
+     * SPSC command queue. Producer is guest I/O on core0; consumer is the
+     * native timer IRQ on the same core. Payload is written before cmd_head is
+     * published, so an IRQ which arrives mid-enqueue simply sees the old head.
+     */
+    AdlibCommand cmd[ADLIB_CMD_COUNT];
+    volatile uint16_t cmd_head;
+    volatile uint16_t cmd_tail;
+    uint32_t cmd_overflow_count;
+    volatile uint8_t reset_requested;
+    uint8_t  started;
+
+    int16_t  buf[2][ADLIB_BATCH_SIZE];
     volatile uint8_t ready[2];  /* 1 = filled by Core 0, not yet consumed */
     uint8_t  play_buf;          /* Core 1: which buf is being played */
     uint32_t read_pos;          /* Core 1: next sample index in play_buf */
 
+    repeating_timer_t timer;
     uint32_t underrun_count;
 };
+
+/*
+ * OPL_calc_buffer_linear() produces 32-bit working samples.  Keep only a
+ * small render tile here and convert into the long 16-bit playback queue.
+ *
+ * Keep only 64 working samples instead of two 1024-sample int32 queues.
+ * This scratch buffer is ordinary SRAM; it is not in CORE0_STACK_EXT.
+ */
+#define ADLIB_RENDER_TILE 64u
+#define ADLIB_QUEUE_SPIN_LIMIT 1000000u
+static int32_t adlib_render_scratch[ADLIB_RENDER_TILE]
+    __attribute__((aligned(4)));
+
+static inline uint32_t adlib_canonical_port(uint32_t nport)
+{
+    switch (nport) {
+    case 0x220: case 0x228: case 0x388: case 0x38a:
+        return 0x388;
+    case 0x221: case 0x229: case 0x389: case 0x38b:
+        return 0x389;
+    default:
+        return nport;
+    }
+}
+
+static inline void adlib_queue_command(AdlibState *s,
+                                       uint8_t reg, uint8_t value)
+{
+    uint16_t head = s->cmd_head;
+    uint16_t next = (uint16_t)((head + 1u) & ADLIB_CMD_MASK);
+
+    uint32_t spins = 0;
+    while (next == s->cmd_tail) {
+        if (++spins >= ADLIB_QUEUE_SPIN_LIMIT) {
+            /*
+             * Do not leave guest OUT permanently blocked if the OPL consumer
+             * stops making progress. The producer never touches emu8950:
+             * recovery is requested and performed by adlib_service().
+             */
+            s->cmd_overflow_count++;
+            __dmb();
+            s->reset_requested = 1;
+            return;
+        }
+    }
+    __dmb();
+
+    s->cmd[head].reg = reg;
+    s->cmd[head].value = value;
+    __dmb();
+    s->cmd_head = next;
+}
 
 void adlib_write(void *opaque, uint32_t nport, uint32_t val)
 {
     AdlibState *s = opaque;
+    nport = adlib_canonical_port(nport);
     switch (nport) {
         case 0x388:
             s->adlib_register = val;
@@ -83,13 +162,15 @@ void adlib_write(void *opaque, uint32_t nport, uint32_t val)
                     s->adlibregmem[4] = 0;
                 }
             }
-            OPL_writeReg(s->opl, s->adlib_register, val);
+            adlib_queue_command(s, (uint8_t)s->adlib_register, (uint8_t)val);
+            break;
     }
 }
 
 uint32_t adlib_read(void *opaque, uint32_t nport)
 {
     AdlibState *s = opaque;
+    nport = adlib_canonical_port(nport);
     switch (nport) {
         case 0x388:
         case 0x389:
@@ -105,17 +186,36 @@ uint32_t adlib_read(void *opaque, uint32_t nport)
     return 0xFF;
 }
 
+static bool __not_in_flash_func(adlib_timer_callback)(repeating_timer_t *rt);
+
 AdlibState *adlib_new()
 {
     AdlibState *s = malloc(sizeof(AdlibState));
+    if (!s)
+        return NULL;
+
     memset(s, 0, sizeof(AdlibState));
     s->freq     = SOUND_FREQUENCY;
     s->play_buf = 0;
     s->read_pos = 0;
     s->opl = OPL_new(3579552, s->freq);
     if (!s->opl) {
+        free(s);
         return NULL;
     }
+
+    /*
+     * Run end-to-start, not start-to-start. OPL rendering happens inside this
+     * IRQ and may exceed 1 ms; a negative period would then keep scheduling
+     * already-overdue callbacks and can starve foreground guest execution.
+     */
+    if (!add_repeating_timer_us(1000, adlib_timer_callback, s, &s->timer)) {
+        /* No public OPL destructor exists in this backend. Keep old behaviour:
+         * fail construction rather than run a polling-dependent half-device. */
+        free(s);
+        return NULL;
+    }
+
     return s;
 }
 
@@ -128,7 +228,7 @@ int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
         return 0;
     }
 
-    int16_t sample = (int16_t)s->buf[s->play_buf][s->read_pos++];
+    int16_t sample = s->buf[s->play_buf][s->read_pos++];
 
     if (s->read_pos >= ADLIB_BATCH_SIZE) {
         /* Mark this buffer as consumed, switch to the other one. */
@@ -140,23 +240,99 @@ int16_t __not_in_flash_func(adlib_getsample)(AdlibState *s) {
     return sample;
 }
 
-// call it from main cycle on core0
-void __not_in_flash_func(adlib_core0)(AdlibState *s) {
-    if (!s->opl) return;
+/*
+ * Core0 timer-owned service.
+ *
+ * Drain every register command first, then render at most one 128-sample batch
+ * per tick. One batch is ~2.90 ms at 44.1 kHz, while the service period is
+ * 1 ms, so a single refill per tick is enough to recover a consumed buffer
+ * without spending a long 256-sample burst in IRQ context.
+ */
+static void __not_in_flash_func(adlib_service)(AdlibState *s)
+{
+    if (!s->opl)
+        return;
 
-    /* Fill buf[0] first, then buf[1], alternating.
-     * Fill whichever buffer is free (not ready). Prefer the one
-     * Core 1 is about to play (play_buf) if it's empty, otherwise
-     * fill the other one as look-ahead. */
-    for (int i = 0; i < 2; i++) {
-        uint8_t fill_buf = (s->play_buf + i) & 1;
-        if (s->ready[fill_buf]) continue;  /* already full */
+    if (s->reset_requested) {
+        /*
+         * Recovery is intentionally core1-only. Publish all currently queued
+         * slots as free first, then reset the OPL and discard already-rendered
+         * PCM. Commands published by core0 after this head snapshot remain in
+         * the queue and are consumed below, rebuilding the music state.
+         */
+        __dmb();
+        uint16_t reset_head = s->cmd_head;
+        s->cmd_tail = reset_head;
 
-        OPL_calc_buffer_linear(s->opl, s->buf[fill_buf], ADLIB_BATCH_SIZE);
+        OPL_reset(s->opl);
+        s->started = 0;
+
+        /* Drop PCM generated from the pre-reset OPL state. */
+        s->ready[0] = 0;
+        s->ready[1] = 0;
+        s->play_buf = 0;
+        s->read_pos = 0;
+
+        __dmb();
+        s->reset_requested = 0;
+    }
+
+    uint16_t tail = s->cmd_tail;
+    uint16_t head = s->cmd_head;
+
+    while (tail != head) {
+        AdlibCommand command = s->cmd[tail];
+        tail = (uint16_t)((tail + 1u) & ADLIB_CMD_MASK);
+        OPL_writeReg(s->opl, command.reg, command.value);
+        s->started = 1;
+    }
+    s->cmd_tail = tail;
+
+    /*
+     * Before the first guest command there is no FM state worth advancing.
+     * This avoids spending timer time on an enabled-but-unused AdLib device.
+     */
+    if (!s->started)
+        return;
+
+    for (int i = 0; i < 2; ++i) {
+        uint8_t fill_buf = (uint8_t)((s->play_buf + i) & 1u);
+        if (s->ready[fill_buf])
+            continue;
+
+        for (uint32_t pos = 0; pos < ADLIB_BATCH_SIZE;
+             pos += ADLIB_RENDER_TILE) {
+            uint32_t count = ADLIB_BATCH_SIZE - pos;
+            if (count > ADLIB_RENDER_TILE)
+                count = ADLIB_RENDER_TILE;
+
+            OPL_calc_buffer_linear(s->opl, adlib_render_scratch, count);
+
+            for (uint32_t j = 0; j < count; ++j) {
+                int32_t sample = adlib_render_scratch[j] * 4; /// TODO: ensure x4
+                if (sample > 32767)
+                    sample = 32767;
+                else if (sample < -32768)
+                    sample = -32768;
+                s->buf[fill_buf][pos + j] = (int16_t)sample;
+            }
+        }
+
         __dmb();
         s->ready[fill_buf] = 1;
-        return;  /* fill one buffer per call */
+        break;  /* At most one batch per 1 ms timer tick. */
     }
+}
+
+static bool __not_in_flash_func(adlib_timer_callback)(repeating_timer_t *rt)
+{
+    AdlibState *s = (AdlibState *)rt->user_data;
+
+    if (!pc || !pc->adlib_enabled)
+        return true;
+
+    adlib_service(s);
+    return true;
 }
 
 uint32_t adlib_underruns(AdlibState *s) {

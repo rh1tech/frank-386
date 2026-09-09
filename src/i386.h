@@ -35,8 +35,8 @@ typedef struct {
 	void (*io_write16)(void *, int, u16);
 	u32 (*io_read32)(void *, int);
 	void (*io_write32)(void *, int, u32);
-	int (*io_read_string)(void *, int, uint8_t *, int, int);
-	int (*io_write_string)(void *, int, uint8_t *, int, int);
+	int (*io_read_string)(void *, int, uint32_t, int, int);
+	int (*io_write_string)(void *, int, uint32_t, int, int);
 
 	void *iomem;
 	u8 (*iomem_read8)(void *, uword);

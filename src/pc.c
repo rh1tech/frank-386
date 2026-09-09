@@ -1,4 +1,6 @@
 #include "pc.h"
+#include "guest_mem.h"
+#include "bulk_bounce.h"
 #include "ide.h"
 #include "dss.h"
 #include "misc.h"
@@ -14,6 +16,11 @@
 #include <hardware/watchdog.h>
 
 #include "mpu401.c.inl"
+
+uint8_t *guest_phys_mem = NULL;
+unsigned long guest_phys_mem_size = 0;
+void *guest_iomem = NULL;
+uint8_t guest_bulk_buf[GUEST_BULK_BUF_SIZE];
 void netredirect_init(CPUI386 *cpu, int enable);
 
 #ifdef USEKVM
@@ -108,7 +115,7 @@ static void emulink_arg_write(PC *pc, uint32_t val)
 }
 
 /* bulk read: called from pc_io_read_string for port 0xF1F4 */
-static int emulink_data_read(PC *pc, uint8_t *buf, int size, int count)
+static int emulink_data_read(PC *pc, uint32_t addr, int size, int count)
 {
 	if (pc->emulink.cmd == 0x101 && pc->emulink.argi == 3) {
 		uint8_t drv = (uint8_t)pc->emulink.args[0];
@@ -117,8 +124,14 @@ static int emulink_data_read(PC *pc, uint8_t *buf, int size, int count)
 		if (len > pc->emulink.dataleft) goto err;
 		FIL *fil = fdd_get_file(drv);
 		UINT br = 0;
-		FRESULT fr = f_read(fil, buf, (UINT)len, &br);
-		if (fr != FR_OK || (int)br != len) goto err;
+        uint8_t *buf = guest_bulk_buf;
+        for (int i = 0; i < len; i += GUEST_BULK_BUF_SIZE) {
+            UINT l = (UINT)(len - i);
+            if (l > GUEST_BULK_BUF_SIZE) l = GUEST_BULK_BUF_SIZE;
+            FRESULT fr = f_read(fil, buf, l, &br);
+            if (fr != FR_OK || br != l) goto err;
+            guest_write_block(addr + (uint32_t)i, buf, l);
+        }
 		pc->emulink.dataleft -= len;
 		if (pc->emulink.dataleft == 0) {
 			pc->emulink.cmd    = -1;
@@ -133,7 +146,7 @@ err:
 }
 
 /* bulk write: called from pc_io_write_string for port 0xF1F4 */
-static int emulink_data_write(PC *pc, uint8_t *buf, int size, int count)
+static int emulink_data_write(PC *pc, uint32_t addr, int size, int count)
 {
 	if (pc->emulink.cmd == 0x102 && pc->emulink.argi == 3) {
 		uint8_t drv = (uint8_t)pc->emulink.args[0];
@@ -142,8 +155,14 @@ static int emulink_data_write(PC *pc, uint8_t *buf, int size, int count)
 		if (len > pc->emulink.dataleft) goto err;
 		FIL *fil = fdd_get_file(drv);
 		UINT bw = 0;
-		FRESULT fr = f_write(fil, buf, (UINT)len, &bw);
-		if (fr != FR_OK || (int)bw != len) goto err;
+        uint8_t *buf = guest_bulk_buf;
+        for (int i = 0; i < len; i += GUEST_BULK_BUF_SIZE) {
+            UINT l = (UINT)(len - i);
+            if (l > GUEST_BULK_BUF_SIZE) l = GUEST_BULK_BUF_SIZE;
+            guest_read_block(addr + (uint32_t)i, buf, l);
+            FRESULT fr = f_write(fil, buf, l, &bw);
+            if (fr != FR_OK || bw != l) goto err;
+        }
 		pc->emulink.dataleft -= len;
 		if (pc->emulink.dataleft == 0) {
 			pc->emulink.cmd    = -1;
@@ -437,7 +456,7 @@ static u32 pc_io_read32(void *o, int addr) {
 	return r;
 }
 
-static int pc_io_read_string(void *o, int addr, uint8_t *buf, int size, int count)
+static int pc_io_read_string(void *o, int addr, uint32_t buf, int size, int count)
 {
 	debug_write("RS: %ph [%d / %d]\n", addr, size, count);
 	PC *pc = o;
@@ -742,7 +761,7 @@ static void pc_io_write32(void *o, int addr, u32 val)
 	}
 }
 
-static int pc_io_write_string(void *o, int addr, uint8_t *buf, int size, int count)
+static int pc_io_write_string(void *o, int addr, uint32_t buf, int size, int count)
 {
 	debug_write("WS: %ph [%d / %d]\n", addr, size, count);
 	PC *pc = o;
@@ -812,25 +831,9 @@ void __not_in_flash_func(pc_step)(PC *pc)
 #if defined(BUILD_ESP32)
 	cpui386_step(pc->cpu, 512);
 #elif defined(RP2350_BUILD)
-	if (pc->adlib_enabled) {
-		/* The OPL2 stream is produced here, ten instructions at a
-		 * time, because core 1 has no room for it. Timing the two
-		 * separately is the whole point of this profile: moving the
-		 * chips to the C2 slave removes the adlib bucket *and* lets
-		 * this collapse back to one 4096-instruction call. */
-		for (int i = 0; i < 409; ++i) {
-			PROF_T(t_cpu);
-			cpui386_step(pc->cpu, 10);
-			PROF_ADD(t_cpu, cpu);
-			PROF_T(t_adlib);
-			adlib_core0(pc->adlib);
-			PROF_ADD(t_adlib, adlib);
-		}
-	} else {
-		PROF_T(t_cpu);
-		cpui386_step(pc->cpu, 4096);
-		PROF_ADD(t_cpu, cpu);
-	}
+	PROF_T(t_cpu);
+	cpui386_step(pc->cpu, 4096);
+	PROF_ADD(t_cpu, cpu);
 #else
 	cpui386_step(pc->cpu, 10240);
 #endif
@@ -887,7 +890,7 @@ static void set_pci_vga_bar(void *opaque, int bar_num, uint32_t addr, bool enabl
 #endif
 }
 
-static u8 iomem_read8(void *iomem, uword addr)
+u8 iomem_read8(void *iomem, uword addr)
 {
 	PC *pc = iomem;
 	uword vga_addr2 = pc->pci_vga_ram_addr;
@@ -901,7 +904,7 @@ static u8 iomem_read8(void *iomem, uword addr)
 	return vga_mem_read(pc->vga, addr - 0xa0000);
 }
 
-static void iomem_write8(void *iomem, uword addr, u8 val)
+void iomem_write8(void *iomem, uword addr, u8 val)
 {
 	PC *pc = iomem;
 	uword vga_addr2 = pc->pci_vga_ram_addr;
@@ -1131,6 +1134,9 @@ PC *pc_new(SimpleFBDrawFunc *redraw, void (*poll)(void *), void *redraw_data,
 
 	pc->phys_mem = mem;
 	pc->phys_mem_size = conf->mem_size;
+    guest_phys_mem = (uint8_t *)pc->phys_mem;
+    guest_phys_mem_size = (unsigned long)pc->phys_mem_size;
+    guest_iomem = pc;
 
 	cb->io = pc;
 	cb->io_read8 = pc_io_read;
