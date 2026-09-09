@@ -1016,7 +1016,7 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
     DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
     DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
-    if (!ps2_init(pio0, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
+    if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
         printf("WARNING: PS/2 PIO init failed\n");
     }
 
