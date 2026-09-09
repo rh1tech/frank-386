@@ -89,7 +89,11 @@
 #ifdef BOARD_M1
 #define PSRAM_PIN_RP2350A 19
 #else
+#ifdef BOARD_Z2
+#define PSRAM_PIN_RP2350A 47
+#else
 #define PSRAM_PIN_RP2350A 8
+#endif
 #endif
 
 // PSRAM pin for RP2350B (always GPIO47)
@@ -445,12 +449,17 @@ static inline uint get_psram_pin(void) {
 // Common PIO Assignments
 //=============================================================================
 
-// Video output uses PIO1
+/* Z2 uses the known-good PiZero HDMI PIO assignment: PIO0 drives
+ * GPIO32..39 while PS/2 stays on a separate PIO instance. */
+#ifdef BOARD_Z2
+#define PIO_VIDEO       pio0
+#define PIO_VIDEO_ADDR  pio0
+#define PIO_PS2KBD      pio1
+#else
 #define PIO_VIDEO       pio1
 #define PIO_VIDEO_ADDR  pio1
-
-// PS/2 Keyboard uses PIO0
 #define PIO_PS2KBD      pio0
+#endif
 
 // SD Card PIO (if using PIO SPI)
 #define PIO_SDCARD      pio1
@@ -462,13 +471,9 @@ static inline uint get_psram_pin(void) {
 // HDMI Configuration
 //=============================================================================
 
-// HDMI differential pair encoding options
-#define HDMI_PIN_RGB_notBGR       1
-#define HDMI_PIN_invert_diffpairs 1
-
-// HDMI clock pins (relative to base)
-#define beginHDMI_PIN_clk   HDMI_BASE_PIN
-#define beginHDMI_PIN_data  (HDMI_BASE_PIN + 2)
+/* HDMI electrical lane order is board-specific and is defined in
+ * drivers/hdmi/hdmi.h.  Z2 routes TMDS data on the first three pairs and
+ * TMDS clock on the last pair, unlike M1/M2. */
 
 //=============================================================================
 // VGA Display Configuration
@@ -543,8 +548,12 @@ static inline uint get_psram_pin(void) {
 // SD Card Configuration
 //=============================================================================
 
-// SD Card SPI bus (use hardware SPI0 or PIO)
+// SD Card SPI bus. Z2 routes GPIO30/31/40 to SPI1.
+#ifdef BOARD_Z2
+#define SDCARD_SPI_BUS spi1
+#else
 #define SDCARD_SPI_BUS spi0
+#endif
 
 /*
  * Enable PIO-based SD card for better performance.
@@ -560,7 +569,7 @@ static inline uint get_psram_pin(void) {
  * which are exactly the hardware SPI0 pins (RX/CSn/SCK/TX), so the
  * non-PIO path in sdcard.c drives it directly.
  */
-#ifndef BOARD_C2
+#if !defined(BOARD_C2) && !defined(BOARD_Z2)
 #define SDCARD_PIO 1
 #endif
 
