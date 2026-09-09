@@ -37,9 +37,6 @@ if(BOARD STREQUAL "C2")
     if(NOT FORCE_VGA)
         set(FORCE_HDMI ON CACHE BOOL "Force HDMI" FORCE)
     endif()
-    # The TDA1387T I2S DAC sits on GPIO9..11 — the same pins the M2 PWM
-    # path would drive. I2S is not optional here.
-    set(AUDIO_TYPE "I2S" CACHE STRING "Audio output" FORCE)
 else()
     # Set board to Pico 2 (RP2350)
     set(PICO_BOARD pico2 CACHE STRING "Pico board type")
@@ -56,9 +53,6 @@ set(CPU_SPEED "504" CACHE STRING "CPU clock in MHz: 378, 504")
 
 # PSRAM speed configuration (133, 166 MHz target)
 set(PSRAM_SPEED "66" CACHE STRING "PSRAM max frequency in MHz: 66, 84, 100, 133, 166")
-
-# Audio output configuration (I2S or PWM)
-set(AUDIO_TYPE "PWM" CACHE STRING "Audio output: I2S or PWM")
 
 # Enable LTEMM support (performance degradation is expected)
 option(EMM "Enable LTEMM support" OFF)
@@ -103,7 +97,7 @@ else()
     set(CPU_VOLTAGE "VREG_VOLTAGE_1_50")
 endif()
 
-message(STATUS "frank-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE} ${AUDIO_TYPE}")
+message(STATUS "frank-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE}, Audio=runtime")
 
 include(pico_sdk_import.cmake)
 
@@ -214,7 +208,7 @@ target_compile_definitions(video_driver PRIVATE
 target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
 
 #=============================================================================
-# I2S Audio Driver
+# Runtime I2S/PWM Audio Driver
 #=============================================================================
 add_library(audio_driver
     drivers/audio/audio.c
@@ -222,15 +216,10 @@ add_library(audio_driver
 target_include_directories(audio_driver PUBLIC drivers/audio src)
 target_compile_definitions(audio_driver PRIVATE
     BOARD_${BOARD}
+    SOUND_FREQUENCY=44100
 )
 pico_generate_pio_header(audio_driver ${CMAKE_CURRENT_LIST_DIR}/drivers/audio/audio_i2s.pio)
-if(AUDIO_TYPE STREQUAL "I2S")
-    target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq)
-    target_compile_definitions(audio_driver PRIVATE FEATURE_AUDIO_I2S=1 SOUND_FREQUENCY=44100)
-elseif(AUDIO_TYPE STREQUAL "PWM")
-    target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq hardware_pwm)
-    target_compile_definitions(audio_driver PRIVATE FEATURE_AUDIO_PWM=1 SOUND_FREQUENCY=44100)
-endif()
+target_link_libraries(audio_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync hardware_irq hardware_pwm video_driver)
 
 #=============================================================================
 # USB HID Keyboard Driver (optional)
@@ -238,9 +227,9 @@ endif()
 add_subdirectory(drivers/usbhid)
 
 if(EMM)
-    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}-emm")
+    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${FIRMWARE_VERSION}-emm")
 else ()
-    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${AUDIO_TYPE}-${FIRMWARE_VERSION}")
+    SET(BUILD_NAME "${BUILD_NAME}-${CPU_SPEED}MHz-P${PSRAM_SPEED}-${FIRMWARE_VERSION}")
 endif()
 
 #=============================================================================
@@ -333,12 +322,6 @@ if(USB_HID_ENABLED)
     target_include_directories(${BUILD_NAME} PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/drivers/usbhid
     )
-endif()
-
-if(AUDIO_TYPE STREQUAL "I2S")
-    target_compile_definitions(${BUILD_NAME} PRIVATE FEATURE_AUDIO_I2S=1)
-elseif(AUDIO_TYPE STREQUAL "PWM")
-    target_compile_definitions(${BUILD_NAME} PRIVATE FEATURE_AUDIO_PWM=1)
 endif()
 
 if(EMM)
@@ -543,7 +526,7 @@ message(STATUS "  EMM:            ${EMM}")
 message(STATUS "  CPU Speed:      ${CPU_SPEED} MHz")
 message(STATUS "  CPU Voltage:    ${CPU_VOLTAGE}")
 message(STATUS "  PSRAM Speed:    ${PSRAM_SPEED} MHz")
-message(STATUS "  Audio Type:     ${AUDIO_TYPE}")
+message(STATUS "  Audio Type:     runtime AUTO/PWM/I2S")
 message(STATUS "  USB HID:        ${USB_HID_ENABLED}")
 message(STATUS "  Debug Output:   ${DEBUG_ENABLED}")
 message(STATUS "  Build Name:     ${BUILD_NAME}")

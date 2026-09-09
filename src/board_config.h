@@ -501,6 +501,45 @@ static inline uint get_psram_pin(void) {
 #endif
 
 //=============================================================================
+// Runtime audio backend availability
+//=============================================================================
+#if defined(I2S_DATA_PIN) && defined(I2S_CLOCK_PIN_BASE)
+#define HAS_AUDIO_I2S 1
+#else
+#define HAS_AUDIO_I2S 0
+#endif
+#if defined(PWM_LEFT_PIN) && defined(PWM_RIGHT_PIN)
+#define HAS_AUDIO_PWM 1
+#else
+#define HAS_AUDIO_PWM 0
+#endif
+
+//=============================================================================
+// Per-platform configuration directory
+//=============================================================================
+#if defined(BOARD_M1)
+#define CONFIG_PLATFORM_NAME "M1"
+#elif defined(BOARD_M2)
+#define CONFIG_PLATFORM_NAME "M2"
+#elif defined(BOARD_PC)
+#define CONFIG_PLATFORM_NAME "PC"
+#elif defined(BOARD_Z2)
+#define CONFIG_PLATFORM_NAME "Z2"
+#elif defined(BOARD_C2)
+#define CONFIG_PLATFORM_NAME "C2"
+#else
+#error "Unknown BOARD_* configuration"
+#endif
+
+#define CONFIG_CPU_DIR      "/.config/386"
+#define CONFIG_PLATFORM_DIR CONFIG_CPU_DIR "/" CONFIG_PLATFORM_NAME
+#define CONFIG_FILE_PATH    CONFIG_PLATFORM_DIR "/config.ini"
+#define VIDEO_MARKER_VGA    CONFIG_PLATFORM_DIR "/force_vga"
+#define VIDEO_MARKER_HDMI   CONFIG_PLATFORM_DIR "/force_dvi"
+#define AUDIO_MARKER_PWM    CONFIG_PLATFORM_DIR "/force_pwm"
+#define AUDIO_MARKER_I2S    CONFIG_PLATFORM_DIR "/force_i2s"
+
+//=============================================================================
 // SD Card Configuration
 //=============================================================================
 

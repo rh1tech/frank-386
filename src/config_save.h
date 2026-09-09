@@ -13,6 +13,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Ensure /.config/386/<platform>/ exists
+bool config_ensure_dir(void);
+
 // Save all configuration to INI file
 // Returns true on success
 bool config_save_all(void);

@@ -28,14 +28,15 @@
 #include "board_config.h"
 #include <pico/time.h>
 
-#ifdef FEATURE_AUDIO_PWM
+#if HAS_AUDIO_PWM
 #include <hardware/pwm.h>
-#include <hardware/clocks.h>
 #endif
+#include <hardware/clocks.h>
+#include <hardware/gpio.h>
 
 static uint8_t volume = 0; // 0 - MAX vol, 16 - silece (for i2s, for pwm - 12)
 
-#ifdef FEATURE_AUDIO_I2S
+#if HAS_AUDIO_I2S
 /**
  * return the default i2s context used to store information about the setup
  */
@@ -169,8 +170,22 @@ void i2s_decrease_volume(i2s_config_t *i2s_config) {
 }
 
 static i2s_config_t i2s_config;
-#elif FEATURE_AUDIO_PWM || FEATURE_AUDIO_HW
+#endif
+#if HAS_AUDIO_PWM || FEATURE_AUDIO_HW
 static pwm_config pwm;
+#endif
+
+static bool audio_use_i2s = false;
+static int boot_audio_output = AUDIO_OUTPUT_AUTO;
+
+void audio_set_boot_output(int output) {
+    if (output >= AUDIO_OUTPUT_AUTO && output <= AUDIO_OUTPUT_I2S)
+        boot_audio_output = output;
+}
+
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+extern int testPins(uint32_t pin0, uint32_t pin1);
+static uint8_t link_i2s_code = 0xFF;
 #endif
 
 static uint8_t prev = 0;
@@ -193,36 +208,68 @@ uint8_t audio_get_volume(void) {
 
 
 void audio_init(void) {
-#if FEATURE_AUDIO_I2S
-    i2s_config = i2s_get_default_config();
-    i2s_config.sample_freq = SOUND_FREQUENCY;
-    i2s_config.dma_trans_count = 1;
-    i2s_volume(&i2s_config, 0);
-    i2s_init(&i2s_config);
-    sleep_ms(100);
-#elif FEATURE_AUDIO_PWM
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+    if (boot_audio_output == AUDIO_OUTPUT_AUTO) {
+        if (link_i2s_code == 0xFF) {
+            // Drain residual charge before probing shared audio pins.
+            gpio_init(I2S_DATA_PIN);
+            gpio_set_dir(I2S_DATA_PIN, GPIO_OUT);
+            gpio_put(I2S_DATA_PIN, 0);
+            gpio_init(I2S_CLOCK_PIN_BASE);
+            gpio_set_dir(I2S_CLOCK_PIN_BASE, GPIO_OUT);
+            gpio_put(I2S_CLOCK_PIN_BASE, 0);
+            sleep_ms(50);
+            gpio_deinit(I2S_DATA_PIN);
+            gpio_deinit(I2S_CLOCK_PIN_BASE);
+
+            link_i2s_code = testPins(I2S_DATA_PIN, I2S_CLOCK_PIN_BASE);
+            // HIGH under pull-down means external back-feed, not an I2S DAC.
+            if (link_i2s_code & 0b10100) link_i2s_code = 0;
+        }
+        audio_use_i2s = link_i2s_code != 0;
+    } else {
+        audio_use_i2s = (boot_audio_output == AUDIO_OUTPUT_I2S);
+    }
+#elif HAS_AUDIO_I2S
+    audio_use_i2s = true;
+#else
+    audio_use_i2s = false;
+#endif
+
+#if HAS_AUDIO_I2S
+    if (audio_use_i2s) {
+        i2s_config = i2s_get_default_config();
+        i2s_config.sample_freq = SOUND_FREQUENCY;
+        i2s_config.dma_trans_count = 1;
+        i2s_volume(&i2s_config, 0);
+        i2s_init(&i2s_config);
+        sleep_ms(100);
+        return;
+    }
+#endif
+#if HAS_AUDIO_PWM
     pwm = pwm_get_default_config();
     gpio_set_function(PWM_LEFT_PIN, GPIO_FUNC_PWM);
     gpio_set_function(PWM_RIGHT_PIN, GPIO_FUNC_PWM);
-    #ifdef BEEPER_PIN
-        gpio_set_function(BEEPER_PIN, GPIO_FUNC_PWM);
-    #endif
+#ifdef BEEPER_PIN
+    gpio_set_function(BEEPER_PIN, GPIO_FUNC_PWM);
+#endif
     pwm_config_set_clkdiv(&pwm, 1.0f);
-    pwm_config_set_wrap(&pwm, (1 << 12) - 1); // MAX PWM value
+    pwm_config_set_wrap(&pwm, (1 << 12) - 1);
     uint sln_l = pwm_gpio_to_slice_num(PWM_LEFT_PIN);
     pwm_init(sln_l, &pwm, true);
     uint sln_r = pwm_gpio_to_slice_num(PWM_RIGHT_PIN);
     if (sln_r != sln_l) pwm_init(sln_r, &pwm, true);
-    #ifdef BEEPER_PIN
-        uint sln_b = pwm_gpio_to_slice_num(BEEPER_PIN);
-        if (sln_r != sln_b && sln_l != sln_b) pwm_init(sln_b, &pwm, true);
-    #endif
+#ifdef BEEPER_PIN
+    uint sln_b = pwm_gpio_to_slice_num(BEEPER_PIN);
+    if (sln_r != sln_b && sln_l != sln_b) pwm_init(sln_b, &pwm, true);
+#endif
 #elif FEATURE_AUDIO_HW
     init_74hc595();
     pwm = pwm_get_default_config();
     gpio_set_function(PCM_PIN, GPIO_FUNC_PWM);
     pwm_config_set_clkdiv(&pwm, 1.0f);
-    pwm_config_set_wrap(&pwm, (1 << 12) - 1); // MAX PWM value
+    pwm_config_set_wrap(&pwm, (1 << 12) - 1);
     pwm_init(pwm_gpio_to_slice_num(PCM_PIN), &pwm, true);
 #endif
 }
@@ -276,22 +323,8 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
     }
     r_v += dss_v;
     l_v += dss_v;
-    #if FEATURE_AUDIO_PWM
-        r_v >>= volume;
-        l_v >>= volume;
-        uint16_t ur_v = (r_v + 32768) >> 4; // 16 signed bit to 12 unsigned
-        uint16_t ul_v = (l_v + 32768) >> 4;
-        if (ur_v > 4095) ur_v = 4095;
-        if (ul_v > 4095) ul_v = 4095;
-        #ifdef BEEPER_PIN
-            b_v = b_v ? (4095 >> volume) : 0;
-            pwm_set_gpio_level(BEEPER_PIN, b_v);
-        #else
-            if (b_v) { r_v = l_v = 32767; }
-        #endif
-        pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
-        pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
-    #elif FEATURE_AUDIO_I2S
+#if HAS_AUDIO_I2S
+    if (audio_use_i2s) {
         if (b_v) { r_v = l_v = 32767; }
         if (r_v > 32767) r_v = 32767;
         if (r_v < -32768) r_v = -32768;
@@ -299,13 +332,32 @@ bool __not_in_flash_func(timer_callback)(repeating_timer_t *rt) {
         if (l_v < -32768) l_v = -32768;
         samples[0] = r_v;
         samples[1] = l_v;
-    #endif
+        return true;
+    }
+#endif
+#if HAS_AUDIO_PWM
+    r_v >>= volume;
+    l_v >>= volume;
+    uint16_t ur_v = (r_v + 32768) >> 4;
+    uint16_t ul_v = (l_v + 32768) >> 4;
+    if (ur_v > 4095) ur_v = 4095;
+    if (ul_v > 4095) ul_v = 4095;
+#ifdef BEEPER_PIN
+    b_v = b_v ? (4095 >> volume) : 0;
+    pwm_set_gpio_level(BEEPER_PIN, b_v);
+#else
+    if (b_v) { r_v = l_v = 32767; }
+#endif
+    pwm_set_gpio_level(PWM_RIGHT_PIN, ur_v);
+    pwm_set_gpio_level(PWM_LEFT_PIN, ul_v);
+#endif
     return true;
 }
 
 // to call DMA-wait not from ISR for timer
 bool __not_in_flash_func(repeat_me_often)(void) {
-    #if FEATURE_AUDIO_I2S
-        i2s_dma_write(&i2s_config, samples);
-    #endif
+#if HAS_AUDIO_I2S
+    if (audio_use_i2s) i2s_dma_write(&i2s_config, samples);
+#endif
+    return true;
 }

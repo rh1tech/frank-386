@@ -54,6 +54,12 @@ void i2s_volume(i2s_config_t *i2s_config, uint8_t volume);
 void i2s_increase_volume(i2s_config_t *i2s_config);
 void i2s_decrease_volume(i2s_config_t *i2s_config);
 
+#define AUDIO_OUTPUT_AUTO 0
+#define AUDIO_OUTPUT_PWM  1
+#define AUDIO_OUTPUT_I2S  2
+
+void audio_set_boot_output(int output);
+
 void audio_set_enabled(bool);
 void audio_set_volume(uint8_t);
 uint8_t audio_get_volume(void);

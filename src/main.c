@@ -60,10 +60,6 @@
 #include "diskcache.h"
 #include "gameport.h"
 
-#if FEATURE_AUDIO_PWM
-#include <hardware/pwm.h>
-#endif
-
 //=============================================================================
 // Version Information
 //=============================================================================
@@ -636,7 +632,7 @@ static int load_config_from_sd(const char *filename) {
     }
 
     char path[256];
-    snprintf(path, sizeof(path), "386/%s", filename);
+    snprintf(path, sizeof(path), CONFIG_PLATFORM_DIR "/%s", filename);
 
     res = f_open(&fp, path, FA_READ);
     if (res != FR_OK) {
@@ -833,7 +829,31 @@ static bool init_hardware(void) {
     }
     DBG_PRINT("  PSRAM test passed (8MB)\n");
 
-    // Initialize VGA early so we can show errors on screen
+    // Mount SD before video/audio so persistent output overrides can be read
+    // before either backend claims its pins.
+    DBG_PRINT("Initializing SD card...\n");
+    FRESULT res = f_mount(&fatfs, "", 1);
+    if (res == FR_OK) {
+        FIL fp;
+        if (f_open(&fp, VIDEO_MARKER_VGA, FA_READ) == FR_OK) {
+            vga_hw_set_boot_output(true);
+            f_close(&fp);
+        } else if (f_open(&fp, VIDEO_MARKER_HDMI, FA_READ) == FR_OK) {
+            vga_hw_set_boot_output(false);
+            f_close(&fp);
+        }
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+        if (f_open(&fp, AUDIO_MARKER_I2S, FA_READ) == FR_OK) {
+            audio_set_boot_output(AUDIO_OUTPUT_I2S);
+            f_close(&fp);
+        } else if (f_open(&fp, AUDIO_MARKER_PWM, FA_READ) == FR_OK) {
+            audio_set_boot_output(AUDIO_OUTPUT_PWM);
+            f_close(&fp);
+        }
+#endif
+    }
+
+    // Initialize video/audio early so SD errors can be shown on screen.
     multicore_launch_core1(core1_entry);
 
     while(!vga_initialized) {
@@ -842,9 +862,6 @@ static bool init_hardware(void) {
     }
     __dmb();
 
-    // Initialize SD card
-    DBG_PRINT("Initializing SD card...\n");
-    FRESULT res = f_mount(&fatfs, "", 1);
     if (res != FR_OK) {
         char detail[32];
         snprintf(detail, sizeof(detail), "FatFS error code: %d", res);
@@ -863,13 +880,13 @@ static bool init_hardware(void) {
     f_closedir(&dir);
     DBG_PRINT("  386/ directory found\n");
 
-    // Load frank-386-specific hardware settings from INI
+    // Load frank-386-specific hardware settings from the per-platform INI
     // This allows cpu_freq and psram_freq to be configured
     {
         FIL fp;
         char *content = NULL;
 
-        if (f_open(&fp, "386/config.ini", FA_READ) == FR_OK) {
+        if (f_open(&fp, CONFIG_FILE_PATH, FA_READ) == FR_OK) {
             FSIZE_t size = f_size(&fp);
             content = malloc(size + 1);
             if (content) {
@@ -884,7 +901,7 @@ static bool init_hardware(void) {
             f_close(&fp);
             DBG_PRINT("  Loaded config.ini\n");
         } else {
-            show_warning_screen(" Warning ", "config.ini not found, using defaults.", 2000);
+            show_warning_screen(" Warning ", "Platform config.ini not found, using defaults.", 2000);
         }
 
         // Check if clock reconfiguration is needed
@@ -1116,17 +1133,7 @@ static void __not_in_flash_func(core1_entry)(void) {
     sleep_ms(100);
     vga_initialized = true;
 
-    // Initialize audio. Boards without an I2S DAC (Olimex PC) define no
-    // I2S pins at all, so the pin report has to follow the audio type
-    // rather than being printed unconditionally.
-#if FEATURE_AUDIO_I2S
-    DBG_PRINT("Initializing I2S Audio...\n");
-    DBG_PRINT("  DATA: GPIO%d, CLK: GPIO%d, LRCK: GPIO%d\n",
-           I2S_DATA_PIN, I2S_CLOCK_PIN_BASE, I2S_CLOCK_PIN_BASE + 1);
-#else
-    DBG_PRINT("Initializing PWM Audio...\n");
-    DBG_PRINT("  LEFT: GPIO%d, RIGHT: GPIO%d\n", PWM_LEFT_PIN, PWM_RIGHT_PIN);
-#endif
+    DBG_PRINT("Initializing runtime audio output...\n");
     audio_set_enabled(false);
     audio_init();
     audio_set_volume(config_get_volume());

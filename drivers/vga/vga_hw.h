@@ -49,6 +49,9 @@
 // Recalculate PIO clock divider after sysclk change (call after reconfigure_clocks)
 void vga_hw_reclock(void);
 
+// Force physical output for this boot and bypass runtime pin autodetection.
+void vga_hw_set_boot_output(bool select_vga);
+
 // Initialize VGA hardware subsystem
 void vga_hw_init(void);
 

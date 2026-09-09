@@ -45,8 +45,20 @@ static bool cfg_hw_changed = false;
 
 extern PC *pc;
 
-// INI file path
-#define CONFIG_PATH "386/config.ini"
+
+bool config_ensure_dir(void) {
+    FILINFO info;
+    FRESULT res;
+
+    res = f_mkdir("/.config");
+    if (res != FR_OK && res != FR_EXIST) return false;
+    res = f_mkdir(CONFIG_CPU_DIR);
+    if (res != FR_OK && res != FR_EXIST) return false;
+    res = f_mkdir(CONFIG_PLATFORM_DIR);
+    if (res != FR_OK && res != FR_EXIST) return false;
+
+    return f_stat(CONFIG_PLATFORM_DIR, &info) == FR_OK && (info.fattrib & AM_DIR);
+}
 
 void config_init_from_current(void) {
     // These will be set from PCConfig in main.c
@@ -253,7 +265,9 @@ bool config_save_all(void) {
     FRESULT res;
     char line[80];
 
-    res = f_open(&fp, CONFIG_PATH, FA_WRITE | FA_CREATE_ALWAYS);
+    if (!config_ensure_dir()) return false;
+
+    res = f_open(&fp, CONFIG_FILE_PATH, FA_WRITE | FA_CREATE_ALWAYS);
     if (res != FR_OK) return false;
 
     // Write [pc] section

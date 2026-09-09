@@ -15,6 +15,8 @@
 #include <string.h>
 #include <stdio.h>
 #include "audio.h"
+#include "board_config.h"
+#include "ff.h"
 
 extern bool SELECT_VGA;
 
@@ -49,6 +51,8 @@ typedef enum {
     SETTING_VOLTAGE,
     SETTING_PSRAM_FREQ,
     SETTING_FLASH_FREQ,
+    SETTING_AUDIO_OUTPUT,
+    SETTING_VIDEO_OUTPUT,
     SETTING_COUNT
 } SettingItem;
 
@@ -99,6 +103,15 @@ static int scroll_offset = 0;
 static bool restart_requested = false;
 static int plasma_frame = 0;  // Animation frame counter
 
+typedef enum {
+    VIDEO_OUTPUT_AUTO = 0,
+    VIDEO_OUTPUT_VGA,
+    VIDEO_OUTPUT_HDMI
+} VideoOutputSetting;
+
+static VideoOutputSetting video_output_setting = VIDEO_OUTPUT_AUTO;
+static int audio_output_setting = AUDIO_OUTPUT_AUTO;
+
 // Original values (to detect changes)
 static int orig_mem, orig_cpu, orig_fpu, orig_redirector;
 static int orig_pcspeaker, orig_adlib, orig_soundblaster, orig_tandy, orig_covox, orig_dss, orig_mouse, orig_nes_mouse, orig_nes_joystick, orig_mpu401;
@@ -117,6 +130,74 @@ static void draw_confirm_dialog(void);
 static void draw_confirm_dialog2(void);
 static int find_option_index(const int *options, int count, int value);
 static void cycle_option(int direction);
+
+static VideoOutputSetting load_video_output_setting(void) {
+    FILINFO fno;
+    if (f_stat(VIDEO_MARKER_VGA, &fno) == FR_OK) return VIDEO_OUTPUT_VGA;
+    if (f_stat(VIDEO_MARKER_HDMI, &fno) == FR_OK) return VIDEO_OUTPUT_HDMI;
+    return VIDEO_OUTPUT_AUTO;
+}
+
+static int load_audio_output_setting(void) {
+#if !HAS_AUDIO_I2S
+    return AUDIO_OUTPUT_PWM;
+#elif !HAS_AUDIO_PWM
+    return AUDIO_OUTPUT_I2S;
+#else
+    FILINFO fno;
+    if (f_stat(AUDIO_MARKER_I2S, &fno) == FR_OK) return AUDIO_OUTPUT_I2S;
+    if (f_stat(AUDIO_MARKER_PWM, &fno) == FR_OK) return AUDIO_OUTPUT_PWM;
+    return AUDIO_OUTPUT_AUTO;
+#endif
+}
+
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+static void save_audio_output_setting(int setting) {
+    FIL fp;
+    audio_output_setting = setting;
+
+    if (setting == AUDIO_OUTPUT_AUTO) {
+        (void)f_unlink(AUDIO_MARKER_PWM);
+        (void)f_unlink(AUDIO_MARKER_I2S);
+        return;
+    }
+    if (!config_ensure_dir()) return;
+
+    const char *create_path;
+    if (setting == AUDIO_OUTPUT_I2S) {
+        (void)f_unlink(AUDIO_MARKER_PWM);
+        create_path = AUDIO_MARKER_I2S;
+    } else {
+        (void)f_unlink(AUDIO_MARKER_I2S);
+        create_path = AUDIO_MARKER_PWM;
+    }
+    if (f_open(&fp, create_path, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+        f_close(&fp);
+}
+#endif
+
+static void save_video_output_setting(VideoOutputSetting setting) {
+    FIL fp;
+    video_output_setting = setting;
+
+    if (setting == VIDEO_OUTPUT_AUTO) {
+        (void)f_unlink(VIDEO_MARKER_VGA);
+        (void)f_unlink(VIDEO_MARKER_HDMI);
+        return;
+    }
+    if (!config_ensure_dir()) return;
+
+    const char *create_path;
+    if (setting == VIDEO_OUTPUT_VGA) {
+        (void)f_unlink(VIDEO_MARKER_HDMI);
+        create_path = VIDEO_MARKER_VGA;
+    } else {
+        (void)f_unlink(VIDEO_MARKER_VGA);
+        create_path = VIDEO_MARKER_HDMI;
+    }
+    if (f_open(&fp, create_path, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+        f_close(&fp);
+}
 
 void settingsui_init(void) {
     settings_state = SETTINGS_CLOSED;
@@ -147,6 +228,8 @@ void settingsui_open(void) {
     orig_volume = audio_get_volume();
     orig_voltage = config_get_voltage();
     orig_mouse_invert_y = config_get_mouse_invert_y();
+    audio_output_setting = load_audio_output_setting();
+    video_output_setting = load_video_output_setting();
 
     settings_state = SETTINGS_MAIN;
     selected_item = 0;
@@ -322,6 +405,18 @@ static void cycle_option(int direction) {
             idx = (idx + direction + count) % count;
             config_set_flash_freq(options[idx]);
             break;
+
+        case SETTING_AUDIO_OUTPUT:
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+            audio_output_setting = (audio_output_setting + direction + 3) % 3;
+            save_audio_output_setting(audio_output_setting);
+#endif
+            break;
+
+        case SETTING_VIDEO_OUTPUT:
+            video_output_setting = (VideoOutputSetting)(((int)video_output_setting + direction + 3) % 3);
+            save_video_output_setting(video_output_setting);
+            break;
     }
 }
 
@@ -356,7 +451,9 @@ static void draw_settings_menu(void) {
         "RP2350 Freq:",
         "CPU Voltage:",
         "PSRAM Freq:",
-        "Flash Freq:"
+        "Flash Freq:",
+        "Audio output:",
+        "VGA/HDMI:"
     };
     char value[24];
 
@@ -440,6 +537,23 @@ static void draw_settings_menu(void) {
             case SETTING_FLASH_FREQ:
                 snprintf(value, sizeof(value), "< %d MHz >", config_get_flash_freq());
                 break;
+            case SETTING_AUDIO_OUTPUT:
+#if HAS_AUDIO_I2S && HAS_AUDIO_PWM
+                {
+                    static const char *names[] = { "Autodetect", "PWM", "I2S" };
+                    snprintf(value, sizeof(value), "< %s >", names[audio_output_setting]);
+                }
+#elif HAS_AUDIO_I2S
+                snprintf(value, sizeof(value), "  I2S");
+#else
+                snprintf(value, sizeof(value), "  PWM");
+#endif
+                break;
+            case SETTING_VIDEO_OUTPUT: {
+                static const char *names[] = { "Autodetect", "VGA", "HDMI" };
+                snprintf(value, sizeof(value), "< %s >", names[video_output_setting]);
+                break;
+            }
         }
         // Right-align value
         int val_len = strlen(value);
