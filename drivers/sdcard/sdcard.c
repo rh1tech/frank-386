@@ -54,7 +54,7 @@
 #define CT_BLOCK       0x08            /* Block addressing */
 
 #define CLK_SLOW	(100 * KHZ)
-#define CLK_FAST	(30 * MHZ)
+#define CLK_FAST	(20 * MHZ)
 
 static volatile
 DSTATUS Stat = STA_NOINIT;	/* Physical drive status */
@@ -68,6 +68,8 @@ pio_spi_inst_t pio_spi = {
 		.sm = -1
 };
 #endif
+
+static bool spi_initialized = false;
 
 static inline uint32_t _millis(void)
 {
@@ -90,18 +92,34 @@ static inline void cs_deselect(uint cs_pin) {
     asm volatile("nop \n nop \n nop"); // FIXME
 }
 
+static void set_spi_clock(uint32_t hz)
+{
+    if (!spi_initialized) return;
+#ifndef SDCARD_PIO
+    spi_set_baudrate(SDCARD_SPI_BUS, hz);
+#else
+    /* The PIO program uses four state-machine cycles per SPI bit. */
+    float clkdiv = (float)clock_get_hz(clk_sys) / (4.0f * (float)hz);
+    if (clkdiv < 1.0f) clkdiv = 1.0f;
+    pio_sm_set_clkdiv(pio_spi.pio, pio_spi.sm, clkdiv);
+    pio_sm_clkdiv_restart(pio_spi.pio, pio_spi.sm);
+#endif
+}
+
 static void FCLK_SLOW(void)
 {
-#ifndef SDCARD_PIO
-    spi_set_baudrate(SDCARD_SPI_BUS, CLK_SLOW);
-#endif
+    set_spi_clock(CLK_SLOW);
 }
 
 static void FCLK_FAST(void)
 {
-#ifndef SDCARD_PIO
-    spi_set_baudrate(SDCARD_SPI_BUS, CLK_FAST);
-#endif
+    set_spi_clock(CLK_FAST);
+}
+
+void sdcard_reclock(void)
+{
+    if (!spi_initialized) return;
+    set_spi_clock((Stat & STA_NOINIT) ? CLK_SLOW : CLK_FAST);
 }
 
 static void CS_HIGH(void)
@@ -150,6 +168,7 @@ void init_spi(void)
 	gpio_set_function(SDCARD_PIN_SPI0_MOSI, GPIO_FUNC_SPI);
 
 	spi_init(SDCARD_SPI_BUS, CLK_SLOW);
+	spi_initialized = true;
 
 	/* SPI0 parameter config */
 	spi_set_format(SDCARD_SPI_BUS,
@@ -163,7 +182,10 @@ void init_spi(void)
     gpio_set_dir(SDCARD_PIN_SPI0_MISO, GPIO_OUT);
     gpio_set_dir(SDCARD_PIN_SPI0_MOSI, GPIO_OUT);
 
-	float clkdiv = 4.0f;
+	/* SD-card initialization must stay at the identification clock. The PIO
+	 * program uses four state-machine cycles per SPI bit. */
+	float clkdiv = (float)clock_get_hz(clk_sys) / (4.0f * (float)CLK_SLOW);
+	if (clkdiv < 1.0f) clkdiv = 1.0f;
 	int cpol = 0;
 	int cpha = 0;
 	uint cpha0_prog_offs = pio_add_program(pio_spi.pio, &spi_cpha0_program);
@@ -178,6 +200,7 @@ void init_spi(void)
 				SDCARD_PIN_SPI0_MOSI,
 				SDCARD_PIN_SPI0_MISO
 	);
+	spi_initialized = true;
 #endif
 }
 

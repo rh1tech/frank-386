@@ -856,6 +856,7 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
             set_sys_clock_khz(cpu_mhz * 1000, false);
         }
         console_reclock();
+        sdcard_reclock();
     } else if (current_vreg_mv != new_vreg_mv) {
         // HDMI may already have pinned clk_sys at 504 MHz. Voltage still has
         // to follow config.ini without needlessly reprogramming the PLLs.

@@ -36,4 +36,7 @@
 #define SDCARD_PIN_SPI0_MISO   16
 #endif
 
+/* Recalculate the active SD SPI clock after clk_sys/clk_peri changes. */
+void sdcard_reclock(void);
+
 #endif // _SDCARD_H_
