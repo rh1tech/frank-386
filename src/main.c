@@ -84,6 +84,23 @@ PC *pc = NULL;
 static PCConfig config;
 volatile bool initialized = false;
 
+/* Track the voltage actually programmed into the RP2350 regulator. */
+static uint16_t current_vreg_mv = 1100;
+
+static uint16_t vreg_to_mv(enum vreg_voltage v) {
+    switch ((int)v) {
+    case 15: return 1300;
+    case 16: return 1350;
+    case 17: return 1400;
+    case 18: return 1500;
+    case 19: return 1600;
+    case 20: return 1650;
+    case 21: return 1700;
+    case 22: return 1800;
+    default: return 1100;
+    }
+}
+
 /*
  * Interpreter throughput, always compiled.
  *
@@ -716,6 +733,7 @@ static void configure_clocks(void) {
 
     vreg_disable_voltage_limit();
     vreg_set_voltage(CPU_VOLTAGE);
+    current_vreg_mv = vreg_to_mv(CPU_VOLTAGE);
     sleep_ms(100);  // Stabilization delay
 
     // Configure flash timing BEFORE changing clock
@@ -736,7 +754,7 @@ static enum vreg_voltage get_voltage_for_freq(int mhz) {
     int v = config_get_voltage();
     if (v >= 0) return (enum vreg_voltage)v;  /* user override */
     /* auto: safe defaults per frequency */
-    if (mhz >= 504) return VREG_VOLTAGE_1_65;
+    if (mhz > 504) return VREG_VOLTAGE_1_65;
     if (mhz >= 378) return VREG_VOLTAGE_1_60;
     return VREG_VOLTAGE_1_50;
 }
@@ -751,11 +769,13 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
     DBG_PRINT("Reconfiguring clocks: %d MHz -> %d MHz, PSRAM: %d MHz, FLASH: %d\n",
               current_mhz, cpu_mhz, psram_mhz, cfg_flash);
 
+    enum vreg_voltage new_voltage = get_voltage_for_freq(cpu_mhz);
+    uint16_t new_vreg_mv = vreg_to_mv(new_voltage);
+
     // Only change system clock if CPU frequency actually differs.
     // Unnecessary PLL reconfiguration disrupts PIO timing (HDMI, audio).
     if (cpu_mhz != current_mhz) {
         bool lowering = (cpu_mhz < current_mhz);
-        enum vreg_voltage new_voltage = get_voltage_for_freq(cpu_mhz);
 
         if (lowering) {
             // LOWERING: clock first, then voltage (safe order)
@@ -763,15 +783,24 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
             set_sys_clock_khz(cpu_mhz * 1000, false);
             sleep_ms(10);
             vreg_set_voltage(new_voltage);
+            current_vreg_mv = new_vreg_mv;
         } else {
             // RAISING: voltage first, then clock (safe order)
             vreg_disable_voltage_limit();
             vreg_set_voltage(new_voltage);
+            current_vreg_mv = new_vreg_mv;
             sleep_ms(50);  // Stabilization delay
             set_flash_timings(cpu_mhz, cfg_flash);
             set_sys_clock_khz(cpu_mhz * 1000, false);
         }
         console_reclock();
+    } else if (current_vreg_mv != new_vreg_mv) {
+        // HDMI may already have pinned clk_sys at 504 MHz. Voltage still has
+        // to follow config.ini without needlessly reprogramming the PLLs.
+        vreg_disable_voltage_limit();
+        vreg_set_voltage(new_voltage);
+        current_vreg_mv = new_vreg_mv;
+        sleep_ms(50);
     }
 
     // Re-initialize PSRAM with the new frequency
@@ -878,7 +907,9 @@ static bool init_hardware(void) {
         DBG_PRINT("  Clocks pinned to build settings: CPU %d, PSRAM %d\n",
                   CPU_CLOCK_MHZ, PSRAM_MAX_FREQ_MHZ);
 #else
-        if (cfg_cpu != CPU_CLOCK_MHZ || cfg_psram != PSRAM_MAX_FREQ_MHZ || cfg_flash != FLASH_MAX_FREQ_MHZ) {
+        if (cfg_cpu != CPU_CLOCK_MHZ || cfg_psram != PSRAM_MAX_FREQ_MHZ ||
+            cfg_flash != FLASH_MAX_FREQ_MHZ ||
+            current_vreg_mv != vreg_to_mv(get_voltage_for_freq(cfg_cpu))) {
             reconfigure_clocks(cfg_cpu, cfg_psram, psram_pin, cfg_flash);
         }
 #endif

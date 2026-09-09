@@ -85,10 +85,12 @@ static const int flash_freq_option_count = 5;
  *   0b10010 = 18 -> 1.50V
  *   0b10011 = 19 -> 1.60V
  *   0b10100 = 20 -> 1.65V
+ *   0b10101 = 21 -> 1.70V
+ *   0b10110 = 22 -> 1.80V
  */
-static const int voltage_options[]      = { -1,     15,       16,       17,       18,       19,       20 };
-static const char *voltage_labels[]     = { "Auto", "1.30V",  "1.35V",  "1.40V",  "1.50V",  "1.60V",  "1.65V" };
-static const int voltage_option_count   = 7;
+static const int voltage_options[]      = { -1,     15,       16,       17,       18,       19,       20,       21,       22 };
+static const char *voltage_labels[]     = { "Auto", "1.30V",  "1.35V",  "1.40V",  "1.50V",  "1.60V",  "1.65V",  "1.70V",  "1.80V" };
+static const int voltage_option_count   = 9;
 
 // State
 static SettingsState settings_state = SETTINGS_CLOSED;
@@ -298,7 +300,6 @@ static void cycle_option(int direction) {
             break;
 
         case SETTING_VOLTAGE:
-            if (!SELECT_VGA) break;  // locked on HDMI
             options = voltage_options;
             count = voltage_option_count;
             idx = find_option_index(options, count, config_get_voltage());
@@ -429,12 +430,8 @@ static void draw_settings_menu(void) {
                     snprintf(value, sizeof(value), "< %d MHz >", config_get_cpu_freq());
                 break;
             case SETTING_VOLTAGE: {
-                if (!SELECT_VGA) {
-                    snprintf(value, sizeof(value), "  1.65V (HDMI)");
-                } else {
-                    int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
-                    snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);
-                }
+                int idx = find_option_index(voltage_options, voltage_option_count, config_get_voltage());
+                snprintf(value, sizeof(value), "< %s >", voltage_labels[idx]);
                 break;
             }
             case SETTING_PSRAM_FREQ:
