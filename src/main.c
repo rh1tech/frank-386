@@ -816,6 +816,9 @@ static int __no_inline_not_in_flash_func(flash_ensure_qe)(uint8_t *jedec_mfr) {
     case 0x68:  // Boya
     case 0x5E:  // Zbit
         break;
+    case 0x20:  // XMC, but Micron uses 20h too and has no SR2 QE bit
+        if (rx[2] != 0x40 && rx[2] != 0x70) return -1;  // XM25QH memory types
+        break;
     default:
         return -1;
     }
@@ -981,10 +984,34 @@ static bool init_hardware(void) {
     uint psram_pin = get_psram_pin();
     DBG_PRINT("  PSRAM CS pin: GPIO%d\n", psram_pin);
     psram_init(psram_pin);
+    uint8_t psram_mfid, psram_kgd;
+    psram_get_id(&psram_mfid, &psram_kgd);
+    DBG_PRINT("  PSRAM ID: MF %02X KGD %02X%s\n", psram_mfid, psram_kgd,
+              psram_kgd == 0x5D ? "" : " (expected 5D: no PSRAM on this CS?)");
 
+    /*
+     * Some boards' PSRAM does not hold the configured clock with the
+     * default sampling delay (#6). Rather than stop dead, step down until
+     * the part answers, and keep that as a cap for every later re-init.
+     */
     size_t detected_psram = psram_detect_size();
+    static const int psram_fallback_mhz[] = { 84, 66, 33 };
+    for (unsigned i = 0; detected_psram < (1u << 20) && i < count_of(psram_fallback_mhz); i++) {
+        if (psram_fallback_mhz[i] >= PSRAM_MAX_FREQ_MHZ) continue;
+        printf("PSRAM not detected (read back %08lX), retrying at %d MHz\n",
+               (unsigned long)psram_probe_readback(), psram_fallback_mhz[i]);
+        psram_init_with_freq(psram_pin, psram_fallback_mhz[i]);
+        detected_psram = psram_detect_size();
+        if (detected_psram >= (1u << 20)) {
+            psram_set_freq_cap(psram_fallback_mhz[i]);
+            printf("WARNING: PSRAM only works at %d MHz or below on this board\n",
+                   psram_fallback_mhz[i]);
+        }
+    }
     if (detected_psram < (1u << 20)) {
-        printf("ERROR: QSPI PSRAM not detected or smaller than 1 MiB!\n");
+        printf("ERROR: QSPI PSRAM not detected or smaller than 1 MiB! "
+               "(ID %02X/%02X, read back %08lX)\n",
+               psram_mfid, psram_kgd, (unsigned long)psram_probe_readback());
         // Can't show visual error - VGA not ready yet
         return false;
     }
@@ -1103,8 +1130,11 @@ static bool init_hardware(void) {
         printf("ERROR: QSPI PSRAM failed detection at configured frequency!\n");
         return false;
     }
+    int psram_mhz_eff = config_get_psram_freq();
+    if (psram_get_freq_cap() > 0 && psram_mhz_eff > psram_get_freq_cap())
+        psram_mhz_eff = psram_get_freq_cap();
     DBG_PRINT("  QSPI PSRAM usable: %lu MiB at %d MHz\n",
-              (unsigned long)(detected_psram >> 20), config_get_psram_freq());
+              (unsigned long)(detected_psram >> 20), psram_mhz_eff);
 
 #ifdef BOARD_HAS_PS2
     // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
