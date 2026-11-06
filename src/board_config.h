@@ -105,8 +105,15 @@
 #endif
 #endif
 
-// PSRAM pin for RP2350B (always GPIO47)
+// PSRAM pin for RP2350B variants. GPIO47 everywhere except the PC layout:
+// the Olimex RP2350pc (RP2350B, same pinout as the PICO-PC carrier) has
+// its PSRAM on GPIO8 like a Pico 2 in the carrier does, and GPIO47 found
+// nothing, so the PSRAM test failed before video came up (issue #10).
+#ifdef BOARD_PC
+#define PSRAM_PIN_RP2350B 8
+#else
 #define PSRAM_PIN_RP2350B 47
+#endif
 
 // PSRAM memory size (8MB)
 #if EMULATE_LTEMS
@@ -128,7 +135,7 @@ static inline uint get_psram_pin(void) {
         // RP2350A - use board-specific pin
         return PSRAM_PIN_RP2350A;
     } else {
-        // RP2350B - always GPIO47
+        // RP2350B - GPIO47, GPIO8 on the PC layout
         return PSRAM_PIN_RP2350B;
     }
 }
