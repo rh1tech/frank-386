@@ -290,11 +290,20 @@ void *pcmalloc(long size) {
  * Load ROM file from SD card to memory.
  */
 int load_rom(void *phys_mem, const char *file, uword addr, int backward) {
-    FIL fp;
+    /*
+     * Static, not on the stack: a FIL carries a 512-byte sector buffer,
+     * and core 0's stack (top of SCRATCH_Y, 4 KB shared with the data
+     * placed there) is only a few hundred bytes deeper than this boot
+     * path. On the stack, main -> init_emulator -> pc_new -> load_rom ->
+     * FatFS/printf ran into spread8_lut and corrupted EGA/VGA 640-wide
+     * output (PR #9). The same goes for the other boot-time file
+     * helpers in this file. Core 0 only, never reentered.
+     */
+    static FIL fp;
     FRESULT res;
     UINT bytes_read;
 
-    char path[256];
+    static char path[256];
     snprintf(path, sizeof(path), "386/%s", file);
 
     res = f_open(&fp, path, FA_READ);
@@ -667,10 +676,11 @@ static void load_default_config(void) {
 }
 
 static int load_config_from_sd(const char *filename) {
-    FIL fp;
+    // Static to keep the boot path's stack shallow, see load_rom()
+    static FIL fp;
     FRESULT res;
-    DIR dir;
-    FILINFO fno;
+    static DIR dir;
+    static FILINFO fno;
 
     // Debug: List 386 directory contents
     DBG_PRINT("Checking SD card contents...\n");
@@ -697,7 +707,7 @@ static int load_config_from_sd(const char *filename) {
         }
     }
 
-    char path[256];
+    static char path[256];
     snprintf(path, sizeof(path), CONFIG_PLATFORM_DIR "/%s", filename);
 
     res = f_open(&fp, path, FA_READ);
@@ -764,6 +774,81 @@ void console_reclock(void) {
 #ifdef LIB_PICO_STDIO_UART
     uart_set_baudrate(uart_default, PICO_DEFAULT_UART_BAUD_RATE);
 #endif
+}
+
+/*
+ * Make sure the flash chip has its Quad Enable bit set.
+ *
+ * Winbond parts ship with QE=1. Some boards — Waveshare RP2350-PiZero
+ * batches with Puya flash among them — ship with QE=0, which leaves the
+ * flash's IO2/IO3 as WP#/HOLD# rather than data lines. With PSRAM on the
+ * same QSPI bus such a board locks up or fails the PSRAM test as soon as
+ * it is overclocked (issue #6). The standalone FLASH_QE_SET_1.uf2
+ * fixes it once; doing the same here means nobody has to know about it.
+ *
+ * QE is non-volatile, so this writes the status register at most once
+ * in the chip's life: every later boot reads QE=1 and returns. Only
+ * vendors whose QE is bit 1 of SR2, read with 0x35 and written with
+ * 0x31, are touched — on e.g. Macronix 0x35 means "enter QPI" instead.
+ *
+ * The flash is unreadable while it rewrites a status register, so the
+ * whole sequence — including the busy poll — runs from RAM with
+ * interrupts off. Must run before core 1 is launched.
+ *
+ * Returns -1 if the vendor is not handled, 0 if QE was already set,
+ * 1 if it was set now, and -2 if the write did not take.
+ */
+static int __no_inline_not_in_flash_func(flash_ensure_qe)(uint8_t *jedec_mfr) {
+    uint8_t tx[4], rx[4];
+
+    tx[0] = 0x9F; tx[1] = 0; tx[2] = 0; tx[3] = 0;
+    flash_do_cmd(tx, rx, 4);
+    *jedec_mfr = rx[1];
+    switch (rx[1]) {
+    case 0xEF:  // Winbond
+    case 0xC8:  // GigaDevice
+    case 0x85:  // Puya
+    case 0x68:  // Boya
+    case 0x5E:  // Zbit
+        break;
+    default:
+        return -1;
+    }
+
+    tx[0] = 0x35; tx[1] = 0;
+    flash_do_cmd(tx, rx, 2);
+    const uint8_t sr2 = rx[1];
+    if (sr2 & 0x02) return 0;
+
+    tx[0] = 0x06;                       // Write Enable
+    flash_do_cmd(tx, rx, 1);
+    tx[0] = 0x31; tx[1] = sr2 | 0x02;   // Write SR2, keep the other bits
+    flash_do_cmd(tx, rx, 2);
+
+    // Poll WIP. tW is 15 ms worst case; each poll is tens of us.
+    for (int i = 0; i < 100000; i++) {
+        tx[0] = 0x05; tx[1] = 0;
+        flash_do_cmd(tx, rx, 2);
+        if (!(rx[1] & 0x01)) break;
+    }
+
+    tx[0] = 0x35; tx[1] = 0;
+    flash_do_cmd(tx, rx, 2);
+    return (rx[1] & 0x02) ? 1 : -2;
+}
+
+static void flash_qe_fixup(void) {
+    uint8_t mfr;
+    uint32_t irq = save_and_disable_interrupts();
+    int r = flash_ensure_qe(&mfr);
+    restore_interrupts(irq);
+
+    if (r == 1)
+        printf("Flash (JEDEC %02X): Quad Enable bit was off, now set\n", mfr);
+    else if (r == -2)
+        printf("WARNING: flash (JEDEC %02X) did not accept the Quad Enable bit\n", mfr);
+    else
+        DBG_PRINT("Flash JEDEC %02X: QE %s\n", mfr, r == 0 ? "set" : "not checked");
 }
 
 // Flash timing configuration for overclocking
@@ -879,6 +964,10 @@ static void __no_inline_not_in_flash_func(reconfigure_clocks)(int cpu_mhz, int p
 //=============================================================================
 static void core1_entry(void);
 static bool init_hardware(void) {
+    // Before the overclock and before PSRAM: on flash shipped with QE=0
+    // both fail (see flash_ensure_qe)
+    flash_qe_fixup();
+
     // Configure clocks (including overclock if enabled)
     configure_clocks();
 
@@ -902,7 +991,7 @@ static bool init_hardware(void) {
     DBG_PRINT("Initializing SD card...\n");
     FRESULT res = f_mount(&fatfs, "", 1);
     if (res == FR_OK) {
-        FIL fp;
+        static FIL fp;  // static: shallow boot stack, see load_rom()
         if (f_open(&fp, VIDEO_MARKER_VGA, FA_READ) == FR_OK) {
             vga_hw_set_boot_output(true);
             f_close(&fp);
@@ -939,7 +1028,7 @@ static bool init_hardware(void) {
     DBG_PRINT("  SD card mounted\n");
 
     // Check if 386/ directory exists
-    DIR dir;
+    static DIR dir;  // static: shallow boot stack, see load_rom()
     res = f_opendir(&dir, "386");
     if (res != FR_OK) {
         show_error_screen(" Missing Directory ", "Directory '386/' not found on SD card.", "Create it and add config.ini, bios.bin");
@@ -951,7 +1040,7 @@ static bool init_hardware(void) {
     // Load frank-386-specific hardware settings from the per-platform INI
     // This allows cpu_freq and psram_freq to be configured
     {
-        FIL fp;
+        static FIL fp;
         char *content = NULL;
 
         if (f_open(&fp, CONFIG_FILE_PATH, FA_READ) == FR_OK) {
@@ -1165,8 +1254,8 @@ static bool init_emulator(void) {
     // Check if BIOS file exists before loading
     DBG_PRINT("Loading BIOS...\n");
     if (config.bios && config.bios[0]) {
-        char bios_path[256];
-        FIL fp;
+        static char bios_path[256];  // static: shallow boot stack, see load_rom()
+        static FIL fp;
         snprintf(bios_path, sizeof(bios_path), "386/%s", config.bios);
         if (f_open(&fp, bios_path, FA_READ) != FR_OK) {
             char detail[64];
@@ -1300,6 +1389,17 @@ static void show_welcome_screen(void) {
 //=============================================================================
 
 int main(void) {
+    /*
+     * Core 0's stack grows down from the top of SCRATCH_Y towards the
+     * data placed at its bottom (spread8_lut, the HDMI DMA pointers).
+     * Nothing stops it there by default, and an overflow silently
+     * corrupts those tables (PR #9). Fence the stack off at the end of
+     * that data, so an overflow faults where it happens instead.
+     */
+    extern char __scratch_y_end__[];
+    uintptr_t stack_limit = ((uintptr_t)__scratch_y_end__ + 7u) & ~7u;
+    __asm volatile ("msr msplim, %0" : : "r" (stack_limit));
+
     // Initialize stdio (USB Serial or UART depending on USB HID mode)
     stdio_init_all();
     #ifdef PICO_DEFAULT_LED_PIN
@@ -1340,6 +1440,10 @@ int main(void) {
     DBG_PRINT("  Board: M1\n");
 #elif defined(BOARD_M2)
     DBG_PRINT("  Board: M2\n");
+#elif defined(BOARD_PC)
+    DBG_PRINT("  Board: PC (Olimex PICO-PC)\n");
+#elif defined(BOARD_Z2)
+    DBG_PRINT("  Board: Z2 (Waveshare RP2350-PiZero)\n");
 #elif defined(BOARD_C2)
     DBG_PRINT("  Board: C2 (FRANK Core 2 master)\n");
 #else

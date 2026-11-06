@@ -510,6 +510,11 @@ if(USB_HID_ENABLED)
         # master is not something to attempt blind.
         message(STATUS "USB HID enabled: console on UART0 (J2, GPIO0/1)")
         pico_enable_stdio_uart(${BUILD_NAME} 1)
+    elseif(BOARD STREQUAL "Z2")
+        # Z2's GPIO0/1 carry the PS/2 mouse, which board_config.h drops
+        # in a USB HID build, so the UART console can have them.
+        message(STATUS "USB HID enabled: console on UART0 (GPIO0/1)")
+        pico_enable_stdio_uart(${BUILD_NAME} 1)
     else()
         # Other boards route GPIO0/1 to PS/2 or a gamepad, so there is no
         # UART to fall back on — stdio is simply off.

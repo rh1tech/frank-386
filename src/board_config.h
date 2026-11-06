@@ -61,6 +61,15 @@
 #ifndef BOARD_C2
 #define BOARD_HAS_PS2 1
 #endif
+/*
+ * Z2 (RP2350-PiZero) has its PS/2 mouse on GPIO0/1, which a USB HID
+ * build hands to the UART console instead (USB is in host mode, so it
+ * is the only console). The keyboard and mouse are USB there anyway.
+ * From PR #9 by @blee-blee.
+ */
+#if defined(BOARD_Z2) && defined(USB_HID_ENABLED)
+#undef BOARD_HAS_PS2
+#endif
 
 //=============================================================================
 // CPU/PSRAM Speed Defaults (can be overridden via CMake)

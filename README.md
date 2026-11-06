@@ -42,13 +42,15 @@ This firmware is designed for RP2350-based boards with integrated VGA/HDMI, SD c
 ## Hardware Requirements
 
 - **Raspberry Pi Pico 2** (RP2350) or compatible board
-- **8MB PSRAM** (required for extended memory)
+- **8MB QSPI PSRAM** on the RP2350's second QSPI chip select (XIP CS1: GPIO47 on RP2350B, GPIO19 or GPIO8 on RP2350A), sharing the bus with the flash. PSRAM wired as a plain SPI device on other GPIOs is not supported.
 - **VGA or HDMI connector**
 - **SD card module** (SPI mode)
 - **PS/2 keyboard** (directly connected) - OR - **USB keyboard** (via native USB port)
 - **Audio output** (optional): I2S DAC or PWM
 
-> **Note:** When USB HID is enabled, the native USB port is used for keyboard/mouse input. USB serial console (CDC) is disabled in this mode; use UART for debug output.
+> **Note:** When USB HID is enabled, the native USB port is used for keyboard/mouse input. USB serial console (CDC) is disabled in this mode; use UART for debug output. On Z2 a USB HID build puts that UART console on GPIO0 (TX) / GPIO1 (RX) at 115200 baud and drops PS/2 support, because the Z2 PS/2 mouse uses those pins.
+
+> **Non-Winbond flash (e.g. Puya on some Waveshare RP2350-PiZero batches):** these chips can ship with the flash Quad Enable bit cleared, which makes PSRAM boards fail once overclocked. The firmware checks the bit on every boot and sets it once if needed, so no separate `FLASH_QE_SET_1.uf2` step is required.
 
 ## Board Configurations
 
@@ -320,11 +322,10 @@ This project is based on the following open-source projects:
 - **License:** MIT
 - **Description:** RP2350 platform integration, disk management, VGA driver concepts.
 
-### QuakeGeneric
-- **Project:** [QuakeGeneric](https://github.com/DnCraptor/quakegeneric)
+### RP2350 platform code by DnCraptor
 - **Author:** DnCraptor
-- **License:** GPL v2
-- **Description:** RP2350 hardware integration patterns, Murmulator platform support, and PS/2 mouse driver implementation.
+- **License:** MIT
+- **Description:** RP2350 hardware integration, Murmulator platform support, and the PS/2 mouse driver, taken from DnCraptor's RP2350 Quake port. Only that MIT-licensed platform code is used: nothing from the GPL-licensed Quake engine or from QuakeGeneric.
 
 ### QEMU
 - **Project:** [QEMU](https://www.qemu.org/)

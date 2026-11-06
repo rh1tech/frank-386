@@ -37,10 +37,11 @@ This project incorporates code from the following projects:
    RP2350 platform code, disk management, VGA driver concepts
    License: MIT
 
-3. QuakeGeneric (https://github.com/DnCraptor/quakegeneric)
+3. RP2350 platform code by DnCraptor (from DnCraptor's RP2350 Quake port)
    Copyright (c) DnCraptor
-   RP2350 hardware integration patterns
-   License: GPL v2
+   RP2350 hardware integration, Murmulator platform support, PS/2 mouse driver
+   License: MIT
+   No code from the GPL-licensed Quake engine or from QuakeGeneric is used.
 
 4. SeaBIOS (https://www.seabios.org/)
    Copyright (c) Kevin O'Connor and contributors
