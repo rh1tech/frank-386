@@ -53,7 +53,12 @@ This project incorporates code from the following projects:
    Generic FAT Filesystem Module for SD card access
    License: FatFs License (BSD-style)
 
-6. Pico SDK (https://github.com/raspberrypi/pico-sdk)
+6. Pico-PIO-USB (https://github.com/sekigon-gonnoc/Pico-PIO-USB)
+   Copyright (c) 2021 sekigon-gonnoc
+   USB host over PIO (vendored in drivers/pio_usb, v0.7.2)
+   License: MIT
+
+7. Pico SDK (https://github.com/raspberrypi/pico-sdk)
    Copyright (c) 2020-2024 Raspberry Pi (Trading) Ltd.
    RP2350 SDK and libraries
    License: BSD 3-Clause

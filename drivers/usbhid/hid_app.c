@@ -13,6 +13,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "pico/stdlib.h"  // for time_us_32()
+#if CFG_TUH_RPI_PIO_USB
+#include "pio_usb.h"
+#include "hardware/clocks.h"
+#include "hardware/dma.h"
+#include "board_config.h"
+#endif
 
 // Only compile if USB Host is enabled
 #if CFG_TUH_ENABLED
@@ -358,6 +364,37 @@ void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance, uint8_t cons
 //--------------------------------------------------------------------
 
 void usbhid_init(void) {
+#if CFG_TUH_RPI_PIO_USB
+    /*
+     * Pico-PIO-USB bit-bangs full speed from PIO dividers derived from
+     * clk_sys here, once: the clock must be final (it is, all clock
+     * changes happen earlier in init_hardware) and a multiple of 12 MHz
+     * (504 MHz with HDMI is; 378 MHz is not).
+     *
+     * Its 1 ms SOF timer runs on this core, core 0, keeping it off
+     * core 1's scanline rendering.
+     *
+     * The library claims the DMA channel and state machines itself and
+     * panics if they are taken, and channel 0 is HDMI's. Pick a free
+     * channel and hand it over unclaimed.
+     */
+    uint32_t sys_hz = clock_get_hz(clk_sys);
+    if (sys_hz % 12000000u)
+        printf("WARNING: PIO-USB needs clk_sys a multiple of 12 MHz, have %lu Hz\n",
+               (unsigned long)sys_hz);
+
+    pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
+    pio_cfg.pin_dp = PIO_USB_DP_PIN;
+    pio_cfg.pio_tx_num = PIO_USB_PIO;
+    pio_cfg.pio_rx_num = PIO_USB_PIO;
+    int ch = dma_claim_unused_channel(true);
+    dma_channel_unclaim(ch);
+    pio_cfg.tx_ch = (uint8_t)ch;
+    tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
+    DBG_PRINT("USB host on PIO-USB: D+ GPIO%d, D- GPIO%d, pio%d, DMA %d\n",
+              PIO_USB_DP_PIN, PIO_USB_DP_PIN + 1, PIO_USB_PIO, ch);
+#endif
+
     // Initialize TinyUSB Host
     tuh_init(BOARD_TUH_RHPORT);
 

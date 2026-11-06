@@ -50,6 +50,8 @@ This firmware is designed for RP2350-based boards with integrated VGA/HDMI, SD c
 
 > **Note:** When USB HID is enabled, the native USB port is used for keyboard/mouse input. USB serial console (CDC) is disabled in this mode; use UART for debug output. On Z2 a USB HID build puts that UART console on GPIO0 (TX) / GPIO1 (RX) at 115200 baud and drops PS/2 support, because the Z2 PS/2 mouse uses those pins.
 
+> **Z2 USB ports:** USB HID builds for Z2 run the USB host on the board's **PIO-USB** USB-C socket (GPIO28/29, via [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB)); plug the keyboard, mouse or a hub there. The native **USB** socket is then only used for power. Build with `-DZ2_PIO_USB=OFF` to use the native socket for the host instead (TinyUSB drives one host port at a time).
+
 > **Non-Winbond flash (e.g. Puya on some Waveshare RP2350-PiZero batches):** these chips can ship with the flash Quad Enable bit cleared, which makes PSRAM boards fail once overclocked. The firmware checks the bit on every boot and sets it once if needed, so no separate `FLASH_QE_SET_1.uf2` step is required.
 
 ## Board Configurations
@@ -326,6 +328,12 @@ This project is based on the following open-source projects:
 - **Author:** DnCraptor
 - **License:** MIT
 - **Description:** RP2350 hardware integration, Murmulator platform support, and the PS/2 mouse driver, taken from DnCraptor's RP2350 Quake port. Only that MIT-licensed platform code is used: nothing from the GPL-licensed Quake engine or from QuakeGeneric.
+
+### Pico-PIO-USB
+- **Project:** [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) (v0.7.2, vendored in `drivers/pio_usb`)
+- **Author:** sekigon-gonnoc
+- **License:** MIT
+- **Description:** USB host over PIO, used for the Z2 PIO-USB port.
 
 ### QEMU
 - **Project:** [QEMU](https://www.qemu.org/)

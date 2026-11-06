@@ -341,6 +341,12 @@ static inline uint get_psram_pin(void) {
 #define PS2_MOUSE_CLK  0
 #define PS2_MOUSE_DATA 1
 
+// "PIO-USB" USB-C socket (D- is D+ + 1). Driven from pio1, which is free
+// here: video is on pio0, I2S and the NES pad on pio2, and PS/2 (pio1
+// otherwise) is compiled out in the USB HID builds that use this port.
+#define PIO_USB_DP_PIN 28
+#define PIO_USB_PIO    1
+
 // I2S Audio Pins
 #define I2S_DATA_PIN       10
 #define I2S_CLOCK_PIN_BASE 11

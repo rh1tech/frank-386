@@ -1,6 +1,6 @@
 /*
  * TinyUSB Configuration for USB Host HID (Keyboard)
- * Uses native USB port for Host mode
+ * Host on the native USB port, or on PIO-USB when CFG_TUH_RPI_PIO_USB=1
  *
  * NOTE: When USB HID is enabled, USB CDC stdio is DISABLED!
  * Use UART for debug output instead.
@@ -24,9 +24,12 @@ extern "C" {
 #define CFG_TUSB_MCU OPT_MCU_RP2040
 #endif
 
-// RHPort number used for host (0 = native USB port)
+// RHPort number used for host: 0 = native USB port, 1 = PIO-USB
+#ifndef CFG_TUH_RPI_PIO_USB
+#define CFG_TUH_RPI_PIO_USB 0
+#endif
 #ifndef BOARD_TUH_RHPORT
-#define BOARD_TUH_RHPORT 0
+#define BOARD_TUH_RHPORT (CFG_TUH_RPI_PIO_USB ? 1 : 0)
 #endif
 
 // RHPort max speed: Full-Speed (12 Mbps)

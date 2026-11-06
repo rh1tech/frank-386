@@ -66,6 +66,11 @@ option(EMM "Enable LTEMM support" OFF)
 # USB HID keyboard support (disabled by default to keep USB CDC for debug)
 option(USB_HID_ENABLED "Enable USB HID keyboard (disables USB CDC stdio)" ON)
 
+# Z2 (RP2350-PiZero) USB host port: the board's "PIO-USB" USB-C socket
+# (GPIO28/29, driven by Pico-PIO-USB) instead of the native "USB" one.
+# TinyUSB runs one host controller, so it is one or the other.
+option(Z2_PIO_USB "Z2: USB host on the PIO-USB port (OFF = native USB port)" ON)
+
 # Force HDMI output (skip VGA/HDMI pin auto-detection)
 option(FORCE_HDMI "Force HDMI output instead of VGA" OFF)
 
@@ -104,6 +109,16 @@ else()
 endif()
 
 message(STATUS "frank-386: Board=${BOARD}, CPU=${CPU_SPEED}MHz, PSRAM=${PSRAM_SPEED}MHz, Voltage=${CPU_VOLTAGE}, Audio=runtime")
+
+if(BOARD STREQUAL "Z2" AND USB_HID_ENABLED AND Z2_PIO_USB)
+    set(PIO_USB_ENABLED ON)
+    # Vendored Pico-PIO-USB 0.7.2 (sekigon-gonnoc, MIT). Must be set before
+    # pico_sdk_init(): TinyUSB's rp2040 family script picks it up from here
+    # and creates the tinyusb_pico_pio_usb target.
+    set(PICO_PIO_USB_PATH ${CMAKE_CURRENT_LIST_DIR}/drivers/pio_usb)
+else()
+    set(PIO_USB_ENABLED OFF)
+endif()
 
 include(pico_sdk_import.cmake)
 

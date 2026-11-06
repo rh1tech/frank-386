@@ -98,6 +98,18 @@ const uint8_t* vga_get_font_ptr(VGAState *s, uint8_t ch, int attr_bit3);
 #define MAX_TEXT_WIDTH 132
 #define MAX_TEXT_HEIGHT 60
 
+/*
+ * On RP2350 core 1 draws text straight from VGA RAM and vga_refresh()
+ * never calls vga_text_refresh(), so its per-cell change cache
+ * (last_ch_attr, 132x60x2 = 15.8 KB) was dead SRAM inside VGAState.
+ * FULL_UPDATE compiles it out. Keyed on PICO_RP2350 rather than
+ * RP2350_BUILD because every CMake target sees the former, and
+ * VGAState's layout must be the same in all of them.
+ */
+#if defined(PICO_RP2350) && !defined(FULL_UPDATE)
+#define FULL_UPDATE 1
+#endif
+
 struct FBDevice {
     /* the following is set by the device */
     int width;

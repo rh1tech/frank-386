@@ -27,6 +27,19 @@ if(USB_HID_ENABLED)
         USB_HID_ENABLED=1
     )
 
+    if(PIO_USB_ENABLED)
+        message(STATUS "  USB host on PIO-USB (root port 1)")
+        # SRAM is tight (the heap feeds pc_new()). The stock pools are sized
+        # for 2 root ports and 32 endpoints, ~6 KB; a hub with a keyboard
+        # and a mouse needs one root port and about 8 endpoints.
+        target_compile_definitions(usbhid INTERFACE
+            CFG_TUH_RPI_PIO_USB=1
+            PIO_USB_ROOT_PORT_CNT=1
+            PIO_USB_EP_POOL_CNT=12
+        )
+        target_link_libraries(usbhid INTERFACE tinyusb_pico_pio_usb)
+    endif()
+
     # Link TinyUSB Host
     target_link_libraries(usbhid INTERFACE
         tinyusb_host
