@@ -78,6 +78,7 @@
 //=============================================================================
 
 PC *pc = NULL;
+int psram_cs_override = -1;  // see get_psram_pin()
 static PCConfig config;
 volatile bool initialized = false;
 
@@ -1008,6 +1009,28 @@ static bool init_hardware(void) {
                    psram_fallback_mhz[i]);
         }
     }
+#ifdef BOARD_PC
+    /*
+     * The PC layout covers two boards: a Pico 2 in the PICO-PC carrier and
+     * the Olimex RP2350pc (RP2350B). Should the PSRAM not be on the pin
+     * chosen above, try the other candidate before giving up (#10).
+     */
+    if (detected_psram < (1u << 20)) {
+        uint alt = (psram_pin == 8) ? 47 : 8;
+        printf("PSRAM not found on GPIO%u, trying GPIO%u\n", psram_pin, alt);
+        gpio_set_function(psram_pin, GPIO_FUNC_NULL);
+        psram_set_freq_cap(0);
+        psram_init(alt);
+        psram_get_id(&psram_mfid, &psram_kgd);
+        DBG_PRINT("  PSRAM ID on GPIO%u: MF %02X KGD %02X\n", alt, psram_mfid, psram_kgd);
+        detected_psram = psram_detect_size();
+        if (detected_psram >= (1u << 20)) {
+            psram_pin = alt;
+            psram_cs_override = (int)alt;
+            printf("PSRAM found on GPIO%u\n", alt);
+        }
+    }
+#endif
     if (detected_psram < (1u << 20)) {
         printf("ERROR: QSPI PSRAM not detected or smaller than 1 MiB! "
                "(ID %02X/%02X, read back %08lX)\n",

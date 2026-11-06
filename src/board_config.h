@@ -128,7 +128,11 @@
 #define PSRAM_BASE_ADDR  PSRAM_BASE
 
 // Runtime function to get PSRAM pin based on chip package
+// Set by main.c when the PSRAM was found on another pin than the default
+extern int psram_cs_override;
+
 static inline uint get_psram_pin(void) {
+    if (psram_cs_override >= 0) return (uint)psram_cs_override;
     // Check if RP2350A (bit 0 set) or RP2350B (bit 0 clear)
     uint32_t package_sel = *((io_ro_32*)(SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET));
     if (package_sel & 1) {
