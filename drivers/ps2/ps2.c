@@ -699,6 +699,9 @@ void ps2_mouse_poll(void) {
 }
 
 bool ps2_mouse_get_state(int16_t *dx, int16_t *dy, int8_t *wheel, uint8_t *buttons) {
+    // PS/2 may be skipped at boot (Olimex RP2350pc has no port)
+    if (!mouse_pio_initialized) return false;
+
     // Process any pending data from the ring buffer
     ps2_mouse_poll();
 

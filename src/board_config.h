@@ -131,6 +131,21 @@
 // Set by main.c when the PSRAM was found on another pin than the default
 extern int psram_cs_override;
 
+/*
+ * PC layout only: true on the Olimex RP2350pc. The PICO-PC carrier takes a
+ * Pico 2, which is an RP2350A, and the RP2350pc is an RP2350B, so the
+ * package tells the two apart. The RP2350pc has no PS/2 port, its GPIO9 is
+ * the SD chip select (the NES pad latch on the carrier) and its audio is a
+ * codec on unknown pins, so PS/2, the NES pad and PWM audio stay off there.
+ */
+static inline bool board_is_rp2350pc(void) {
+#ifdef BOARD_PC
+    return !(*((io_ro_32*)(SYSINFO_BASE + SYSINFO_PACKAGE_SEL_OFFSET)) & 1);
+#else
+    return false;
+#endif
+}
+
 static inline uint get_psram_pin(void) {
     if (psram_cs_override >= 0) return (uint)psram_cs_override;
     // Check if RP2350A (bit 0 set) or RP2350B (bit 0 clear)
@@ -276,11 +291,17 @@ static inline uint get_psram_pin(void) {
 
 #define HDMI_BASE_PIN HDMI_PIN_CLKN
 
-// SD Card Pins
-#define SDCARD_PIN_CLK    6
-#define SDCARD_PIN_CMD    7
-#define SDCARD_PIN_D0     4
-#define SDCARD_PIN_D3     22
+/*
+ * SD card. The PC layout serves two boards, told apart at runtime by
+ * board_is_rp2350pc(): the PICO-PC carrier with a Pico 2 (RP2350A) and
+ * the Olimex RP2350pc (RP2350B), which has its card on the SPI1 pins
+ * 10/11/24/9 (#10). The PC build drives the card through PIO SPI, which
+ * takes any pins, so a runtime choice costs nothing.
+ */
+#define SDCARD_PIN_CLK    (board_is_rp2350pc() ? 10 : 6)
+#define SDCARD_PIN_CMD    (board_is_rp2350pc() ? 11 : 7)
+#define SDCARD_PIN_D0     (board_is_rp2350pc() ? 24 : 4)
+#define SDCARD_PIN_D3     (board_is_rp2350pc() ? 9 : 22)
 
 #define SDCARD_PIN_SPI0_SCK   SDCARD_PIN_CLK
 #define SDCARD_PIN_SPI0_MOSI  SDCARD_PIN_CMD

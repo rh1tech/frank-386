@@ -1044,6 +1044,9 @@ static bool init_hardware(void) {
     // Mount SD before video/audio so persistent output overrides can be read
     // before either backend claims its pins.
     DBG_PRINT("Initializing SD card...\n");
+    DBG_PRINT("  SCK GPIO%d, MOSI GPIO%d, MISO GPIO%d, CS GPIO%d%s\n",
+              SDCARD_PIN_SPI0_SCK, SDCARD_PIN_SPI0_MOSI, SDCARD_PIN_SPI0_MISO,
+              SDCARD_PIN_SPI0_CS, board_is_rp2350pc() ? " (Olimex RP2350pc)" : "");
     FRESULT res = f_mount(&fatfs, "", 1);
     if (res == FR_OK) {
         static FIL fp;  // static: shallow boot stack, see load_rom()
@@ -1162,17 +1165,21 @@ static bool init_hardware(void) {
 #ifdef BOARD_HAS_PS2
     // Initialize unified PS/2 driver (keyboard + mouse on shared PIO)
     DBG_PRINT("Initializing PS/2 (unified driver)...\n");
-    DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
-    DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
-    if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
-        printf("WARNING: PS/2 PIO init failed\n");
+    if (board_is_rp2350pc()) {
+        DBG_PRINT("Olimex RP2350pc: no PS/2 port, skipping PS/2\n");
+    } else {
+        DBG_PRINT("  Keyboard CLK: GPIO%d, DATA: GPIO%d\n", PS2_PIN_CLK, PS2_PIN_DATA);
+        DBG_PRINT("  Mouse    CLK: GPIO%d, DATA: GPIO%d\n", PS2_MOUSE_CLK, PS2_MOUSE_DATA);
+        if (!ps2_init(PIO_PS2KBD, PS2_PIN_CLK, PS2_MOUSE_CLK)) {
+            printf("WARNING: PS/2 PIO init failed\n");
+        }
+
+        // Initialize PS/2 keyboard wrapper (uses unified driver for PIO)
+        ps2kbd_init();
+
+        // Initialize PS/2 mouse device (reset, detect IntelliMouse, enable streaming)
+        ps2_mouse_init_device();
     }
-
-    // Initialize PS/2 keyboard wrapper (uses unified driver for PIO)
-    ps2kbd_init();
-
-    // Initialize PS/2 mouse device (reset, detect IntelliMouse, enable streaming)
-    ps2_mouse_init_device();
 #else
     DBG_PRINT("PS/2 not present on this board; USB HID is the only input\n");
 #endif
@@ -1185,6 +1192,10 @@ static bool init_hardware(void) {
 
     // Initialize NES/SNES gamepad (if pins defined for this board)
 #ifdef NESPAD_GPIO_CLK
+    if (board_is_rp2350pc()) {
+        // GPIO9, the pad's latch on the PICO-PC, is the SD chip select here
+        DBG_PRINT("Olimex RP2350pc: skipping NES gamepad (pins in use)\n");
+    } else {
     DBG_PRINT("Initializing NES gamepad...\n");
     DBG_PRINT("  CLK: GPIO%d, DATA: GPIO%d, LATCH: GPIO%d\n",
               NESPAD_GPIO_CLK, NESPAD_GPIO_DATA, NESPAD_GPIO_LATCH);
@@ -1193,6 +1204,7 @@ static bool init_hardware(void) {
         DBG_PRINT("  NES gamepad initialized\n");
     } else {
         DBG_PRINT("  NES gamepad init failed (PIO unavailable)\n");
+    }
     }
 #endif
 

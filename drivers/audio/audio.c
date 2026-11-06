@@ -249,8 +249,12 @@ void audio_init(void) {
 #endif
 #if HAS_AUDIO_PWM
     pwm = pwm_get_default_config();
-    gpio_set_function(PWM_LEFT_PIN, GPIO_FUNC_PWM);
-    gpio_set_function(PWM_RIGHT_PIN, GPIO_FUNC_PWM);
+    // The Olimex RP2350pc has an audio codec instead; its pins are not
+    // mapped yet, so leave GPIO27/28 alone there (silent, not driven)
+    if (!board_is_rp2350pc()) {
+        gpio_set_function(PWM_LEFT_PIN, GPIO_FUNC_PWM);
+        gpio_set_function(PWM_RIGHT_PIN, GPIO_FUNC_PWM);
+    }
 #ifdef BEEPER_PIN
     gpio_set_function(BEEPER_PIN, GPIO_FUNC_PWM);
 #endif
