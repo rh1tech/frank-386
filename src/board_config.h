@@ -548,6 +548,12 @@ static inline uint get_psram_pin(void) {
 #define CONFIG_CPU_DIR      "/.config/386"
 #define CONFIG_PLATFORM_DIR CONFIG_CPU_DIR "/" CONFIG_PLATFORM_NAME
 #define CONFIG_FILE_PATH    CONFIG_PLATFORM_DIR "/config.ini"
+/* Where config.ini lived before the per-platform directory. Still read
+ * when CONFIG_FILE_PATH does not exist, so cards set up for v1.05 and
+ * earlier keep booting; the first save from the settings UI writes the
+ * full config to CONFIG_FILE_PATH, which takes over from then on. */
+#define CONFIG_LEGACY_DIR   "386"
+#define CONFIG_LEGACY_PATH  CONFIG_LEGACY_DIR "/config.ini"
 #define VIDEO_MARKER_VGA    CONFIG_PLATFORM_DIR "/force_vga"
 #define VIDEO_MARKER_HDMI   CONFIG_PLATFORM_DIR "/force_dvi"
 #define AUDIO_MARKER_PWM    CONFIG_PLATFORM_DIR "/force_pwm"
