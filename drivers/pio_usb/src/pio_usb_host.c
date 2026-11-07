@@ -219,6 +219,21 @@ static void __not_in_flash_func(busy_wait_1_us)(void) {
   }
 }
 
+static void __no_inline_not_in_flash_func(root_disconnect)(root_port_t *port) {
+  port->connected = false;
+  port->suspended = true;
+  port->ints |= PIO_USB_INTS_DISCONNECT_BITS;
+
+  // failed/retired all queuing transfer in this root
+  uint8_t root_idx = port - PIO_USB_ROOT_PORT(0);
+  for (int ep_idx = 0; ep_idx < PIO_USB_EP_POOL_CNT; ep_idx++) {
+    endpoint_t *ep = PIO_USB_ENDPOINT(ep_idx);
+    if ((ep->root_idx == root_idx) && ep->size && ep->has_transfer) {
+      pio_usb_ll_transfer_complete(ep, PIO_USB_INTS_ENDPOINT_ERROR_BITS);
+    }
+  }
+}
+
 static bool __no_inline_not_in_flash_func(connection_check)(root_port_t *port) {
   if (pio_usb_bus_get_line_state(port) == PORT_PIN_SE0) {
     busy_wait_1_us();
@@ -226,24 +241,62 @@ static bool __no_inline_not_in_flash_func(connection_check)(root_port_t *port) {
     if (pio_usb_bus_get_line_state(port) == PORT_PIN_SE0) {
       busy_wait_1_us();
       // device disconnect
-      port->connected = false;
-      port->suspended = true;
-      port->ints |= PIO_USB_INTS_DISCONNECT_BITS;
-
-      // failed/retired all queuing transfer in this root
-      uint8_t root_idx = port - PIO_USB_ROOT_PORT(0);
-      for (int ep_idx = 0; ep_idx < PIO_USB_EP_POOL_CNT; ep_idx++) {
-        endpoint_t *ep = PIO_USB_ENDPOINT(ep_idx);
-        if ((ep->root_idx == root_idx) && ep->size && ep->has_transfer) {
-          pio_usb_ll_transfer_complete(ep, PIO_USB_INTS_ENDPOINT_ERROR_BITS);
-        }
-      }
-
+      root_disconnect(port);
       return false;
     }
   }
 
   return true;
+}
+
+/*
+ * frank-386: no-response watchdog.
+ *
+ * Unplugging is detected only by the line dropping to SE0. On a Waveshare
+ * RP2350-PiZero D+ was seen to stay high after a hub was pulled (not
+ * driven by the chip, pull-down on), so the disconnect never came, the
+ * re-plugged hub was never noticed, and with the socket empty the port
+ * kept "seeing" a full-speed device that never answered.
+ *
+ * So a port whose device stops answering altogether is treated as
+ * unplugged: if transactions keep failing and nothing has answered for
+ * NORESP_DISCONNECT_US, disconnect it like an SE0 would. Attach detection
+ * then pauses with a back-off (1 s doubling to 8 s while nothing answers;
+ * reset by the first good handshake), because each attach makes TinyUSB
+ * enumerate, which blocks its task for ~0.5 s of debounce and reset
+ * delays. A stuck line costs an occasional retry; a real device plugged
+ * in is picked up on the next one.
+ */
+#define NORESP_DISCONNECT_US (250 * 1000)
+#define NORESP_BACKOFF_MIN_MS 1000
+#define NORESP_BACKOFF_MAX_MS 8000
+static uint32_t root_last_good_us[PIO_USB_ROOT_PORT_CNT];
+static bool root_failed_since_good[PIO_USB_ROOT_PORT_CNT];
+static uint32_t root_hold_until_us[PIO_USB_ROOT_PORT_CNT];
+static uint32_t root_backoff_ms[PIO_USB_ROOT_PORT_CNT];
+
+static void __no_inline_not_in_flash_func(noresp_track)(int root_idx, int res) {
+  if (res == 0) {
+    root_last_good_us[root_idx] = get_time_us_32();
+    root_failed_since_good[root_idx] = false;
+    root_backoff_ms[root_idx] = 0;
+  } else {
+    root_failed_since_good[root_idx] = true;
+  }
+}
+
+static void __no_inline_not_in_flash_func(noresp_check)(int root_idx, root_port_t *root) {
+  if (!root_failed_since_good[root_idx]) return;
+  uint32_t const now = get_time_us_32();
+  if (now - root_last_good_us[root_idx] < NORESP_DISCONNECT_US) return;
+
+  root_disconnect(root);
+  uint32_t b = root_backoff_ms[root_idx];
+  b = b ? b * 2 : NORESP_BACKOFF_MIN_MS;
+  if (b > NORESP_BACKOFF_MAX_MS) b = NORESP_BACKOFF_MAX_MS;
+  root_backoff_ms[root_idx] = b;
+  root_hold_until_us[root_idx] = now + b * 1000;
+  root_failed_since_good[root_idx] = false;
 }
 
 //--------------------------------------------------------------------+
@@ -304,14 +357,17 @@ void __not_in_flash_func(pio_usb_host_frame)(void) {
             pp->need_pre = true;
           }
 
+          int res;
           if (ep->ep_num == 0 && ep->data_id == USB_PID_SETUP) {
-            usb_setup_transaction(pp, ep);
+            res = usb_setup_transaction(pp, ep);
+            noresp_track(root_idx, res);
           } else {
             if (ep->ep_num & EP_IN) {
-              usb_in_transaction(pp, ep);
+              res = usb_in_transaction(pp, ep);
             } else {
-              usb_out_transaction(pp, ep);
+              res = usb_out_transaction(pp, ep);
             }
+            noresp_track(root_idx, res);
 
             if (is_periodic) {
               ep->interval_counter = ep->interval - 1;
@@ -327,14 +383,20 @@ void __not_in_flash_func(pio_usb_host_frame)(void) {
         }
       }
     }
+
+    noresp_check(root_idx, root);
   }
 
   // check for new connection to root hub
   for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
     root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
-    if (root->initialized && !root->connected) {
+    if (root->initialized && !root->connected &&
+        (int32_t)(get_time_us_32() - root_hold_until_us[root_idx]) >= 0) {
       port_pin_status_t const line_state = pio_usb_bus_get_line_state(root);
       if (line_state == PORT_PIN_FS_IDLE || line_state == PORT_PIN_LS_IDLE) {
+        // frank-386: the watchdog's clock starts at attach
+        root_last_good_us[root_idx] = get_time_us_32();
+        root_failed_since_good[root_idx] = false;
         root->is_fullspeed = (line_state == PORT_PIN_FS_IDLE);
         root->connected = true;
         root->suspended = true; // need a bus reset before operating

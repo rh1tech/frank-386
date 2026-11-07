@@ -46,17 +46,27 @@ extern "C" {
 // HOST CONFIGURATION
 //--------------------------------------------------------------------
 
-// Size of buffer for control requests
-#define CFG_TUH_ENUMERATION_BUFSIZE 256
+/*
+ * Host limits, sized like pico-spec's on the same boards: there a keyboard
+ * that frank-386 failed to enumerate worked on both ports. Composite
+ * keyboards (boot + NKRO + media keys + vendor) can carry a configuration
+ * descriptor over 256 bytes and need more HID slots; when a limit is hit
+ * TinyUSB abandons enumeration and the keyboard just keeps resetting.
+ */
+// Size of buffer for control requests (the full configuration descriptor)
+#define CFG_TUH_ENUMERATION_BUFSIZE 1024
+
+// Host event queue; hub + composite device enumeration posts bursts
+#define CFG_TUH_TASK_QUEUE_SZ 64
 
 // Max number of devices (hub + devices behind it)
-#define CFG_TUH_DEVICE_MAX 4
+#define CFG_TUH_DEVICE_MAX 6
 
 // Enable hub support for USB keyboards connected via hub
 #define CFG_TUH_HUB 1
 
-// Max number of HID interfaces
-#define CFG_TUH_HID 4
+// Max number of HID interfaces (composite keyboards use several)
+#define CFG_TUH_HID 8
 
 // Disable unused classes
 #define CFG_TUH_CDC 0
