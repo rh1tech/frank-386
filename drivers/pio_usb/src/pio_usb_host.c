@@ -14,6 +14,7 @@
 #include "hardware/sync.h"
 #include "hardware/pio.h"
 #include "hardware/gpio.h"
+#include "hardware/structs/io_bank0.h"  // frank-386: probe line overrides
 
 #include "pio_usb.h"
 #include "pio_usb_ll.h"
@@ -28,6 +29,7 @@ static repeating_timer_t sof_rt;
 // The sof_count may be incremented and then read on different cores.
 static volatile uint32_t sof_count = 0;
 static bool timer_active;
+static void probe_encode(void);  // frank-386
 
 static volatile bool cancel_timer_flag;
 static volatile bool start_timer_flag;
@@ -85,6 +87,7 @@ usb_device_t *pio_usb_host_init(const pio_usb_configuration_t *c) {
 
   sof_packet_encoded_len =
       pio_usb_ll_encode_tx_data(sof_packet, sizeof(sof_packet), sof_packet_encoded);
+  probe_encode();   // frank-386: presence probe, see probe_step()
   pio_usb_ll_encode_tx_data(NULL, 0, keepalive_encoded);
 
   if (!c->skip_alarm_pool) {
@@ -260,26 +263,125 @@ static bool __no_inline_not_in_flash_func(connection_check)(root_port_t *port) {
  *
  * So a port whose device stops answering altogether is treated as
  * unplugged: if transactions keep failing and nothing has answered for
- * NORESP_DISCONNECT_US, disconnect it like an SE0 would. Attach detection
- * then pauses with a back-off (1 s doubling to 8 s while nothing answers;
- * reset by the first good handshake), because each attach makes TinyUSB
- * enumerate, which blocks its task for ~0.5 s of debounce and reset
- * delays. A stuck line costs an occasional retry; a real device plugged
- * in is picked up on the next one.
+ * NORESP_DISCONNECT_US, disconnect it like an SE0 would.
+ *
+ * With D+ held high the line also cannot show a device being plugged back
+ * in, and handing every "idle" line to TinyUSB would make it enumerate
+ * nothing over and over, blocking its task ~0.5 s each time. So after such
+ * a disconnect the port stays in probe mode until the line drops to SE0
+ * (a real unplug) or a device answers: every PROBE_PERIOD_US it drives a
+ * bus reset, lets the device recover, and sends one SETUP to address 0,
+ * which any device in the default state must ACK, keeping SOFs going
+ * during the recovery so it does not suspend. Only an ACK is reported to
+ * TinyUSB as an attach. A probe costs one ~20 us transaction; the reset
+ * itself is a pin override held across frames, not a busy wait.
  */
 #define NORESP_DISCONNECT_US (250 * 1000)
-#define NORESP_BACKOFF_MIN_MS 1000
-#define NORESP_BACKOFF_MAX_MS 8000
+#define PROBE_RESET_US       (12 * 1000)
+#define PROBE_RECOVERY_US    (10 * 1000)
+#define PROBE_PERIOD_US      (200 * 1000)
+enum { PROBE_OFF = 0, PROBE_WAIT, PROBE_RESET, PROBE_RECOVER };
 static uint32_t root_last_good_us[PIO_USB_ROOT_PORT_CNT];
 static bool root_failed_since_good[PIO_USB_ROOT_PORT_CNT];
-static uint32_t root_hold_until_us[PIO_USB_ROOT_PORT_CNT];
-static uint32_t root_backoff_ms[PIO_USB_ROOT_PORT_CNT];
+static uint8_t root_probe_state[PIO_USB_ROOT_PORT_CNT];
+static uint32_t root_probe_t[PIO_USB_ROOT_PORT_CNT];
+static uint8_t probe_setup_encoded[((8 + 4) * 2 * 7 / 6) + 2];
+static uint8_t probe_setup_encoded_len;
+
+static inline void line_override(uint pin, uint32_t outover, uint32_t oeover) {
+  hw_write_masked(&io_bank0_hw->io[pin].ctrl,
+                  (outover << IO_BANK0_GPIO0_CTRL_OUTOVER_LSB) |
+                      (oeover << IO_BANK0_GPIO0_CTRL_OEOVER_LSB),
+                  IO_BANK0_GPIO0_CTRL_OUTOVER_BITS | IO_BANK0_GPIO0_CTRL_OEOVER_BITS);
+}
+
+static void probe_encode(void) {
+  // SETUP data stage of GET_DESCRIPTOR(DEVICE, 8): SYNC, DATA0, 8 bytes, CRC16
+  uint8_t pkt[12] = {USB_SYNC, USB_PID_DATA0, 0x80, 0x06, 0x00, 0x01,
+                     0x00, 0x00, 0x08, 0x00, 0, 0};
+  uint16_t const crc = calc_usb_crc16(&pkt[2], 8);
+  pkt[10] = crc & 0xff;
+  pkt[11] = crc >> 8;
+  probe_setup_encoded_len =
+      pio_usb_ll_encode_tx_data(pkt, sizeof(pkt), probe_setup_encoded);
+}
+
+static bool __no_inline_not_in_flash_func(probe_device)(pio_port_t *pp, root_port_t *root) {
+  configure_root_port(pp, root);
+  pio_usb_bus_prepare_receive(pp);
+  pio_usb_bus_send_token(pp, USB_PID_SETUP, 0, 0);
+  pio_usb_bus_usb_transfer(pp, probe_setup_encoded, probe_setup_encoded_len);
+  pio_usb_bus_start_receive(pp);
+  uint8_t const handshake = pio_usb_bus_wait_handshake(pp);
+  pio_sm_set_enabled(pp->pio_usb_rx, pp->sm_rx, false);
+  pp->usb_rx_buffer[1] = 0;
+  return handshake == USB_PID_ACK;
+}
+
+/*
+ * Probe mode step for a disconnected port. Returns true when the port may
+ * go through normal attach detection now.
+ */
+static bool __no_inline_not_in_flash_func(probe_step)(pio_port_t *pp, int root_idx,
+                                                      root_port_t *root) {
+  uint32_t const now = get_time_us_32();
+  switch (root_probe_state[root_idx]) {
+  case PROBE_OFF:
+    return true;
+
+  case PROBE_WAIT: {
+    if (now - root_probe_t[root_idx] < PROBE_PERIOD_US) return false;
+    port_pin_status_t const ls = pio_usb_bus_get_line_state(root);
+    if (ls == PORT_PIN_SE0) {
+      // the line can drop again: a real unplug, back to normal detection
+      root_probe_state[root_idx] = PROBE_OFF;
+      return true;
+    }
+    if (ls != PORT_PIN_FS_IDLE && ls != PORT_PIN_LS_IDLE) {
+      root_probe_t[root_idx] = now;
+      return false;
+    }
+    root->is_fullspeed = (ls == PORT_PIN_FS_IDLE);
+    line_override(root->pin_dp, GPIO_OVERRIDE_LOW, GPIO_OVERRIDE_HIGH);
+    line_override(root->pin_dm, GPIO_OVERRIDE_LOW, GPIO_OVERRIDE_HIGH);
+    root_probe_state[root_idx] = PROBE_RESET;
+    root_probe_t[root_idx] = now;
+    return false;
+  }
+
+  case PROBE_RESET:
+    if (now - root_probe_t[root_idx] < PROBE_RESET_US) return false;
+    line_override(root->pin_dp, GPIO_OVERRIDE_NORMAL, GPIO_OVERRIDE_NORMAL);
+    line_override(root->pin_dm, GPIO_OVERRIDE_NORMAL, GPIO_OVERRIDE_NORMAL);
+    root_probe_state[root_idx] = PROBE_RECOVER;
+    root_probe_t[root_idx] = now;
+    return false;
+
+  case PROBE_RECOVER:
+    // Keep the bus alive while the device recovers from the reset: after
+    // 3 ms without traffic it would suspend and ignore the probe.
+    configure_root_port(pp, root);
+    if (root->is_fullspeed) {
+      pio_usb_bus_usb_transfer(pp, sof_packet_encoded, sof_packet_encoded_len);
+    } else {
+      pio_usb_bus_usb_transfer(pp, keepalive_encoded, 1);
+    }
+    if (now - root_probe_t[root_idx] < PROBE_RECOVERY_US) return false;
+    if (probe_device(pp, root)) {
+      root_probe_state[root_idx] = PROBE_OFF;
+      return true;   // a device answered: report the attach
+    }
+    root_probe_state[root_idx] = PROBE_WAIT;
+    root_probe_t[root_idx] = now;
+    return false;
+  }
+  return true;
+}
 
 static void __no_inline_not_in_flash_func(noresp_track)(int root_idx, int res) {
   if (res == 0) {
     root_last_good_us[root_idx] = get_time_us_32();
     root_failed_since_good[root_idx] = false;
-    root_backoff_ms[root_idx] = 0;
   } else {
     root_failed_since_good[root_idx] = true;
   }
@@ -291,12 +393,9 @@ static void __no_inline_not_in_flash_func(noresp_check)(int root_idx, root_port_
   if (now - root_last_good_us[root_idx] < NORESP_DISCONNECT_US) return;
 
   root_disconnect(root);
-  uint32_t b = root_backoff_ms[root_idx];
-  b = b ? b * 2 : NORESP_BACKOFF_MIN_MS;
-  if (b > NORESP_BACKOFF_MAX_MS) b = NORESP_BACKOFF_MAX_MS;
-  root_backoff_ms[root_idx] = b;
-  root_hold_until_us[root_idx] = now + b * 1000;
   root_failed_since_good[root_idx] = false;
+  root_probe_state[root_idx] = PROBE_WAIT;
+  root_probe_t[root_idx] = now;
 }
 
 //--------------------------------------------------------------------+
@@ -391,7 +490,7 @@ void __not_in_flash_func(pio_usb_host_frame)(void) {
   for (int root_idx = 0; root_idx < PIO_USB_ROOT_PORT_CNT; root_idx++) {
     root_port_t *root = PIO_USB_ROOT_PORT(root_idx);
     if (root->initialized && !root->connected &&
-        (int32_t)(get_time_us_32() - root_hold_until_us[root_idx]) >= 0) {
+        probe_step(pp, root_idx, root)) {
       port_pin_status_t const line_state = pio_usb_bus_get_line_state(root);
       if (line_state == PORT_PIN_FS_IDLE || line_state == PORT_PIN_LS_IDLE) {
         // frank-386: the watchdog's clock starts at attach
