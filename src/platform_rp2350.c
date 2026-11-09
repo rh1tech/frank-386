@@ -104,6 +104,66 @@ void __assert_func(const char *file, int line, const char *func, const char *exp
 }
 
 //=============================================================================
+// Heap
+//=============================================================================
+
+/*
+ * The heap, with a top that can be taken off it (heap_reserve_top). The
+ * SDK's _sbrk (weak) with a movable limit in place of __StackLimit.
+ */
+extern char end, __StackLimit;
+static char *heap_end;
+static char *heap_limit = &__StackLimit;
+
+void *_sbrk(int incr) {
+    if (heap_end == 0)
+        heap_end = &end;
+    char *prev_heap_end = heap_end;
+    if (heap_end + incr > heap_limit)
+        return (char *)-1;
+    heap_end += incr;
+    return prev_heap_end;
+}
+
+/*
+ * Take the top `size` bytes of the heap (size a power of 2: the block is
+ * aligned to it, as the top of main RAM is), or NULL when the heap has
+ * grown into them. For the HDMI driver's TMDS table, whose address window
+ * must be aligned to its size: anywhere else that alignment costs up to
+ * as much again in padding. Call while one core alone allocates.
+ */
+void *video_ram_block;
+
+void *heap_reserve_top(size_t size) {
+    char *top = (char *)(((uintptr_t)heap_limit - size) & ~(uintptr_t)(size - 1));
+    if (top < (heap_end ? heap_end : &end))
+        return NULL;
+    heap_limit = top;
+    return top;
+}
+
+/*
+ * newlib grows the heap in 4 KB steps sized from the request alone, not
+ * from what the heap's free top already holds: with 8 KB left below the
+ * limit a 4 KB block can fail. One block as large as fits, freed again,
+ * leaves the whole heap as that free top, which later blocks are cut from
+ * with no more growing. Bypasses pico_malloc's panic on failure; call while
+ * one core alone allocates.
+ */
+void heap_grow_all(void) {
+    extern void *__real_malloc(size_t size);
+    extern void __real_free(void *p);
+    char *cur = heap_end ? heap_end : &end;
+    for (long n = heap_limit - cur; n >= 1024; n -= 256) {
+        void *p = __real_malloc((size_t)n);
+        if (p) {
+            __real_free(p);
+            return;
+        }
+    }
+}
+
+//=============================================================================
 // Memory Debugging
 //=============================================================================
 

@@ -1,33 +1,52 @@
+/**
+ * frank-386 - i386 PC Emulator for RP2350
+ *
+ * HDMI output by PIO, with audio. The output engine is frank-quake2's PIO
+ * HDMI driver (drivers/hdmi_pio there; from the frank-msx / pico-nes driver,
+ * TMDS by table, and the HDMI framing of shuichitakano's PicoDVI): every
+ * line is sent as HDMI, not DVI: a data island in hsync after its preamble
+ * (audio, the clock regeneration, the info frames or a null packet), the
+ * active video after its preamble and guard band. Capture cards want that.
+ *
+ * The output state machine sends 10 instructions a pixel (clk_sys / 2 at
+ * 504 MHz: 25.2 MHz). It is fed by DMA channel "conv", 16 bytes (two
+ * pixels) at a time, from the address the address state machine makes of
+ * each 16-bit index of the line: conv_color | index << 4 (an 8 KB window).
+ * Indices 0..255 are the palette (the renderers' 8-bit pixels, each a pair
+ * of output pixels), 256..335 the HDMI entries: control symbols, the null
+ * islands and two slots the IRQ encodes packets into.
+ *
+ * DMA channel "line" sends the indices of a line in 4 blocks, loaded by
+ * channel "ctrl" from the line's block list: the front porch with the data
+ * preamble, the island, the rest of the blanking, the pixels (a row of 16-bit
+ * indices, or one blank index repeated). The IRQ at the end of the third
+ * block points "ctrl" at the next line's list and makes the one after: its
+ * list, its island, its row (rendered by the scanline renderers below).
+ *
+ * Copyright (c) 2026 Mikhail Matveev <xtreme@rh1.tech>
+ * SPDX-License-Identifier: MIT
+ */
 #include <stdio.h>
 #include <string.h>
 #include <malloc.h>
-#include <stdalign.h>
+#include <assert.h>
 #include <hardware/dma.h>
 #include <hardware/pio.h>
+#include <hardware/irq.h>
+#include <hardware/sync.h>
+#include <hardware/timer.h>
 #include <pico/time.h>
-#include <pico/multicore.h>
 #include <hardware/clocks.h>
-#include "hardware/structs/bus_ctrl.h"
 #include <arm_acle.h>
 
 #include "vga.h"
 #include "vga_osd.h"
 #include "hdmi.h"
+#include "hstx_packet.h"
 #include "font8x16.h"
-
-//PIO параметры
-static uint offs_prg0 = 0;
-static uint offs_prg1 = 0;
-
-//SM
-static int SM_video = -1;
-static int SM_conv = -1;
 
 //активный видеорежим
 extern int current_mode;  // Default text mode
-
-//буфер  палитры 256 цветов в формате R8G8B8
-extern uint32_t palette_a[256];
 
 #define SCREEN_WIDTH (320)
 #define SCREEN_HEIGHT (240)
@@ -62,132 +81,140 @@ extern int gfx_sram_stride;  // Words per line in SRAM buffer (width/8 + 1)
 
 extern volatile uint32_t frame_update_request;
 
-// #define HDMI_WIDTH 480 //480 Default
-// #define HDMI_HEIGHT 644 //524 Default
-// #define HDMI_HZ 52 //60 Default
+#define ACTIVE_LINES 480
+#define TOTAL_LINES 525
+#define VSYNC_FIRST 490 /* 490, 491 */
+#define ROW_PIXELS 320  /* indices: each two output pixels */
 
-//DMA каналы
-//каналы работы с первичным графическим буфером
-static int dma_chan_ctrl;
-static int dma_chan;
-//каналы работы с конвертацией палитры
-static int dma_chan_pal_conv_ctrl;
-static int dma_chan_pal_conv;
-
-//DMA буферы
-//основные строчные данные
-// 4 line buffers for 2-line-ahead rendering (prevents DMA underflow)
-static uint32_t* __scratch_y("hdmi_ptr_3") dma_lines[4] = { NULL,NULL,NULL,NULL };
-static uint32_t* __scratch_y("hdmi_ptr_4") DMA_BUF_ADDR[4];
-// Extra 2 line buffers (buffers 0-1 are in conv_color, 2-3 are here)
-static uint32_t hdmi_extra_line_buf[2][100];
-
-//ДМА палитра для конвертации
-//в хвосте этой памяти выделяется dma_data
-alignas(4096) uint32_t conv_color[1224];
-uint32_t conv_color2[1024]; // backup to fast restore pallete
-bool required_to_repair_text_pal = false;
-
-//индекс, проверяющий зависание
-static uint32_t irq_inx = 0;
-
-
-//функции и константы HDMI
-
-#define HDMI_CTRL_0 (252)
-#define HDMI_CTRL_1 (253)
-#define HDMI_CTRL_2 (254)
-#define HDMI_CTRL_3 (255)
-
-//программа конвертации адреса
-uint16_t pio_program_instructions_conv_HDMI[] = {
-    0x80a0, //  0: pull   block
-    0x40e8, //  1: in     osr, 8
-    0x4034, //  2: in     x, 20
-    0x8020, //  3: push   block
+/* the HDMI entries (index 256 + E_...) */
+enum {
+    E_BLANK = 0,     /* [vsync] */
+    E_HSYNC = 2,     /* [vsync] */
+    E_PRE_DATA = 4,  /* [vsync] the preamble to a data island */
+    E_PRE_VIDEO = 6, /* the preamble to the active video */
+    E_GUARD_VIDEO = 7,
+    E_NULL = 8,      /* [vsync] 18 entries each */
+    E_SLOT = 44,     /* [2] 18 entries each */
+    E_COUNT = 80,
 };
+#define ISLAND_ENTRIES 18 /* 36 pixels: 2 guard, 32 packet, 2 guard */
+#define IDX(e) (256 + (e))
 
+/* The TMDS table: 16 bytes an index (two pixels' serialized symbols), the
+ * palette (0..255) then the HDMI entries. The address machine ORs the index
+ * into its base, so the table is aligned to its 8 KB window: the top 8 KB of
+ * the heap, aligned by itself (anywhere else the alignment costs up to 8 KB
+ * of padding, and the heap that pc_new() lives on is tight); the rows go in
+ * the rest of it with the audio ring. VGA builds take none of it. Entries 0..255 are written
+ * live by graphics_set_palette_hdmi*(). */
+#define CONV_COLOR_WORDS ((256 + E_COUNT) * 4)
+#define HDMI_RAM_BLOCK 8192
+uint32_t *conv_color;
+bool required_to_repair_text_pal = false; /* text mode again: hdmi_text_palette() */
+volatile bool hdmi_palette_reload;        /* the OSD went: the guest's palette again */
 
-const struct pio_program pio_program_conv_addr_HDMI = {
-    .instructions = pio_program_instructions_conv_HDMI,
-    .length = 4,
-    .origin = -1,
-};
+typedef struct {
+    const void *read;
+    volatile void *write;
+    uint32_t count;
+    uint32_t ctrl;
+} block_t;
 
-//программа видеовывода
-static const uint16_t instructions_PIO_HDMI[] = {
-    0x7006, //  0: out    pins, 6         side 2
-    0x7006, //  1: out    pins, 6         side 2
-    0x7006, //  2: out    pins, 6         side 2
-    0x7006, //  3: out    pins, 6         side 2
-    0x7006, //  4: out    pins, 6         side 2
-    0x6806, //  5: out    pins, 6         side 1
-    0x6806, //  6: out    pins, 6         side 1
-    0x6806, //  7: out    pins, 6         side 1
-    0x6806, //  8: out    pins, 6         side 1
-    0x6806, //  9: out    pins, 6         side 1
-};
+/* the index lists (SRAM: read by DMA while the CPU works) */
+static uint16_t head[2][8];
+static uint16_t isl_null[2][ISLAND_ENTRIES];
+static uint16_t isl_slot[2][ISLAND_ENTRIES];
+static uint16_t rest_active[54];
+static uint16_t rest_blank[2][54];
+static uint16_t blank_px[2];
+/* a row a line: line N sent, N + 1 ready, N + 2 being made (by line % 3:
+ * 525 lines are a whole number of threes, the wrap keeps the order); after
+ * the table, in its 8 KB block */
+static uint16_t (*rows)[ROW_PIXELS];
+static uint8_t *row8;
+/* the two lines' lists, then a stop: should the IRQ come too late to point
+ * "ctrl" at the next list, it runs on into blocks[2], all zeros, whose ctrl
+ * word (EN clear) starts nothing; the chain stops (hdmi_watchdog restarts
+ * it) instead of loading whatever follows as DMA descriptors, one of which
+ * once sent 32 KB over the RAM after gfx_buffer */
+static block_t blocks[3][4] __attribute__((aligned(16)));
 
-static const struct pio_program program_PIO_HDMI = {
-    .instructions = instructions_PIO_HDMI,
-    .length = 10,
-    .origin = -1,
-};
+static uint32_t ctrl_quiet, ctrl_irq; /* "line" ctrl words: incrementing reads */
+static uint32_t ctrl_quiet_fixed;     /* the same, the read address fixed */
 
-static uint64_t __time_critical_func(get_ser_diff_data)(const uint16_t dataR, const uint16_t dataG, const uint16_t dataB) {
-    uint64_t out64 = 0;
-    for (int i = 0; i < 10; i++) {
-        out64 <<= 6;
-        if (i == 5) out64 <<= 2;
+static PIO const pio_video = PIO_VIDEO;
+static uint sm_video, sm_conv;
+static uint off_video, off_conv;
+static pio_sm_config cfg_video, cfg_conv;
+static volatile bool running;
+static uint dma_ctrl, dma_line, dma_conv_ctrl, dma_conv;
+
+volatile uint32_t hdmi_frame_count;
+volatile uint32_t hdmi_irq_max_us;
+volatile uint32_t hdmi_underruns; /* frames in which the output machine starved */
+volatile uint32_t hdmi_resyncs;   /* restarts after the output stopped (hdmi_watchdog) */
+
+/* serialized lane symbols (see ser_lane): TERC4 by nibble, a lane each */
+static uint64_t terc_lane[3][16];
+static uint64_t guard12; /* the data island guard band on lanes 1 and 2 */
+
+/* packets sent from the IRQ, made at init */
+static hstx_packet_t pkt_acr, pkt_avi, pkt_aif;
+static uint32_t audio_accum, audio_step; /* samples, 16.16: 735 a frame */
+static uint32_t audio_packets;           /* mod 48: the B flag */
+
+extern uint8_t hstx_bch_table[256]; /* hstx_packet.c, in SRAM */
+
+/* TERC4 (data islands) and the control symbols by CTL bits (c1 << 1 | c0),
+ * bit 0 sent first, as in hstx_packet.c and PicoDVI */
+static const uint16_t terc4[16] = {0x29c, 0x263, 0x2e4, 0x2e2, 0x171, 0x11e, 0x18e, 0x13c,
+                                   0x2cc, 0x139, 0x19c, 0x2c6, 0x28e, 0x271, 0x163, 0x2c3};
+static const uint16_t ctl_sym[4] = {0x354, 0x0ab, 0x154, 0x2ab};
+#define GUARD_DATA 0x133 /* lanes 1, 2 of a data island guard band */
+#define GUARD_VIDEO_0 0x2cc
+#define GUARD_VIDEO_1 0x133
+
+/* The bit position of a TMDS lane (0 blue + syncs, 1 green, 2 red) in each
+ * 6-bit step of the output program: the board's pair order. */
+static inline int lane_shift(int lane) {
 #ifdef BOARD_PC
-        uint8_t bG = (dataR >> (9 - i)) & 1;
-        uint8_t bR = (dataG >> (9 - i)) & 1;
-#else
-        uint8_t bR = (dataR >> (9 - i)) & 1;
-        uint8_t bG = (dataG >> (9 - i)) & 1;
+    if (lane) lane ^= 3; /* red and green pairs swapped */
 #endif
-        uint8_t bB = (dataB >> (9 - i)) & 1;
-
-        bR |= (bR ^ 1) << 1;
-        bG |= (bG ^ 1) << 1;
-        bB |= (bB ^ 1) << 1;
-
-        if (HDMI_PIN_invert_diffpairs) {
-            bR ^= 0b11;
-            bG ^= 0b11;
-            bB ^= 0b11;
-        }
-        uint8_t d6;
-        if (HDMI_PIN_RGB_notBGR) {
-            d6 = (bR << 4) | (bG << 2) | (bB << 0);
-        }
-        else {
-            d6 = (bB << 4) | (bG << 2) | (bR << 0);
-        }
-
-
-        out64 |= d6;
-    }
-    return out64;
+    if (lane == 1) return 2;
+    return (lane == 0) == (HDMI_PIN_RGB_notBGR != 0) ? 0 : 4;
 }
 
-//конвертор TMDS
-static uint __time_critical_func(tmds_encoder)(const uint8_t d8) {
-    int s1 = 0;
-    for (int i = 0; i < 8; i++) s1 += (d8 & (1 << i)) ? 1 : 0;
-    bool is_xnor = false;
-    if ((s1 > 4) || ((s1 == 4) && ((d8 & 1) == 0))) is_xnor = true;
-    uint16_t d_out = d8 & 1;
-    uint16_t qi = d_out;
-    for (int i = 1; i < 8; i++) {
-        d_out |= ((qi << 1) ^ (d8 & (1 << i))) ^ (is_xnor << i);
-        qi = d_out & (1 << i);
+/* One lane's 10-bit symbol as the output program shifts it: 10 steps of 6
+ * bits (a 2-bit pair a lane, the second half of the word 2 bits on). */
+static uint64_t __time_critical_func(ser_lane)(uint16_t sym, int lane) {
+    int shift = lane_shift(lane);
+    uint64_t out = 0;
+    for (int i = 0; i < 10; i++) {
+        out <<= 6;
+        if (i == 5) out <<= 2;
+        uint32_t b = (sym >> (9 - i)) & 1;
+        b |= (b ^ 1) << 1;
+        if (HDMI_PIN_invert_diffpairs) b ^= 3;
+        out |= (uint64_t)b << shift;
     }
+    return out;
+}
 
-    if (is_xnor) d_out |= 1 << 9;
-    else d_out |= 1 << 8;
+static uint64_t __time_critical_func(get_ser_diff_data)(const uint16_t dataR, const uint16_t dataG, const uint16_t dataB) {
+    return ser_lane(dataB, 0) | ser_lane(dataG, 1) | ser_lane(dataR, 2);
+}
 
-    return d_out;
+/* TMDS symbols as frank-quake2's table (and the PicoDVI one) has them:
+ * bit 8 set for XOR, bit 9 for XNOR. Sent with its data bits (0-7) flipped
+ * the symbol is the DC complement; receivers take both. Never 0x3xx: the
+ * capture card would not lock on the standard inverted symbols. */
+static uint16_t __time_critical_func(tmds_encoder)(const uint8_t d8) {
+    int s1 = __builtin_popcount(d8);
+    uint32_t xnor = s1 > 4 || (s1 == 4 && !(d8 & 1));
+    uint16_t q = d8 & 1;
+    for (int i = 1; i < 8; i++)
+        q |= (((q >> (i - 1)) ^ (d8 >> i) ^ xnor) & 1) << i;
+    return q | (xnor ? 1u << 9 : 1u << 8);
 }
 
 static void pio_set_x(PIO pio, const int sm, uint32_t v) {
@@ -237,8 +264,9 @@ static inline void* __not_in_flash_func(nf_memset)(void* ptr, int value, size_t 
     return ptr;
 }
 
-#define is_hdmi_sync(c) (c >= HDMI_CTRL_0)
-#define ob(x) { register uint8_t c = x; *output_buffer++ = is_hdmi_sync(c) ? (HDMI_CTRL_0 - 1) : c; }
+/* all 256 palette entries are pixels: no sync indices to keep out */
+#define ob(x) { *output_buffer++ = (uint8_t)(x); }
+
 
 static void __time_critical_func(render_text_line)(uint32_t line, uint8_t *output_buffer) {
     uint32_t char_row = line >> 4; // div 16
@@ -483,7 +511,7 @@ static void __time_critical_func(render_gfx_line_cga2)(uint32_t line, uint8_t *o
 extern uint32_t spread8_lut[256];
 
 // Merge 4 plane bytes [P3|P2|P1|P0] into 8 nibbles (pixel color indices).
-static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
+static __force_inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
     return
      spread8_lut[(uint8_t)ega_planes] |
      spread8_lut[(uint8_t)(ega_planes >> 8)] << 1 |
@@ -491,7 +519,7 @@ static inline uint32_t ega_pack8_from_planes(const uint32_t ega_planes) {
      spread8_lut[(uint8_t)(ega_planes >> 24)] << 3;
 }
 
-static inline uint32_t ega_pair(uint8_t ab) {
+static __force_inline uint32_t ega_pair(uint8_t ab) {
     return ((uint32_t)(ab & 15) << 8) | (uint32_t)(ab >> 4);
 }
 
@@ -687,22 +715,218 @@ static void __time_critical_func(render_line)(uint32_t line, uint8_t *output_buf
     nf_memset(output_buffer, 0x77, SCREEN_WIDTH);
 }
 
-static void __time_critical_func(dma_handler_HDMI)() {
-    static uint line = 0;
-    irq_inx++;
+//=============================================================================
+// HDMI output engine
+//=============================================================================
 
-    dma_hw->ints0 = 1u << dma_chan_ctrl;
+static inline uint64_t *entry(int e) {
+    return (uint64_t *)&conv_color[(256 + e) * 4];
+}
 
-    if (line >= 524) {
-        line = 0;
-        frame_update_request = 1;
-    } else {
-        ++line;
+static void set_hdmi_entry(int e, uint64_t v) {
+    entry(e)[0] = v;
+    entry(e)[1] = v;
+}
+
+/* A data island into entries e..e+17, from a packet: lane 0 carries the
+ * header and the syncs (hv: VSYNC << 1 | HSYNC levels), lanes 1 and 2 the
+ * subpackets (laid out as hstx_packet.c does for the HSTX). */
+static void __time_critical_func(encode_island)(int e, const hstx_packet_t *p, uint32_t hv) {
+    uint64_t *d = entry(e);
+    uint64_t g = terc_lane[0][0xc | hv] | guard12;
+    d[0] = g;
+    d[1] = g;
+    d[34] = g;
+    d[35] = g;
+    for (int j = 0; j < 8; j++) {
+        uint32_t v = p->subpacket[0][j] | p->subpacket[1][j] << 8 | p->subpacket[2][j] << 16 |
+                     (uint32_t)p->subpacket[3][j] << 24;
+        uint32_t x = (v ^ (v >> 7)) & 0x00aa00aa;
+        v = v ^ x ^ (x << 7);
+        x = (v ^ (v >> 14)) & 0x0000cccc;
+        v = v ^ x ^ (x << 14);
+        for (int k = 0; k < 4; k++) {
+            int i = j * 4 + k;                   /* the packet's pixel */
+            int sh = (k & 1) * 16 + (k >> 1) * 4; /* lane 1: 0, 16, 4, 20; lane 2: 8 more */
+            uint32_t bit = (p->header[i >> 3] >> (i & 7)) & 1;
+            uint32_t n0 = bit << 2 | hv | (i ? 8 : 0);
+            d[2 + i] = terc_lane[0][n0] | terc_lane[1][(v >> sh) & 0xf] | terc_lane[2][(v >> (sh + 8)) & 0xf];
+        }
     }
+}
 
-    // Update VGA status register 1 (port 0x3DA) from ISR
+//-----------------------------------------------------------------------------
+// HDMI audio: the mixer (core 0, 44.1 kHz) pushes frames into a ring, the
+// line IRQ (core 1) takes four for each audio packet; HDMI is the clock.
+//-----------------------------------------------------------------------------
+#define AUDIO_RING 128      /* frames, a power of 2: 2.9 ms */
+#define AUDIO_HIGH 64       /* above it: one frame dropped a packet */
+static uint32_t *audio_ring; /* in the HDMI block, after the rows */
+static volatile uint32_t audio_wr, audio_rd;
+static uint32_t audio_last;
+static volatile bool audio_on;
+volatile uint32_t hdmi_audio_underruns, hdmi_audio_drops;
+
+void __not_in_flash_func(hdmi_audio_push)(int16_t left, int16_t right) {
+    if (!audio_on) return;
+    uint32_t w = audio_wr;
+    if (w - audio_rd >= AUDIO_RING) { /* full: dropped */
+        hdmi_audio_drops++;
+        return;
+    }
+    audio_ring[w & (AUDIO_RING - 1)] = (uint16_t)left | (uint32_t)(uint16_t)right << 16;
+    __dmb();
+    audio_wr = w + 1;
+}
+
+static inline uint32_t parity8(uint32_t v) {
+    v ^= v >> 4;
+    return (0x6996u >> (v & 0xf)) & 1;
+}
+
+/* the next audio packet: 4 frames from the ring (the last one repeated if
+ * it ran dry) */
+static void __time_critical_func(make_audio_packet)(hstx_packet_t *p) {
+    uint32_t rd = audio_rd, fill = audio_wr - rd;
+    if (fill > AUDIO_HIGH) {
+        rd++; /* the mixer ran ahead: catch up a frame at a time */
+        fill--;
+        hdmi_audio_drops++;
+    }
+    p->header[0] = 0x02;
+    p->header[1] = 0x0f;
+    p->header[2] = audio_packets == 0 ? 0x10 : 0; /* B: a new 192-sample block */
+    if (++audio_packets == 48) audio_packets = 0;
+    uint8_t v = hstx_bch_table[p->header[0]];
+    v = hstx_bch_table[p->header[1] ^ v];
+    p->header[3] = hstx_bch_table[p->header[2] ^ v];
+    for (int k = 0; k < 4; k++) {
+        if (fill) {
+            audio_last = audio_ring[rd & (AUDIO_RING - 1)];
+            rd++;
+            fill--;
+        } else {
+            hdmi_audio_underruns++;
+        }
+        int l = (int16_t)audio_last, r = (int16_t)(audio_last >> 16);
+        uint8_t *d = p->subpacket[k];
+        d[0] = 0;
+        d[1] = (uint8_t)l;
+        d[2] = (uint8_t)(l >> 8);
+        d[3] = 0;
+        d[4] = (uint8_t)r;
+        d[5] = (uint8_t)(r >> 8);
+        d[6] = (uint8_t)(parity8(d[1] ^ d[2]) << 3 | parity8(d[4] ^ d[5]) << 7);
+        uint8_t b = hstx_bch_table[0];
+        for (int i = 1; i < 7; i++) b = hstx_bch_table[d[i] ^ b];
+        d[7] = b;
+    }
+    audio_rd = rd;
+}
+
+/* 8-bit pixels to 16-bit indices */
+static void __time_critical_func(convert_row)(uint16_t *dst, const uint8_t *src) {
+    const uint32_t *s = (const uint32_t *)src;
+    uint32_t *d = (uint32_t *)dst;
+    for (int i = 0; i < ROW_PIXELS / 4; i++) {
+        uint32_t w = s[i];
+        d[2 * i] = (w & 0xff) | (w & 0xff00) << 8;
+        d[2 * i + 1] = (w >> 16 & 0xff) | (w >> 24) << 16;
+    }
+}
+
+static inline void set_block(block_t *b, const void *read, uint32_t count, uint32_t ctrl) {
+    b->read = read;
+    b->write = &pio_video->txf[sm_conv];
+    b->count = count;
+    b->ctrl = ctrl;
+}
+
+
+/* the picture of an active line into its row */
+static void __time_critical_func(render_row)(uint32_t line, uint16_t *row) {
+    if (line < (uint32_t)active_start || line >= (uint32_t)active_end) {
+        nf_memset(row, 0, ROW_PIXELS * sizeof(uint16_t));
+        return;
+    }
+    render_line(line - active_start, row8);
+    convert_row(row, row8);
+}
+
+/* the block list, island and row of a line, into slot (the lines' parity
+ * would not do: 525 a frame) */
+static void __time_critical_func(prepare_line)(uint32_t line, uint32_t slot) {
+    block_t *b = blocks[slot];
+    int blank = line >= ACTIVE_LINES;
+    int vs = line >= VSYNC_FIRST && line < VSYNC_FIRST + 2;
+    uint32_t hv = vs ? 0 : 2; /* in the island: HSYNC asserted (low) */
+
+    /* the packet, if any: the info frames and the clock regeneration on
+     * some blanking lines, audio as due */
+    audio_accum += audio_step;
+    const hstx_packet_t *pkt = NULL;
+    hstx_packet_t audio;
+    if (blank && !vs && line == ACTIVE_LINES + 1)
+        pkt = &pkt_avi;
+    else if (blank && !vs && line == ACTIVE_LINES + 3)
+        pkt = &pkt_aif;
+    else if (blank && !vs && (line & 3) == 0)
+        pkt = &pkt_acr;
+    else if (audio_on && audio_accum >= 4u << 16) {
+        audio_accum -= 4u << 16;
+        make_audio_packet(&audio);
+        pkt = &audio;
+    }
+    if (audio_accum > 8u << 16) audio_accum = 8u << 16; /* never a burst */
+
+    set_block(&b[0], head[vs], 8, ctrl_quiet);
+    if (pkt) {
+        encode_island(E_SLOT + slot * ISLAND_ENTRIES, pkt, hv);
+        set_block(&b[1], isl_slot[slot], ISLAND_ENTRIES, ctrl_quiet);
+    } else {
+        set_block(&b[1], isl_null[vs], ISLAND_ENTRIES, ctrl_quiet);
+    }
+    if (!blank) {
+        uint16_t *row = rows[line % 3];
+        render_row(line, row);
+        set_block(&b[2], rest_active, 54, ctrl_irq);
+        set_block(&b[3], row, ROW_PIXELS, ctrl_quiet);
+    } else {
+        set_block(&b[2], rest_blank[vs], 54, ctrl_irq);
+        set_block(&b[3], &blank_px[vs], ROW_PIXELS, ctrl_quiet_fixed);
+    }
+}
+
+/* the end of the blanking of a line: its pixels are next */
+static uint32_t line, slot; /* being sent (the IRQ's) */
+
+static void __time_critical_func(dma_handler_HDMI)(void) {
+    uint32_t t0 = timer_hw->timerawl;
+    dma_hw->ints0 = 1u << dma_line;
+    uint32_t next = line + 1 == TOTAL_LINES ? 0 : line + 1;
+    /* "ctrl" loads this line's last block as the IRQ comes in; the lists are
+     * in main SRAM, where core 0's traffic can hold it up. Repointing it (or
+     * rewriting this slot) before it is through would cut the pixel block
+     * short with the next list's words: a line of the wrong length, and the
+     * sink loses sync. */
+    const uint32_t loaded = (uint32_t)&blocks[slot][4];
+    for (int i = 0; i < 1000 && dma_hw->ch[dma_ctrl].read_addr != loaded; i++)
+        tight_loop_contents();
+    dma_channel_set_read_addr(dma_ctrl, blocks[slot ^ 1], false);
+    uint32_t after = next + 1 == TOTAL_LINES ? 0 : next + 1;
+
+    if (line == 0) {
+        frame_update_request = 1;
+        hdmi_frame_count++;
+        uint32_t stall = 1u << (PIO_FDEBUG_TXSTALL_LSB + sm_video);
+        if (pio_video->fdebug & stall) {
+            pio_video->fdebug = stall;
+            hdmi_underruns++;
+        }
+    }
+    // VGA status register 1 (port 0x3DA)
     if (vga_state) {
-        if (line >= 480) {
+        if (line >= ACTIVE_LINES) {
             vga_state->st01 |=  ST01_V_RETRACE;
             vga_state->st01 &= ~ST01_DISP_ENABLE;
         } else {
@@ -710,399 +934,410 @@ static void __time_critical_func(dma_handler_HDMI)() {
             vga_state->st01 |=  ST01_DISP_ENABLE;
         }
     }
-
-    // 4-buffer rendering: DMA reads buf (line % 4), ISR renders (line+2) % 4.
-    uint32_t read_buf = line & 3;
-    uint32_t render_buf = (line + 2) & 3;
-    dma_channel_set_read_addr(dma_chan_ctrl, &DMA_BUF_ADDR[read_buf], false);
-
-    uint8_t* activ_buf = (uint8_t *)dma_lines[render_buf];
-
-    if (line < 480) { //область изображения
-        uint8_t* output_buffer = activ_buf + 72;
-        if (line < (uint32_t)active_start) {
-            nf_memset(output_buffer, 0, SCREEN_WIDTH);
-            goto f;
-        }
-        if (line >= (uint32_t)active_end) {
-            nf_memset(output_buffer, 0, SCREEN_WIDTH);
-            goto f;
-        }
-        render_line(line - active_start, output_buffer);
-f:
-        //ССИ
-        //для выравнивания синхры
-        // --|_|---|_|---|_|----
-        //---|___________|-----
-        nf_memset(activ_buf + 48, HDMI_CTRL_0, 24);
-        nf_memset(activ_buf, HDMI_CTRL_1, 48);
-        nf_memset(activ_buf + 392, HDMI_CTRL_0, 8);
+    // Late in vblank, just before line 0 is made: the new page address
+    // (Wolf3D has written it to CRTC by now), panning, line compare.
+    if (line == TOTAL_LINES - 4 && vga_state) {
+        const uint8_t *cr = vga_state->cr;
+        frame_vram_offset = (uint16_t)((cr[0x0c] << 8) | cr[0x0d]);
+        frame_pixel_panning = vga_state->ar[0x13] & 0x07;
+        int lc = (int)cr[0x18]
+               | (((int)cr[0x07] & 0x10) << 4)
+               | (((int)cr[0x09] & 0x40) << 3);
+        frame_line_compare = (lc > 0 && lc < 480) ? lc : -1;
     }
-    else {
-        if ((line >= 490) && (line < 492)) {
-            //кадровый синхроимпульс
-            //для выравнивания синхры
-            // --|_|---|_|---|_|----
-            //---|___________|-----
-            nf_memset(activ_buf + 48, HDMI_CTRL_2, 352);
-            nf_memset(activ_buf, HDMI_CTRL_3, 48);
-        }
-        else {
-            //ССИ без изображения
-            //для выравнивания синхры
-            nf_memset(activ_buf + 48, HDMI_CTRL_0, 352);
-            nf_memset(activ_buf, HDMI_CTRL_1, 48);
-        };
 
-        // Line N_LINES_TOTAL-4 (521): late in vblank, just before DMA needs line 0.
-        // Wolf3D has already written the new page address to CRTC by now.
-        // Read cr[] and ar[] directly — no intermediate volatile copies.
-        if (line == 521) {
-            if (vga_state) {
-                const uint8_t *cr = vga_state->cr;
-                frame_vram_offset = (uint16_t)((cr[0x0c] << 8) | cr[0x0d]);
-                frame_pixel_panning = vga_state->ar[0x13] & 0x07;
-                int lc = (int)cr[0x18]
-                       | (((int)cr[0x07] & 0x10) << 4)
-                       | (((int)cr[0x09] & 0x40) << 3);
-                frame_line_compare = (lc > 0 && lc < 480) ? lc : -1;
-            }
-        }
-    }
+    prepare_line(after, slot); /* this line's slot: all loaded */
+    line = next;
+    slot ^= 1;
+    uint32_t dt = timer_hw->timerawl - t0;
+    if (dt > hdmi_irq_max_us) hdmi_irq_max_us = dt;
 }
 
-static inline void irq_remove_handler_DMA_core1() {
-    irq_set_enabled(VIDEO_DMA_IRQ, false);
-    irq_remove_handler(VIDEO_DMA_IRQ, irq_get_exclusive_handler(VIDEO_DMA_IRQ));
+
+/* ones minus zeros of a 10-bit symbol */
+static inline int disparity(uint16_t sym) {
+    return 2 * __builtin_popcount(sym & 0x3ff) - 10;
 }
 
-static inline void irq_set_exclusive_handler_DMA_core1() {
-    irq_set_exclusive_handler(VIDEO_DMA_IRQ, dma_handler_HDMI);
-    irq_set_priority(VIDEO_DMA_IRQ, 0);
-    irq_set_enabled(VIDEO_DMA_IRQ, true);
-}
-
-void graphics_set_palette_hdmi2(
-    const uint8_t R1, const uint8_t G1, const uint8_t B1,
-    const uint8_t R2, const uint8_t G2, const uint8_t B2,
-    uint8_t i
-);
-
-//деинициализация - инициализация ресурсов
-static inline bool hdmi_init() {
-    //выключение прерывания DMA
-    if (VIDEO_DMA_IRQ == DMA_IRQ_0) {
-        dma_channel_set_irq0_enabled(dma_chan_ctrl, false);
-    }
-    else {
-        dma_channel_set_irq1_enabled(dma_chan_ctrl, false);
-    }
-
-    irq_remove_handler_DMA_core1();
-
-
-    //остановка всех каналов DMA
-    dma_hw->abort = (1 << dma_chan_ctrl) | (1 << dma_chan) | (1 << dma_chan_pal_conv) | (
-                        1 << dma_chan_pal_conv_ctrl);
-    while (dma_hw->abort) tight_loop_contents();
-
-    //выключение SM основной и конвертора
-
-#if BOARD_Z2
-    pio_set_gpio_base(PIO_VIDEO, 16);
-    pio_set_gpio_base(PIO_VIDEO_ADDR, 16);
-#endif
-
-    // pio_sm_restart(PIO_VIDEO, SM_video);
-    pio_sm_set_enabled(PIO_VIDEO, SM_video, false);
-
-    //pio_sm_restart(PIO_VIDEO_ADDR, SM_conv);
-    pio_sm_set_enabled(PIO_VIDEO_ADDR, SM_conv, false);
-
-
-    //удаление программ из соответствующих PIO
-    pio_remove_program(PIO_VIDEO_ADDR, &pio_program_conv_addr_HDMI, offs_prg1);
-    pio_remove_program(PIO_VIDEO, &program_PIO_HDMI, offs_prg0);
-
-
-    offs_prg1 = pio_add_program(PIO_VIDEO_ADDR, &pio_program_conv_addr_HDMI);
-    offs_prg0 = pio_add_program(PIO_VIDEO, &program_PIO_HDMI);
-    pio_set_x(PIO_VIDEO_ADDR, SM_conv, ((uint32_t)conv_color >> 12));
-
-    // Заполнение палитры — CGA 16 цветов (индексы 0-15)
-    // Формат cga_colors: 6-бит RRGGBB (как в VGA DAC)
-    static uint8_t cga_colors[16][3] = {
-        { 0,  0,  0},  //  0: Black
-        { 0,  0, 42},  //  1: Blue        (0x02 -> b=2/3*63)
-        { 0, 42,  0},  //  2: Green
-        { 0, 42, 42},  //  3: Cyan
-        {42,  0,  0},  //  4: Red
-        {42,  0, 42},  //  5: Magenta
-        {42, 21,  0},  //  6: Brown
-        {42, 42, 42},  //  7: Light Gray
-        {21, 21, 21},  //  8: Dark Gray
-        {21, 21, 63},  //  9: Light Blue
-        {21, 63, 21},  // 10: Light Green
-        {21, 63, 63},  // 11: Light Cyan
-        {63, 21, 21},  // 12: Light Red
-        {63, 21, 63},  // 13: Light Magenta
-        {63, 63, 21},  // 14: Yellow
-        {63, 63, 63},  // 15: White
-    };
-    
-    // заполнение палитры (text) 4 старших bit первый пиксел, 4 младших - второй
-    for (int c1 = 0; c1 < 16; ++c1) {
-        const uint8_t* c13 = cga_colors[c1];
-        for (int c2 = 0; c2 < 16; ++c2) {
-            const uint8_t* c23 = cga_colors[c2];
-            int ci = c1 << 4 | c2; // compund index
-            graphics_set_palette_hdmi2(
-                c13[0] << 2, c13[1] << 2, c13[2] << 2,
-                c23[0] << 2, c23[1] << 2, c23[2] << 2,
-                ci
-            );
-        }
-    }
-
-    //BASE_HDMI_CTRL_INX +3 служебные данные(синхра) напрямую вносим в массив -конвертер
-    uint64_t* conv_color64 = (uint64_t *)conv_color;
-    const uint16_t b0 = 0b1101010100;
-    const uint16_t b1 = 0b0010101011;
-    const uint16_t b2 = 0b0101010100;
-    const uint16_t b3 = 0b1010101011;
-
-    conv_color64[2 * HDMI_CTRL_0 + 0] = get_ser_diff_data(b0, b0, b3);
-    conv_color64[2 * HDMI_CTRL_0 + 1] = get_ser_diff_data(b0, b0, b3);
-
-    conv_color64[2 * HDMI_CTRL_1 + 0] = get_ser_diff_data(b0, b0, b2);
-    conv_color64[2 * HDMI_CTRL_1 + 1] = get_ser_diff_data(b0, b0, b2);
-
-    conv_color64[2 * HDMI_CTRL_2 + 0] = get_ser_diff_data(b0, b0, b1);
-    conv_color64[2 * HDMI_CTRL_2 + 1] = get_ser_diff_data(b0, b0, b1);
-
-    conv_color64[2 * HDMI_CTRL_3 + 0] = get_ser_diff_data(b0, b0, b0);
-    conv_color64[2 * HDMI_CTRL_3 + 1] = get_ser_diff_data(b0, b0, b0);
-
-    memcpy(conv_color2, conv_color, 1024 * 4);
-
-    //настройка PIO SM для конвертации
-    pio_sm_config c_c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c_c, offs_prg1, offs_prg1 + (pio_program_conv_addr_HDMI.length - 1));
-    sm_config_set_in_shift(&c_c, true, false, 32);
-
-    pio_sm_init(PIO_VIDEO_ADDR, SM_conv, offs_prg1, &c_c);
-    pio_sm_set_enabled(PIO_VIDEO_ADDR, SM_conv, true);
-
-    //настройка PIO SM для вывода данных
-    c_c = pio_get_default_sm_config();
-    sm_config_set_wrap(&c_c, offs_prg0, offs_prg0 + (program_PIO_HDMI.length - 1));
-
-    //настройка side set
-    sm_config_set_sideset_pins(&c_c,beginHDMI_PIN_clk);
-    sm_config_set_sideset(&c_c, 2,false,false);
-    for (int i = 0; i < 2; i++) {
-        pio_gpio_init(PIO_VIDEO, beginHDMI_PIN_clk + i);
-        gpio_set_drive_strength(beginHDMI_PIN_clk + i, GPIO_DRIVE_STRENGTH_12MA);
-        gpio_set_slew_rate(beginHDMI_PIN_clk + i, GPIO_SLEW_RATE_FAST);
-    }
-
-#if BOARD_Z2
-    // Настройка направлений пинов для state machines
-    pio_sm_set_consecutive_pindirs(PIO_VIDEO, SM_video, HDMI_BASE_PIN, 8, true);
-    pio_sm_set_consecutive_pindirs(PIO_VIDEO_ADDR, SM_conv, HDMI_BASE_PIN, 8, true);
-
-    uint64_t mask64 = (uint64_t)(3ull << beginHDMI_PIN_clk);
-    pio_sm_set_pins_with_mask64(PIO_VIDEO, SM_video, mask64, mask64);
-    pio_sm_set_pindirs_with_mask64(PIO_VIDEO, SM_video, mask64, mask64);
-    // пины
-#else
-    pio_sm_set_pins_with_mask(PIO_VIDEO, SM_video, 3u << beginHDMI_PIN_clk, 3u << beginHDMI_PIN_clk);
-    pio_sm_set_pindirs_with_mask(PIO_VIDEO, SM_video, 3u << beginHDMI_PIN_clk, 3u << beginHDMI_PIN_clk);
-    // пины
-#endif
-
-    for (int i = 0; i < 6; i++) {
-        gpio_set_slew_rate(beginHDMI_PIN_data + i, GPIO_SLEW_RATE_FAST);
-        pio_gpio_init(PIO_VIDEO, beginHDMI_PIN_data + i);
-        gpio_set_drive_strength(beginHDMI_PIN_data + i, GPIO_DRIVE_STRENGTH_12MA);
-        gpio_set_slew_rate(beginHDMI_PIN_data + i, GPIO_SLEW_RATE_FAST);
-    }
-    pio_sm_set_consecutive_pindirs(PIO_VIDEO, SM_video, beginHDMI_PIN_data, 6, true);
-    //конфигурация пинов на выход
-    sm_config_set_out_pins(&c_c, beginHDMI_PIN_data, 6);
-
-    //
-    sm_config_set_out_shift(&c_c, true, true, 30);
-    sm_config_set_fifo_join(&c_c, PIO_FIFO_JOIN_TX);
-
-    sm_config_set_clkdiv(&c_c, clock_get_hz(clk_sys) / 252000000.0f);
-    pio_sm_init(PIO_VIDEO, SM_video, offs_prg0, &c_c);
-    pio_sm_set_enabled(PIO_VIDEO, SM_video, true);
-
-    //настройки DMA — 4 line buffers (2 in conv_color, 2 separate)
-    dma_lines[0] = &conv_color[1024];
-    dma_lines[1] = &conv_color[1124];
-    dma_lines[2] = hdmi_extra_line_buf[0];
-    dma_lines[3] = hdmi_extra_line_buf[1];
-
-    //основной рабочий канал
-    dma_channel_config cfg_dma = dma_channel_get_default_config(dma_chan);
-    channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_8);
-    channel_config_set_chain_to(&cfg_dma, dma_chan_ctrl);
-    channel_config_set_high_priority(&cfg_dma, true);
-
-    channel_config_set_read_increment(&cfg_dma, true);
-    channel_config_set_write_increment(&cfg_dma, false);
-
-
-    uint dreq = DREQ_PIO1_TX0 + SM_conv;
-    if (PIO_VIDEO_ADDR == pio0) dreq = DREQ_PIO0_TX0 + SM_conv;
-
-    channel_config_set_dreq(&cfg_dma, dreq);
-
-    dma_channel_configure(
-        dma_chan,
-        &cfg_dma,
-        &PIO_VIDEO_ADDR->txf[SM_conv], // Write address
-        &dma_lines[0][0], // read address
-        400, //
-        false // Don't start yet
-    );
-
-    //контрольный канал для основного
-    cfg_dma = dma_channel_get_default_config(dma_chan_ctrl);
-    channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_32);
-    channel_config_set_chain_to(&cfg_dma, dma_chan);
-    channel_config_set_high_priority(&cfg_dma, true);
-
-    channel_config_set_read_increment(&cfg_dma, false);
-    channel_config_set_write_increment(&cfg_dma, false);
-
-    DMA_BUF_ADDR[0] = &dma_lines[0][0];
-    DMA_BUF_ADDR[1] = &dma_lines[1][0];
-    DMA_BUF_ADDR[2] = &dma_lines[2][0];
-    DMA_BUF_ADDR[3] = &dma_lines[3][0];
-
-    dma_channel_configure(
-        dma_chan_ctrl,
-        &cfg_dma,
-        &dma_hw->ch[dma_chan].read_addr, // Write address
-        &DMA_BUF_ADDR[0], // read address
-        1, //
-        false // Don't start yet
-    );
-
-    //канал - конвертер палитры
-
-    cfg_dma = dma_channel_get_default_config(dma_chan_pal_conv);
-    channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_32);
-    channel_config_set_chain_to(&cfg_dma, dma_chan_pal_conv_ctrl);
-    channel_config_set_high_priority(&cfg_dma, true);
-
-    channel_config_set_read_increment(&cfg_dma, true);
-    channel_config_set_write_increment(&cfg_dma, false);
-
-    dreq = DREQ_PIO1_TX0 + SM_video;
-    if (PIO_VIDEO == pio0) dreq = DREQ_PIO0_TX0 + SM_video;
-
-    channel_config_set_dreq(&cfg_dma, dreq);
-
-    dma_channel_configure(
-        dma_chan_pal_conv,
-        &cfg_dma,
-        &PIO_VIDEO->txf[SM_video], // Write address
-        &conv_color[0], // read address
-        4, //
-        false // Don't start yet
-    );
-
-    //канал управления конвертером палитры
-
-    cfg_dma = dma_channel_get_default_config(dma_chan_pal_conv_ctrl);
-    channel_config_set_transfer_data_size(&cfg_dma, DMA_SIZE_32);
-    channel_config_set_chain_to(&cfg_dma, dma_chan_pal_conv); // chain to other channel
-
-    channel_config_set_read_increment(&cfg_dma, false);
-    channel_config_set_write_increment(&cfg_dma, false);
-
-    dreq = DREQ_PIO1_RX0 + SM_conv;
-    if (PIO_VIDEO_ADDR == pio0) dreq = DREQ_PIO0_RX0 + SM_conv;
-
-    channel_config_set_dreq(&cfg_dma, dreq);
-
-    dma_channel_configure(
-        dma_chan_pal_conv_ctrl,
-        &cfg_dma,
-        &dma_hw->ch[dma_chan_pal_conv].read_addr, // Write address
-        &PIO_VIDEO_ADDR->rxf[SM_conv], // read address
-        1, //
-        true // start yet
-    );
-
-    //стартуем прерывание и канал
-    if (VIDEO_DMA_IRQ == DMA_IRQ_0) {
-        dma_channel_acknowledge_irq0(dma_chan_ctrl);
-        dma_channel_set_irq0_enabled(dma_chan_ctrl, true);
-    }
-    else {
-        dma_channel_acknowledge_irq1(dma_chan_ctrl);
-        dma_channel_set_irq1_enabled(dma_chan_ctrl, true);
-    }
-
-    irq_set_exclusive_handler_DMA_core1();
-
-    dma_start_channel_mask((1u << dma_chan_ctrl));
-
-    return true;
+/* the value nearest to each one whose symbol (tmds_encoder) has a disparity
+ * of 0, 2, 4, 6 or 8 in size; in flash, made by a script from the encoder */
+static const uint8_t near_val[256][5] = {
+    { 16,   8,   4,   2,   0}, { 16,   8,   4,   2,   1}, { 16,   8,   4,   2,   1}, { 16,   8,   4,   3,   1},
+    { 16,   8,   4,   3,   1}, { 16,   8,   5,   6,   1}, { 16,   8,   5,   6,   1}, { 16,   8,   5,   7,   1},
+    { 16,   8,  10,   7,   1}, { 16,   9,  10,   7,   1}, { 16,   9,  10,  12,   1}, { 16,   9,  11,  12,   1},
+    { 16,   9,  11,  12,   1}, { 16,   9,  14,  13,   1}, { 16,  18,  14,  13,   1}, { 16,  18,  15,  13,   1},
+    { 16,  18,  15,  13,   1}, { 17,  18,  15,  13,   1}, { 17,  18,  20,  13,   1}, { 17,  19,  20,  24,   1},
+    { 17,  19,  20,  24,   1}, { 17,  22,  21,  24,   1}, { 17,  22,  21,  24,   1}, { 17,  23,  21,  24,   1},
+    { 17,  23,  26,  24,   1}, { 17,  23,  26,  25,   1}, { 34,  28,  26,  25,   1}, { 34,  28,  27,  25,   1},
+    { 34,  28,  27,  25,   1}, { 34,  29,  30,  25,   1}, { 34,  29,  30,  25,   1}, { 34,  32,  31,  25,   1},
+    { 34,  32,  31,  25,   1}, { 34,  33,  31,  25,   1}, { 34,  33,  31,  25,   1}, { 35,  36,  31,  25,   1},
+    { 35,  36,  40,  25,   1}, { 38,  37,  40,  48,   1}, { 38,  37,  40,  48,   1}, { 39,  37,  40,  48,   1},
+    { 39,  42,  40,  48,   1}, { 39,  42,  41,  48,   1}, { 44,  42,  41,  48,   1}, { 44,  43,  41,  48,   1},
+    { 44,  43,  41,  48,   1}, { 45,  46,  41,  48,   1}, { 45,  46,  50,  48,   1}, { 45,  47,  50,  48,   1},
+    { 45,  47,  50,  48,   1}, { 45,  47,  50,  49,   1}, { 54,  52,  50,  49,   1}, { 54,  52,  51,  49,   1},
+    { 54,  52,  51,  49,   1}, { 54,  53,  51,  49,   1}, { 54,  53,  51,  49,   1}, { 55,  53,  51,  49,   1},
+    { 56,  58,  60,  62,   1}, { 57,  58,  60,  62,   1}, { 57,  58,  60,  62,   1}, { 57,  59,  60,  62,   1},
+    { 57,  59,  60,  62,   1}, { 57,  59,  61,  62,   1}, { 57,  59,  61,  62,   1}, { 68,  66,  64,  63,   1},
+    { 68,  66,  64,  63,   1}, { 68,  66,  65,  63,   1}, { 68,  66,  65,  63,   1}, { 68,  67,  65,  63,   1},
+    { 68,  67,  65,  63,   1}, { 69,  70,  65,  63,   1}, { 69,  70,  65,  63,   1}, { 69,  71,  65,  63,   1},
+    { 74,  72,  78,  63,   1}, { 74,  73,  78,  63,   1}, { 74,  73,  78,  63,   1}, { 75,  76,  78,  63,   1},
+    { 75,  76,  78,  63,   1}, { 75,  77,  78,  63,   1}, { 75,  77,  78,  63,   1}, { 75,  77,  79,  63,   1},
+    { 84,  82,  80,  96,   1}, { 84,  82,  81,  96,   1}, { 84,  82,  81,  96,   1}, { 84,  83,  81,  96,   1},
+    { 84,  83,  81,  96,   1}, { 85,  86,  81,  96,   1}, { 85,  86,  81,  96,   1}, { 85,  87,  81,  96,   1},
+    { 90,  88,  94,  96,   1}, { 90,  89,  94,  96,   1}, { 90,  89,  94,  96,   1}, { 91,  92,  94,  96,   1},
+    { 91,  92,  94,  96,   1}, { 91,  93,  94,  96,   1}, { 91,  93,  94,  96,   1}, { 91,  93,  95,  96,   1},
+    { 91,  93,  95,  96,   1}, { 91, 100,  98,  97,   1}, {104, 100,  98,  97,   1}, {104, 100,  99,  97,   1},
+    {104, 100,  99,  97,   1}, {104, 101, 102,  97,   1}, {104, 101, 102,  97,   1}, {104, 101, 103,  97,   1},
+    {104, 106, 103,  97,   1}, {105, 106, 103,  97,   1}, {105, 106, 103,  97,   1}, {108, 107, 103,  97,   1},
+    {108, 107, 103,  97,   1}, {109, 110, 114,  97,   1}, {109, 110, 114,  97,   1}, {109, 111, 114,  97,   1},
+    {109, 112, 114, 126,   1}, {109, 113, 114, 126,   1}, {118, 113, 114, 126,   1}, {118, 116, 115, 126,   1},
+    {118, 116, 115, 126,   1}, {118, 117, 115, 126,   1}, {118, 117, 120, 126,   1}, {119, 117, 120, 126,   1},
+    {119, 122, 120, 126,   1}, {119, 122, 121, 126,   1}, {119, 122, 121, 126,   1}, {119, 123, 124, 126,   1},
+    {119, 123, 124, 126,   1}, {119, 123, 125, 126,   1}, {119, 123, 125, 126,   1}, {119, 123, 125, 127,   1},
+    {136, 132, 130, 128, 254}, {136, 132, 130, 129, 254}, {136, 132, 130, 129, 254}, {136, 132, 131, 129, 254},
+    {136, 132, 131, 129, 254}, {136, 133, 134, 129, 254}, {136, 133, 134, 129, 254}, {136, 133, 135, 129, 254},
+    {136, 138, 135, 129, 254}, {137, 138, 135, 129, 254}, {137, 138, 140, 129, 254}, {137, 139, 140, 129, 254},
+    {137, 139, 140, 129, 254}, {137, 142, 141, 129, 254}, {146, 142, 141, 129, 254}, {146, 143, 141, 129, 254},
+    {146, 144, 141, 158, 254}, {146, 145, 141, 158, 254}, {146, 145, 141, 158, 254}, {147, 148, 152, 158, 254},
+    {147, 148, 152, 158, 254}, {150, 149, 152, 158, 254}, {150, 149, 152, 158, 254}, {151, 149, 152, 158, 254},
+    {151, 154, 152, 158, 254}, {151, 154, 153, 158, 254}, {151, 154, 153, 158, 254}, {151, 155, 156, 158, 254},
+    {151, 155, 156, 158, 254}, {151, 155, 157, 158, 254}, {164, 155, 157, 158, 254}, {164, 162, 160, 159, 254},
+    {164, 162, 160, 159, 254}, {164, 162, 161, 159, 254}, {164, 162, 161, 159, 254}, {164, 163, 161, 159, 254},
+    {164, 163, 161, 159, 254}, {165, 166, 161, 159, 254}, {165, 166, 161, 159, 254}, {165, 167, 161, 159, 254},
+    {170, 168, 174, 159, 254}, {170, 169, 174, 159, 254}, {170, 169, 174, 159, 254}, {171, 172, 174, 159, 254},
+    {171, 172, 174, 159, 254}, {171, 173, 174, 159, 254}, {171, 173, 174, 159, 254}, {171, 173, 175, 159, 254},
+    {180, 178, 176, 192, 254}, {180, 178, 177, 192, 254}, {180, 178, 177, 192, 254}, {180, 179, 177, 192, 254},
+    {180, 179, 177, 192, 254}, {181, 182, 177, 192, 254}, {181, 182, 177, 192, 254}, {181, 183, 177, 192, 254},
+    {186, 184, 190, 192, 254}, {186, 185, 190, 192, 254}, {186, 185, 190, 192, 254}, {187, 188, 190, 192, 254},
+    {187, 188, 190, 192, 254}, {187, 189, 190, 192, 254}, {187, 189, 190, 192, 254}, {187, 189, 191, 192, 254},
+    {187, 189, 191, 192, 254}, {198, 196, 194, 193, 254}, {198, 196, 194, 193, 254}, {198, 196, 195, 193, 254},
+    {198, 196, 195, 193, 254}, {198, 197, 195, 193, 254}, {198, 197, 195, 193, 254}, {199, 197, 195, 193, 254},
+    {200, 202, 204, 206, 254}, {201, 202, 204, 206, 254}, {201, 202, 204, 206, 254}, {201, 203, 204, 206, 254},
+    {201, 203, 204, 206, 254}, {201, 203, 205, 206, 254}, {210, 208, 205, 206, 254}, {210, 208, 205, 207, 254},
+    {210, 208, 205, 207, 254}, {210, 209, 205, 207, 254}, {210, 209, 214, 207, 254}, {211, 212, 214, 207, 254},
+    {211, 212, 214, 207, 254}, {211, 213, 214, 207, 254}, {216, 213, 214, 207, 254}, {216, 213, 215, 207, 254},
+    {216, 218, 215, 207, 254}, {217, 218, 215, 207, 254}, {217, 218, 215, 207, 254}, {220, 219, 215, 230, 254},
+    {220, 219, 224, 230, 254}, {221, 222, 224, 230, 254}, {221, 222, 224, 230, 254}, {221, 223, 224, 230, 254},
+    {221, 223, 224, 230, 254}, {221, 226, 225, 230, 254}, {221, 226, 225, 230, 254}, {221, 227, 228, 230, 254},
+    {221, 227, 228, 230, 254}, {221, 227, 229, 230, 254}, {238, 232, 229, 230, 254}, {238, 232, 229, 231, 254},
+    {238, 232, 234, 231, 254}, {238, 233, 234, 231, 254}, {238, 233, 234, 231, 254}, {238, 236, 235, 231, 254},
+    {238, 236, 235, 231, 254}, {238, 237, 235, 242, 254}, {238, 237, 240, 242, 254}, {239, 237, 240, 242, 254},
+    {239, 237, 240, 242, 254}, {239, 237, 241, 242, 254}, {239, 246, 241, 242, 254}, {239, 246, 244, 243, 254},
+    {239, 246, 244, 243, 254}, {239, 246, 245, 243, 254}, {239, 246, 245, 248, 254}, {239, 247, 245, 248, 254},
+    {239, 247, 250, 248, 254}, {239, 247, 250, 249, 254}, {239, 247, 250, 249, 254}, {239, 247, 251, 252, 254},
+    {239, 247, 251, 252, 254}, {239, 247, 251, 253, 254}, {239, 247, 251, 253, 254}, {239, 247, 251, 253, 255},
 };
 
-// DC balance XOR mask — inverts differential pairs for alternating pixels.
-// Flips TMDS bits 0-7 and bit 9 (DC balance flag) but NOT bit 8 (encoding method).
-#define HDMI_DC_BAL_XOR 0x0003ffffffffffffllu
+static inline int near_dist(int v, int k) {
+    int x = near_val[v][k];
+    return x > v ? x - v : v - x;
+}
 
-void __time_critical_func(graphics_set_palette_hdmi)(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
-    if is_hdmi_sync(i) return;
-    uint64_t* conv_color64 = (uint64_t *)conv_color;
-    conv_color64[i * 2] = get_ser_diff_data(tmds_encoder(R), tmds_encoder(G), tmds_encoder(B));
-    conv_color64[i * 2 + 1] = conv_color64[i * 2] ^ HDMI_DC_BAL_XOR;
-};
+/* Two pixels of a lane as an exactly DC-balanced pair. A symbol with its
+ * data bits flipped is the same value with the disparity negated, so a
+ * colour against itself is the symbol and its complement (as frank-quake2
+ * sends every pixel). Two values balance only when their symbols'
+ * disparities are equal in size; where they are not, the values move by the
+ * fewest steps (a few in 255) that make them so. Pairs left unbalanced
+ * (two colours side by side: text, EGA 640) drift the line's DC level, and
+ * the capture card loses sync over it; monitors do not mind. */
+static void __time_critical_func(balance_pair)(uint8_t va, uint8_t vb, uint16_t *a, uint16_t *b) {
+    uint16_t sa = tmds_encoder(va);
+    if (va == vb) {
+        *a = sa;
+        *b = sa ^ 0xff;
+        return;
+    }
+    int best = 0;
+    for (int k = 1; k < 5; k++)
+        if (near_dist(va, k) + near_dist(vb, k) < near_dist(va, best) + near_dist(vb, best))
+            best = k;
+    sa = tmds_encoder(near_val[va][best]);
+    uint16_t sb = tmds_encoder(near_val[vb][best]);
+    if (disparity(sa) + disparity(sb) != 0)
+        sb ^= 0xff; /* -d(s) == d(s ^ 0xff) */
+    *a = sa;
+    *b = sb;
+}
 
-void graphics_set_palette_hdmi2(
+void __time_critical_func(graphics_set_palette_hdmi2)(
     const uint8_t R1, const uint8_t G1, const uint8_t B1,
     const uint8_t R2, const uint8_t G2, const uint8_t B2,
     uint8_t i
 ) {
-    if is_hdmi_sync(i) return;
+    uint16_t r1, r2, g1, g2, b1, b2;
+    balance_pair(R1, R2, &r1, &r2);
+    balance_pair(G1, G2, &g1, &g2);
+    balance_pair(B1, B2, &b1, &b2);
     uint64_t* conv_color64 = (uint64_t*)conv_color;
-    uint64_t c1 = get_ser_diff_data(tmds_encoder(R1), tmds_encoder(G1), tmds_encoder(B1));
-    uint64_t c2 = get_ser_diff_data(tmds_encoder(R2), tmds_encoder(G2), tmds_encoder(B2));
-    conv_color64[i * 2]     = c1;
-    conv_color64[i * 2 + 1] = (c1 == c2) ? (c2 ^ HDMI_DC_BAL_XOR) : c2;
+    conv_color64[i * 2]     = get_ser_diff_data(r1, g1, b1);
+    conv_color64[i * 2 + 1] = get_ser_diff_data(r2, g2, b2);
 }
 
-#define RGB888(r, g, b) ((r<<16) | (g << 8 ) | b )
-
-void graphics_init_hdmi() {
-    // PIO и DMA
-    SM_video = pio_claim_unused_sm(PIO_VIDEO, true);
-    SM_conv = pio_claim_unused_sm(PIO_VIDEO_ADDR, true);
-    dma_chan_ctrl = dma_claim_unused_channel(true);
-    dma_chan = dma_claim_unused_channel(true);
-    dma_chan_pal_conv_ctrl = dma_claim_unused_channel(true);
-    dma_chan_pal_conv = dma_claim_unused_channel(true);
-
-    // DMA high priority is set per-channel below (after hdmi_init).
-    // Do NOT set bus_ctrl_hw->priority here — it starves CPU PSRAM writes.
-
-    hdmi_init();
-
-    // DMA starts at normal priority to avoid starving SD/PSRAM during init.
-    // Call hdmi_set_dma_high_priority() after BIOS loading is complete.
+void __time_critical_func(graphics_set_palette_hdmi)(const uint8_t R, const uint8_t G, const uint8_t B,  uint8_t i) {
+    graphics_set_palette_hdmi2(R, G, B, R, G, B, i);
 }
 
+static void fill16(uint16_t *p, uint16_t v, int n) {
+    while (n--) *p++ = v;
+}
+
+/* The text palette: CGA's 16 colours, an index a pair of them (high nibble
+ * the first pixel). Text mode, the OSD and EGA 640 draw with it; made again
+ * whenever it was overwritten (in place of keeping a 4 KB copy). */
+void __time_critical_func(hdmi_text_palette)(void) {
+    static const uint8_t cga_colors[16][3] = {
+        { 0,  0,  0}, { 0,  0, 42}, { 0, 42,  0}, { 0, 42, 42},
+        {42,  0,  0}, {42,  0, 42}, {42, 21,  0}, {42, 42, 42},
+        {21, 21, 21}, {21, 21, 63}, {21, 63, 21}, {21, 63, 63},
+        {63, 21, 21}, {63, 21, 63}, {63, 63, 21}, {63, 63, 63},
+    };
+    for (int c1 = 0; c1 < 16; ++c1) {
+        const uint8_t* c13 = cga_colors[c1];
+        for (int c2 = 0; c2 < 16; ++c2) {
+            const uint8_t* c23 = cga_colors[c2];
+            graphics_set_palette_hdmi2(
+                c13[0] << 2, c13[1] << 2, c13[2] << 2,
+                c23[0] << 2, c23[1] << 2, c23[2] << 2,
+                c1 << 4 | c2
+            );
+        }
+    }
+}
+
+static void make_tables(void) {
+    for (int lane = 0; lane < 3; lane++)
+        for (int n = 0; n < 16; n++) terc_lane[lane][n] = ser_lane(terc4[n], lane);
+    guard12 = ser_lane(GUARD_DATA, 1) | ser_lane(GUARD_DATA, 2);
+
+    hdmi_text_palette();
+
+    for (int vs = 0; vs < 2; vs++) {
+        uint32_t v = vs ? 0 : 2; /* VSYNC level (low when asserted) */
+        set_hdmi_entry(E_BLANK + vs, get_ser_diff_data(ctl_sym[0], ctl_sym[0], ctl_sym[v | 1]));
+        set_hdmi_entry(E_HSYNC + vs, get_ser_diff_data(ctl_sym[0], ctl_sym[0], ctl_sym[v]));
+        set_hdmi_entry(E_PRE_DATA + vs, get_ser_diff_data(ctl_sym[1], ctl_sym[1], ctl_sym[v | 1]));
+        hstx_packet_t null;
+        hstx_packet_set_null(&null);
+        encode_island(E_NULL + vs * ISLAND_ENTRIES, &null, v);
+    }
+    set_hdmi_entry(E_PRE_VIDEO, get_ser_diff_data(ctl_sym[0], ctl_sym[1], ctl_sym[3]));
+    set_hdmi_entry(E_GUARD_VIDEO, get_ser_diff_data(GUARD_VIDEO_0, GUARD_VIDEO_1, GUARD_VIDEO_0));
+
+    for (int vs = 0; vs < 2; vs++) {
+        fill16(head[vs], IDX(E_BLANK + vs), 4);
+        fill16(head[vs] + 4, IDX(E_PRE_DATA + vs), 4);
+        for (int k = 0; k < ISLAND_ENTRIES; k++) isl_null[vs][k] = IDX(E_NULL + vs * ISLAND_ENTRIES + k);
+        fill16(rest_blank[vs], IDX(E_HSYNC + vs), 30);
+        fill16(rest_blank[vs] + 30, IDX(E_BLANK + vs), 24);
+        blank_px[vs] = IDX(E_BLANK + vs);
+    }
+    for (int s = 0; s < 2; s++)
+        for (int k = 0; k < ISLAND_ENTRIES; k++) isl_slot[s][k] = IDX(E_SLOT + s * ISLAND_ENTRIES + k);
+    /* hsync 30 (60 px, after the island's 36), back porch 19 (38 px), the
+     * video preamble 4 (8 px), the guard band 1 (2 px) */
+    fill16(rest_active, IDX(E_HSYNC), 30);
+    fill16(rest_active + 30, IDX(E_BLANK), 19);
+    fill16(rest_active + 49, IDX(E_PRE_VIDEO), 4);
+    rest_active[53] = IDX(E_GUARD_VIDEO);
+
+    /* 44.1 kHz: ACR N 6272, CTS 28000 at 25.2 MHz; 640x480 is VIC 1 */
+    hstx_packet_set_acr(&pkt_acr, 6272, 28000);
+    hstx_packet_set_avi_infoframe(&pkt_avi, 1, 0);
+    hstx_packet_set_audio_infoframe(&pkt_aif, 44100, 2, 16);
+    audio_step = (735u << 16) / TOTAL_LINES;
+}
+
+void graphics_init_hdmi(void) {
+    extern void *video_ram_block; /* main.c: the heap's top 8 KB */
+    uint8_t *block = video_ram_block;
+    if (!block) block = memalign(HDMI_RAM_BLOCK, HDMI_RAM_BLOCK);
+    hard_assert(block);
+    memset(block, 0, HDMI_RAM_BLOCK);
+    conv_color = (uint32_t *)block;
+    rows = (uint16_t (*)[ROW_PIXELS])(block + CONV_COLOR_WORDS * sizeof(uint32_t));
+    row8 = (uint8_t *)(rows + 3);
+    audio_ring = (uint32_t *)(row8 + SCREEN_WIDTH);
+    static_assert(CONV_COLOR_WORDS * sizeof(uint32_t) + 3 * ROW_PIXELS * 2 + SCREEN_WIDTH +
+                  AUDIO_RING * sizeof(uint32_t) <= HDMI_RAM_BLOCK,
+                  "the HDMI block holds the table, the rows and the audio ring");
+    make_tables();
+
+    dma_ctrl = dma_claim_unused_channel(true);
+    dma_line = dma_claim_unused_channel(true);
+    dma_conv_ctrl = dma_claim_unused_channel(true);
+    dma_conv = dma_claim_unused_channel(true);
+    sm_video = pio_claim_unused_sm(pio_video, true);
+    sm_conv = pio_claim_unused_sm(pio_video, true);
+#if HDMI_BASE_PIN >= 16
+    pio_set_gpio_base(pio_video, 16); /* 0 or 16 only: GPIO 16..47 */
+#endif
+    /* the address machine: the window | index << 4 */
+    static uint16_t conv_instr[5];
+    conv_instr[0] = pio_encode_pull(false, true);
+    conv_instr[1] = pio_encode_in(pio_null, 4);
+    conv_instr[2] = pio_encode_in(pio_osr, 9);
+    conv_instr[3] = pio_encode_in(pio_x, 19);
+    conv_instr[4] = pio_encode_push(false, true);
+    static const struct pio_program conv_program = {.instructions = conv_instr, .length = 5, .origin = -1};
+    /* the output: a pixel in 10 steps on the 3 data pairs, the clock by side-set */
+    static const uint16_t video_instr[] = {
+        0x7006, 0x7006, 0x7006, 0x7006, 0x7006, /* out pins, 6  side 2 */
+        0x6806, 0x6806, 0x6806, 0x6806, 0x6806, /* out pins, 6  side 1 */
+    };
+    static const struct pio_program video_program = {.instructions = video_instr, .length = 10, .origin = -1};
+    off_conv = pio_add_program(pio_video, &conv_program);
+    off_video = pio_add_program(pio_video, &video_program);
+
+    pio_sm_config cc = pio_get_default_sm_config();
+    sm_config_set_wrap(&cc, off_conv, off_conv + conv_program.length - 1);
+    sm_config_set_in_shift(&cc, true, false, 32);
+    cfg_conv = cc;
+    pio_sm_init(pio_video, sm_conv, off_conv, &cc);
+    pio_set_x(pio_video, sm_conv, (uint32_t)conv_color >> 13);
+
+    cc = pio_get_default_sm_config();
+    sm_config_set_wrap(&cc, off_video, off_video + video_program.length - 1);
+    sm_config_set_sideset_pins(&cc, beginHDMI_PIN_clk);
+    sm_config_set_sideset(&cc, 2, false, false);
+    for (int i = 0; i < 2; i++) {
+        pio_gpio_init(pio_video, beginHDMI_PIN_clk + i);
+        gpio_set_drive_strength(beginHDMI_PIN_clk + i, GPIO_DRIVE_STRENGTH_12MA);
+        gpio_set_slew_rate(beginHDMI_PIN_clk + i, GPIO_SLEW_RATE_FAST);
+    }
+    for (int i = 0; i < 6; i++) {
+        pio_gpio_init(pio_video, beginHDMI_PIN_data + i);
+        gpio_set_drive_strength(beginHDMI_PIN_data + i, GPIO_DRIVE_STRENGTH_12MA);
+        gpio_set_slew_rate(beginHDMI_PIN_data + i, GPIO_SLEW_RATE_FAST);
+    }
+    uint64_t clk_mask = (uint64_t)3u << beginHDMI_PIN_clk;
+    pio_sm_set_pins_with_mask64(pio_video, sm_video, clk_mask, clk_mask);
+    pio_sm_set_pindirs_with_mask64(pio_video, sm_video, clk_mask, clk_mask);
+    pio_sm_set_consecutive_pindirs(pio_video, sm_video, beginHDMI_PIN_data, 6, true);
+    sm_config_set_out_pins(&cc, beginHDMI_PIN_data, 6);
+    sm_config_set_out_shift(&cc, true, true, 30);
+    sm_config_set_fifo_join(&cc, PIO_FIFO_JOIN_TX);
+    sm_config_set_clkdiv(&cc, (float)clock_get_hz(clk_sys) / 252000000.0f);
+    cfg_video = cc;
+    pio_sm_init(pio_video, sm_video, off_video, &cc);
+
+    /* "line": the ctrl words its blocks load (16-bit indices, chained to
+     * "ctrl"; the IRQ after the third) */
+    dma_channel_config d = dma_channel_get_default_config(dma_line);
+    channel_config_set_transfer_data_size(&d, DMA_SIZE_16);
+    channel_config_set_read_increment(&d, true);
+    channel_config_set_write_increment(&d, false);
+    channel_config_set_dreq(&d, pio_get_dreq(pio_video, sm_conv, true));
+    channel_config_set_chain_to(&d, dma_ctrl);
+    channel_config_set_irq_quiet(&d, true);
+    ctrl_quiet = channel_config_get_ctrl_value(&d);
+    channel_config_set_irq_quiet(&d, false);
+    ctrl_irq = channel_config_get_ctrl_value(&d);
+    channel_config_set_irq_quiet(&d, true);
+    channel_config_set_read_increment(&d, false);
+    ctrl_quiet_fixed = channel_config_get_ctrl_value(&d);
+
+    /* "ctrl": a block (4 words) into the registers of "line", the last
+     * write (ctrl_trig) starts it */
+    d = dma_channel_get_default_config(dma_ctrl);
+    channel_config_set_transfer_data_size(&d, DMA_SIZE_32);
+    channel_config_set_read_increment(&d, true);
+    channel_config_set_write_increment(&d, true);
+    channel_config_set_ring(&d, true, 4);
+    dma_channel_configure(dma_ctrl, &d, &dma_hw->ch[dma_line].read_addr, blocks[0], 4, false);
+
+    /* "conv": an index's 16 bytes to the output machine */
+    d = dma_channel_get_default_config(dma_conv);
+    channel_config_set_transfer_data_size(&d, DMA_SIZE_32);
+    channel_config_set_chain_to(&d, dma_conv_ctrl);
+    channel_config_set_read_increment(&d, true);
+    channel_config_set_write_increment(&d, false);
+    channel_config_set_dreq(&d, pio_get_dreq(pio_video, sm_video, true));
+    dma_channel_configure(dma_conv, &d, &pio_video->txf[sm_video], conv_color, 4, false);
+
+    /* "conv ctrl": the address machine's output into "conv", which it starts */
+    d = dma_channel_get_default_config(dma_conv_ctrl);
+    channel_config_set_transfer_data_size(&d, DMA_SIZE_32);
+    channel_config_set_chain_to(&d, dma_conv);
+    channel_config_set_read_increment(&d, false);
+    channel_config_set_write_increment(&d, false);
+    channel_config_set_dreq(&d, pio_get_dreq(pio_video, sm_conv, false));
+    dma_channel_configure(dma_conv_ctrl, &d, &dma_hw->ch[dma_conv].read_addr, &pio_video->rxf[sm_conv], 1, false);
+
+    prepare_line(0, 0);
+    prepare_line(1, 1);
+
+    /* the IRQ on this core (core 1) */
+    irq_set_exclusive_handler(VIDEO_DMA_IRQ, dma_handler_HDMI);
+    irq_set_priority(VIDEO_DMA_IRQ, 0);
+    dma_channel_acknowledge_irq0(dma_line);
+    dma_channel_set_irq0_enabled(dma_line, true);
+    irq_set_enabled(VIDEO_DMA_IRQ, true);
+    pio_sm_set_enabled(pio_video, sm_conv, true);
+    pio_sm_set_enabled(pio_video, sm_video, true);
+    dma_channel_start(dma_conv_ctrl);
+    dma_channel_start(dma_ctrl);
+    audio_on = true;
+    running = true;
+}
+
+/* The output from line 0 again, after it stopped: the IRQ came more than a
+ * line late (core 1's interrupts held off), "ctrl" ran past the lists and
+ * the chain died on what it read there. A moment of no picture instead of
+ * none until the next reset. */
+static void hdmi_restart(void) {
+    uint32_t mask = 1u << dma_ctrl | 1u << dma_line | 1u << dma_conv_ctrl | 1u << dma_conv;
+    irq_set_enabled(VIDEO_DMA_IRQ, false);
+    pio_sm_set_enabled(pio_video, sm_video, false);
+    pio_sm_set_enabled(pio_video, sm_conv, false);
+    dma_hw->abort = mask;
+    while (dma_hw->abort & mask) tight_loop_contents();
+    dma_hw->ints0 = 1u << dma_line;
+    pio_sm_init(pio_video, sm_conv, off_conv, &cfg_conv);
+    pio_set_x(pio_video, sm_conv, (uint32_t)conv_color >> 13);
+    pio_sm_init(pio_video, sm_video, off_video, &cfg_video);
+    dma_channel_set_read_addr(dma_ctrl, blocks[0], false);
+    dma_channel_set_trans_count(dma_ctrl, 4, false);
+    dma_channel_set_read_addr(dma_conv, conv_color, false);
+    dma_channel_set_trans_count(dma_conv, 4, false);
+    dma_channel_set_trans_count(dma_conv_ctrl, 1, false);
+    line = 0;
+    slot = 0;
+    prepare_line(0, 0);
+    prepare_line(1, 1);
+    hdmi_resyncs++;
+    irq_set_enabled(VIDEO_DMA_IRQ, true);
+    pio_sm_set_enabled(pio_video, sm_conv, true);
+    pio_sm_set_enabled(pio_video, sm_video, true);
+    dma_channel_start(dma_conv_ctrl);
+    dma_channel_start(dma_ctrl);
+}
+
+/* Core 1's loop, often: restarts the output when no frame came for 100 ms */
+void hdmi_watchdog(void) {
+    static uint32_t last_frames, last_us;
+    static bool armed;
+    if (!running) return;
+    uint32_t now = time_us_32(), f = hdmi_frame_count;
+    if (!armed || f != last_frames) {
+        armed = true;
+        last_frames = f;
+        last_us = now;
+    } else if (now - last_us > 100000) {
+        printf("HDMI: output stopped at frame %lu, restarted\n", (unsigned long)f);
+        hdmi_restart();
+        last_us = now;
+    }
+}
+
+/* DMA starts at normal priority to avoid starving SD/PSRAM during init;
+ * main.c raises it after BIOS loading. "line" takes its ctrl word from each
+ * block, so the words change too. */
 void hdmi_set_dma_high_priority(void) {
-    hw_set_bits(&dma_hw->ch[dma_chan].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
-    hw_set_bits(&dma_hw->ch[dma_chan_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
-    hw_set_bits(&dma_hw->ch[dma_chan_pal_conv].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
-    hw_set_bits(&dma_hw->ch[dma_chan_pal_conv_ctrl].ctrl_trig, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
+    ctrl_quiet |= DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS;
+    ctrl_irq |= DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS;
+    ctrl_quiet_fixed |= DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS;
+    hw_set_bits(&dma_hw->ch[dma_ctrl].al1_ctrl, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
+    hw_set_bits(&dma_hw->ch[dma_conv].al1_ctrl, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
+    hw_set_bits(&dma_hw->ch[dma_conv_ctrl].al1_ctrl, DMA_CH0_CTRL_TRIG_HIGH_PRIORITY_BITS);
 }

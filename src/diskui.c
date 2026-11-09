@@ -372,9 +372,8 @@ static void apply_and_close(void) {
 
     if (reboot_required) {
         *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52;
-        watchdog_reboot(0, 0, 0);
-        while (true);
-        __unreachable();
+        extern void __attribute__((noreturn)) platform_reboot(bool bootsel);
+        platform_reboot(false);
     }
 
     diskui_close();

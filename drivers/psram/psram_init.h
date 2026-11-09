@@ -44,6 +44,9 @@ void psram_init_with_freq(uint cs_pin, int freq_mhz);
  */
 bool psram_test(void);
 
+/** Leave QPI mode and reset the PSRAM before a software reboot. */
+void psram_reset_to_spi(void);
+
 /** MF ID and KGD read at boot by psram_init() (0x0D, 0x5D on APS6404). */
 void psram_get_id(uint8_t *mfid, uint8_t *kgd);
 

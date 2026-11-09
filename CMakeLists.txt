@@ -216,6 +216,7 @@ target_link_libraries(psram pico_stdlib hardware_clocks)
 #=============================================================================
 add_library(video_driver
     drivers/hdmi/hdmi.c
+    drivers/hdmi/hstx_packet.c
     drivers/vga/test_pins.c
     drivers/vga/vga_hw.c
     drivers/vga/vga_osd.c
@@ -227,6 +228,8 @@ target_compile_definitions(video_driver PRIVATE
     RP2350_BUILD=1
 )
 target_link_libraries(video_driver pico_stdlib hardware_dma hardware_pio hardware_clocks hardware_sync)
+# the HDMI line IRQ must stay in SRAM: no loops turned into newlib calls
+set_source_files_properties(drivers/hdmi/hdmi.c PROPERTIES COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns")
 
 #=============================================================================
 # Runtime I2S/PWM Audio Driver

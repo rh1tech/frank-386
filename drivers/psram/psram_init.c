@@ -175,6 +175,23 @@ static void __no_inline_not_in_flash_func(psram_reset_and_read_id)(uint cs_pin) 
     restore_interrupts(irq);
 }
 
+/* Put the PSRAM back into its power-on SPI mode before a software reboot
+ * (frank-ecat): a QPI-mode PSRAM on the shared QSPI bus garbles the boot
+ * ROM's flash probe after a warm reset. Call it with interrupts off and the
+ * other core stopped; runs from RAM (XIP is unusable in direct mode). */
+void __no_inline_not_in_flash_func(psram_reset_to_spi)(void) {
+    qmi_hw->direct_csr = 30 << QMI_DIRECT_CSR_CLKDIV_LSB | QMI_DIRECT_CSR_EN_BITS;
+    while (qmi_hw->direct_csr & QMI_DIRECT_CSR_BUSY_BITS);
+    uint8_t cmd = 0xF5; /* exit QPI, sent on all four lines */
+    psram_direct_xfer(&cmd, NULL, 1, true);
+    cmd = 0x66;         /* reset enable, reset */
+    psram_direct_xfer(&cmd, NULL, 1, false);
+    cmd = 0x99;
+    psram_direct_xfer(&cmd, NULL, 1, false);
+    for (volatile int i = 0; i < 1000; i++);
+    qmi_hw->direct_csr = 0;
+}
+
 void psram_get_id(uint8_t *mfid, uint8_t *kgd) {
     *mfid = psram_id[0];
     *kgd = psram_id[1];

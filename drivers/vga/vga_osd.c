@@ -65,28 +65,21 @@ void osd_init(void) {
 }
 
 extern bool SELECT_VGA;
-extern uint32_t conv_color[1224], conv_color2[1024];
+extern void hdmi_text_palette(void);
+extern volatile bool hdmi_palette_reload;
 void osd_show(void) {
     if (SELECT_VGA) {
         osd_visible = true;
-    } else { // hdmi only
-        for(int i = 0; i < 1024; ++i) {
-            uint32_t t = conv_color[i];
-            conv_color[i] = conv_color2[i];
-            conv_color2[i] = t;
-        }
+    } else { // hdmi only: the OSD draws with the text palette
+        hdmi_text_palette();
         osd_visible = true;
     }
 }
 
 void osd_hide(void) {
     osd_visible = false;
-    if (!SELECT_VGA) { // hdmi only
-        for(int i = 0; i < 1024; ++i) {
-            uint32_t t = conv_color[i];
-            conv_color[i] = conv_color2[i];
-            conv_color2[i] = t;
-        }
+    if (!SELECT_VGA) { // hdmi only: the guest's palette back at the next frame
+        hdmi_palette_reload = true;
     }
 }
 

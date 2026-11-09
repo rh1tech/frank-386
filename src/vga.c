@@ -1480,8 +1480,10 @@ void vbe_write(VGAState *s, uint32_t offset, uint32_t val)
             vbe_update_vgaregs(s);
             /* clear the screen */
             if (!(val & VBE_DISPI_NOCLEARMEM)) {
-                memset(s->vga_ram, 0,
-                       s->vbe_regs[VBE_DISPI_INDEX_YRES] * s->vbe_line_offset);
+                /* bounded: a mode larger than the VRAM (640x480x8 is
+                 * 300 KB of 256) would clear what follows it */
+                uint32_t n = (uint32_t)s->vbe_regs[VBE_DISPI_INDEX_YRES] * s->vbe_line_offset;
+                memset(s->vga_ram, 0, n < (uint32_t)s->vga_ram_size ? n : (uint32_t)s->vga_ram_size);
             }
             break;
         case VBE_DISPI_INDEX_XRES:
@@ -1652,7 +1654,7 @@ void IRAM_ATTR vga_mem_write16(VGAState *s, uint32_t addr, uint16_t val16)
     /* chain 4 mode : simplest access */
     plane = addr & 3;
     mask = (1 << plane);
-    if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
+    if ((s->sr[VGA_SEQ_PLANE_WRITE] & mask) && addr + 2 <= (uint32_t)s->vga_ram_size) {
         * (uint16_t *) &(s->vga_ram[addr]) = val;
     }
 }
@@ -1700,7 +1702,7 @@ void IRAM_ATTR vga_mem_write32(VGAState *s, uint32_t addr, uint32_t val)
     /* chain 4 mode : simplest access */
     plane = addr & 3;
     mask = (1 << plane);
-    if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
+    if ((s->sr[VGA_SEQ_PLANE_WRITE] & mask) && addr + 4 <= (uint32_t)s->vga_ram_size) {
         * (uint32_t *) &(s->vga_ram[addr]) = val;
     }
 }
@@ -1743,7 +1745,9 @@ bool IRAM_ATTR vga_mem_write_string(VGAState *s, uint32_t addr, uint8_t *buf, in
     /* chain 4 mode : simplest access */
     plane = addr & 3;
     mask = (1 << plane);
-    if (s->sr[VGA_SEQ_PLANE_WRITE] & mask) {
+    /* past the VRAM's end (the last bank, a long rep movs): the byte path,
+     * which wraps; a memcpy would run on into whatever follows gfx_buffer */
+    if ((s->sr[VGA_SEQ_PLANE_WRITE] & mask) && addr + (uint32_t)len <= (uint32_t)s->vga_ram_size) {
         memcpy(s->vga_ram + addr, buf, len);
         return true;
     }

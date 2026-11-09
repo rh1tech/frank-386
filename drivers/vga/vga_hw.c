@@ -35,6 +35,8 @@
 bool SELECT_VGA = false;
 static bool boot_output_forced = false;
 extern bool required_to_repair_text_pal;
+extern void hdmi_text_palette(void);
+extern volatile bool hdmi_palette_reload;
 
 // ============================================================================
 // PIO Program
@@ -106,8 +108,7 @@ static volatile int update_requested = 0;  // Set by update call
 uint8_t gfx_buffer[GFX_BUFFER_SIZE] __attribute__((aligned(4)));
 
 // Fast text palette for 2-bit pixel pairs
-extern uint32_t conv_color2[1024]; // 4096 in hdmi only
-static uint16_t* txt_palette_fast = (uint16_t*)&conv_color2[0]; ///[256 * 4]; 2048, reusing
+static uint16_t *txt_palette_fast; /* [256 * 4], VGA only: from the heap in init_palettes() */
 
 // Graphics palette (256 entries) - 16-bit dithered format
 // Each entry: low byte = c_hi (conv0), high byte = c_lo (conv1)
@@ -221,6 +222,10 @@ static void vga_color_to_dithered(uint8_t r6, uint8_t g6, uint8_t b6, uint32_t i
 }
 
 static void init_palettes(void) {
+    if (!txt_palette_fast) { /* VGA: the HDMI driver's block is free (main.c) */
+        extern void *video_ram_block;
+        txt_palette_fast = video_ram_block ? video_ram_block : malloc(256 * 4 * sizeof(uint16_t));
+    }
     // Standard 16-color text palette (CGA colors)
     // Each entry is 6-bit: RRGGBB
     static const uint8_t cga_colors[16] = {
@@ -805,7 +810,8 @@ static void vga_hw_new_frame_deferred(void) {
     // Update palette and graphics submode for graphics modes
     if (vga_mode == 2) {
         // Only update palette when it actually changed
-        if (vga_is_palette_dirty(vga_state)) {
+        if (vga_is_palette_dirty(vga_state) | (!SELECT_VGA && hdmi_palette_reload)) {
+            hdmi_palette_reload = false;
             vga_hw_set_palette(vga_get_palette(vga_state));
         }
 
@@ -1362,7 +1368,6 @@ void __time_critical_func(vga_hw_set_gfx_mode)(int submode, int width, int heigh
     }
 }
 
-extern uint32_t conv_color[1224], conv_color2[1024];
 
 void __not_in_flash_func(vga_hw_process_deferred)(void) {
     if (!frame_update_request)
@@ -1371,8 +1376,7 @@ void __not_in_flash_func(vga_hw_process_deferred)(void) {
     uint32_t t0 = timer_hw->timerawl;
     if (!SELECT_VGA && required_to_repair_text_pal) {
         required_to_repair_text_pal = false;
-        // Only restore palette entries (0..1023), not the DMA line buffers (1024..1223)
-        memcpy(conv_color, conv_color2, 1024 * sizeof(uint32_t));
+        hdmi_text_palette();
     }
     vga_hw_new_frame_deferred();
     uint32_t dt = timer_hw->timerawl - t0;

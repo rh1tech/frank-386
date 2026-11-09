@@ -28,6 +28,12 @@
 
 #include "board_config.h"
 #include "psram_init.h"
+#if USB_CDC_CONSOLE
+#include "usb_console.h"
+#endif
+#include "hdmi.h"
+#include "pico/bootrom.h"
+#include "hardware/structs/psm.h"
 #include "vga_hw.h"
 #include "vga.h"
 #include "ps2.h"
@@ -1068,6 +1074,16 @@ static bool init_hardware(void) {
 #endif
     }
 
+    // The video driver's 8 KB block off the top of the heap (aligned there by
+    // itself, see hdmi.c), then the heap grown to its new end in one go.
+    // Here, while core 0 is the only one allocating.
+    {
+        extern void *video_ram_block, *heap_reserve_top(size_t size);
+        extern void heap_grow_all(void);
+        video_ram_block = heap_reserve_top(8192);
+        heap_grow_all();
+    }
+
     // Initialize video/audio early so SD errors can be shown on screen.
     multicore_launch_core1(core1_entry);
 
@@ -1346,10 +1362,70 @@ static bool init_emulator(void) {
     return true;
 }
 
+/* Every software reboot goes through here (frank-ecat's platform_reboot):
+ * core 1 is stopped (it may be reading PSRAM) and the PSRAM taken out of
+ * QPI mode first, or the boot ROM cannot read the flash after a warm reset. */
+void __attribute__((noreturn)) platform_reboot(bool bootsel) {
+    if (get_core_num() == 0) {
+        /* forced off, then released: it restarts into the boot ROM, which
+         * waits for a launch. Left forced off, the bit survives the reboot. */
+        hw_set_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
+        while (!(psm_hw->frce_off & PSM_FRCE_OFF_PROC1_BITS)) tight_loop_contents();
+        busy_wait_us(10);
+        hw_clear_bits(&psm_hw->frce_off, PSM_FRCE_OFF_PROC1_BITS);
+        busy_wait_us(10);
+    }
+    save_and_disable_interrupts();
+    psram_reset_to_spi();
+    if (bootsel) reset_usb_boot(0, 0);
+    watchdog_reboot(0, 0, 0);
+    while (1) tight_loop_contents();
+}
+
+/* Console commands for the bench (bytes from stdio: the UART or USB CDC):
+ * "~BOOT~" reboots into BOOTSEL (then picotool load -x), "~RST~" reboots,
+ * "~STAT~" prints the HDMI output's counters. */
+static void console_poll(void) {
+    static const char *const cmds[] = {"~BOOT~", "~RST~", "~STAT~"};
+    static unsigned pos[3];
+    int ch;
+    while ((ch = getchar_timeout_us(0)) >= 0) {
+        for (int c = 0; c < 3; c++) {
+            const char *m = cmds[c];
+            pos[c] = (ch == m[pos[c]]) ? pos[c] + 1 : (ch == m[0]);
+            if (m[pos[c]]) continue;
+            pos[c] = 0;
+            if (c == 2) {
+                extern bool SELECT_VGA;
+                if (!SELECT_VGA)
+                    printf("\nHDMI: frames %lu, line IRQ max %lu us, starved frames %lu, "
+                           "restarts %lu, audio underruns %lu, drops %lu\n",
+                           (unsigned long)hdmi_frame_count, (unsigned long)hdmi_irq_max_us,
+                           (unsigned long)hdmi_underruns, (unsigned long)hdmi_resyncs,
+                           (unsigned long)hdmi_audio_underruns, (unsigned long)hdmi_audio_drops);
+                hdmi_irq_max_us = 0;
+                continue;
+            }
+            printf("\nrebooting%s\n", c == 0 ? " to BOOTSEL" : "");
+            sleep_ms(20);
+            platform_reboot(c == 0);
+        }
+    }
+}
+
 bool timer_callback(repeating_timer_t *rt);
 void vga_hw_process_deferred(void);
+#define MIXER_TICK_US (1000000 / SOUND_FREQUENCY) /* 22: 45.45 kHz */
 static bool __not_in_flash_func(timer_callback0)(repeating_timer_t *rt) {
-    timer_callback(rt);
+    /* The timer ticks in whole microseconds; skip a tick now and then so
+     * the mixer averages SOUND_FREQUENCY exactly (HDMI audio takes 44.1 kHz,
+     * and the sound devices assume it). */
+    static uint32_t phase;
+    phase += MIXER_TICK_US * SOUND_FREQUENCY;
+    if (phase >= 1000000) {
+        phase -= 1000000;
+        timer_callback(rt);
+    }
     vga_hw_process_deferred();
     return true;
 }
@@ -1369,15 +1445,17 @@ static void __not_in_flash_func(core1_entry)(void) {
     audio_set_volume(config_get_volume());
     audio_set_enabled(true);
     config_clear_changes();
+    extern bool SELECT_VGA;
     while(!initialized) {
         sleep_ms(1);
+        if (!SELECT_VGA) hdmi_watchdog(); /* core 0's boot can stall it */
         __dmb();
     }
     static repeating_timer_t m_timer = { 0 };
-    int hz = 44100;
-	add_repeating_timer_us(-1000000 / hz, timer_callback0, pc, &m_timer);
+	add_repeating_timer_us(-MIXER_TICK_US, timer_callback0, pc, &m_timer);
     while(1) {
         repeat_me_often();
+        if (!SELECT_VGA) hdmi_watchdog();
         sleep_us(1);
     }
     __unreachable();
@@ -1499,6 +1577,14 @@ int main(void) {
     } else {
         DBG_PRINT("Timeout - continuing without USB Serial\n\n");
     }
+#elif USB_CDC_CONSOLE
+    // USB HID on PIO-USB: the native port is the CDC console (and the UART)
+    usb_console_init();
+    absolute_time_t deadline = make_timeout_time_ms(USB_CONSOLE_DELAY_MS);
+    while (!usb_console_connected() && !time_reached(deadline)) {
+        sleep_ms(100);
+    }
+    DBG_PRINT("USB HID on PIO-USB, console on native USB and UART\n\n");
 #else
     // USB HID mode: using UART for debug output
     DBG_PRINT("USB HID mode: USB port used for keyboard input\n");
@@ -1589,6 +1675,7 @@ int main(void) {
         if (pc->paused) {
             // Still poll keyboard to handle UI input
             poll_keyboard();
+            console_poll();
 
             // Animate plasma background for active UI
             if (diskui_is_open()) {
@@ -1615,6 +1702,7 @@ int main(void) {
         if (++poll_counter >= 20) {
             poll_counter = 0;
             poll_keyboard();
+            console_poll();
         }
 
         // Check for reset request
@@ -1630,7 +1718,7 @@ int main(void) {
             DBG_PRINT("Settings changed - triggering RP reset...\n");
             // Full hardware reset via watchdog
             *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
-            watchdog_reboot(0, 0, 0);
+            platform_reboot(false);
         }
 
         // Check for shutdown
@@ -1658,8 +1746,7 @@ int main(void) {
 
     DBG_PRINT("\nEmulation stopped.\n");
     *(uint32_t*)(0x20000000 + (512ul << 10) - 32) = 0x1927fa52; // magic to fast reboot
-    watchdog_reboot(0, 0, 0);
-    while (true);
+    platform_reboot(false);
     __unreachable();
     return 0;
 }

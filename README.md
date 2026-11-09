@@ -11,7 +11,8 @@ Based on [Tiny386](https://github.com/hchunhui/tiny386) by Chunhui He.
 - Full i386 (and partially i486/i586) CPU emulation with optional x87 FPU
 - Up to 8MB RAM (using 8MB PSRAM)
 - VGA and HDMI graphics output (text modes and graphics up to 640x480)
-- Sound: AdLib OPL2, Sound Blaster 16, PC Speaker, Tandy, Covox, Disney Sound Source
+- HDMI output is real HDMI (not DVI): data islands, AVI/audio InfoFrames and 44.1 kHz stereo audio, so it works with USB HDMI capture cards as well as monitors and TVs
+- Sound: AdLib OPL2, Sound Blaster 16, PC Speaker, Tandy, Covox, Disney Sound Source (over I2S/PWM, and over HDMI when HDMI is the output)
 - SD card support for floppy, hard disk, and CD-ROM images
 - Runtime disk manager (Win+F12) for hot-swapping disk images
 - Settings menu (Win+F11) for changing emulator configuration
@@ -48,9 +49,9 @@ This firmware is designed for RP2350-based boards with integrated VGA/HDMI, SD c
 - **PS/2 keyboard** (directly connected) - OR - **USB keyboard** (via native USB port)
 - **Audio output** (optional): I2S DAC or PWM
 
-> **Note:** When USB HID is enabled, the native USB port is used for keyboard/mouse input. USB serial console (CDC) is disabled in this mode; use UART for debug output. On Z2 a USB HID build puts that UART console on GPIO0 (TX) / GPIO1 (RX) at 115200 baud and drops PS/2 support, because the Z2 PS/2 mouse uses those pins.
+> **Note:** When USB HID is enabled on the native USB port, that port is used for keyboard/mouse input and the USB serial console (CDC) is disabled; use UART for debug output. On Z2 a USB HID build puts a UART console on GPIO0 (TX) / GPIO1 (RX) at 115200 baud and drops PS/2 support, because the Z2 PS/2 mouse uses those pins.
 
-> **Z2 USB ports:** USB HID builds for Z2 run the USB host on the board's **PIO-USB** USB-C socket (GPIO28/29, via [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB)); plug the keyboard, mouse or a hub there. The native **USB** socket is then only used for power. Build with `-DZ2_PIO_USB=OFF` to use the native socket for the host instead (TinyUSB drives one host port at a time).
+> **Z2 USB ports:** USB HID builds for Z2 run the USB host on the board's **PIO-USB** USB-C socket (GPIO28/29, via [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB)); plug the keyboard, mouse or a hub there. The native **USB** socket is then a USB serial console (CDC), alongside the UART one: TinyUSB runs as a host on PIO-USB and as a device on the native port at the same time. Build with `-DZ2_PIO_USB=OFF` to use the native socket for the host instead (no USB console then).
 
 > **Non-Winbond flash (e.g. Puya on some Waveshare RP2350-PiZero batches):** these chips can ship with the flash Quad Enable bit cleared, which makes PSRAM boards fail once overclocked. The firmware checks the bit on every boot and sets it once if needed, so no separate `FLASH_QE_SET_1.uf2` step is required.
 
@@ -278,6 +279,20 @@ picotool load build/frank-386.uf2
 ./flash.sh
 ```
 
+### Console commands
+
+On the serial console (USB CDC or UART, 115200 baud) the firmware takes these
+commands, typed as they are:
+
+| Command | Action |
+|---------|--------|
+| `~BOOT~` | Reboot into BOOTSEL, ready for `picotool load -x` (no button needed) |
+| `~RST~` | Reboot |
+| `~STAT~` | HDMI counters: frames, longest line IRQ, output restarts, HDMI audio underruns/drops |
+
+Every software reboot stops core 1 and takes the PSRAM out of QPI mode first,
+so the boot ROM can read the flash after a warm reset.
+
 ## Troubleshooting
 
 ### "0 bytes of memory" during Windows 95 setup
@@ -292,6 +307,11 @@ Set `redirector = 1` in config.ini.
 ### No keyboard input
 - For PS/2: Check keyboard connection and GPIO pins
 - For USB: Ensure firmware was built with `--usb-hid` option
+- On Z2: plug the keyboard into the **PIO-USB** socket, not the native **USB** one
+
+### No picture or no sound on an HDMI capture card
+HDMI output carries audio and is framed as HDMI, which capture cards need. The
+audio is 44.1 kHz stereo; it plays alongside the board's I2S or PWM output.
 
 ### SD card not detected
 - Ensure SD card is formatted as FAT32
@@ -333,7 +353,11 @@ This project is based on the following open-source projects:
 - **Project:** [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) (v0.7.2, vendored in `drivers/pio_usb`)
 - **Author:** sekigon-gonnoc
 - **License:** MIT
-- **Description:** USB host over PIO, used for the Z2 PIO-USB port.
+- **Description:** USB host over PIO, used for the Z2 PIO-USB port. Patched: the receive loop's byte index is an `int` and over-long packets are dropped (as an `int16_t` it could wrap after 32 KB of line noise and write below its buffer).
+
+### HDMI output
+- **Project:** [frank-quake2](https://github.com/rh1tech/frank-quake2)'s PIO HDMI driver, after [PicoDVI](https://github.com/Wren6991/PicoDVI) by Luke Wren, and shuichitakano's HDMI framing for it (data islands, audio)
+- **Description:** TMDS by table through PIO and DMA, data islands, InfoFrames and audio packets. `drivers/hdmi/hstx_packet.c` (packet and BCH encoding) is public domain (see `drivers/hdmi/LICENSE.pico_hdmi`).
 
 ### QEMU
 - **Project:** [QEMU](https://www.qemu.org/)

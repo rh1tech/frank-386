@@ -39,6 +39,13 @@ if(USB_HID_ENABLED)
             PIO_USB_EP_POOL_CNT=24
         )
         target_link_libraries(usbhid INTERFACE tinyusb_pico_pio_usb)
+        # The native port is free: the USB CDC console runs there, a TinyUSB
+        # device next to the PIO-USB host (pico_stdio_usb cannot: it compiles
+        # to nothing once the host library is linked).
+        message(STATUS "  USB CDC console on the native USB port")
+        target_sources(usbhid INTERFACE ${CMAKE_CURRENT_LIST_DIR}/usb_console.c)
+        target_compile_definitions(usbhid INTERFACE USB_CDC_CONSOLE=1)
+        target_link_libraries(usbhid INTERFACE tinyusb_device pico_unique_id)
     endif()
 
     # Link TinyUSB Host

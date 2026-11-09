@@ -191,7 +191,12 @@ int __no_inline_not_in_flash_func(pio_usb_bus_receive_packet_and_handshake)(
   uint16_t crc_receive = 0xffff;
   bool crc_match = false;
   const uint16_t rx_buf_len = sizeof(pp->usb_rx_buffer) / sizeof(pp->usb_rx_buffer[0]);
-  int16_t idx = 0;
+  // frank-386: an int, and a packet longer than the buffer is dropped. As an
+  // int16_t, a line that kept producing bytes with no EOP wrapped idx to
+  // -32768 after 32 KB, which passed the idx < rx_buf_len check: the next
+  // 32 KB went to the RAM below the buffer (gfx_buffer's end, the TinyUSB
+  // and audio state after it) and core 0 never left this loop.
+  int idx = 0;
 
   // Per USB Specs 7.1.18 for turnaround: We must wait at least 2 bit times for inter-packet delay.
   // This is essential for working with LS device specially when we overlocked the mcu.
@@ -221,6 +226,8 @@ int __no_inline_not_in_flash_func(pio_usb_bus_receive_packet_and_handshake)(
       uint8_t data = pio_sm_get(pio_usb_rx, sm_rx) >> 24;
       if (idx < rx_buf_len) {
         usb_rx_buffer[idx] = data;
+      } else {
+        return -1; // longer than any packet: noise, not data
       }
       start = get_time_us_32(); // reset timeout when a byte is received
 

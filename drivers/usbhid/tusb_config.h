@@ -2,8 +2,8 @@
  * TinyUSB Configuration for USB Host HID (Keyboard)
  * Host on the native USB port, or on PIO-USB when CFG_TUH_RPI_PIO_USB=1
  *
- * NOTE: When USB HID is enabled, USB CDC stdio is DISABLED!
- * Use UART for debug output instead.
+ * With the host on the native port there is no USB CDC stdio (use the
+ * UART); with it on PIO-USB the native port carries the CDC console.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -35,9 +35,25 @@ extern "C" {
 // RHPort max speed: Full-Speed (12 Mbps)
 #define BOARD_TUH_MAX_SPEED OPT_MODE_FULL_SPEED
 
-// Enable Host mode (disables Device mode including CDC stdio!)
+// Host mode. With the host on PIO-USB (USB_CDC_CONSOLE), the native port
+// is a device at the same time: the CDC console (usb_console.c).
 #define CFG_TUH_ENABLED 1
+#if USB_CDC_CONSOLE
+#define CFG_TUD_ENABLED 1
+#define BOARD_TUD_RHPORT 0
+#define CFG_TUD_MAX_SPEED OPT_MODE_FULL_SPEED
+#define CFG_TUD_ENDPOINT0_SIZE 64
+#define CFG_TUD_CDC 1
+#define CFG_TUD_CDC_RX_BUFSIZE 64
+#define CFG_TUD_CDC_TX_BUFSIZE 64
+#define CFG_TUD_CDC_EP_BUFSIZE 64
+#define CFG_TUD_MSC 0
+#define CFG_TUD_HID 0
+#define CFG_TUD_MIDI 0
+#define CFG_TUD_VENDOR 0
+#else
 #define CFG_TUD_ENABLED 0
+#endif
 
 // Default is max speed that hardware controller supports
 #define CFG_TUH_MAX_SPEED BOARD_TUH_MAX_SPEED

@@ -36,6 +36,27 @@ extern "C" {
 
 void hdmi_set_dma_high_priority(void);
 
+/* the text palette (CGA pairs) into entries 0..255; hdmi_palette_reload:
+ * the guest's palette is to be applied again at the next frame */
+void hdmi_text_palette(void);
+extern volatile bool hdmi_palette_reload;
+
+/* HDMI audio: one 44.1 kHz stereo frame from the mixer (core 0); dropped
+ * until the HDMI output runs */
+void hdmi_audio_push(int16_t left, int16_t right);
+
+/* counters for the bench (~STAT~): frames sent, the longest line IRQ so far
+ * (us; a line is 31.7), frames in which the output starved, audio frames
+ * repeated (ring empty) and dropped (ring full), restarts of the output */
+extern volatile uint32_t hdmi_frame_count;
+extern volatile uint32_t hdmi_irq_max_us;
+extern volatile uint32_t hdmi_underruns;
+extern volatile uint32_t hdmi_audio_underruns, hdmi_audio_drops;
+extern volatile uint32_t hdmi_resyncs;
+
+/* call often from core 1 (its IRQ's core): restarts a stopped output */
+void hdmi_watchdog(void);
+
 #define TEXTMODE_COLS 53
 #define TEXTMODE_ROWS 30
 
